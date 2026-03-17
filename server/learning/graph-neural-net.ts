@@ -206,7 +206,6 @@ const GAUSSIAN_STEP = (GAUSSIAN_END - GAUSSIAN_START) / (N_GAUSSIAN_BASIS - 1);
 const GAUSSIAN_WIDTH = GAUSSIAN_STEP;
 // Log-scale Tc normalisation: log1p(Tc) / log1p(300) maps 0–300K → 0–1
 // with proportional spacing. Replacing the old linear /300 encoding.
-const TC_LOG_SCALE = Math.log1p(300); // ≈ 5.707
 
 let cachedEnsembleModels: GNNWeights[] | null = null;
 let modelTrainedAt = 0;
@@ -2107,9 +2106,7 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
   const sf = (v: number, fallback = 0) => Number.isFinite(v) ? v : fallback;
   const formationEnergy = sf(out[0] ?? 0);
   const phononStabilityRaw = sigmoid(sf(out[1] ?? 0));
-  // Clamp logit to [0, 1.2] before expm1 — prevents ≈e^28 overflow at random init.
-  // 1.2 × TC_LOG_SCALE ≈ 6.85 → expm1 ≈ 938 K ceiling, well above any real SC.
-  const predictedTcRaw = Math.max(0, Math.expm1(Math.min(1.2, Math.max(0, sf(out[2] ?? 0))) * TC_LOG_SCALE));
+  const predictedTcRaw = Math.max(0, sf(out[2] ?? 0) * 300);
   const confidenceRaw = sigmoid(sf(out[3] ?? 0));
   const lambdaRaw = Math.max(0, sf(out[4] ?? 0));
   const bandgapRaw = sigmoid(sf(out[5] ?? 0)) * 5.0;
@@ -2127,7 +2124,7 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
     dosProxy: Math.round(dosProxyRaw * 1000) / 1000,
     stabilityProbability: Math.round(stabilityProbRaw * 1000) / 1000,
     latentEmbedding: safeLatent,
-    predictedTcVar: Math.round(Math.max(0.01, sf(tcVarNorm * TC_LOG_SCALE * TC_LOG_SCALE * 100, 1)) * 1000) / 1000,
+    predictedTcVar: Math.round(Math.max(0.01, sf(tcVarNorm * 300 * 300, 1)) * 1000) / 1000,
     lambdaVar: Math.round(Math.max(0.001, sf(lambdaVarNorm, 0.01)) * 1000) / 1000,
     formationEnergyVar: Math.round(Math.max(0.001, sf(feVarNorm, 0.01)) * 1000) / 1000,
     bandgapVar: Math.round(Math.max(0.001, sf(bgVarNorm, 0.01)) * 1000) / 1000,
@@ -2258,9 +2255,7 @@ function GNNPredictForTraining(graph: CrystalGraph, weights: GNNWeights): { pred
   const sf = (v: number, fallback = 0) => Number.isFinite(v) ? v : fallback;
   const formationEnergy = sf(out[0] ?? 0);
   const phononStabilityRaw = sigmoid(sf(out[1] ?? 0));
-  // Clamp logit to [0, 1.2] before expm1 — prevents ≈e^28 overflow at random init.
-  // 1.2 × TC_LOG_SCALE ≈ 6.85 → expm1 ≈ 938 K ceiling, well above any real SC.
-  const predictedTcRaw = Math.max(0, Math.expm1(Math.min(1.2, Math.max(0, sf(out[2] ?? 0))) * TC_LOG_SCALE));
+  const predictedTcRaw = Math.max(0, sf(out[2] ?? 0) * 300);
   const confidenceRaw = sigmoid(sf(out[3] ?? 0));
   const lambdaRaw = Math.max(0, sf(out[4] ?? 0));
   const bandgapRaw = sigmoid(sf(out[5] ?? 0)) * 5.0;
@@ -2281,7 +2276,7 @@ function GNNPredictForTraining(graph: CrystalGraph, weights: GNNWeights): { pred
     dosProxy: Math.round(dosProxyRaw * 1000) / 1000,
     stabilityProbability: Math.round(stabilityProbRaw * 1000) / 1000,
     latentEmbedding: safeLatent,
-    predictedTcVar: Math.round(Math.max(0.01, sf(tcVarNorm * TC_LOG_SCALE * TC_LOG_SCALE * 100, 1)) * 1000) / 1000,
+    predictedTcVar: Math.round(Math.max(0.01, sf(tcVarNorm * 300 * 300, 1)) * 1000) / 1000,
     lambdaVar: Math.round(Math.max(0.001, sf(lambdaVarNorm, 0.01)) * 1000) / 1000,
     formationEnergyVar: Math.round(Math.max(0.001, sf(feVarNorm, 0.01)) * 1000) / 1000,
     bandgapVar: Math.round(Math.max(0.001, sf(bgVarNorm, 0.01)) * 1000) / 1000,
@@ -2338,7 +2333,7 @@ function initWeights(rng: () => number): GNNWeights {
     W_pressure: Array.from({ length: HIDDEN_DIM }, () => (rng() - 0.5) * 2 * Math.sqrt(2.0 / HIDDEN_DIM)),
     W_mlp1: initMatrix(HIDDEN_DIM, HIDDEN_DIM * 2 + GLOBAL_COMP_DIM, rng),
     b_mlp1: initVector(HIDDEN_DIM),
-    W_mlp2: initMatrix(OUTPUT_DIM, HIDDEN_DIM, rng),
+    W_mlp2: initMatrix(OUTPUT_DIM, HIDDEN_DIM, rng, 0.01),
     b_mlp2: initVector(OUTPUT_DIM),
     W_mlp2_var: initMatrix(OUTPUT_DIM, HIDDEN_DIM, rng, 0.05),
     b_mlp2_var: initVector(OUTPUT_DIM, -2.0),
@@ -2419,9 +2414,9 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
   }
 
   const LR_INIT = 0.001;
-  // More epochs at all sizes — 78 gradient steps (old 3-epoch limit) is insufficient.
-  // Cosine LR decay within trainSingleModel handles lr scheduling per-epoch.
-  const epochs = 10;
+  // Scale epochs so smaller datasets (~100 samples) still get enough gradient steps.
+  // Target ~600 gradient steps: N=100→38, N=300→13, N=500→10, N=800→10 (min).
+  const epochs = Math.max(10, Math.min(40, Math.ceil(6000 / trainingData.length)));
   const batchSize = Math.min(64, trainingData.length);
 
   // Adam state for MLP head weights (graph layers use simple SGD at lower lr).
@@ -2521,13 +2516,10 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
         const { pred, cache } = GNNPredictForTraining(graph, weights);
         const nN = graph.nodes.length;
 
-        // Log-normalised target: log1p(Tc)/TC_LOG_SCALE → [0,1] with balanced gradient weights.
-        const tcTarget = Math.log1p(Math.max(0, sample.tc)) / TC_LOG_SCALE;
+        const tcTarget = sample.tc / 300;
         const hasFormationEnergy = sample.formationEnergy != null;
         const feTarget = hasFormationEnergy ? sample.formationEnergy! : 0;
-        // Convert predicted Tc back to log-space for the loss (avoids back-computing log).
-        const predTcLog = Math.log1p(Math.max(0, pred.predictedTc)) / TC_LOG_SCALE;
-        const tcError = predTcLog - tcTarget;
+        const tcError = pred.predictedTc / 300 - tcTarget;
         // 2× weight for SC samples (Tc>0) to counteract 60/40 contrast imbalance.
         const scWeight = sample.tc > 0 ? 2.0 : 1.0;
         const feError = hasFormationEnergy ? pred.formationEnergy - feTarget : 0;
@@ -2563,10 +2555,7 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
         const dLdOut = new Array(OUTPUT_DIM).fill(0);
         dLdOut[0] = hasFormationEnergy ? clipGrad(2 * feError * 0.1) : 0;
         dLdOut[1] = clipGrad(2 * phononError * 0.05);
-        // Chain rule: d(loss)/d(out[2]) = d(loss)/d(predTcLog) * d(predTcLog)/d(predictedTc) * d(predictedTc)/d(out[2])
-        // d(predTcLog)/d(predictedTc) = 1/(1+predictedTc) / TC_LOG_SCALE
-        // d(predictedTc)/d(out[2]) = TC_LOG_SCALE * exp(out[2]*TC_LOG_SCALE) = predictedTc+1
-        // These cancel: d/d(out[2]) = d(loss)/d(predTcLog)  (chain rule simplifies to just tcError gradient)
+        // d(loss)/d(out[2]) = scWeight * 2 * tcError * (1/300) — the /300 is absorbed into tcError
         dLdOut[2] = clipGrad(scWeight * (2 * tcError + 0.1 * 2 * tcError / tcVarNorm));
         dLdOut[3] = clipGrad(2 * confError * 0.05);
         dLdOut[4] = clipGrad(2 * lambdaError * 0.1 + 0.05 * 2 * lambdaError / lambdaVarNorm);
