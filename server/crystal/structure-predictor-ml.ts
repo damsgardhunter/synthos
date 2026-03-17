@@ -138,7 +138,7 @@ function predictTree(tree: TreeNode | number, x: number[]): number {
     : predictTree(tree.right, x);
 }
 
-function trainGBM(X: number[][], y: number[], nEstimators = 100, lr = 0.1, maxDepth = 4): GBModel {
+async function trainGBM(X: number[][], y: number[], nEstimators = 100, lr = 0.1, maxDepth = 4): Promise<GBModel> {
   const n = X.length;
   const basePrediction = y.reduce((s, v) => s + v, 0) / n;
   const predictions = new Array(n).fill(basePrediction);
@@ -146,6 +146,8 @@ function trainGBM(X: number[][], y: number[], nEstimators = 100, lr = 0.1, maxDe
   const allIndices = Array.from({ length: n }, (_, i) => i);
 
   for (let t = 0; t < nEstimators; t++) {
+    // Yield every 5 trees so timer callbacks (DB keepalive, HTTP) can fire.
+    if (t > 0 && t % 5 === 0) await new Promise<void>(r => setTimeout(r, 0));
     const residuals = y.map((yi, i) => yi - predictions[i]);
     const tree = buildTree(X, residuals, allIndices, 0, maxDepth);
     if (typeof tree === "number" && Math.abs(tree) < 1e-8) break;
@@ -167,13 +169,17 @@ function predictGBM(model: GBModel, x: number[]): number {
   return pred;
 }
 
-function trainOneVsAllClassifier(X: number[][], labels: string[], nEstimators = 80, lr = 0.1, maxDepth = 3): ClassifierModel {
+async function trainOneVsAllClassifier(X: number[][], labels: string[], nEstimators = 80, lr = 0.1, maxDepth = 3): Promise<ClassifierModel> {
   const classes = Array.from(new Set(labels));
   const classModels: GBModel[] = [];
 
   for (const cls of classes) {
+    // Yield between each class model — with many space groups (30+) each class
+    // model takes ~100-500ms sync, and without yields the event loop blocks for
+    // several seconds at a stretch.
+    await new Promise<void>(r => setTimeout(r, 0));
     const binaryY = labels.map(l => l === cls ? 1.0 : 0.0);
-    const model = trainGBM(X, binaryY, nEstimators, lr, maxDepth);
+    const model = await trainGBM(X, binaryY, nEstimators, lr, maxDepth);
     classModels.push(model);
   }
 
@@ -275,25 +281,16 @@ export async function trainStructurePredictor(): Promise<void> {
   // Yield to timers between each heavy synchronous training call so heartbeats
   // and DB keepalives can fire. Each trainOneVsAllClassifier / trainGBM call
   // is O(n·trees) synchronous computation that can take 1-5s per call.
-  const spacegroupClassifier = trainOneVsAllClassifier(X, sgLabels, 15, 0.15, 3);
-  await new Promise<void>(r => setTimeout(r, 0));
-  const crystalSystemClassifier = trainOneVsAllClassifier(X, csLabels, 20, 0.15, 3);
-  await new Promise<void>(r => setTimeout(r, 0));
-  const prototypeClassifier = trainOneVsAllClassifier(X, protoLabels, 15, 0.15, 3);
-  await new Promise<void>(r => setTimeout(r, 0));
+  const spacegroupClassifier = await trainOneVsAllClassifier(X, sgLabels, 15, 0.15, 3);
+  const crystalSystemClassifier = await trainOneVsAllClassifier(X, csLabels, 20, 0.15, 3);
+  const prototypeClassifier = await trainOneVsAllClassifier(X, protoLabels, 15, 0.15, 3);
 
-  const lA = trainGBM(X, latticeA, 25, 0.12, 3);
-  await new Promise<void>(r => setTimeout(r, 0));
-  const lB = trainGBM(X, latticeB, 25, 0.12, 3);
-  await new Promise<void>(r => setTimeout(r, 0));
-  const lC = trainGBM(X, latticeC, 25, 0.12, 3);
-  await new Promise<void>(r => setTimeout(r, 0));
-  const lAlpha = trainGBM(X, latticeAlpha, 15, 0.1, 3);
-  await new Promise<void>(r => setTimeout(r, 0));
-  const lBeta = trainGBM(X, latticeBeta, 15, 0.1, 3);
-  await new Promise<void>(r => setTimeout(r, 0));
-  const lGamma = trainGBM(X, latticeGamma, 15, 0.1, 3);
-  await new Promise<void>(r => setTimeout(r, 0));
+  const lA = await trainGBM(X, latticeA, 25, 0.12, 3);
+  const lB = await trainGBM(X, latticeB, 25, 0.12, 3);
+  const lC = await trainGBM(X, latticeC, 25, 0.12, 3);
+  const lAlpha = await trainGBM(X, latticeAlpha, 15, 0.1, 3);
+  const lBeta = await trainGBM(X, latticeBeta, 15, 0.1, 3);
+  const lGamma = await trainGBM(X, latticeGamma, 15, 0.1, 3);
 
   const latticeRegressor = { a: lA, b: lB, c: lC, alpha: lAlpha, beta: lBeta, gamma: lGamma };
 
