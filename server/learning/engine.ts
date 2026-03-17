@@ -135,6 +135,7 @@ import { evaluateSynthesisGate, getSynthesisGateStats } from "../synthesis/synth
 import { recordPredictionOutcome } from "./model-diagnostics";
 import { checkFormulaNovelty } from "./cod-client";
 import { systematicSGSweep, getSpaceGroupCoverageReport } from "./space-group-explorer";
+import { startSuperConIngestion } from "./supercon-db-ingestion";
 
 function derivePairingSymmetry(mechanism: string | null | undefined, dWaveFlag?: boolean): string {
   const mech = (mechanism ?? "").toLowerCase();
@@ -8424,6 +8425,11 @@ export async function startEngine() {
   // Delayed 3 min: lets XGBoost (45s) and the first engine cycle (~60-90s) finish
   // before adding another DB-heavy operation that would saturate the connection pool.
   setTimeout(() => bootstrapInsightEmbeddingCache().catch(() => {}), 180_000);
+
+  // Kick off background ingestion of the full SuperCon database (~33K entries)
+  // into supercon_external_entries. Fire-and-forget — idempotent, resumes from
+  // last checkpoint if the server restarts mid-ingestion.
+  startSuperConIngestion();
 
   // Background poller: applies GNN weights from GCP when training jobs complete.
   startGCPWeightPoller();
