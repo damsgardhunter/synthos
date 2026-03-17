@@ -6,5 +6,10 @@ vite.config.ts.*
 *.tar.gz
 server/dft/xtb-dist/
 server/dft/pseudo/
+# Exception: commit the specific UPFs that GCP cannot download (network-blocked sources)
+!server/dft/pseudo/Pt.UPF
+!server/dft/pseudo/Rh.UPF
+!server/dft/pseudo/Ir.UPF
+!server/dft/pseudo/Te.UPF
 ".env" 
 ".env" 
