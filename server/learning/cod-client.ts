@@ -56,9 +56,12 @@ interface CODApiRow {
   a?: number | string;
   b?: number | string;
   c?: number | string;
-  alpha?: number | string;
+  alpha?: number | string;  // some responses use full name
   beta?: number | string;
   gamma?: number | string;
+  al?: number | string;     // COD API shorthand
+  be?: number | string;
+  ga?: number | string;
   vol?: number | string;
   Z?: number | string;  // formula units per cell
   nelem?: number | string;
@@ -128,9 +131,9 @@ function parseCODRow(row: CODApiRow): CODEntry | null {
     a,
     b,
     c,
-    alpha: parseNum(row.alpha),
-    beta: parseNum(row.beta),
-    gamma: parseNum(row.gamma),
+    alpha: parseNum(row.alpha ?? row.al),
+    beta: parseNum(row.beta ?? row.be),
+    gamma: parseNum(row.gamma ?? row.ga),
     volumePerAtom,
   };
 }
@@ -214,7 +217,12 @@ export async function fetchCODBySpaceGroup(
       const rows: CODApiRow[] = await response.json();
       if (!Array.isArray(rows) || rows.length === 0) break;
 
-      const entries = rows.map(parseCODRow).filter(Boolean) as CODEntry[];
+      // COD API does not always return a sgNumber field — inject the known value so
+      // parseCODRow can always derive the crystal system and pass the !sgNumber guard.
+      const entries = rows.map(row => parseCODRow({
+        ...row,
+        sgNumber: row.sgNumber ?? (row["sg number"] as number | string | undefined) ?? spaceGroupNumber,
+      })).filter(Boolean) as CODEntry[];
       results.push(...entries);
       await cacheEntries(entries);
 

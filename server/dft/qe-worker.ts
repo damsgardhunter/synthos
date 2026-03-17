@@ -1455,6 +1455,7 @@ function generateSCFInput(
   ntyp = ${nTypes},
   ecutwfc = ${ecutwfc},
   ecutrho = ${ecutrho},
+  input_dft = 'PBE',
   occupations = 'smearing',
   smearing = 'mv',
   degauss = 0.005,
@@ -2578,6 +2579,7 @@ function generateSCFInputWithParams(
   ntyp = ${nTypes},
   ecutwfc = ${ecutwfc},
   ecutrho = ${ecutrho},
+  input_dft = 'PBE',
   occupations = 'smearing',
   smearing = '${smearing}',
   degauss = ${degauss},
@@ -2667,6 +2669,7 @@ function generateVCRelaxInput(
   ntyp = ${nTypes},
   ecutwfc = ${ecutwfc},
   ecutrho = ${ecutrho},
+  input_dft = 'PBE',
   occupations = 'smearing',
   smearing = 'mv',
   degauss = ${vcRelaxDegauss},
@@ -3177,7 +3180,12 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
         const stdoutTail = scfResult.stdout.slice(-600);
         const combined = scfResult.stderr + "\n" + stdoutTail;
 
-        const isPPError = combined.includes("read_upf") || combined.includes("readpp") || combined.includes("EOF marker") || combined.includes("pseudopotential");
+        // XC functional conflicts (igcx/igcc) arise when a PP encodes a different
+        // functional than input_dft — treating as a PP error skips wasteful retries.
+        const isPPError = combined.includes("read_upf") || combined.includes("readpp") ||
+          combined.includes("EOF marker") || combined.includes("pseudopotential") ||
+          combined.includes("conflicting values for igcx") || combined.includes("conflicting values for igcc") ||
+          combined.includes("set_dft_from_name");
         if (isPPError) {
           result.scf.error = `Pseudopotential read failure: ${stdoutTail.slice(-300)}`;
           console.log(`[QE-Worker] PP error for ${formula}, no retry will help — skipping`);
