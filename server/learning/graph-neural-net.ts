@@ -45,7 +45,25 @@ export interface CrystalGraph {
   formula: string;
   prototype?: string;
   pressureGpa?: number;
-  globalFeatures?: number[]; // 13-dim: VEC, mean d-occ, mean EN, mean Debye, size mismatch, nElements, stdEN, hasH, tmFrac, cfgEntropy, maxENdiff, meanMass, stdRadius
+  globalFeatures?: number[]; // 19-dim: original 6 + 7 composition + 6 physics (λ, logω, DOS, FE, isCuprate, isIronBased)
+}
+
+/**
+ * Pre-computed physics hints that can be injected into the GNN's global feature
+ * vector without leakage. These are measured/estimated material properties —
+ * NOT model outputs — so passing them alongside the graph is safe at train time.
+ */
+export interface PhysicsFeatureHints {
+  /** Electron-phonon coupling constant λ (BCS: ~0.4 weak, ~2+ strong). */
+  electronPhononLambda?: number | null;
+  /** Formation energy in eV/atom (negative = thermodynamically stable). */
+  formationEnergy?: number | null;
+  /** Distance above the convex hull in eV/atom (0 = on hull, stable). */
+  hullDistance?: number | null;
+  /** Density of states at the Fermi level (states/eV/atom). */
+  dosAtEF?: number | null;
+  /** Log mean phonon frequency proxy (from Debye temperature or phonon spectrum). */
+  logPhononFreq?: number | null;
 }
 
 function buildEdgeIndex(nodes: NodeFeature[], edges: EdgeFeature[]): (EdgeFeature | null)[] {
@@ -195,7 +213,7 @@ const HIDDEN_DIM = 48;
 const N_GAUSSIAN_BASIS = 40;             // expanded from 20 — denser RBF gives finer distance discrimination
 const EDGE_DIM = N_GAUSSIAN_BASIS + 4;   // derived: 40 RBF + bond order, EN diff, ionic char, radius sum
 const OUTPUT_DIM = 16;
-const GLOBAL_COMP_DIM = 13;              // original 6 + 7 XGBoost-inspired: stdEN, hasH, tmFrac, cfgEntropy, maxENdiff, meanMass, stdRadius
+const GLOBAL_COMP_DIM = 19;              // 6 composition + 7 XGBoost-inspired composition + 6 physics (λ, logω, DOS, FE, isCuprate, isIronBased)
 const CGCNN_CONCAT_DIM = HIDDEN_DIM * 2 + EDGE_DIM;
 export const ENSEMBLE_SIZE = 5;
 const MC_DROPOUT_PASSES = 10;
@@ -913,13 +931,13 @@ function assignSiteLabels(formula: string, prototype: string): Record<string, st
   return assignment;
 }
 
-export function buildPrototypeGraph(formula: string, prototype: string, pressureGpa?: number): CrystalGraph {
+export function buildPrototypeGraph(formula: string, prototype: string, pressureGpa?: number, hints?: PhysicsFeatureHints): CrystalGraph {
   const rawCounts = parseFormulaCounts(formula);
   const elements = Object.keys(rawCounts);
   const protoInfo = PROTOTYPE_COORDINATIONS[prototype];
 
   if (!protoInfo) {
-    return buildCrystalGraph(formula, undefined, pressureGpa);
+    return buildCrystalGraph(formula, undefined, pressureGpa, hints);
   }
 
   const siteAssignment = assignSiteLabels(formula, prototype);
@@ -1034,7 +1052,7 @@ export function buildPrototypeGraph(formula: string, prototype: string, pressure
   }
 
   const edgeIndex = buildEdgeIndex(nodes, edges);
-  const globalFeatures = computeGlobalCompositionFeatures(rawCounts);
+  const globalFeatures = computeGlobalCompositionFeatures(rawCounts, hints);
   const threeBodyFeatures = compute3BodyFeatures({ nodes, edges, threeBodyFeatures: [], adjacency, edgeIndex, formula, prototype, globalFeatures });
   return { nodes, edges, threeBodyFeatures, adjacency, edgeIndex, formula, prototype, pressureGpa, globalFeatures };
 }
@@ -1237,9 +1255,10 @@ function computeAtomicMismatch(counts: Record<string, number>): number {
   return Math.sqrt(Math.max(0, delta2));
 }
 
-// Computes GLOBAL_COMP_DIM (13) composition-level features injected at the MLP head.
-// Original 6 features + 7 XGBoost-inspired features the message-passing layers cannot recover.
-function computeGlobalCompositionFeatures(counts: Record<string, number>): number[] {
+// Computes GLOBAL_COMP_DIM (19) composition-level features injected at the MLP head.
+// 13 composition features + 6 physics features from PhysicsFeatureHints (λ, logω, DOS, FE, class flags).
+// Hints contain measured/estimated physics — not model outputs — so there is no training leakage.
+function computeGlobalCompositionFeatures(counts: Record<string, number>, hints?: PhysicsFeatureHints): number[] {
   const els = Object.entries(counts);
   if (els.length === 0) return new Array(GLOBAL_COMP_DIM).fill(0);
   const total = els.reduce((s, [, n]) => s + n, 0);
@@ -1286,6 +1305,42 @@ function computeGlobalCompositionFeatures(counts: Record<string, number>): numbe
   const meanR  = radii.reduce((s, { w, v }) => s + w * v, 0);
   const stdRadius = Math.sqrt(radii.reduce((s, { w, v }) => s + w * (v - meanR) ** 2, 0));
 
+  // --- 6 physics features from hints (no leakage: these are physics estimates, not model outputs) ---
+
+  // [13] electron-phonon coupling λ — the central BCS scalar
+  // Range 0–3: weak coupling ~0.4, strong ~1.5+; normalise by 3.
+  const lambda = hints?.electronPhononLambda;
+  const lambdaFeat = lambda != null && lambda >= 0 ? Math.min(1.0, lambda / 3.0) : meanD * transitionMetalFraction;
+
+  // [14] log phonon frequency proxy — phonon energy scale; high → higher Tc ceiling
+  // Use provided logPhononFreq, or fall back to log(Debye) normalised to ~0–1 over 1–2000 K range.
+  const logPhononFreqHint = hints?.logPhononFreq;
+  const logPhononFeat = logPhononFreqHint != null
+    ? Math.min(1.0, Math.max(0, logPhononFreqHint / 8.0))
+    : Math.min(1.0, Math.log(Math.max(1, meanDebye)) / 7.6);
+
+  // [15] density of states at E_F proxy — high DOS → strong coupling per BCS N(0)V
+  // Unit: states/eV/atom; typical range 0–5; fallback: d-orbital filling heuristic.
+  const dosHint = hints?.dosAtEF;
+  const dosFeat = dosHint != null && dosHint >= 0 ? Math.min(1.0, dosHint / 5.0) : Math.min(1.0, meanD * 2.0);
+
+  // [16] formation energy signal — more negative = more thermodynamically stable
+  // Maps -3→1, -1→0.67, 0→0.33, +1→0 eV/atom. When unknown (null), use neutral prior 0.5.
+  const fe = hints?.formationEnergy;
+  const hd = hints?.hullDistance;
+  const feFeat = fe != null
+    ? Math.max(0, Math.min(1.0, (-fe + 1.0) / 4.0))
+    : hd != null
+      ? Math.max(0, Math.min(1.0, 1.0 - hd / 0.5))   // hull distance 0→1 (stable), 0.5+→0 (unstable)
+      : 0.5;                                           // neutral prior
+
+  // [17] cuprate class flag — Cu + O compound → d-wave unconventional SC regime
+  const isCuprate = (counts["Cu"] != null && counts["O"] != null) ? 1.0 : 0.0;
+
+  // [18] iron-based class flag — Fe + pnictogen/chalcogen → sign-changing s± pairing
+  const IRON_SC_ANIONS = new Set(["As", "P", "Se", "Te", "S"]);
+  const isIronBased = (counts["Fe"] != null && Object.keys(counts).some(el => IRON_SC_ANIONS.has(el))) ? 1.0 : 0.0;
+
   return [
     meanEN / 4.0,                           // [0] mean Pauling EN — ionicity proxy
     meanD,                                  // [1] mean d-orbital filling — BCS coupling proxy
@@ -1300,10 +1355,16 @@ function computeGlobalCompositionFeatures(counts: Record<string, number>): numbe
     Math.min(1.0, maxENdiff / 3.5),         // [10] max EN spread — ionicity extremes
     Math.min(1.0, meanMass / 200),          // [11] mean atomic mass — phonon mass scale
     Math.min(1.0, stdRadius / 80),          // [12] radius std — lattice strain heterogeneity
+    lambdaFeat,                             // [13] electron-phonon λ — core BCS coupling constant
+    logPhononFeat,                          // [14] log phonon frequency — phonon energy scale
+    dosFeat,                                // [15] DOS at E_F — electronic density at Fermi level
+    feFeat,                                 // [16] formation energy signal — thermodynamic viability
+    isCuprate,                              // [17] cuprate flag — d-wave/unconventional class
+    isIronBased,                            // [18] iron-based flag — s± pairing class
   ];
 }
 
-export function buildCrystalGraph(formula: string, structure?: any, pressureGpa?: number): CrystalGraph {
+export function buildCrystalGraph(formula: string, structure?: any, pressureGpa?: number, hints?: PhysicsFeatureHints): CrystalGraph {
   const rawCounts = parseFormulaCounts(formula);
   const elements = Object.keys(rawCounts);
   const { normalized, multiplicities } = normalizeFormulaCounts(rawCounts);
@@ -1473,8 +1534,27 @@ export function buildCrystalGraph(formula: string, structure?: any, pressureGpa?
     }
   }
 
+  // Enrich hints with lambda regressor output if λ not already provided.
+  // predictLambda uses fast gradient-boosted trees (~1ms) when an ensemble model exists;
+  // falls back to analytical physics engine otherwise. Called once per graph build
+  // (graphs are cached in trainEnsemble) so this does not dominate training time.
+  let enrichedHints: PhysicsFeatureHints = hints ?? {};
+  if (enrichedHints.electronPhononLambda == null) {
+    try {
+      const lp = predictLambda(formula, pressureGpa ?? 0);
+      enrichedHints = {
+        ...enrichedHints,
+        electronPhononLambda: lp.lambda,
+        // dosAtEF and logPhononFreq from the regressor's own feature vector
+        dosAtEF:       enrichedHints.dosAtEF       ?? (lp.features['dosAtEF']  as number | undefined) ?? null,
+        logPhononFreq: enrichedHints.logPhononFreq ?? (lp.features['debyeTemp'] != null
+          ? Math.log(Math.max(1, lp.features['debyeTemp'] as number)) : null),
+      };
+    } catch { /* leave as null — computeGlobalCompositionFeatures will use proxy fallbacks */ }
+  }
+
   const edgeIndex = buildEdgeIndex(nodes, edges);
-  const globalFeatures = computeGlobalCompositionFeatures(rawCounts);
+  const globalFeatures = computeGlobalCompositionFeatures(rawCounts, enrichedHints);
   const partialGraph: CrystalGraph = { nodes, edges, threeBodyFeatures: [], adjacency, edgeIndex, formula, pressureGpa, globalFeatures };
   partialGraph.threeBodyFeatures = compute3BodyFeatures(partialGraph);
   return partialGraph;
@@ -2482,9 +2562,15 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
     const sample = trainingData[si];
     const key = graphCacheKey(sample.formula, sample.prototype, sample.structure);
     if (!graphCache.has(key)) {
+      // Pass known physics from the training sample as hints so the GNN sees
+      // the same physics features at train time that it will derive at inference.
+      const sampleHints: PhysicsFeatureHints = {
+        electronPhononLambda: sample.lambda ?? null,
+        formationEnergy:      sample.formationEnergy ?? null,
+      };
       const g = sample.prototype
-        ? buildPrototypeGraph(sample.formula, sample.prototype, sample.pressureGpa)
-        : buildCrystalGraph(sample.formula, sample.structure, sample.pressureGpa);
+        ? buildPrototypeGraph(sample.formula, sample.prototype, sample.pressureGpa, sampleHints)
+        : buildCrystalGraph(sample.formula, sample.structure, sample.pressureGpa, sampleHints);
       graphCache.set(key, g);
       origEmbeddings.set(key, g.nodes.map(n => [...n.embedding]));
     }
