@@ -137,7 +137,9 @@ async function loadMPContrastSamples(existingFormulas: Set<string>, scCount: num
       if (!formula || existingFormulas.has(formula)) continue;
       const d = row.data as any;
       if (!d) continue;
-      if ((d.bandGap ?? 1) > 0.1) continue;
+      // Default to 0 (metallic) when field is absent — we only seed metallic formulas,
+      // so missing bandGap means the API didn't return it, not that it's an insulator.
+      if (d.bandGap != null && d.bandGap > 0.1) continue;
       samples.push({ formula, tc: 0, formationEnergy: d.formationEnergyPerAtom ?? undefined, structure: undefined, prototype: undefined });
     }
     return samples;
