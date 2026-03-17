@@ -4,11 +4,12 @@ import * as schema from "@shared/schema";
 
 const pool = new pg.Pool({
   connectionString: process.env.DATABASE_URL,
-  max: 10,
-  // Keep idle connections for 2 minutes — longer than the 60s keepalive ping interval
-  // so there's always a live connection in the pool and pg-pool never needs to open
-  // a new TCP connection mid-poll (which risks ETIMEDOUT on Neon cold-start).
-  idleTimeoutMillis: 120_000,
+  // 5 max connections per process (local + GCP = 10 total) — keeps simultaneous
+  // TLS handshakes low during Neon cold-start. 10/process was overwhelming Neon.
+  max: 5,
+  // Keep idle connections for 90s — shorter than 120s so stale connections
+  // get recycled before they accumulate, but longer than the 45s keepalive interval.
+  idleTimeoutMillis: 90_000,
   // Give Neon up to 60s to cold-start; Neon free-tier can take 30-45s after suspension.
   connectionTimeoutMillis: 60_000,
   keepAlive: true,
@@ -44,6 +45,8 @@ export function isConnectionError(err: any): boolean {
     msg.includes("socket hang up") ||
     msg.includes("the client is closed") ||
     msg.includes("connection ended unexpectedly") ||
+    msg.includes("before secure tls connection") ||
+    msg.includes("socket disconnected") ||
     err?.constructor?.name === "AggregateError";
 }
 
