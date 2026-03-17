@@ -1,4 +1,4 @@
-import { execSync, execFile } from "child_process";
+import { execSync, execFile, spawn } from "child_process";
 import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
@@ -3246,12 +3246,37 @@ async function execShellAsync(cmd: string, options: { timeout?: number; env?: No
       }
     }
 
-    const { stdout } = await execFileAsync("wsl.exe", ["-d", "Ubuntu", "--", "bash", "-c", wslCmd], {
-      timeout: options.timeout,
-      env: wslEnv,
-      maxBuffer: options.maxBuffer,
+    // Use spawn instead of execFileAsync: execFile creates pipe handles that WSL's
+    // wsl.exe rejects with "RPC call contains a handle that differs from declared type".
+    // spawn with stdio:['ignore','pipe','pipe'] gives WSL compatible handle types.
+    return new Promise<string>((resolve, reject) => {
+      const proc = spawn("wsl.exe", ["-d", "Ubuntu", "--", "bash", "-c", wslCmd], {
+        env: wslEnv,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let stdout = "";
+      let stderr = "";
+      proc.stdout?.on("data", (d: Buffer) => { stdout += d.toString(); });
+      proc.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
+      let timedOut = false;
+      const timer = options.timeout
+        ? setTimeout(() => { timedOut = true; proc.kill(); }, options.timeout)
+        : null;
+      proc.on("close", (code) => {
+        if (timer) clearTimeout(timer);
+        if (timedOut) {
+          reject(new Error(`WSL command timed out after ${options.timeout}ms`));
+        } else if (code !== 0) {
+          const err: any = new Error(`Command failed: wsl.exe -d Ubuntu -- bash -c ${wslCmd.slice(0, 120)}`);
+          err.stdout = stdout;
+          err.stderr = stderr;
+          reject(err);
+        } else {
+          resolve(stdout);
+        }
+      });
+      proc.on("error", reject);
     });
-    return stdout;
   }
 
   const { stdout } = await execFileAsync("/bin/sh", ["-c", cmd], {
