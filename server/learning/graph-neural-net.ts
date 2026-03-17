@@ -2245,7 +2245,9 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
   // softplus ensures positivity; OMEGA_LOG_SCALE sets the physical range.
   const omegaLogRaw = sf(out[2] ?? 0);
   const omegaLog = Math.max(10, softplus(omegaLogRaw) * OMEGA_LOG_SCALE + 10);
-  const lambdaRaw = Math.max(0, sf(out[4] ?? 0));
+  // out[4] → λ via softplus (NOT ReLU): softplus has non-zero gradient everywhere,
+  // preventing the dead-neuron problem that blocks gradient flow when out[4]<0.
+  const lambdaRaw = softplus(sf(out[4] ?? 0));
   // Tc computed via Allen-Dynes formula: Tc = (ω_log/1.2)*exp(-1.04(1+λ)/(λ-μ*(1+0.62λ)))
   const predictedTcRaw = allenDynesTcRaw(lambdaRaw, omegaLog, FIXED_MU_STAR);
   const confidenceRaw = sigmoid(sf(out[3] ?? 0));
@@ -2403,7 +2405,7 @@ function GNNPredictForTraining(graph: CrystalGraph, weights: GNNWeights): { pred
   // out[2] → ω_log (K) — two-stage Allen-Dynes prediction (same as GNNPredict)
   const omegaLogRaw = sf(out[2] ?? 0);
   const omegaLog = Math.max(10, softplus(omegaLogRaw) * OMEGA_LOG_SCALE + 10);
-  const lambdaRaw = Math.max(0, sf(out[4] ?? 0));
+  const lambdaRaw = softplus(sf(out[4] ?? 0)); // softplus: always positive, always differentiable
   const predictedTcRaw = allenDynesTcRaw(lambdaRaw, omegaLog, FIXED_MU_STAR);
   const confidenceRaw = sigmoid(sf(out[3] ?? 0));
   const bandgapRaw = sigmoid(sf(out[5] ?? 0)) * 5.0;
@@ -2807,7 +2809,9 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
         // the Allen-Dynes formula without adding fields to GNNForwardCache.
         const adOmegaLogRaw = cache.outRaw[2] ?? 0;
         const adOmegaLog    = Math.max(10, softplus(adOmegaLogRaw) * OMEGA_LOG_SCALE + 10);
-        const adLambda      = Math.max(0, cache.outRaw[4] ?? 0);
+        // λ uses softplus in the forward pass — reconstruct with softplus here too
+        const adLambdaRaw   = cache.outRaw[4] ?? 0;
+        const adLambda      = softplus(adLambdaRaw);
         const adTc          = allenDynesTcRaw(adLambda, adOmegaLog, FIXED_MU_STAR);
         // McMillan denominator: D = λ(1−0.62μ*) − μ*  (μ*=0.10 → D = 0.938λ − 0.10)
         const adD = adLambda * (1 - 0.62 * FIXED_MU_STAR) - FIXED_MU_STAR;
@@ -2818,8 +2822,8 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
         const dTcdLambda = (adD > 0.05 && adTc > 0) ? adTc * 1.07952 / (adD * adD) : 0;
         // d(softplus(x))/dx = sigmoid(x)  →  d(ω_log)/d(out[2]) = sigmoid(out[2]) * OMEGA_LOG_SCALE
         const dOmegaLogdOut2 = sigmoid(adOmegaLogRaw) * OMEGA_LOG_SCALE;
-        // d(max(0,x))/dx = 1{x>0}
-        const dLambdadOut4 = (cache.outRaw[4] ?? 0) > 0 ? 1.0 : 0.0;
+        // d(softplus(x))/dx = sigmoid(x) — always non-zero, fixes dead-ReLU gradient blocking
+        const dLambdadOut4 = sigmoid(adLambdaRaw);
 
         // Direct ω_log supervision: invert Allen-Dynes from (Tc_target, λ_target) to get ω_log target.
         // Only reliable when Tc>0 and the McMillan denominator is well-defined.
