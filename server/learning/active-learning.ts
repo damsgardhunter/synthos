@@ -1302,8 +1302,47 @@ async function retrainGNNWithEnrichedData(
     console.log(`[ActiveLearning] Training payload: +${mpMergeCount} MP cached records (total ${trainingData.length})`);
   }
 
+  // Load DFT-computed entries from quantum_engine_dataset — this table accumulates
+  // thousands of QE-verified entries from GCP runs and is the primary source of
+  // additional SC training data beyond the 513-entry static seed.
+  let qeDbMergeCount = 0;
   try {
-    const enrichedCandidates = enrichedSnapshot ?? await storage.getSuperconductorCandidates(100);
+    const { db: qeDb } = await import("../db");
+    const { quantumEngineDataset } = await import("@shared/schema");
+    const { gt: qeGt } = await import("drizzle-orm");
+    const qeRows = await qeDb.select({
+      material: quantumEngineDataset.material,
+      tc: quantumEngineDataset.tc,
+      formationEnergy: quantumEngineDataset.formationEnergy,
+      bandGap: quantumEngineDataset.bandGap,
+      lambda: quantumEngineDataset.lambda,
+      tier: quantumEngineDataset.tier,
+      scfConverged: quantumEngineDataset.scfConverged,
+    }).from(quantumEngineDataset)
+      .where(qeGt(quantumEngineDataset.tc, 0))
+      .limit(5000);
+    for (const row of qeRows) {
+      if (!row.material || seenFormulas.has(row.material)) continue;
+      if (row.tier !== "full-dft" && row.tier !== "xtb") continue;
+      seenFormulas.add(row.material);
+      trainingData.push({
+        formula: row.material,
+        tc: Number(row.tc) || 0,
+        formationEnergy: row.formationEnergy ?? undefined,
+        structure: undefined,
+        prototype: undefined,
+      });
+      qeDbMergeCount++;
+    }
+    if (qeDbMergeCount > 0) {
+      console.log(`[ActiveLearning] Training payload: +${qeDbMergeCount} QE dataset entries (total ${trainingData.length})`);
+    }
+  } catch (e: any) {
+    console.warn("[ActiveLearning] QE dataset load failed:", e?.message?.slice(0, 100));
+  }
+
+  try {
+    const enrichedCandidates = enrichedSnapshot ?? await storage.getSuperconductorCandidates(5000);
     for (const c of enrichedCandidates) {
       if (c.dataConfidence === "high" || c.dataConfidence === "dft-verified" || c.dataConfidence === "medium") {
         if (seenFormulas.has(c.formula)) continue;

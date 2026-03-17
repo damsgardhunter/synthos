@@ -2586,6 +2586,12 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
     }
   }
 
+  // Pre-bucket indices by Tc for stratified sampling.
+  // high-Tc (≥40K) are the discovery targets — guarantee they appear in every batch.
+  const hiTcBucket  = Array.from({ length: trainingData.length }, (_, i) => i).filter(i => trainingData[i].tc >= 40);
+  const loTcBucket  = Array.from({ length: trainingData.length }, (_, i) => i).filter(i => trainingData[i].tc > 0 && trainingData[i].tc < 40);
+  const nonScBucket = Array.from({ length: trainingData.length }, (_, i) => i).filter(i => trainingData[i].tc === 0);
+
   const indices = Array.from({ length: trainingData.length }, (_, i) => i);
 
   for (let epoch = 0; epoch < epochs; epoch++) {
@@ -2594,9 +2600,31 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
     let totalLoss = 0;
     let totalSamples = 0;
 
-    for (let i = indices.length - 1; i > 0; i--) {
-      const j = Math.floor(rng() * (i + 1));
-      [indices[i], indices[j]] = [indices[j], indices[i]];
+    // Stratified shuffle: interleave high-Tc samples so every batch sees them.
+    // Shuffle each bucket independently, then interleave high-Tc evenly through others.
+    const shuf = (arr: number[]) => {
+      for (let i = arr.length - 1; i > 0; i--) {
+        const j = Math.floor(rng() * (i + 1));
+        [arr[i], arr[j]] = [arr[j], arr[i]];
+      }
+    };
+    shuf(hiTcBucket); shuf(loTcBucket); shuf(nonScBucket);
+    // Merge low-Tc and non-SC into one stream, then interleave high-Tc evenly
+    const mainstream = [...loTcBucket, ...nonScBucket];
+    shuf(mainstream);
+    if (hiTcBucket.length === 0) {
+      for (let i = 0; i < indices.length; i++) indices[i] = mainstream[i] ?? i;
+    } else {
+      // Place one high-Tc sample every `step` mainstream samples
+      const step = Math.max(1, Math.floor(mainstream.length / (hiTcBucket.length + 1)));
+      let hi = 0, lo = 0, out = 0;
+      while (out < indices.length) {
+        for (let s = 0; s < step && lo < mainstream.length && out < indices.length; s++) indices[out++] = mainstream[lo++];
+        if (hi < hiTcBucket.length && out < indices.length) indices[out++] = hiTcBucket[hi++];
+      }
+      while (lo < mainstream.length && out < indices.length) indices[out++] = mainstream[lo++];
+      while (hi < hiTcBucket.length && out < indices.length) indices[out++] = hiTcBucket[hi++];
+    }
     }
 
     const numBatches = Math.ceil(trainingData.length / batchSize);
@@ -2647,8 +2675,9 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
         const hasFormationEnergy = sample.formationEnergy != null;
         const feTarget = hasFormationEnergy ? sample.formationEnergy! : 0;
         const tcError = pred.predictedTc / 300 - tcTarget;
-        // 2× weight for SC samples (Tc>0) to counteract 60/40 contrast imbalance.
-        const scWeight = sample.tc > 0 ? 2.0 : 1.0;
+        // Weighted loss: high-Tc (discovery targets) are rare so up-weight them.
+        // >100K: 4× (room-T SCs), 40-100K: 3×, >0: 2× (counteract contrast imbalance), =0: 1×
+        const scWeight = sample.tc >= 100 ? 4.0 : sample.tc >= 40 ? 3.0 : sample.tc > 0 ? 2.0 : 1.0;
         const feError = hasFormationEnergy ? pred.formationEnergy - feTarget : 0;
 
         const phononTarget = (sample.tc > 0) ? 1.0 : 0.0;

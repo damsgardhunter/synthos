@@ -133,6 +133,35 @@ function computeMetrics(
   return { r2, mae, rmse };
 }
 
+// ── QE dataset augmentation (DFT-verified SC samples) ────────────────────────
+
+async function loadQEDatasetSamples(existingFormulas: Set<string>): Promise<TrainingSample[]> {
+  try {
+    const rows = await db.execute(
+      `SELECT material, tc, formation_energy, band_gap, lambda
+       FROM quantum_engine_dataset
+       WHERE scf_converged = true AND tc > 0 AND tier IN ('full-dft', 'xtb')
+       ORDER BY tc DESC
+       LIMIT 5000`
+    );
+    const items: any[] = (rows as any).rows ?? (Array.isArray(rows) ? rows : []);
+    const samples: TrainingSample[] = [];
+    for (const row of items) {
+      if (!row.material || existingFormulas.has(row.material)) continue;
+      samples.push({
+        formula: row.material,
+        tc: Number(row.tc) || 0,
+        formationEnergy: row.formation_energy != null ? Number(row.formation_energy) : undefined,
+        structure: undefined,
+        prototype: undefined,
+      });
+    }
+    return samples;
+  } catch {
+    return [];
+  }
+}
+
 // ── MP augmentation (Tc=0 contrast examples) ─────────────────────────────────
 
 async function loadMPContrastSamples(existingFormulas: Set<string>, scCount: number): Promise<TrainingSample[]> {
@@ -183,15 +212,25 @@ async function processNextGnnJob(): Promise<boolean> {
   let trainingData: TrainingSample[] = job.training_data as TrainingSample[];
   const datasetSize: number = job.dataset_size ?? trainingData.length;
 
-  // Augment with MP metallic materials (Tc=0) so GNN learns contrast with SCs
   const existingFormulas = new Set(trainingData.map(s => s.formula));
-  const mpContrast = await loadMPContrastSamples(existingFormulas, trainingData.length);
+
+  // Augment with DFT-verified SC entries from quantum_engine_dataset
+  const qeSamples = await loadQEDatasetSamples(existingFormulas);
+  if (qeSamples.length > 0) {
+    trainingData = [...trainingData, ...qeSamples];
+    qeSamples.forEach(s => existingFormulas.add(s.formula));
+    console.log(`[GNN-GCP] Augmented job #${jobId} with ${qeSamples.length} QE dataset SC entries — total ${trainingData.length}`);
+  }
+
+  // Augment with MP metallic materials (Tc=0) so GNN learns contrast with SCs
+  const scCount = trainingData.filter(s => s.tc > 0).length;
+  const mpContrast = await loadMPContrastSamples(existingFormulas, scCount);
   if (mpContrast.length > 0) {
     trainingData = [...trainingData, ...mpContrast];
     console.log(`[GNN-GCP] Augmented job #${jobId} with ${mpContrast.length} MP contrast samples (Tc=0) — total ${trainingData.length}`);
   }
 
-  console.log(`[GNN-GCP] Starting training job #${jobId} — ${datasetSize} SC samples + ${mpContrast.length} MP contrast`);
+  console.log(`[GNN-GCP] Starting training job #${jobId} — ${datasetSize} seed + ${qeSamples.length} QE + ${mpContrast.length} MP contrast`);
   const startMs = Date.now();
 
   try {
