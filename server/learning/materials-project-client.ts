@@ -163,6 +163,26 @@ const METALLIC_SEED_FORMULAS: string[] = [
   "Cu2ZnSnS4","Cu2ZnSnSe4","Cu2ZnGeS4","Cu2CdSnS4",
   "AgGaS2","AgGaSe2","AgInS2","AgInSe2","CuGaS2","CuInS2","CuInSe2",
   "ZnGeAs2","CdGeAs2","ZnSiAs2","CdSiAs2",
+
+  // --- Ferromagnets --- //
+  "AcEuZn2", "Ag2Cl3", "AgS2(O3F)2", "Mn2O3", "Fe2O3", "Eu2Sb3", "LiGd6B3O14", "LiMn2O4",
+
+  // --- Dielectrics --- //
+  "Bi2Te3", "GeTe", "CrAiRu2", "FeGe", "NbAs",
+
+  // --- Other Phonon characteristics --- //
+  "KGa3", "BaS3", "PtS", "RbSb2", "BaP3", "GaN", "InF3", "CaP", "CuP2", 
+  "ZnO", "CdSe", "SiO2", "GaP", "InP", "Li3Sb", "KCl", "Mg2Si", "CaTe",
+  "SrP", "AlH3", "KF", "SiO2", "SrP", "BaCl2", "SrF2", "P2Rh",
+
+  // --- Other materials --- //
+  "BeSe", "K2S3", "Fe(SiP)4", "ZnTe", "BeTe", "BP", "ZnSe", "ZnSnP2", "InAgS2", "PtF4",
+  "YAgTe2", "Ga2Te3", "LiNbO3", "BaLiAs", "BeGeAs2", "Cu2HgI4", "AlCuS2", "CdSiAs2",
+  "CrN2", "K15Os7N19", "MnRu2W", "MnTc2Mo", "Ti2VMo", "LiOs2W", "CaC2", "MgOs2W", "ReSiTc2",
+  "BaAs2O5", "TbNp3", "H4N2O3", "LaH2SNO7", "Ca(BH)2", "B6H6NO6", "V2H", "Ta2H", "LiH", "Mn2AsHO5",
+  "KMn2P2HO9", "Co2AsHO5", "Mn2VHO5", "UH3", "K2Fe3P4(HO4)4", "EuH2", "LiCa2Mn2Si5HO15", "MnHO2",
+  "HPbBrO", "Mg3MnH7", "Ti3H2O7", "NbAs", "MgNb2(PbO3)3", "Pr3NF6", "KBi2", "MoIr3", "BMo", "BaRuO3", "Mn5Si3",
+  "Mn6Si7Ni16", "CrFeS4", "Si3N4", "C3N4", "SiO2", "AlF3",
 ];
 
 const MP_API_BASE = "https://api.materialsproject.org";
