@@ -272,6 +272,7 @@ export async function trainStabilityPredictor(): Promise<void> {
   }
 
   const feResult = trainGBM(X, yFE, 150, 0.05, 4);
+  await new Promise<void>(r => setTimeout(r, 0)); // yield between the two heavy synchronous trainGBM calls
   const phononResult = trainGBM(X, yPhonon, 150, 0.05, 4);
 
   cachedModel = {

@@ -356,7 +356,10 @@ export function retrainTBSurrogate(): { retrained: boolean; datasetSize: number;
     return { retrained: false, datasetSize: surrogateModels.datasetSize, reason: `Only ${newComputationCount} new computations (need ${RETRAIN_THRESHOLD})` };
   }
 
-  const { X, Y } = generateTrainingData();
+  // Cap at 15 formulas — computeTBProperties takes ~0.9s/formula; 15 → ~13.5s max synchronous
+  // work broken into per-call chunks (each trainGBM call is 0.5-1s). The caller wraps this in
+  // Promise.resolve() which does NOT yield internally, so the cap is the only guard here.
+  const { X, Y } = generateTrainingData(15);
   const prevCount = newComputationCount;
   newComputationCount = 0;
 

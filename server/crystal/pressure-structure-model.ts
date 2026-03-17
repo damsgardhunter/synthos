@@ -359,23 +359,32 @@ function generateSyntheticTrainingData(): {
   return { X, csLabels, sgLabels, protoLabels, latticeA, latticeB, latticeC, latticeAlpha, latticeBeta, latticeGamma };
 }
 
-function trainPressureStructureModel(): void {
+async function trainPressureStructureModel(): Promise<void> {
   const data = generateSyntheticTrainingData();
   if (data.X.length < 20) return;
 
+  // Yield between each synchronous trainGBM / trainOneVsAllClassifier call
+  // so timer callbacks and heartbeats can fire during the ~5-8s total training.
   crystalSystemClassifier = trainOneVsAllClassifier(data.X, data.csLabels, 30, 0.1, 3);
+  await new Promise<void>(r => setTimeout(r, 0));
   spacegroupClassifier = trainOneVsAllClassifier(data.X, data.sgLabels, 30, 0.1, 3);
+  await new Promise<void>(r => setTimeout(r, 0));
   prototypeClassifier = trainOneVsAllClassifier(data.X, data.protoLabels, 30, 0.1, 3);
+  await new Promise<void>(r => setTimeout(r, 0));
 
-  latticeRegressors = {
-    a: trainGBM(data.X, data.latticeA, 30, 0.08, 3),
-    b: trainGBM(data.X, data.latticeB, 30, 0.08, 3),
-    c: trainGBM(data.X, data.latticeC, 30, 0.08, 3),
-    alpha: trainGBM(data.X, data.latticeAlpha, 20, 0.08, 3),
-    beta: trainGBM(data.X, data.latticeBeta, 20, 0.08, 3),
-    gamma: trainGBM(data.X, data.latticeGamma, 20, 0.08, 3),
-  };
+  const a = trainGBM(data.X, data.latticeA, 30, 0.08, 3);
+  await new Promise<void>(r => setTimeout(r, 0));
+  const b = trainGBM(data.X, data.latticeB, 30, 0.08, 3);
+  await new Promise<void>(r => setTimeout(r, 0));
+  const c = trainGBM(data.X, data.latticeC, 30, 0.08, 3);
+  await new Promise<void>(r => setTimeout(r, 0));
+  const alpha = trainGBM(data.X, data.latticeAlpha, 20, 0.08, 3);
+  await new Promise<void>(r => setTimeout(r, 0));
+  const beta = trainGBM(data.X, data.latticeBeta, 20, 0.08, 3);
+  await new Promise<void>(r => setTimeout(r, 0));
+  const gamma = trainGBM(data.X, data.latticeGamma, 20, 0.08, 3);
 
+  latticeRegressors = { a, b, c, alpha, beta, gamma };
   modelTrained = true;
   trainedAt = Date.now();
   datasetSize = data.X.length;
@@ -387,7 +396,7 @@ function deferTraining(): void {
   if (trainDeferred) return;
   trainDeferred = true;
   setTimeout(() => {
-    try { trainPressureStructureModel(); } catch {}
+    trainPressureStructureModel().catch(() => {});
   }, 8000);
 }
 
