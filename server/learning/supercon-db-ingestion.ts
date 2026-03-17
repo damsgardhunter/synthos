@@ -342,13 +342,21 @@ async function runIngestion(): Promise<void> {
   await saveState(state);
 
   try {
-    // 1. Local CSV (user-supplied or previously downloaded)
-    const localCsvPath = process.env.SUPERCON_CSV_PATH ??
-      path.join(process.cwd(), "server/learning/data/supercon.csv");
+    // 1. Bundled Kaggle datasets committed directly to the repo — highest priority
+    //    because they're always available without any network request.
+    //    unique_m.csv: Hamidieh 2018 dataset, 21,263 rows, columns include
+    //    `material` (formula string) and `critical_temp` (Tc in K).
+    const bundledPaths = [
+      process.env.SUPERCON_CSV_PATH,
+      path.join(process.cwd(), "server/learning/unique_m.csv"),
+      path.join(process.cwd(), "server/learning/data/supercon.csv"),
+    ].filter(Boolean) as string[];
 
-    if (fs.existsSync(localCsvPath)) {
-      state.source = "local-csv";
-      await ingestFromLocalCSV(localCsvPath, state);
+    const foundLocal = bundledPaths.find(p => fs.existsSync(p));
+    if (foundLocal) {
+      console.log(`[SuperCon] Using bundled CSV: ${foundLocal}`);
+      state.source = foundLocal.includes("unique_m") ? "kaggle-unique_m" : "local-csv";
+      await ingestFromLocalCSV(foundLocal, state);
     } else {
       // 2. Try NIMS REST API
       try {
