@@ -25,6 +25,18 @@ import { fetchMPBatchFromAPI } from "../server/learning/materials-project-client
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const WORKER_SCRIPT = path.join(__dirname, "gnn-worker-thread.ts");
 
+// Build execArgv for worker threads with an explicit tsx ESM loader.
+// We cannot rely on process.execArgv propagation: on GCP the main process is
+// started by systemd/tsx and execArgv may be empty or missing the loader flag,
+// causing worker_threads to reject the .ts file with "Unknown file extension".
+// Construct from scratch: tsx/esm loader first, then any non-loader parent flags.
+const workerExecArgv: string[] = [
+  "--import", "tsx/esm",
+  ...process.execArgv.filter(
+    (a) => !a.includes("tsx") && !a.includes("--loader") && !a.startsWith("--import"),
+  ),
+];
+
 // ── Parallel ensemble training via worker threads ────────────────────────────
 // Each of the 5 ensemble models trains in its own worker thread so the full
 // ensemble is trained in the time it takes to train one model sequentially.
@@ -36,8 +48,7 @@ function spawnModelWorker(
 ): Promise<GNNWeights> {
   return new Promise((resolve, reject) => {
     const worker = new Worker(WORKER_SCRIPT, {
-      // Inherit tsx loader flags so the .ts worker file is transpiled correctly.
-      execArgv: process.execArgv,
+      execArgv: workerExecArgv,
       workerData: {
         trainingData,
         seed: ENSEMBLE_SEEDS[modelIndex],
