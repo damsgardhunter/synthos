@@ -269,6 +269,8 @@ async function ingestFromNIMSAPI(state: IngestionState): Promise<void> {
     await new Promise(r => setTimeout(r, YIELD_BETWEEN_BATCHES_MS));
   }
   console.log(`[SuperCon] NIMS API ingestion complete: ${totalInserted} rows inserted`);
+  // Throw if nothing was ingested so the caller can fall back to Hamidieh CSV.
+  if (totalInserted === 0) throw new Error("NIMS API returned 0 rows");
 }
 
 // ── Hamidieh fallback download ────────────────────────────────────────────────
@@ -305,9 +307,15 @@ export function startSuperConIngestion(): void {
 async function runIngestion(): Promise<void> {
   const state = await loadState();
 
-  if (state.status === "done") {
+  if (state.status === "done" && state.rowsIngested > 0) {
     console.log(`[SuperCon] Ingestion already complete (${state.rowsIngested} rows). Skipping.`);
     return;
+  }
+  if (state.status === "done" && state.rowsIngested === 0) {
+    console.log(`[SuperCon] Previous ingestion completed with 0 rows — retrying all sources.`);
+    state.status = "idle";
+    state.lastOffset = 0;
+    state.source = "";
   }
 
   state.status = "running";
