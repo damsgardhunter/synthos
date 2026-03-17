@@ -5,6 +5,7 @@ import { SUPERCON_TRAINING_DATA } from "./supercon-dataset";
 import { storage } from "../storage";
 import { computeSymmetryEmbedding, computeSymmetryFeatureVector } from "../crystal/symmetry-subgroups";
 import { predictLambda } from "./lambda-regressor";
+import { allenDynesTcRaw } from "./physics-engine";
 import { normalizeSpaceGroup, matchPrototype } from "./structure-predictor";
 import { parseFormulaCounts as parseFormulaCountsCanonical } from "./utils";
 
@@ -122,6 +123,8 @@ export interface GNNPrediction {
   formationEnergy: number;
   phononStability: boolean;
   predictedTc: number;
+  /** Characteristic phonon frequency ω_log (K) — Allen-Dynes intermediate; inspect for physical validity. */
+  omegaLog: number;
   confidence: number;
   lambda: number;
   bandgap: number;
@@ -191,6 +194,8 @@ export interface UncertaintyBreakdown {
 
 export interface GNNPredictionWithUncertainty {
   tc: number;
+  /** Ensemble-mean characteristic phonon frequency ω_log (K) — Allen-Dynes intermediate. */
+  omegaLog: number;
   formationEnergy: number;
   lambda: number;
   bandgap: number;
@@ -213,7 +218,12 @@ const HIDDEN_DIM = 48;
 const N_GAUSSIAN_BASIS = 40;             // expanded from 20 — denser RBF gives finer distance discrimination
 const EDGE_DIM = N_GAUSSIAN_BASIS + 4;   // derived: 40 RBF + bond order, EN diff, ionic char, radius sum
 const OUTPUT_DIM = 16;
-const GLOBAL_COMP_DIM = 19;              // 6 composition + 7 XGBoost-inspired composition + 6 physics (λ, logω, DOS, FE, isCuprate, isIronBased)
+const GLOBAL_COMP_DIM = 19;
+// Coulomb pseudopotential μ* — fixed at conventional BCS value.
+// Typical range: 0.10 (metals), 0.12-0.13 (hydrides, higher Coulomb screening).
+const FIXED_MU_STAR = 0.10;
+// Scale for out[2] → ω_log (K). softplus(0)*500+10 ≈ 357 K — reasonable default for BCS metals.
+const OMEGA_LOG_SCALE = 500;              // 6 composition + 7 XGBoost-inspired composition + 6 physics (λ, logω, DOS, FE, isCuprate, isIronBased)
 const CGCNN_CONCAT_DIM = HIDDEN_DIM * 2 + EDGE_DIM;
 export const ENSEMBLE_SIZE = 5;
 const MC_DROPOUT_PASSES = 10;
@@ -2227,9 +2237,14 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
   const sf = (v: number, fallback = 0) => Number.isFinite(v) ? v : fallback;
   const formationEnergy = sf(out[0] ?? 0);
   const phononStabilityRaw = sigmoid(sf(out[1] ?? 0));
-  const predictedTcRaw = Math.max(0, sf(out[2] ?? 0) * 300);
-  const confidenceRaw = sigmoid(sf(out[3] ?? 0));
+  // out[2] → ω_log (K) via softplus — two-stage Allen-Dynes prediction.
+  // softplus ensures positivity; OMEGA_LOG_SCALE sets the physical range.
+  const omegaLogRaw = sf(out[2] ?? 0);
+  const omegaLog = Math.max(10, softplus(omegaLogRaw) * OMEGA_LOG_SCALE + 10);
   const lambdaRaw = Math.max(0, sf(out[4] ?? 0));
+  // Tc computed via Allen-Dynes formula: Tc = (ω_log/1.2)*exp(-1.04(1+λ)/(λ-μ*(1+0.62λ)))
+  const predictedTcRaw = allenDynesTcRaw(lambdaRaw, omegaLog, FIXED_MU_STAR);
+  const confidenceRaw = sigmoid(sf(out[3] ?? 0));
   const bandgapRaw = sigmoid(sf(out[5] ?? 0)) * 5.0;
   const dosProxyRaw = softplus(sf(out[6] ?? 0));
   const stabilityProbRaw = sigmoid(sf(out[7] ?? 0));
@@ -2239,6 +2254,7 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
     formationEnergy: Math.round(formationEnergy * 1000) / 1000,
     phononStability: phononStabilityRaw > 0.5,
     predictedTc: Math.round(Math.max(0, predictedTcRaw) * 10) / 10,
+    omegaLog: Math.round(omegaLog * 10) / 10,
     confidence: Math.round(Math.max(0.05, Math.min(0.95, confidenceRaw)) * 100) / 100,
     lambda: Math.round(Math.max(0, lambdaRaw) * 1000) / 1000,
     bandgap: Math.round(bandgapRaw * 1000) / 1000,
@@ -2376,9 +2392,12 @@ function GNNPredictForTraining(graph: CrystalGraph, weights: GNNWeights): { pred
   const sf = (v: number, fallback = 0) => Number.isFinite(v) ? v : fallback;
   const formationEnergy = sf(out[0] ?? 0);
   const phononStabilityRaw = sigmoid(sf(out[1] ?? 0));
-  const predictedTcRaw = Math.max(0, sf(out[2] ?? 0) * 300);
-  const confidenceRaw = sigmoid(sf(out[3] ?? 0));
+  // out[2] → ω_log (K) — two-stage Allen-Dynes prediction (same as GNNPredict)
+  const omegaLogRaw = sf(out[2] ?? 0);
+  const omegaLog = Math.max(10, softplus(omegaLogRaw) * OMEGA_LOG_SCALE + 10);
   const lambdaRaw = Math.max(0, sf(out[4] ?? 0));
+  const predictedTcRaw = allenDynesTcRaw(lambdaRaw, omegaLog, FIXED_MU_STAR);
+  const confidenceRaw = sigmoid(sf(out[3] ?? 0));
   const bandgapRaw = sigmoid(sf(out[5] ?? 0)) * 5.0;
   const dosProxyRaw = softplus(sf(out[6] ?? 0));
   const stabilityProbRaw = sigmoid(sf(out[7] ?? 0));
@@ -2391,6 +2410,7 @@ function GNNPredictForTraining(graph: CrystalGraph, weights: GNNWeights): { pred
     formationEnergy: Math.round(formationEnergy * 1000) / 1000,
     phononStability: phononStabilityRaw > 0.5,
     predictedTc: Math.round(Math.max(0, predictedTcRaw) * 10) / 10,
+    omegaLog: Math.round(omegaLog * 10) / 10,
     confidence: Math.round(Math.max(0.05, Math.min(0.95, confidenceRaw)) * 100) / 100,
     lambda: Math.round(Math.max(0, lambdaRaw) * 1000) / 1000,
     bandgap: Math.round(bandgapRaw * 1000) / 1000,
@@ -2594,6 +2614,73 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
 
   const indices = Array.from({ length: trainingData.length }, (_, i) => i);
 
+  // ── Formation energy pretraining ─────────────────────────────────────────────
+  // Run a warm-up phase on FE-only loss before Tc training. The message-passing
+  // layers learn chemical bonding geometry from the much larger pool of MP data
+  // (every sample with a formation energy). This gives better node representations
+  // before the harder Tc regression task begins — analogous to ImageNet pretraining.
+  const feSamples = trainingData.map((s, i) => i).filter(i => trainingData[i].formationEnergy != null);
+  const PRETRAIN_EPOCHS = feSamples.length >= 20 ? 15 : 0;
+  if (PRETRAIN_EPOCHS > 0) {
+    console.log(`[GNN] FE pretraining: ${PRETRAIN_EPOCHS} epochs on ${feSamples.length} samples with formation energy`);
+    for (let preEpoch = 0; preEpoch < PRETRAIN_EPOCHS; preEpoch++) {
+      const preLr = LR_INIT * (0.5 + 0.5 * Math.cos(Math.PI * preEpoch / PRETRAIN_EPOCHS));
+      // Shuffle FE samples
+      for (let i = feSamples.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [feSamples[i], feSamples[j]] = [feSamples[j], feSamples[i]];
+      }
+      const prePooledLen = HIDDEN_DIM * 2 + GLOBAL_COMP_DIM;
+      for (let bStart = 0; bStart < feSamples.length; bStart += batchSize) {
+        const bEnd = Math.min(bStart + batchSize, feSamples.length);
+        const preGradW1 = weights.W_mlp1.map(r => new Array(r.length).fill(0));
+        const preGradB1 = new Array(weights.b_mlp1.length).fill(0);
+        const preGradW2 = weights.W_mlp2.map(r => new Array(r.length).fill(0));
+        const preGradB2 = new Array(weights.b_mlp2.length).fill(0);
+        const clipG = (g: number) => { const v = Number.isFinite(g) ? g : 0; return Math.max(-1, Math.min(1, v)); };
+        for (let b = bStart; b < bEnd; b++) {
+          const si = feSamples[b];
+          const s = trainingData[si];
+          const cKey = graphCacheKey(s.formula, s.prototype, s.structure);
+          const g = graphCache.get(cKey)!;
+          const orig = origEmbeddings.get(cKey)!;
+          for (let ni = 0; ni < g.nodes.length; ni++) g.nodes[ni].embedding = [...orig[ni]];
+          const { pred: prePred, cache: preCache } = GNNPredictForTraining(g, weights);
+          const feErr = prePred.formationEnergy - s.formationEnergy!;
+          // Only FE loss — zero gradient on all other outputs.
+          const preDLdOut = new Array(OUTPUT_DIM).fill(0);
+          preDLdOut[0] = clipG(2 * feErr);  // weight 1.0 during pretraining
+          for (let i = 0; i < weights.W_mlp2.length; i++) {
+            for (let j = 0; j < weights.W_mlp2[i].length; j++) preGradW2[i][j] += preDLdOut[i] * preCache.h1[j];
+            preGradB2[i] += preDLdOut[i];
+          }
+          const preDLdH1 = new Array(HIDDEN_DIM).fill(0);
+          for (let j = 0; j < HIDDEN_DIM; j++)
+            for (let i = 0; i < OUTPUT_DIM; i++) preDLdH1[j] += preDLdOut[i] * (weights.W_mlp2[i]?.[j] ?? 0);
+          const preDLdZ1 = preDLdH1.map((v, j) => v * (preCache.z1[j] >= 0 ? 1.0 : 0.01));
+          for (let i = 0; i < HIDDEN_DIM; i++) {
+            for (let j = 0; j < prePooledLen; j++) preGradW1[i][j] += clipG(preDLdZ1[i] * preCache.pooled[j]);
+            preGradB1[i] += clipG(preDLdZ1[i]);
+          }
+        }
+        // SGD update for W_mlp1 and W_mlp2 only (no Adam state needed for warm-up)
+        const batchN = bEnd - bStart;
+        for (let i = 0; i < HIDDEN_DIM; i++) {
+          for (let j = 0; j < prePooledLen; j++) weights.W_mlp1[i][j] -= preLr * preGradW1[i][j] / batchN;
+          weights.b_mlp1[i] -= preLr * preGradB1[i] / batchN;
+        }
+        for (let i = 0; i < OUTPUT_DIM; i++) {
+          for (let j = 0; j < HIDDEN_DIM; j++) weights.W_mlp2[i][j] -= preLr * preGradW2[i][j] / batchN;
+          weights.b_mlp2[i] -= preLr * preGradB2[i] / batchN;
+        }
+        // Invalidate flat matrix caches after in-place weight mutations
+        invalidateFlatCache(weights.W_mlp1);
+        invalidateFlatCache(weights.W_mlp2);
+      }
+    }
+    console.log(`[GNN] FE pretraining complete — starting Tc fine-tuning`);
+  }
+
   for (let epoch = 0; epoch < epochs; epoch++) {
     // Cosine LR decay: LR_INIT → LR_INIT/10 over the training run.
     const lr = LR_INIT * (0.1 + 0.9 * 0.5 * (1 + Math.cos(Math.PI * epoch / epochs)));
@@ -2708,13 +2795,56 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
         totalLoss += loss;
         totalSamples++;
 
+        // ── Allen-Dynes chain-rule gradient setup ───────────────────────────────
+        // Reconstruct ω_log / λ / Tc from outRaw so we can differentiate through
+        // the Allen-Dynes formula without adding fields to GNNForwardCache.
+        const adOmegaLogRaw = cache.outRaw[2] ?? 0;
+        const adOmegaLog    = Math.max(10, softplus(adOmegaLogRaw) * OMEGA_LOG_SCALE + 10);
+        const adLambda      = Math.max(0, cache.outRaw[4] ?? 0);
+        const adTc          = allenDynesTcRaw(adLambda, adOmegaLog, FIXED_MU_STAR);
+        // McMillan denominator: D = λ(1−0.62μ*) − μ*  (μ*=0.10 → D = 0.938λ − 0.10)
+        const adD = adLambda * (1 - 0.62 * FIXED_MU_STAR) - FIXED_MU_STAR;
+        // dTc/dω_log = Tc / ω_log  (linear dependence in Allen-Dynes)
+        const dTcdOmegaLog = (adOmegaLog > 10 && adTc > 0) ? adTc / adOmegaLog : 0;
+        // dTc/dλ = Tc × 1.04×(D−(1+λ)(1−0.62μ*)) ... = Tc × (-1.04×(-1.038)) / D²
+        //        = Tc × 1.07952 / D²   (McMillan simplified, always positive for D>0)
+        const dTcdLambda = (adD > 0.05 && adTc > 0) ? adTc * 1.07952 / (adD * adD) : 0;
+        // d(softplus(x))/dx = sigmoid(x)  →  d(ω_log)/d(out[2]) = sigmoid(out[2]) * OMEGA_LOG_SCALE
+        const dOmegaLogdOut2 = sigmoid(adOmegaLogRaw) * OMEGA_LOG_SCALE;
+        // d(max(0,x))/dx = 1{x>0}
+        const dLambdadOut4 = (cache.outRaw[4] ?? 0) > 0 ? 1.0 : 0.0;
+
+        // Direct ω_log supervision: invert Allen-Dynes from (Tc_target, λ_target) to get ω_log target.
+        // Only reliable when Tc>0 and the McMillan denominator is well-defined.
+        let omegaLogGradBoost = 0;
+        if (sample.tc > 0 && lambdaTarget > 0) {
+          const adDtarget = lambdaTarget * (1 - 0.62 * FIXED_MU_STAR) - FIXED_MU_STAR;
+          if (adDtarget > 0.05) {
+            const omegaLogTarget = 1.2 * sample.tc * Math.exp(1.04 * (1 + lambdaTarget) / adDtarget);
+            if (Number.isFinite(omegaLogTarget) && omegaLogTarget > 10 && omegaLogTarget < 4000) {
+              // Relative error supervision: loss = 0.1*(ω_log−ω_log_target)²/ω_log_target²
+              const omegaLogRelErr = (adOmegaLog - omegaLogTarget) / omegaLogTarget;
+              totalLoss += 0.1 * omegaLogRelErr * omegaLogRelErr;
+              // d(loss)/d(ω_log) = 0.2 * relErr / ω_log_target
+              omegaLogGradBoost = 0.2 * omegaLogRelErr / omegaLogTarget;
+            }
+          }
+        }
+
+        // d(loss)/d(predictedTc) in K (the 1/300 comes from tcError = ΔTc/300)
+        const dLossDTcK = scWeight * (2 * tcError / 300 + 0.1 * 2 * tcError / 300 / tcVarNorm);
+
         const dLdOut = new Array(OUTPUT_DIM).fill(0);
         dLdOut[0] = hasFormationEnergy ? clipGrad(2 * feError * 0.1) : 0;
         dLdOut[1] = clipGrad(2 * phononError * 0.05);
-        // d(loss)/d(out[2]) = scWeight * 2 * tcError * (1/300) — the /300 is absorbed into tcError
-        dLdOut[2] = clipGrad(scWeight * (2 * tcError + 0.1 * 2 * tcError / tcVarNorm));
+        // out[2] → ω_log: Tc chain rule + direct ω_log supervision
+        dLdOut[2] = clipGrad((dLossDTcK * dTcdOmegaLog + omegaLogGradBoost) * dOmegaLogdOut2);
         dLdOut[3] = clipGrad(2 * confError * 0.05);
-        dLdOut[4] = clipGrad(2 * lambdaError * 0.1 + 0.05 * 2 * lambdaError / lambdaVarNorm);
+        // out[4] → λ: Tc chain rule through Allen-Dynes + direct λ supervision
+        dLdOut[4] = clipGrad(
+          (dLossDTcK * dTcdLambda + (2 * lambdaError * 0.1 + 0.05 * 2 * lambdaError / lambdaVarNorm))
+          * dLambdadOut4
+        );
         dLdOut[5] = clipGrad(2 * bgError * 0.05);
         dLdOut[6] = clipGrad(2 * dosError * 0.05);
         dLdOut[7] = clipGrad(2 * stabError * 0.05);
@@ -3416,9 +3546,12 @@ export function gnnPredictWithUncertainty(formula: string, prototype?: string, p
     },
   };
 
+  const meanOmegaLog = predictions.reduce((acc, p) => acc + p.omegaLog, 0) / predictions.length;
+
   const s = (v: number, fb = 0) => Number.isFinite(v) ? v : fb;
   const result = {
     tc: Math.round(s(meanTc) * 10) / 10,
+    omegaLog: Math.round(s(meanOmegaLog) * 10) / 10,
     formationEnergy: Math.round(s(meanFE) * 1000) / 1000,
     lambda: Math.round(s(meanLambda) * 1000) / 1000,
     bandgap: Math.round(s(meanBG) * 1000) / 1000,
