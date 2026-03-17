@@ -288,9 +288,15 @@ export const gnnTrainingJobs = pgTable("gnn_training_jobs", {
   status: varchar("status", { length: 20 }).notNull().default("queued"), // queued | running | done | failed
   trainingData: jsonb("training_data").notNull(), // TrainingSample[]
   weights: jsonb("weights"),                      // GNNWeights[] when done
+  // Validation-set metrics (honest — computed on 20% held-out SC samples never
+  // seen during training).  These are the numbers to report in papers/dashboards.
   r2: real("r2"),
   mae: real("mae"),
   rmse: real("rmse"),
+  // Training-set metrics for diagnosing overfitting (val R² - train R² = overfit gap).
+  trainR2: real("train_r2"),
+  trainMae: real("train_mae"),
+  valN: integer("val_n"),    // number of held-out samples used for val metrics
   datasetSize: integer("dataset_size"),
   dftSamples: integer("dft_samples"),
   errorMessage: text("error_message"),

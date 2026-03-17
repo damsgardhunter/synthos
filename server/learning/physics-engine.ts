@@ -595,7 +595,7 @@ function isHydrideForLambda(matClass: MaterialClass): boolean {
   return matClass === "superhydride" || matClass === "hydride-high-p" || matClass === "hydride-low-p";
 }
 
-function classifyMaterialForLambda(formula: string, pressureGpa: number = 0): MaterialClass {
+export function classifyMaterialForLambda(formula: string, pressureGpa: number = 0): MaterialClass {
   const pc = parseComposition(formula);
   const hCount = pc.counts["H"] || 0;
   const metalAtoms = pc.elements.filter(e => isTransitionMetal(e) || isRareEarth(e) || isActinide(e) || HEA_EXTRA_METALS.includes(e))

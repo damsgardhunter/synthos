@@ -349,11 +349,14 @@ async function processNextGnnJob(): Promise<boolean> {
     await storage.updateGnnTrainingJob(jobId, {
       status: "done",
       weights: models as any,
-      r2,    // validation R²  (honest — not training-set)
-      mae,   // validation MAE
-      rmse,  // validation RMSE
+      r2,                           // validation R²  (honest — 20% held-out SC)
+      mae,                          // validation MAE (K)
+      rmse,                         // validation RMSE (K)
+      trainR2: trainMetrics.r2,     // training R² — compare to val R² for overfitting
+      trainMae: trainMetrics.mae,
+      valN,                         // held-out sample count
       completedAt: new Date(),
-    });
+    } as any);
 
     console.log(
       `[GNN-GCP] Job #${jobId} complete in ${wallSec}s` +

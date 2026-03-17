@@ -6,6 +6,7 @@ import {
   computePhononSpectrum,
   computeElectronPhononCoupling,
   predictTcEliashberg,
+  classifyMaterialForLambda,
   evaluateCompetingPhases,
   computeCriticalFields,
   assessCorrelationStrength,
@@ -432,7 +433,12 @@ async function stage3_TcPrediction(
   const start = Date.now();
 
   const eliashbergPipeline = couplingData.eliashbergPipeline;
-  const eliashberg = predictTcEliashberg(couplingData.coupling);
+  // Classify material so the correct physics branch is used:
+  // cuprates → d-wave spin-fluctuation, heavy-fermions → QCP pairing,
+  // hydrides / conventional metals → Allen-Dynes BCS.
+  const candidatePressureGpa = (candidate as any).pressureGpa ?? 0;
+  const matClass = classifyMaterialForLambda(candidate.formula, candidatePressureGpa);
+  const eliashberg = predictTcEliashberg(couplingData.coupling, undefined, undefined, matClass);
 
   if (eliashbergPipeline && eliashbergPipeline.tcBest > 0) {
     const pipelineTc = eliashbergPipeline.tcBest;
