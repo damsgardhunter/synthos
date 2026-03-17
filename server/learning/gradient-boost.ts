@@ -2290,22 +2290,36 @@ async function dispatchXGBJobToGCP(X: number[][], y: number[], formulas?: string
   console.log(`[XGBoost] Dispatched training job #${job.id} to GCP (${X.length} samples)`);
 
   // Co-dispatch a GNN training job with the same formula+Tc pairs so both models
-  // train on the same data and stay in sync.
+  // train on the same data and stay in sync. Skip if a GNN job is already queued
+  // to avoid piling up duplicate jobs when XGB retrains on the same dataset.
   if (formulas && formulas.length > 0 && process.env.OFFLOAD_GNN_TO_GCP === "true") {
-    const gnnTrainingData = formulas.map((formula, i) => ({
-      formula,
-      tc: y[i] ?? 0,
-      formationEnergy: undefined as number | undefined,
-      structure: undefined as any,
-      prototype: undefined as string | undefined,
-    }));
-    storage.insertGnnTrainingJob({
-      status: "queued",
-      trainingData: gnnTrainingData as any,
-      datasetSize: gnnTrainingData.length,
-      dftSamples: 0,
-    }).then(gnnJob => {
-      console.log(`[XGBoost] Co-dispatched GNN training job #${gnnJob.id} (${gnnTrainingData.length} samples)`);
+    storage.getQueuedGnnTrainingJob().then(existing => {
+      if (existing) {
+        console.log(`[XGBoost] GNN co-dispatch skipped — job #${existing.id} already queued`);
+        return;
+      }
+      const feIdx = PHYSICS_FEATURE_NAMES.indexOf("formationEnergy");
+      const lambdaIdx = PHYSICS_FEATURE_NAMES.indexOf("lambda");
+      const gnnTrainingData = formulas.map((formula, i) => ({
+        formula,
+        tc: y[i] ?? 0,
+        formationEnergy: (feIdx >= 0 && X[i]?.[feIdx] != null && Number.isFinite(X[i][feIdx]) && X[i][feIdx] !== 0)
+          ? X[i][feIdx] : undefined as number | undefined,
+        lambda: (lambdaIdx >= 0 && X[i]?.[lambdaIdx] != null && Number.isFinite(X[i][lambdaIdx]) && X[i][lambdaIdx] > 0)
+          ? X[i][lambdaIdx] : undefined as number | undefined,
+        structure: undefined as any,
+        prototype: undefined as string | undefined,
+      }));
+      return storage.insertGnnTrainingJob({
+        status: "queued",
+        trainingData: gnnTrainingData as any,
+        datasetSize: gnnTrainingData.length,
+        dftSamples: 0,
+      }).then(gnnJob => {
+        const withFe = gnnTrainingData.filter(s => s.formationEnergy != null).length;
+        const withLambda = gnnTrainingData.filter(s => s.lambda != null).length;
+        console.log(`[XGBoost] Co-dispatched GNN job #${gnnJob.id} (${gnnTrainingData.length} samples, ${withFe} with FE, ${withLambda} with λ)`);
+      });
     }).catch(err => {
       console.warn(`[XGBoost] GNN co-dispatch failed: ${err.message}`);
     });
