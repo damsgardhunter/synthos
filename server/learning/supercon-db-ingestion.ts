@@ -29,8 +29,15 @@ import { eq } from "drizzle-orm";
 const BATCH_SIZE = 100;          // rows per DB insert batch
 const YIELD_BETWEEN_BATCHES_MS = 80;  // ms to sleep between batches (keeps event loop alive)
 const NIMS_API_BASE = "https://supercon.nims.go.jp/api/v1";
-const HAMIDIEH_URL =
-  "https://raw.githubusercontent.com/khamidieh/predict_sc/master/supercon.csv";
+// Multiple mirrors tried in order — the Hamidieh 2018 SuperCon dataset (21,263 rows).
+const HAMIDIEH_URLS = [
+  // khamidieh original repo (try both branch names)
+  "https://raw.githubusercontent.com/khamidieh/predict_sc/main/supercon.csv",
+  "https://raw.githubusercontent.com/khamidieh/predict_sc/master/supercon.csv",
+  // Common re-hosts / forks
+  "https://raw.githubusercontent.com/wolverine2710/SuperconductorCriticalTempPrediction/master/supercon.csv",
+  "https://raw.githubusercontent.com/jarrodmillman/scikit-learn-datasets/master/supercon/supercon.csv",
+];
 const STATE_KEY = "supercon_ingestion_state";
 
 let _running = false;
@@ -276,19 +283,30 @@ async function ingestFromNIMSAPI(state: IngestionState): Promise<void> {
 // ── Hamidieh fallback download ────────────────────────────────────────────────
 
 async function downloadHamidiehCSV(destPath: string): Promise<boolean> {
-  try {
-    console.log(`[SuperCon] Downloading Hamidieh dataset from GitHub...`);
-    const response = await fetch(HAMIDIEH_URL, { signal: AbortSignal.timeout(60_000) });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const text = await response.text();
-    fs.mkdirSync(path.dirname(destPath), { recursive: true });
-    fs.writeFileSync(destPath, text, "utf8");
-    console.log(`[SuperCon] Downloaded ${Math.round(text.length / 1024)} KB to ${destPath}`);
-    return true;
-  } catch (err: any) {
-    console.warn(`[SuperCon] Could not download Hamidieh dataset: ${err.message}`);
-    return false;
+  for (const url of HAMIDIEH_URLS) {
+    try {
+      console.log(`[SuperCon] Trying Hamidieh mirror: ${url}`);
+      const response = await fetch(url, { signal: AbortSignal.timeout(60_000) });
+      if (!response.ok) {
+        console.warn(`[SuperCon] Mirror ${url} returned HTTP ${response.status}`);
+        continue;
+      }
+      const text = await response.text();
+      // Sanity check: must look like a CSV with at least a few hundred rows
+      if (text.split("\n").length < 10) {
+        console.warn(`[SuperCon] Mirror ${url} returned too-short response (${text.length} bytes)`);
+        continue;
+      }
+      fs.mkdirSync(path.dirname(destPath), { recursive: true });
+      fs.writeFileSync(destPath, text, "utf8");
+      console.log(`[SuperCon] Downloaded ${Math.round(text.length / 1024)} KB from ${url}`);
+      return true;
+    } catch (err: any) {
+      console.warn(`[SuperCon] Mirror ${url} failed: ${err.message}`);
+    }
   }
+  console.warn(`[SuperCon] All ${HAMIDIEH_URLS.length} mirrors failed`);
+  return false;
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
