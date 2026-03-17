@@ -3079,6 +3079,11 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       fs.writeFileSync(path.join(jobDir, "vc_relax.out"), vcResult.stdout);
       const vcParsed = parseVCRelaxOutput(vcResult.stdout);
 
+      // Log the actual QE error from stdout (not the MPI_ABORT boilerplate in stderr)
+      if (vcResult.exitCode !== 0) {
+        const vcErrTail = vcResult.stdout.slice(-400);
+        console.log(`[QE-Worker] vc-relax exit=${vcResult.exitCode} for ${formula}: ${vcErrTail.slice(-200)}`);
+      }
       if (vcParsed.finalPositions && vcParsed.finalPositions.length > 0) {
         positions = vcParsed.finalPositions;
         result.vcRelaxed = true;
@@ -3142,15 +3147,32 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       result.scf = parseSCFOutput(scfResult.stdout, usedDegauss);
 
       if (scfResult.exitCode !== 0 && !result.scf.converged) {
-        const isPPError = scfResult.stderr.includes("read_upf") || scfResult.stderr.includes("readpp") || scfResult.stderr.includes("EOF marker");
+        // QE writes the actual error to stdout; stderr only has MPI_ABORT boilerplate.
+        // Extract the meaningful tail of stdout (last 600 chars) for diagnosis.
+        const stdoutTail = scfResult.stdout.slice(-600);
+        const combined = scfResult.stderr + "\n" + stdoutTail;
+
+        const isPPError = combined.includes("read_upf") || combined.includes("readpp") || combined.includes("EOF marker") || combined.includes("pseudopotential");
         if (isPPError) {
-          result.scf.error = `Pseudopotential read failure: ${scfResult.stderr.slice(-300)}`;
+          result.scf.error = `Pseudopotential read failure: ${stdoutTail.slice(-300)}`;
           console.log(`[QE-Worker] PP error for ${formula}, no retry will help — skipping`);
           recordFormulaFailure(formula);
           break;
         }
-        result.scf.error = `pw.x exited with code ${scfResult.exitCode}: ${scfResult.stderr.slice(-500)}`;
-        console.log(`[QE-Worker] SCF attempt ${attempt + 1} failed for ${formula}: ${result.scf.error.slice(-200)}`);
+        // Geometry failures won't improve with SCF parameter tweaks — skip all retries.
+        const isGeomError = combined.includes("atom too close") || combined.includes("negative Jacobian") ||
+          combined.includes("atoms are too close") || combined.includes("overlap") ||
+          combined.includes("Wrong atomic coordinates") || combined.includes("too many atoms in the unit cell");
+        if (isGeomError) {
+          result.scf.error = `Geometry failure (atoms too close or bad cell): ${stdoutTail.slice(-200)}`;
+          console.log(`[QE-Worker] Geometry error for ${formula}, no retry will help — ${stdoutTail.slice(-120)}`);
+          recordFormulaFailure(formula);
+          break;
+        }
+        // Capture the real error: prefer stdout tail over MPI_ABORT boilerplate in stderr.
+        const errSummary = stdoutTail || scfResult.stderr.slice(-300);
+        result.scf.error = `pw.x exited with code ${scfResult.exitCode}: ${errSummary}`;
+        console.log(`[QE-Worker] SCF attempt ${attempt + 1} failed for ${formula}: ${errSummary.slice(-200)}`);
         retryCount = attempt + 1;
       } else if (result.scf.converged) {
         scfConverged = true;
