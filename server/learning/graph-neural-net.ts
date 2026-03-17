@@ -2107,7 +2107,9 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
   const sf = (v: number, fallback = 0) => Number.isFinite(v) ? v : fallback;
   const formationEnergy = sf(out[0] ?? 0);
   const phononStabilityRaw = sigmoid(sf(out[1] ?? 0));
-  const predictedTcRaw = Math.max(0, Math.expm1(Math.max(0, sf(out[2] ?? 0)) * TC_LOG_SCALE));
+  // Clamp logit to [0, 1.2] before expm1 — prevents ≈e^28 overflow at random init.
+  // 1.2 × TC_LOG_SCALE ≈ 6.85 → expm1 ≈ 938 K ceiling, well above any real SC.
+  const predictedTcRaw = Math.max(0, Math.expm1(Math.min(1.2, Math.max(0, sf(out[2] ?? 0))) * TC_LOG_SCALE));
   const confidenceRaw = sigmoid(sf(out[3] ?? 0));
   const lambdaRaw = Math.max(0, sf(out[4] ?? 0));
   const bandgapRaw = sigmoid(sf(out[5] ?? 0)) * 5.0;
@@ -2256,7 +2258,9 @@ function GNNPredictForTraining(graph: CrystalGraph, weights: GNNWeights): { pred
   const sf = (v: number, fallback = 0) => Number.isFinite(v) ? v : fallback;
   const formationEnergy = sf(out[0] ?? 0);
   const phononStabilityRaw = sigmoid(sf(out[1] ?? 0));
-  const predictedTcRaw = Math.max(0, Math.expm1(Math.max(0, sf(out[2] ?? 0)) * TC_LOG_SCALE));
+  // Clamp logit to [0, 1.2] before expm1 — prevents ≈e^28 overflow at random init.
+  // 1.2 × TC_LOG_SCALE ≈ 6.85 → expm1 ≈ 938 K ceiling, well above any real SC.
+  const predictedTcRaw = Math.max(0, Math.expm1(Math.min(1.2, Math.max(0, sf(out[2] ?? 0))) * TC_LOG_SCALE));
   const confidenceRaw = sigmoid(sf(out[3] ?? 0));
   const lambdaRaw = Math.max(0, sf(out[4] ?? 0));
   const bandgapRaw = sigmoid(sf(out[5] ?? 0)) * 5.0;

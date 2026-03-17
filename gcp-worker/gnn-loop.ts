@@ -110,23 +110,26 @@ function computeMetrics(
   const actuals = trainingData.map(d => d.tc);
   const meanActual = actuals.reduce((a, b) => a + b, 0) / actuals.length;
 
-  let ssTot = 0, ssRes = 0, sumAbs = 0, sumSq = 0;
+  let ssTot = 0, ssRes = 0, sumAbs = 0, sumSq = 0, counted = 0;
   for (const sample of trainingData) {
     try {
       const graph = buildCrystalGraph(sample.formula, sample.structure);
       const preds = models.map(m => GNNPredict(graph, m).predictedTc);
       const pred = preds.reduce((a, b) => a + b, 0) / preds.length;
+      if (!Number.isFinite(pred)) continue; // skip overflow predictions
       const diff = sample.tc - pred;
       ssTot += (sample.tc - meanActual) ** 2;
       ssRes += diff ** 2;
       sumAbs += Math.abs(diff);
       sumSq += diff ** 2;
+      counted++;
     } catch { /* skip malformed samples */ }
   }
 
+  if (counted === 0) return { r2: 0, mae: 0, rmse: 0 };
   const r2 = ssTot > 0 ? 1 - ssRes / ssTot : 0;
-  const mae = sumAbs / trainingData.length;
-  const rmse = Math.sqrt(sumSq / trainingData.length);
+  const mae = sumAbs / counted;
+  const rmse = Math.sqrt(sumSq / counted);
   return { r2, mae, rmse };
 }
 
