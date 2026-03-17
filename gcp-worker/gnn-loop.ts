@@ -25,71 +25,31 @@ import { fetchMPBatchFromAPI } from "../server/learning/materials-project-client
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const WORKER_SCRIPT = path.join(__dirname, "gnn-worker-thread.ts");
 
-// Build execArgv for worker threads that correctly loads TypeScript files.
-//
-// Strategy: copy the parent process's own tsx loader flags verbatim.
-// The parent is already running .ts files successfully, so whatever flags it
-// used (--require tsx/cjs, --loader tsx/esm, --import tsx/esm, etc.) are the
-// right ones for this environment. We must NOT substitute a different loader
-// variant (e.g. replacing --require tsx/cjs with --import tsx/esm) because
-// CJS and ESM loaders are not interchangeable — the wrong one silently fails
-// to register and workers get "Unknown file extension .ts".
-//
-// If no tsx loader is found in the parent (e.g. process was started some other
-// way), fall back to --import tsx/esm (Node 18.19+) then --loader tsx (older).
-const PAIR_FLAGS = new Set(["--require", "-r", "--loader", "--import"]);
-
-function buildWorkerExecArgv(): string[] {
-  const args = process.execArgv;
-
-  // Collect tsx loader pairs from parent
-  const tsxLoaderFlags: string[] = [];
-  const otherFlags: string[] = [];
-
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i];
-    const nextVal = args[i + 1];
-
-    if (PAIR_FLAGS.has(a) && nextVal) {
-      if (nextVal.includes("tsx")) {
-        tsxLoaderFlags.push(a, nextVal);  // keep pair: e.g. ["--require", "tsx/cjs"]
-      } else {
-        otherFlags.push(a, nextVal);      // non-tsx pair — keep as-is
-      }
-      i++;
-    } else if (a.startsWith("--loader=") || a.startsWith("--import=") || a.startsWith("--require=")) {
-      if (a.includes("tsx")) {
-        tsxLoaderFlags.push(a);           // inline form: --loader=tsx
-      } else {
-        otherFlags.push(a);
-      }
-    } else {
-      otherFlags.push(a);
-    }
-  }
-
-  // Prefer parent's own tsx flags; fall back if none found
-  const loaderFlags = tsxLoaderFlags.length > 0
-    ? tsxLoaderFlags
-    : ["--import", "tsx/esm"];   // fallback for environments where tsx sets no execArgv
-
-  return [...loaderFlags, ...otherFlags];
-}
-
-const workerExecArgv = buildWorkerExecArgv();
-
 // ── Parallel ensemble training via worker threads ────────────────────────────
 // Each of the 5 ensemble models trains in its own worker thread so the full
 // ensemble is trained in the time it takes to train one model sequentially.
+//
+// TypeScript loading in workers: tsx may start the main process via NODE_OPTIONS,
+// internal patching, or other means that do NOT add flags to process.execArgv.
+// Passing execArgv flags is therefore unreliable. Instead we use eval:true with
+// a tiny CJS bootstrap string that calls require('tsx/cjs') then loads the worker
+// script. Plain .js eval content has no extension problem; tsx/cjs then handles
+// the subsequent require() of the .ts file.
 
 function spawnModelWorker(
   trainingData: TrainingSample[],
   modelIndex: number,
   maxPretrainEpochs: number,
 ): Promise<GNNWeights> {
+  // Inline CJS bootstrap: enable tsx TypeScript loading, then run the worker.
+  // Uses eval:true so Node sees a plain JS string — no ".ts extension" rejection.
+  const bootstrapCode = `
+require('tsx/cjs');
+require(${JSON.stringify(WORKER_SCRIPT)});
+`;
   return new Promise((resolve, reject) => {
-    const worker = new Worker(WORKER_SCRIPT, {
-      execArgv: workerExecArgv,
+    const worker = new Worker(bootstrapCode, {
+      eval: true,
       workerData: {
         trainingData,
         seed: ENSEMBLE_SEEDS[modelIndex],
