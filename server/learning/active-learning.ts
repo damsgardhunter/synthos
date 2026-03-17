@@ -1468,7 +1468,10 @@ export async function runActiveLearningCycle(
     return convergenceStats;
   }
 
-  const selected = await selectForDFT(eligibleCandidates, 20, { explorationMode: memory.explorationMode });
+  // Cap at 5 candidates and run them concurrently. The previous 20-candidate
+  // sequential loop took 10-30 min (30-90s per xTB call). 5 concurrent runs
+  // complete in ~90s total and don't block the engine cycle for the full duration.
+  const selected = await selectForDFT(eligibleCandidates, 5, { explorationMode: memory.explorationMode });
 
   const avgUncertaintyBefore = selected.length > 0
     ? selected.reduce((sum, r) => sum + r.uncertainty, 0) / selected.length
@@ -1523,7 +1526,9 @@ export async function runActiveLearningCycle(
   enrichmentLogCount = 0;
   const enrichedFormulaPressures = new Set<string>();
 
-  for (const ranked of selected) {
+  // Run all selected candidates concurrently — xTB takes 30-90s each so
+  // sequential execution would block the engine cycle for 10-30 minutes.
+  await Promise.allSettled(selected.map(async (ranked) => {
     const { candidate } = ranked;
     const isPressureTier = ranked.selectionTier === "pressure-exploration";
     const mlf = (candidate.mlFeatures as Record<string, any>) ?? {};
@@ -1541,7 +1546,7 @@ export async function runActiveLearningCycle(
       });
     }
     const fpKey = `${candidate.formula}@${candidatePressure}`;
-    if (enrichedFormulaPressures.has(fpKey)) continue;
+    if (enrichedFormulaPressures.has(fpKey)) return;
     enrichedFormulaPressures.add(fpKey);
     if (isPressureTier) session.pressureTierDftRuns++;
     const enriched = await runDFTEnrichmentForCandidate(emit, candidate, candidatePressure, ranked.cachedFeatures);
@@ -1555,21 +1560,11 @@ export async function runActiveLearningCycle(
       }
     } else {
       pipelineCrashCount++;
-      const attemptsSoFar = dftSuccessCount + pipelineCrashCount;
-      if (attemptsSoFar >= 4 && pipelineCrashCount / attemptsSoFar > 0.5) {
-        emit("log", {
-          phase: "active-learning",
-          event: "Pipeline cooldown triggered",
-          detail: `High failure rate: ${pipelineCrashCount}/${attemptsSoFar} evaluations crashed (${(pipelineCrashCount / attemptsSoFar * 100).toFixed(0)}%). Halting remaining ${selected.length - attemptsSoFar} evaluations to conserve resources.`,
-          dataSource: "Active Learning",
-        });
-        break;
-      }
     }
     if ((candidate.predictedTc ?? 0) > bestTcThisLoop) {
       bestTcThisLoop = candidate.predictedTc ?? 0;
     }
-  }
+  }));
 
   const DISORDER_FRACTIONS = [0.02, 0.05, 0.10];
   const disorderTopN = Math.min(3, selected.length);
