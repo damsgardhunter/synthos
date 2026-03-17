@@ -16,16 +16,22 @@ const EXPLORATION_FRACTION = 0.3;
 const JOB_STAGGER_MS = 2000;
 const STALE_CLEANUP_INTERVAL_MS = 5 * 60_000;
 
-// Stability gate: reject any candidate whose best-known convex hull distance
-// exceeds this threshold (eV/atom above the hull). Prevents wasting SCF compute
-// on thermodynamically unstable structures that are very unlikely to be real.
-// 0.1 eV/atom was too strict — many novel hypothetical superconductors sit 0.1-0.3 eV/atom
-// above the convex hull (metastable but synthesisable under pressure or at low T).
-// 0.3 eV/atom is the standard threshold used in high-throughput screening literature, but
-// Miedema analytical estimates have ±0.2 eV/atom error — hard-rejecting at 0.3 causes data
-// starvation when all candidates land 0.3-0.5 eV above hull on analytical estimates alone.
-// Raised to 0.5 eV/atom so DFT can validate candidates that analytical methods overestimate.
-const STABILITY_GATE_EV_ATOM = 0.5;
+// Two-tier stability gate (eV/atom above convex hull):
+//
+//   EXPLOIT gate (0.5 eV/atom): strict — candidates here have the highest ML scores
+//   and should be close to known-stable structures; Miedema ±0.2 eV/atom error means
+//   anything up to 0.5 eV is plausibly stable.
+//
+//   EXPLORE gate (1.5 eV/atom): relaxed — exploration intentionally targets uncertain,
+//   possibly metastable regions. Metastable A15/Laves/hydride phases routinely sit
+//   0.5–1.5 eV above hull on analytical estimates but are synthesisable under pressure.
+//   Setting a hard exploit-level gate here causes complete queue starvation when all
+//   candidates land 0.5–1.5 eV on Miedema estimates alone.
+//
+//   Both gates admit null hull distance (unknown) — analytical estimates may never
+//   have run for novel formulas.
+const STABILITY_GATE_EV_ATOM = 0.5;           // exploit pool gate
+const EXPLORE_STABILITY_GATE_EV_ATOM = 1.5;   // explore pool gate
 
 function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -492,30 +498,39 @@ async function refillQueueIfLow(): Promise<number> {
     const formulasToCheck = preFiltered.map(c => c.formula);
     const structureMap = await storage.getCrystalStructuresByFormulas(formulasToCheck);
 
+    // Build two-tier pools using separate stability gates.
+    // Exploit pool: strict gate (STABILITY_GATE_EV_ATOM) — only queue high-confidence candidates.
+    // Explore pool: relaxed gate (EXPLORE_STABILITY_GATE_EV_ATOM) — include metastable candidates
+    //   whose true stability is uncertain (Miedema estimates have ±0.2 eV/atom error).
     let skippedUnstable = 0;
-    const eligible = preFiltered.filter(c => {
+
+    const exploitPool: typeof preFiltered = [];
+    const explorePool: typeof preFiltered = [];
+
+    for (const c of preFiltered) {
       const structures = structureMap.get(c.formula);
-      if (!structures || structures.length === 0) return false;
-      // Stability gate: only queue candidates whose best structure is close enough
-      // to the convex hull. Null hull distance means unknown — allow through.
+      if (!structures || structures.length === 0) continue; // no structure: skip both pools
+      // Null hull distance = unknown → treat as 0 (allow through)
       const bestHullDist = Math.min(...structures.map(s => s.convexHullDistance ?? 0));
-      if (bestHullDist > STABILITY_GATE_EV_ATOM) {
-        skippedUnstable++;
-        return false;
+      if (bestHullDist <= STABILITY_GATE_EV_ATOM) {
+        exploitPool.push(c);
+        explorePool.push(c);
+      } else if (bestHullDist <= EXPLORE_STABILITY_GATE_EV_ATOM) {
+        explorePool.push(c); // explore only — too metastable for high-priority exploit
+      } else {
+        skippedUnstable++;  // beyond explore gate — skip entirely
       }
-      return true;
-    });
+    }
 
-    const exploitCount = Math.ceil(REFILL_BATCH_SIZE * (1 - EXPLORATION_FRACTION));
-    const exploreCount = REFILL_BATCH_SIZE - exploitCount;
-
-    const exploitPool = [...eligible].sort((a, b) => (b.ensembleScore ?? 0) - (a.ensembleScore ?? 0));
-
-    const explorePool = [...eligible].sort((a, b) => {
+    exploitPool.sort((a, b) => (b.ensembleScore ?? 0) - (a.ensembleScore ?? 0));
+    explorePool.sort((a, b) => {
       const aAcq = (a.uncertaintyEstimate ?? 0) * 0.6 + (a.discoveryScore ?? 0) * 0.4;
       const bAcq = (b.uncertaintyEstimate ?? 0) * 0.6 + (b.discoveryScore ?? 0) * 0.4;
       return bAcq - aAcq;
     });
+
+    const exploitCount = Math.ceil(REFILL_BATCH_SIZE * (1 - EXPLORATION_FRACTION));
+    const exploreCount = REFILL_BATCH_SIZE - exploitCount;
 
     const queuedFormulas = new Set(queued.map(j => j.formula));
     const selectedFormulas = new Set<string>();
@@ -525,7 +540,7 @@ async function refillQueueIfLow(): Promise<number> {
     let refillErrors = 0;
     let skippedNoStructure = 0;
 
-    async function trySubmit(candidate: typeof eligible[0], source: "exploit" | "explore"): Promise<boolean> {
+    async function trySubmit(candidate: typeof exploitPool[0], source: "exploit" | "explore"): Promise<boolean> {
       if (queuedFormulas.has(candidate.formula)) return false;
       if (selectedFormulas.has(candidate.formula)) return false;
       if (isFormulaBlocked(candidate.formula)) return false;
@@ -585,7 +600,13 @@ async function refillQueueIfLow(): Promise<number> {
       }
     }
 
-    skippedNoStructure = preFiltered.length - eligible.length - skippedUnstable;
+    // skippedNoStructure = candidates that had no crystal structure at all
+    // (can't appear in either pool since the loop `continue`s on missing structures)
+    const withStructure = preFiltered.filter(c => {
+      const structures = structureMap.get(c.formula);
+      return structures && structures.length > 0;
+    }).length;
+    skippedNoStructure = preFiltered.length - withStructure;
 
     if (submitted > 0 || refillErrors > 0 || skippedNoStructure > 0 || skippedUnstable > 0) {
       console.log(`[DFT-Queue] Refilled queue with ${submitted} candidates (${exploitSubmitted} exploit + ${exploreSubmitted} explore, queue was ${queueSize}/${MIN_QUEUE_SIZE})${skippedNoStructure > 0 ? `, ${skippedNoStructure} skipped (no structure)` : ""}${skippedUnstable > 0 ? `, ${skippedUnstable} rejected by stability gate (hull dist > ${STABILITY_GATE_EV_ATOM} eV/atom)` : ""}${refillErrors > 0 ? `, ${refillErrors} insert errors` : ""}`);
