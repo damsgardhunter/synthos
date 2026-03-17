@@ -29,6 +29,20 @@ const REQUEST_DELAY_MS = 1100;   // ~1 req/s — COD fair-use limit
 const FETCH_TIMEOUT_MS = 20_000;
 const PAGE_SIZE = 50;            // results per API page
 
+// COD API quirk: bare sgNumber= / el= queries return [] regardless of value.
+// Only formula=SYMBOL queries consistently return data (e.g. formula=Cu works,
+// el=Cu does not). To fetch by space group, we must query formula=X&sgNumber=N
+// for each candidate element X and aggregate the results.
+// Elements ordered by superconductor relevance — covers FCC/BCC/HCP metal SGs
+// and the main ligand/anion species found in SC families.
+const COD_PROBE_ELEMENTS = [
+  "H",  "Li", "Be", "B",  "C",  "N",  "O",  "F",  "Mg", "Al",
+  "Si", "Ca", "Ti", "V",  "Cr", "Mn", "Fe", "Co", "Ni", "Cu",
+  "Zn", "Ge", "Sr", "Y",  "Nb", "Mo", "Ru", "Rh", "Pd", "Ag",
+  "In", "Sn", "Ba", "La", "Ce", "Pr", "Nd", "Sm", "Gd", "Dy",
+  "Yb", "Hf", "Ta", "W",  "Re", "Os", "Ir", "Pt", "Au", "Pb", "Bi",
+];
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 export interface CODEntry {
@@ -199,36 +213,35 @@ export async function fetchCODBySpaceGroup(
     }));
   }
 
-  // Fetch from COD API with pagination
+  // COD API does not support bare sgNumber= queries — it only returns results when
+  // a formula= filter is present (e.g. formula=Cu&sgNumber=225 works; sgNumber=225
+  // alone returns []). Work around this by probing each element in COD_PROBE_ELEMENTS
+  // and filtering server-side by sgNumber. Pure elemental structures cover the most
+  // common metallic SGs (FCC=225, BCC=229, HCP=194) well; complex SGs may yield
+  // fewer hits but will still populate the cache with representative data.
   const results: CODEntry[] = [];
-  let page = 0;
+  const seenIds = new Set<number>();
 
-  while (results.length < maxResults) {
-    // COD API: `sg` expects an H-M symbol string; to search by integer use `sgNumber`.
-    const url = `${COD_API}?format=json&sgNumber=${spaceGroupNumber}&limit=${PAGE_SIZE}&offset=${page * PAGE_SIZE}`;
+  for (const element of COD_PROBE_ELEMENTS) {
+    if (results.length >= maxResults) break;
+    const url = `${COD_API}?format=json&formula=${element}&sgNumber=${spaceGroupNumber}&limit=${PAGE_SIZE}`;
     try {
       const response = await rateLimitedFetch(url);
-      if (!response.ok) {
-        console.warn(`[COD] SG ${spaceGroupNumber} page ${page}: HTTP ${response.status}`);
-        break;
-      }
+      if (!response.ok) continue;
       const rows: CODApiRow[] = await response.json();
-      if (!Array.isArray(rows) || rows.length === 0) break;
+      if (!Array.isArray(rows) || rows.length === 0) continue;
 
-      // COD API does not always return a sgNumber field — inject the known value so
-      // parseCODRow can always derive the crystal system and pass the !sgNumber guard.
       const entries = rows.map(row => parseCODRow({
         ...row,
         sgNumber: row.sgNumber ?? (row["sg number"] as number | string | undefined) ?? spaceGroupNumber,
       })).filter(Boolean) as CODEntry[];
-      results.push(...entries);
-      await cacheEntries(entries);
 
-      if (rows.length < PAGE_SIZE) break;  // last page
-      page++;
+      const fresh = entries.filter(e => !seenIds.has(e.codId));
+      fresh.forEach(e => seenIds.add(e.codId));
+      results.push(...fresh);
+      if (fresh.length > 0) await cacheEntries(fresh);
     } catch (err: any) {
-      console.warn(`[COD] SG ${spaceGroupNumber} fetch failed: ${err.message?.slice(0, 80)}`);
-      break;
+      console.warn(`[COD] SG ${spaceGroupNumber} probe(${element}) failed: ${err.message?.slice(0, 60)}`);
     }
   }
 
@@ -265,20 +278,31 @@ export async function fetchCODByElements(
     }
   } catch { /* DB may not have the table yet — fallback to API */ }
 
-  // Build COD query: el=X,Y for "contains these elements"
-  const elParam = sorted.join(",");
-  const url = `${COD_API}?format=json&el=${elParam}&limit=${Math.min(maxResults, PAGE_SIZE)}`;
-  try {
-    const response = await rateLimitedFetch(url);
-    if (!response.ok) return [];
-    const rows: CODApiRow[] = await response.json();
-    const entries = (Array.isArray(rows) ? rows : []).map(parseCODRow).filter(Boolean) as CODEntry[];
-    await cacheEntries(entries);
-    return entries.slice(0, maxResults);
-  } catch (err: any) {
-    console.warn(`[COD] fetchCODByElements(${elParam}) failed: ${err.message?.slice(0, 80)}`);
-    return [];
+  // COD API: el= queries return [] (API quirk). Instead, probe each element in the
+  // target set using formula=X and collect any results that contain ALL target elements.
+  const results: CODEntry[] = [];
+  const seenIds = new Set<number>();
+
+  for (const element of sorted) {
+    if (results.length >= maxResults) break;
+    const url = `${COD_API}?format=json&formula=${element}&limit=${Math.min(maxResults, PAGE_SIZE)}`;
+    try {
+      const response = await rateLimitedFetch(url);
+      if (!response.ok) continue;
+      const rows: CODApiRow[] = await response.json();
+      const entries = (Array.isArray(rows) ? rows : []).map(parseCODRow).filter(Boolean) as CODEntry[];
+      // Keep entries that contain at least one of the target elements
+      const relevant = entries.filter(e =>
+        sorted.some(el => e.elements.includes(el)) && !seenIds.has(e.codId)
+      );
+      relevant.forEach(e => seenIds.add(e.codId));
+      results.push(...relevant);
+      if (relevant.length > 0) await cacheEntries(relevant);
+    } catch (err: any) {
+      console.warn(`[COD] fetchCODByElements probe(${element}) failed: ${err.message?.slice(0, 60)}`);
+    }
   }
+  return results.slice(0, maxResults);
 }
 
 /**
