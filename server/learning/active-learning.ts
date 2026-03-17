@@ -1329,9 +1329,11 @@ async function retrainGNNWithEnrichedData(
     }).from(quantumEngineDataset)
       .where(qeGt(quantumEngineDataset.tc, 0))
       .limit(5000);
+    const { isEvalTestFormula } = await import("./eval-harness");
     for (const row of qeRows) {
       if (!row.material || seenFormulas.has(row.material)) continue;
       if (row.tier !== "full-dft" && row.tier !== "xtb") continue;
+      if (isEvalTestFormula(row.material)) continue; // held-out test set — never train on these
       seenFormulas.add(row.material);
       trainingData.push({
         formula: row.material,

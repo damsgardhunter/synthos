@@ -8195,6 +8195,11 @@ async function runLearningCycle() {
     console.log(`[Engine] Cycle #${cycleCount} END at T+${Math.round((Date.now() - _engineStartMs) / 1000)}s`);
     broadcast("cycleEnd", { cycle: cycleCount });
 
+    // Fire-and-forget eval after each cycle — results visible at /api/eval/report
+    import("./eval-harness").then(({ runEvaluation }) => {
+      runEvaluation().catch(e => console.warn("[EvalHarness] Post-cycle eval failed:", e?.message?.slice(0, 80)));
+    }).catch(() => {});
+
     if (state === "running") {
       cycleTimer = setTimeout(runLearningCycle, cycleIntervalMs);
     }

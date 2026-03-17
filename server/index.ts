@@ -216,6 +216,14 @@ process.on("unhandledRejection", (reason) => {
           log(`Engine import failed: ${err.message}`, "startup");
         }
       }, 15000);
+
+      // Eval harness: deferred test-set load at T+90s (after models initialize)
+      setTimeout(async () => {
+        try {
+          const { initEvalHarness } = await import("./learning/eval-harness");
+          initEvalHarness();
+        } catch { /* non-critical */ }
+      }, 5000);
     } catch (err: any) {
       console.error("[startup] Fatal initialization error:", err);
     }

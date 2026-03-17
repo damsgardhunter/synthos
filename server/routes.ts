@@ -4553,6 +4553,20 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
+  app.get("/api/eval/report", generalLimiter, async (_req, res) => {
+    try {
+      const { getEvalReport, getCVReport } = await import("./learning/eval-harness");
+      const evalReport = getEvalReport();
+      const cvReport = getCVReport();
+      if (!evalReport) {
+        return res.status(202).json({ status: "pending", message: "Eval harness not yet run — check back after first AL cycle completes" });
+      }
+      res.json({ ...evalReport, cv: cvReport });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch eval report", detail: e.message });
+    }
+  });
+
   app.get("/api/model-diagnostics/report", generalLimiter, async (_req, res) => {
     try {
       const report = await getComprehensiveModelDiagnostics();

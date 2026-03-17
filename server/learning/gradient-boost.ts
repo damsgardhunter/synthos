@@ -74,7 +74,7 @@ function flattenTree(tree: TreeNode | number): FlatTree {
   return { nodes, leafValues };
 }
 
-function predictFlat(flat: FlatTree, x: number[]): number {
+export function predictFlat(flat: FlatTree, x: number[]): number {
   let idx = 0;
   while (idx >= 0) {
     const node = flat.nodes[idx];
@@ -92,6 +92,15 @@ interface GBModel {
   featureMask?: number[];
   trainedAt: number;
   logTransformed?: boolean; // targets trained with log1p(tc), predictions need expm1
+}
+
+/** Predict a single Tc value from a GBModel (used by eval-harness CV). */
+export function gbPredictFromModel(model: GBModel, x: number[]): number {
+  let pred = model.basePrediction;
+  for (const flat of model.flatTrees) {
+    pred += model.learningRate * predictFlat(flat, x);
+  }
+  return model.logTransformed ? Math.expm1(Math.max(0, pred)) : Math.max(0, pred);
 }
 
 let cachedModel: GBModel | null = null;
@@ -1315,6 +1324,12 @@ export function startPoolInit(): void {
 }
 
 async function prepareTrainingData(): Promise<{ X: number[][]; y: number[]; formulas: string[] }> {
+  await ensurePoolInitialized();
+  return trainingPool.getTrainingData();
+}
+
+/** Public accessor for eval-harness CV — returns feature matrix after pool is ready. */
+export async function getXGBTrainingData(): Promise<{ X: number[][]; y: number[]; formulas: string[] }> {
   await ensurePoolInitialized();
   return trainingPool.getTrainingData();
 }
