@@ -7,10 +7,25 @@ import * as crypto from "crypto";
 import { IS_WINDOWS, binaryPath, getTempSubdir, toWslPath, killProcessGracefully, spawnQE } from "./platform-utils";
 import { selectPrototype } from "../learning/crystal-prototypes";
 import { matchPrototype } from "../learning/structure-predictor";
-import { isTransitionMetal, isRareEarth, ELEMENTAL_DATA, getElementData } from "../learning/elemental-data";
+import { isTransitionMetal, isRareEarth, ELEMENTAL_DATA, getElementData, getHubbardU } from "../learning/elemental-data";
+import { estimateCorrelationEffects } from "../physics/correlation-engine";
 import { generatePrototypeFreeStructure } from "../crystal/lattice-generator";
 import { getAllDistributions, getElementSitePreference, type CrystalSystemDistribution } from "../ai/crystal-distribution-db";
 import { computeDFTBandStructure, recordBandCalcOutcome, type DFTBandStructureResult } from "./band-structure-calculator";
+import {
+  generatePhononGridInput,
+  generateQ2RInput,
+  generateMatdynDOSInput,
+  parseLambdaOutput,
+  tryLoadDFPTResults,
+} from "./dfpt-parser";
+import { runEliashbergFromAlpha2FFile } from "../physics/eliashberg-pipeline";
+import {
+  computeElectronicStructure,
+  computeElectronPhononCoupling,
+  computePhononSpectrum,
+  type ElectronPhononCoupling,
+} from "../learning/physics-engine";
 
 // Resolve the QE binary directory lazily (on first DFT call).
 // Running execSync WSL probes at module-load time would block the Node.js event loop
@@ -215,12 +230,28 @@ export interface QEPhononResult {
   error: string | null;
 }
 
+export interface QEDFPTResult {
+  lambda: number;
+  omegaLog: number;        // cm⁻¹ (log-average phonon frequency)
+  tcAllenDynes: number;    // K via Allen-Dynes
+  tcEliashberg: number;    // K via full Eliashberg gap equation
+  tcBest: number;          // K — best estimate (max of Allen-Dynes and Eliashberg)
+  nqGrid: [number, number, number];
+  phConverged: boolean;
+  q2rDone: boolean;
+  matdynDone: boolean;
+  wallTimeSeconds: number;
+  source: "ph.x-stdout" | "a2F-file" | "none";
+  warnings: string[];
+}
+
 export interface QEFullResult {
   formula: string;
   method: "QE-PW-PBE";
   scf: QESCFResult | null;
   phonon: QEPhononResult | null;
   bandStructure: DFTBandStructureResult | null;
+  dfpt?: QEDFPTResult;
   wallTimeTotal: number;
   error: string | null;
   retryCount?: number;
@@ -236,6 +267,8 @@ export interface QEFullResult {
   kPoints?: string;
   highPressure?: boolean;
   estimatedPressureGPa?: number;
+  qeDFTPlusU?: boolean;
+  dftPlusUTcModifier?: number;
 }
 
 const HASH_CACHE_MAX = 2000;
@@ -2523,7 +2556,7 @@ function generateSCFInputWithParams(
   counts: Record<string, number>,
   latticeA: number,
   positions: Array<{ element: string; x: number; y: number; z: number }>,
-  params: { mixingBeta: number; maxSteps: number; diag: string; smearing?: string; degauss?: number; ecutwfcBoost?: number; convThr?: string; forcConvThr?: string; etotConvThr?: string },
+  params: { mixingBeta: number; maxSteps: number; diag: string; smearing?: string; degauss?: number; ecutwfcBoost?: number; convThr?: string; forcConvThr?: string; etotConvThr?: string; dftPlusULines?: string; dftPlusUNspin2?: boolean },
 ): string {
   const totalAtoms = positions.length;
   const nTypes = elements.length;
@@ -2561,6 +2594,15 @@ function generateSCFInputWithParams(
   const bOverA2 = estimateBOverA(elements, counts);
   const cellBlock2 = `\n${generateCellParameters(latticeA, cOverA2, 0, bOverA2, elements, counts)}`;
 
+  // DFT+U overrides normal nspin/magnetization block when activated
+  const hasMagEl = elements.some(el => el in MAGNETIC_ELEMENTS);
+  const useNspin2 = (params.dftPlusUNspin2 ?? false) || hasMagEl;
+  // When DFT+U nspin2 is set, starting_magnetization is already embedded in dftPlusULines
+  const magBlock = (params.dftPlusUNspin2 ?? false)
+    ? ""
+    : (hasMagEl ? generateMagnetizationLines(elements, counts, isAFMCandidate(elements, counts)) : "");
+  const hubbardBlock = params.dftPlusULines ?? "";
+
   return `&CONTROL
   calculation = 'scf',
   restart_mode = 'from_scratch',
@@ -2583,8 +2625,8 @@ function generateSCFInputWithParams(
   occupations = 'smearing',
   smearing = '${smearing}',
   degauss = ${degauss},
-  nspin = ${elements.some(el => el in MAGNETIC_ELEMENTS) ? 2 : 1},
-${elements.some(el => el in MAGNETIC_ELEMENTS) ? generateMagnetizationLines(elements, counts, isAFMCandidate(elements, counts)) : ''}/
+  nspin = ${useNspin2 ? 2 : 1},
+${magBlock}${hubbardBlock}/
 &ELECTRONS
   electron_maxstep = ${params.maxSteps},
   conv_thr = ${convThr},
@@ -2885,10 +2927,10 @@ function runQECommand(binary: string, inputFile: string, workDir: string): Promi
       inputStream.pipe(proc.stdin!).on("error", () => {});
     }
 
-    proc.stdout.on("data", (data: Buffer) => { stdout += data.toString(); });
-    proc.stderr.on("data", (data: Buffer) => { stderr += data.toString(); });
-    proc.stdout.on("end", () => { stdoutEnded = true; tryResolve(); });
-    proc.stderr.on("end", () => { stderrEnded = true; tryResolve(); });
+    proc.stdout!.on("data", (data: Buffer) => { stdout += data.toString(); });
+    proc.stderr!.on("data", (data: Buffer) => { stderr += data.toString(); });
+    proc.stdout!.on("end", () => { stdoutEnded = true; tryResolve(); });
+    proc.stderr!.on("end", () => { stderrEnded = true; tryResolve(); });
 
     let killTimeout: ReturnType<typeof setTimeout> | null = null;
     const timeout = setTimeout(() => {
@@ -2919,7 +2961,163 @@ function runQECommand(binary: string, inputFile: string, workDir: string): Promi
   });
 }
 
-export async function runFullDFT(formula: string, opts?: { startAttempt?: number }): Promise<QEFullResult> {
+// ---------------------------------------------------------------------------
+// DFPT electron-phonon coupling pipeline for top-scoring candidates.
+// Runs ph.x with electron_phonon='interpolated' on a coarse 2×2×2 q-grid,
+// then q2r.x → matdyn.x (DOS) → Eliashberg Tc estimate.
+// Called only when opts.ensembleScore > 0.7 inside runFullDFT.
+// ---------------------------------------------------------------------------
+async function runDFPTEPC(
+  formula: string,
+  elements: string[],
+  counts: Record<string, number>,
+  jobDir: string,
+  pressureGpa: number,
+): Promise<QEDFPTResult> {
+  const t0 = Date.now();
+  const warnings: string[] = [];
+  const prefix = formula.replace(/[^a-zA-Z0-9]/g, "");
+  // Spec: 2×2×2 coarse q-grid for speed.
+  const nqGrid: [number, number, number] = [2, 2, 2];
+
+  // --- ph.x with electron_phonon = 'interpolated' ---
+  const phInput = generatePhononGridInput(prefix, nqGrid[0], nqGrid[1], nqGrid[2]);
+  const phInputFile = path.join(jobDir, "dfpt_ph.in");
+  fs.writeFileSync(phInputFile, phInput);
+
+  console.log(`[QE-Worker] DFPT EPC: running ph.x for ${formula} (${nqGrid.join("×")} q-grid, P=${pressureGpa} GPa)`);
+  const phResult = await runQECommand(
+    path.posix.join(getQEBinDir(), "ph.x"),
+    phInputFile,
+    jobDir,
+  );
+  const phOut = path.join(jobDir, "dfpt_ph.out");
+  fs.writeFileSync(phOut, phResult.stdout);
+
+  const phParsed = parseLambdaOutput(phResult.stdout);
+  const phConverged = phResult.exitCode === 0 && phParsed.lambda > 0;
+
+  if (!phConverged && phParsed.lambda === 0) {
+    warnings.push(`ph.x exited ${phResult.exitCode}; no lambda parsed from stdout`);
+  }
+  console.log(`[QE-Worker] DFPT ph.x for ${formula}: exit=${phResult.exitCode}, λ=${phParsed.lambda.toFixed(3)}, ω_log=${phParsed.omegaLog.toFixed(0)} cm-1`);
+
+  // --- q2r.x: build interatomic force constants ---
+  let q2rDone = false;
+  try {
+    const q2rInput = generateQ2RInput(prefix, nqGrid[0], nqGrid[1], nqGrid[2]);
+    const q2rFile = path.join(jobDir, "dfpt_q2r.in");
+    fs.writeFileSync(q2rFile, q2rInput);
+    const q2rResult = await runQECommand(
+      path.posix.join(getQEBinDir(), "q2r.x"),
+      q2rFile,
+      jobDir,
+    );
+    q2rDone = q2rResult.exitCode === 0;
+    if (!q2rDone) warnings.push(`q2r.x exited ${q2rResult.exitCode}`);
+    else console.log(`[QE-Worker] DFPT q2r.x done for ${formula}`);
+  } catch (err: any) {
+    warnings.push(`q2r.x failed: ${(err.message ?? "").slice(0, 100)}`);
+  }
+
+  // --- matdyn.x: phonon DOS on fine grid ---
+  let matdynDone = false;
+  if (q2rDone) {
+    try {
+      const matdynInput = generateMatdynDOSInput(prefix, 20, 20, 20);
+      const matdynFile = path.join(jobDir, "dfpt_matdyn.in");
+      fs.writeFileSync(matdynFile, matdynInput);
+      const matdynResult = await runQECommand(
+        path.posix.join(getQEBinDir(), "matdyn.x"),
+        matdynFile,
+        jobDir,
+      );
+      matdynDone = matdynResult.exitCode === 0;
+      if (!matdynDone) warnings.push(`matdyn.x exited ${matdynResult.exitCode}`);
+      else console.log(`[QE-Worker] DFPT matdyn.x done for ${formula}`);
+    } catch (err: any) {
+      warnings.push(`matdyn.x failed: ${(err.message ?? "").slice(0, 100)}`);
+    }
+  }
+
+  // --- Parse a2F and run Eliashberg ---
+  const dfptFiles = await tryLoadDFPTResults(jobDir, prefix);
+  let tcAllenDynes = 0;
+  let tcEliashberg = 0;
+  let lambda = phParsed.lambda;
+  let omegaLog = phParsed.omegaLog;
+  let source: QEDFPTResult["source"] = lambda > 0 ? "ph.x-stdout" : "none";
+
+  if (dfptFiles.alpha2F && dfptFiles.alpha2F.frequencies.length > 0 && !dfptFiles.alpha2F.unstableStructure) {
+    source = "a2F-file";
+    lambda = dfptFiles.alpha2F.lambda > 0 ? dfptFiles.alpha2F.lambda : lambda;
+    omegaLog = dfptFiles.alpha2F.omegaLog > 0 ? dfptFiles.alpha2F.omegaLog : omegaLog;
+
+    // Build a minimal ElectronPhononCoupling from the DFPT-derived values.
+    // The surrogate fields (bandwidth, omega2Avg, etc.) are irrelevant here because
+    // runEliashbergFromAlpha2FFile only uses lambda and lambdaUncorrected for
+    // anharmonic corrections — the spectral Tc comes from the a2F data directly.
+    const electronic = computeElectronicStructure(formula);
+    const phonon = computePhononSpectrum(formula, electronic);
+    const surrogateCoupling = computeElectronPhononCoupling(electronic, phonon, formula, pressureGpa);
+    const dfptCoupling: ElectronPhononCoupling = {
+      ...surrogateCoupling,
+      lambda,
+      lambdaUncorrected: lambda,
+      omegaLog,
+    };
+
+    try {
+      const eliashbergResult = runEliashbergFromAlpha2FFile(
+        formula,
+        pressureGpa,
+        { frequencies: dfptFiles.alpha2F.frequencies, values: dfptFiles.alpha2F.alpha2F },
+        dfptCoupling,
+      );
+      tcAllenDynes = eliashbergResult.tcAllenDynes.tc;
+      tcEliashberg = eliashbergResult.tcEliashbergGap.tc;
+    } catch (elErr: any) {
+      warnings.push(`Eliashberg solver failed: ${(elErr.message ?? "").slice(0, 100)}`);
+    }
+  }
+
+  // Fallback: Allen-Dynes directly from ph.x stdout lambda/omegaLog.
+  if (tcAllenDynes === 0 && lambda > 0 && omegaLog > 0) {
+    const CM1_TO_K = 1.4388;
+    const muStar = 0.10;
+    const omegaLogK = omegaLog * CM1_TO_K;
+    const denom = lambda - muStar * (1 + 0.62 * lambda);
+    if (denom > 0) {
+      const exp = -1.04 * (1 + lambda) / denom;
+      if (exp >= -50) {
+        const lambdaBar = 2.46 * (1 + 3.8 * muStar);
+        const f1 = Math.pow(1 + Math.pow(lambda / lambdaBar, 1.5), 1 / 3);
+        tcAllenDynes = Number(Math.max(0, Math.min(500, (omegaLogK / 1.2) * f1 * Math.exp(exp))).toFixed(2));
+      }
+    }
+    source = "ph.x-stdout";
+  }
+
+  const tcBest = Math.max(tcAllenDynes, tcEliashberg);
+  console.log(`[QE-Worker] DFPT EPC result for ${formula}: λ=${lambda.toFixed(3)}, ω_log=${omegaLog.toFixed(0)} cm-1, Tc=${tcBest.toFixed(1)} K (source=${source})`);
+
+  return {
+    lambda: Number(lambda.toFixed(4)),
+    omegaLog: Number(omegaLog.toFixed(2)),
+    tcAllenDynes: Number(tcAllenDynes.toFixed(2)),
+    tcEliashberg: Number(tcEliashberg.toFixed(2)),
+    tcBest: Number(tcBest.toFixed(2)),
+    nqGrid,
+    phConverged,
+    q2rDone,
+    matdynDone,
+    wallTimeSeconds: (Date.now() - t0) / 1000,
+    source,
+    warnings,
+  };
+}
+
+export async function runFullDFT(formula: string, opts?: { startAttempt?: number; pressureGpa?: number; ensembleScore?: number; forceSpin?: boolean }): Promise<QEFullResult> {
   const startTime = Date.now();
   const result: QEFullResult = {
     formula,
@@ -2961,6 +3159,14 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     result.highPressure = true;
     result.estimatedPressureGPa = formulaCheck.estimatedPressureGPa;
     console.log(`[QE-Worker] ${formula} tagged as high-pressure candidate (~${formulaCheck.estimatedPressureGPa} GPa)`);
+  }
+
+  // If the job record carries an explicit pressure (e.g. from the candidate's known synthesis
+  // pressure), apply it — taking the higher of the two estimates so we never under-compress.
+  if (opts?.pressureGpa && opts.pressureGpa > (result.estimatedPressureGPa ?? 0)) {
+    result.highPressure = true;
+    result.estimatedPressureGPa = opts.pressureGpa;
+    console.log(`[QE-Worker] ${formula} pressure overridden by job record: ${opts.pressureGpa} GPa`);
   }
 
   const jobDir = path.join(QE_WORK_DIR, `job_${Date.now()}_${formula.replace(/[^a-zA-Z0-9]/g, "")}`);
@@ -3136,6 +3342,50 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       console.log(`[QE-Worker] K-points recomputed for ${formula} after vc-relax lattice change (${preVcLatticeA.toFixed(3)} -> ${latticeA.toFixed(3)} A): ${result.kPoints}`);
     }
 
+    // --- DFT+U detection for strongly-correlated materials ---
+    let dftPlusULines = "";
+    let dftPlusUNspin2 = false;
+    try {
+      const corrEffects = await estimateCorrelationEffects(formula, {});
+      const regime = corrEffects.regime.regime;
+      if (regime === "strongly-correlated" || regime === "Mott-proximate") {
+        const hubbardParts: string[] = ["  lda_plus_u = .true.,\n", "  lda_plus_u_kind = 0,\n"];
+        for (let i = 0; i < elements.length; i++) {
+          const u = getHubbardU(elements[i]);
+          if (u != null && u > 0) {
+            hubbardParts.push(`  Hubbard_U(${i + 1}) = ${u.toFixed(1)},\n`);
+          }
+        }
+        dftPlusULines = hubbardParts.join("");
+        const isMagCorrMat = corrEffects.materialPatterns.some(p =>
+          p.includes("cuprate") || p.includes("Fe-pnictide"));
+        if (isMagCorrMat) {
+          dftPlusUNspin2 = true;
+          for (let i = 0; i < elements.length; i++) {
+            const u = getHubbardU(elements[i]);
+            if (u != null && u > 0) {
+              dftPlusULines += `  starting_magnetization(${i + 1}) = 0.5,\n`;
+            }
+          }
+        }
+        result.qeDFTPlusU = true;
+        result.dftPlusUTcModifier = corrEffects.tcModifier;
+        console.log(`[QE-Worker] DFT+U enabled for ${formula}: regime=${regime}, patterns=${corrEffects.materialPatterns.join(",")}, tcModifier=${corrEffects.tcModifier.toFixed(3)}`);
+      }
+    } catch (corrErr: any) {
+      console.log(`[QE-Worker] Correlation detection skipped for ${formula}: ${(corrErr.message || "").slice(0, 100)}`);
+    }
+
+    // TSC jobs (submitted with jobType="scf_tsc" or opts.forceSpin) require
+    // nspin=2 so that QE captures the spin-split bands relevant for Majorana
+    // gap physics.  We reuse dftPlusUNspin2 which already gates the nspin=2
+    // path in generateSCFInputWithParams (line ~2599).
+    if (opts?.forceSpin && !dftPlusUNspin2) {
+      dftPlusUNspin2 = true;
+      console.log(`[QE-Worker] nspin=2 forced for TSC candidate ${formula} (spin-orbit gap physics)`);
+    }
+    // ----------------------------------------------------------
+
     const retryConfigs: Array<{ mixingBeta: number; maxSteps: number; diag: string; smearing?: string; degauss?: number; ecutwfcBoost?: number; convThr?: string; forcConvThr?: string; etotConvThr?: string }> = [
       // Attempts 1-2: screening-quality (degauss=0.02 Ry = wider smearing → faster Fermi,
       // conv_thr=1e-8 is sufficient for band gaps/energies, saves ~2x per attempt)
@@ -3152,7 +3402,11 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
 
     for (let attempt = firstAttempt; attempt < retryConfigs.length && !scfConverged; attempt++) {
       const params = retryConfigs[attempt];
-      const scfInput = generateSCFInputWithParams(formula, elements, counts, latticeA, positions, params);
+      const scfInput = generateSCFInputWithParams(formula, elements, counts, latticeA, positions, {
+        ...params,
+        dftPlusULines: dftPlusULines || undefined,
+        dftPlusUNspin2: dftPlusUNspin2 || undefined,
+      });
       const scfInputFile = path.join(jobDir, `scf_attempt${attempt}.in`);
       fs.writeFileSync(scfInputFile, scfInput);
 
@@ -3255,7 +3509,7 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
           counts,
           latticeA,
           positions,
-          result.scf.fermiEnergy,
+          result.scf!.fermiEnergy,
           jobDir,
           cOverAVal,
           baseEcutwfcBands,
@@ -3303,6 +3557,22 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
         console.log(`[QE-Worker] Phonon failed for ${formula}: ${result.phonon.error.slice(-200)}`);
       } else {
         console.log(`[QE-Worker] Phonon done for ${formula}: ${result.phonon.frequencies.length} modes, lowest=${result.phonon.lowestFrequency.toFixed(1)} cm-1`);
+      }
+    }
+
+    // DFPT electron-phonon coupling — run only for top-scoring candidates
+    // (ensembleScore > 0.7) because ph.x with electron_phonon adds significant
+    // wall time. Phonon stability is pre-checked: if the fast phonon step above
+    // found imaginary modes beyond threshold, skip DFPT to avoid wasting compute.
+    const phononPhysicallyStable = result.phonon
+      ? result.phonon.lowestFrequency > -10.0
+      : true;
+    if (scfUsable && phononPhysicallyStable && (opts?.ensembleScore ?? 0) > 0.7) {
+      console.log(`[QE-Worker] ${formula} qualifies for DFPT EPC (ensembleScore=${opts!.ensembleScore!.toFixed(3)})`);
+      try {
+        result.dfpt = await runDFPTEPC(formula, elements, counts, jobDir, workerPressure);
+      } catch (dfptErr: any) {
+        console.log(`[QE-Worker] DFPT EPC failed for ${formula}: ${(dfptErr.message ?? "").slice(-200)}`);
       }
     }
   } catch (err: any) {

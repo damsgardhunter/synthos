@@ -912,7 +912,9 @@ export async function runCrystalDiffusionCycle(
         }
 
         stabilityScore = Math.min(1, (phonon.softModeScore ?? 0.5) * 0.5 + (electronic.metallicity > 0.5 ? 0.3 : 0.1) + 0.2);
-      } catch {}
+      } catch (err: any) {
+        console.debug(`[crystal-diffusion] McMillan Tc computation failed for ${formula}: ${err?.message ?? err}`);
+      }
 
       predictedTc = Math.min(400, Math.max(0, predictedTc));
 
@@ -971,7 +973,9 @@ export async function runCrystalDiffusionCycle(
       });
       if (diffusionStats.recentResults.length > 50) diffusionStats.recentResults.shift();
 
-    } catch {}
+    } catch (err: any) {
+      console.debug(`[crystal-diffusion] Crystal generation failed for ${(formula as any) ?? "(unknown)"}: ${err?.message ?? err}`);
+    }
   }
 
   if (diffusionStats.recentResults.length > 0) {
@@ -1244,7 +1248,9 @@ export async function runDistributionBasedDiffusion(
         }
 
         stabilityScore = Math.min(1, (phonon.softModeScore ?? 0.5) * 0.5 + (electronic.metallicity > 0.5 ? 0.3 : 0.1) + 0.2);
-      } catch {}
+      } catch (err: any) {
+        console.debug(`[crystal-diffusion] McMillan Tc computation failed for ${formula}: ${err?.message ?? err}`);
+      }
 
       predictedTc = Math.min(400, Math.max(0, predictedTc));
 

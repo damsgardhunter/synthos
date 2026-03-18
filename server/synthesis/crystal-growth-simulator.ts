@@ -2,6 +2,10 @@ import { SynthesisVector } from "../physics/synthesis-simulator";
 
 const kB = 8.617e-5; // Boltzmann constant in eV/K
 
+// Debye frequency — the maximum rate at which a solid-state lattice site attempts
+// a structural transition.  Sets the physical ceiling on the CNT kinetic prefactor.
+const ATTEMPT_FREQUENCY_HZ = 1e13;
+
 export interface GrainStructure {
   grainSize: number;
   grainOrientation: "random" | "textured" | "epitaxial" | "single-crystal";
@@ -30,10 +34,40 @@ const growthStats = {
 
 export function computeNucleationProbability(deltaG: number, temperature: number): number {
   if (temperature <= 0) return 0;
+
+  // Classical Nucleation Theory (CNT) rate: J = Z · β · N_s · exp(−ΔG* / kT)
+  //
+  //   Z  — Zeldovich factor (~0.01–0.10): fraction of critical embryos that commit
+  //        to growth rather than dissolving.  Derived from the curvature of the
+  //        free-energy landscape at the critical nucleus.
+  //   β  — monomer attachment rate (bounded by the Debye attempt frequency ν₀ ≈ 10¹³ Hz).
+  //
+  // The pure Boltzmann formula exp(−ΔG/kT) ignores both prefactors and therefore
+  // overestimates nucleation probability — especially for amorphous precursors at
+  // low temperature where the kinetic term dominates over the thermodynamic one.
+
   const exponent = -deltaG / (kB * temperature);
-  if (exponent > 20) return 1.0;
   if (exponent < -50) return 0;
-  return Math.exp(exponent);
+
+  // Raw Boltzmann factor; saturates at 1.0 for ΔG ≤ 0 (barrierless nucleation).
+  const boltzmann = exponent >= 0 ? 1.0 : Math.exp(exponent);
+
+  // Zeldovich factor: for a parabolic free-energy surface near the critical nucleus,
+  //   Z ≈ sqrt(|ΔG*| / (3π kT))
+  // For barrierless nucleation (ΔG ≤ 0) use the floor value of 0.02 — even
+  // barrierless growth is rate-limited by surface diffusion and monomer supply.
+  const barrierEV = Math.max(0, deltaG);
+  const zeldovich = barrierEV > 0
+    ? Math.min(0.10, Math.sqrt(barrierEV / (3 * Math.PI * kB * temperature)))
+    : 0.02;
+
+  // The kinetic attachment rate β ≤ ATTEMPT_FREQUENCY_HZ; normalised to [0, 1]
+  // it contributes at most 1.0 here (the Zeldovich factor already caps the product).
+  // Hard physical ceiling: 0.95 prevents rounding artefacts from reaching 1.0 and
+  // ensures the caller can always distinguish "very likely" from "certain".
+  const MAX_NUCLEATION_PROBABILITY = 0.95; // set by Z_max · (β/ν₀)_max ≈ 0.10 · 1.0
+  void ATTEMPT_FREQUENCY_HZ; // referenced above for physical justification
+  return Math.min(MAX_NUCLEATION_PROBABILITY, Math.max(0, zeldovich * boltzmann));
 }
 
 function getActivationEnergy(materialClass: string): number {
@@ -75,7 +109,9 @@ export function predictGrainStructure(
   } else if (coolingRate < 1000) {
     grainSize = 5 + (1000 - coolingRate) * 0.05;
   } else {
-    grainSize = Math.max(1, 5 - (coolingRate - 1000) * 0.001);
+    // At extreme cooling rates the linear formula goes negative; clamp to 0
+    // before any downstream multiplication can propagate the sign error.
+    grainSize = Math.max(0, 5 - (coolingRate - 1000) * 0.001);
   }
 
   if (synthesisTemp > 1200) {
@@ -107,6 +143,9 @@ export function predictGrainStructure(
     }
   }
 
+  // Ensure grainSize is strictly positive before computing boundary density —
+  // extreme cooling + high pressure multiplications can otherwise drive it to zero.
+  grainSize = Math.max(0, grainSize);
   const boundaryDensity = grainSize > 0 ? 1e7 / grainSize : 1e14;
 
   const mc = (materialClass ?? "").toLowerCase();

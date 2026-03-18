@@ -11,8 +11,16 @@ const pool = new pg.Pool({
   // Keep idle connections for 90s — shorter than 120s so stale connections
   // get recycled before they accumulate, but longer than the 45s keepalive interval.
   idleTimeoutMillis: 90_000,
-  // Give Neon up to 60s to cold-start; Neon free-tier can take 30-45s after suspension.
-  connectionTimeoutMillis: 60_000,
+  // Give Neon up to 20s to connect; fail fast so pool slots are freed quickly.
+  // Background tasks (recalculatePhysics, SG sweep) can fill all 5 slots with
+  // 60s waits and starve the main cycle — 20s is still enough for cold-start.
+  connectionTimeoutMillis: 20_000,
+  // Client-side query timeout — kills queries that never reach the server (dead
+  // TCP connection). statement_timeout=15s is server-side and doesn't fire when
+  // the TCP connection is silently dropped (common in WSL2→Neon serverless path).
+  // 30s is above the 15s statement timeout so legitimate slow queries are killed
+  // server-side first; this only fires for truly stuck connections.
+  query_timeout: 30_000,
   keepAlive: true,
   keepAliveInitialDelayMillis: 5_000,
 });

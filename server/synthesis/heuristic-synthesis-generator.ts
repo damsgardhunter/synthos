@@ -261,7 +261,7 @@ function ruleSolidState(formula: string, fb: FormulaBreakdown): HeuristicRoute |
 
   if (hasChalcogen && !fb.hasO) {
     const chalcogen = fb.hasTe ? "Te" : fb.hasSe ? "Se" : "S";
-    const preReactionTemp = chalcogen === "S" ? 400 : chalcogen === "Se" ? 500 : 600;
+    const preReactionTemp = chalcogen === "S" ? 673 : chalcogen === "Se" ? 773 : 873;
     noteText += ` Pre-reaction at ${preReactionTemp}K recommended to avoid violent exotherm from ${chalcogen} vapor pressure buildup.`;
     const sinterIdx = steps.findIndex(s => s.includes("Sinter"));
     if (sinterIdx >= 0) {
@@ -448,7 +448,7 @@ function ruleChalcogenide(formula: string, fb: FormulaBreakdown): HeuristicRoute
 
   const precursors = [...fb.metals, chalcogen];
   const maxMp = maxMeltingPoint(fb.metals);
-  const preReactionTemp = chalcogen === "S" ? 400 : chalcogen === "Se" ? 500 : 600;
+  const preReactionTemp = chalcogen === "S" ? 673 : chalcogen === "Se" ? 773 : 873;
   const temperature = Math.min(maxMp, 1200);
   const hasLi = fb.elements.includes("Li");
   const crucible = hasLi ? "Nb or Ta crucible" : "quartz ampoule";
@@ -710,7 +710,9 @@ export function generateHeuristicRoutes(formula: string, trackStats = false): He
           stats.ruleHits[route.rule] = (stats.ruleHits[route.rule] || 0) + 1;
         }
       }
-    } catch (_) {}
+    } catch (err: any) {
+      console.debug(`[heuristic-synth] Rule failed for ${formula}: ${err?.message ?? err}`);
+    }
   }
 
   routes.sort((a, b) => b.confidence - a.confidence);

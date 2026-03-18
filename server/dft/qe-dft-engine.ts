@@ -3257,6 +3257,13 @@ async function execShellAsync(cmd: string, options: { timeout?: number; env?: No
     // spawn + stdio:"ignore" (original behaviour).
     const trySpawn = (useShell: boolean): Promise<string> =>
       new Promise<string>((resolve, reject) => {
+        // Guard so promise settles exactly once — killing cmd.exe on Windows does NOT
+        // close the WSL subprocess stdio pipes, so 'close' may never fire after proc.kill().
+        // Without this guard the AL cycle hangs forever waiting for Promise.allSettled.
+        let settled = false;
+        const safeResolve = (v: string) => { if (!settled) { settled = true; resolve(v); } };
+        const safeReject  = (e: Error)  => { if (!settled) { settled = true; reject(e);  } };
+
         const proc = useShell
           ? spawn("cmd.exe", ["/c", "wsl.exe", "-d", "Ubuntu", "--", "bash", "-c", wslCmd], {
               env: wslEnv,
@@ -3274,22 +3281,28 @@ async function execShellAsync(cmd: string, options: { timeout?: number; env?: No
         proc.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
         let timedOut = false;
         const timer = options.timeout
-          ? setTimeout(() => { timedOut = true; proc.kill(); }, options.timeout)
+          ? setTimeout(() => {
+              timedOut = true;
+              proc.kill();
+              // Force-reject immediately — don't wait for 'close' which may never fire
+              // when cmd.exe is killed but the WSL child keeps its pipe handles open.
+              safeReject(new Error(`WSL command timed out after ${options.timeout}ms`));
+            }, options.timeout)
           : null;
         proc.on("close", (code) => {
           if (timer) clearTimeout(timer);
           if (timedOut) {
-            reject(new Error(`WSL command timed out after ${options.timeout}ms`));
+            safeReject(new Error(`WSL command timed out after ${options.timeout}ms`));
           } else if (code !== 0) {
             const err: any = new Error(`Command failed: wsl.exe -d Ubuntu -- bash -c ${wslCmd.slice(0, 200)}`);
             err.stdout = stdout;
             err.stderr = stderr;
-            reject(err);
+            safeReject(err);
           } else {
-            resolve(stdout);
+            safeResolve(stdout);
           }
         });
-        proc.on("error", reject);
+        proc.on("error", (e) => safeReject(e as Error));
       });
 
     try {

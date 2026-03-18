@@ -625,7 +625,9 @@ function introduceAmorphousXtbMD(
       const quenchCmd = `cd ${calcDir} && ${XTB_BIN} quench.xyz --gfn 2 --md --input md_quench.inp 2>&1`;
       try {
         execXtbCmd(quenchCmd, { timeout: 45000, env, maxBuffer: 10 * 1024 * 1024 });
-      } catch {}
+      } catch (err: any) {
+        console.debug(`[disorder-generator] xTB quench failed for ${baseFormula}: ${err?.message ?? err}`);
+      }
 
       let finalAtoms: Array<{ element: string; x: number; y: number; z: number }> | null = null;
       const optPath = path.join(calcDir, "xtbopt.xyz");

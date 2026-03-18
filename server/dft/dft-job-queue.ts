@@ -1,11 +1,13 @@
 import { storage } from "../storage";
 import { runFullDFT, isQEAvailable, isFormulaBlocked, getStageFailureCounts, scheduleQEAvailabilityProbe } from "./qe-worker";
 export { scheduleQEAvailabilityProbe };
-import type { QEFullResult } from "./qe-worker";
+import { scheduleParetoRecompute } from "../inverse/pareto-optimizer";
+import type { QEFullResult, QEDFPTResult } from "./qe-worker";
 const SCF_RETRY_START_ATTEMPT = 3;
 import type { DftJob } from "@shared/schema";
 import { recordStructureFailure } from "../crystal/structure-failure-db";
-import { isValidFormula, parseFormulaCounts } from "../learning/utils";
+import { isValidFormula, parseFormulaCounts, classifyFamily } from "../learning/utils";
+import { recordSynthesisResult } from "../synthesis/synthesis-learning-db";
 
 const POLL_INTERVAL_MS = 30_000;
 const MAX_CONCURRENT = 3;
@@ -87,6 +89,7 @@ export async function submitDFTJob(
   priority: number = 50,
   jobType: string = "scf",
   skipStabilityGate: boolean = false,
+  pressureGpa?: number,
 ): Promise<DftJob | null> {
   if (!isValidFormula(formula)) {
     console.log(`[DFT-Queue] Formula ${formula} rejected: invalid or contains noble gas`);
@@ -136,7 +139,7 @@ export async function submitDFTJob(
     status: "queued",
     jobType,
     priority,
-    inputData: { formula, candidateId, requestedAt: new Date().toISOString() },
+    inputData: { formula, candidateId, requestedAt: new Date().toISOString(), ...(pressureGpa != null ? { pressureGpa } : {}) },
   });
 
   stageMetrics.candidate_queue.currentDepth++;
@@ -217,10 +220,24 @@ async function processNextJob(): Promise<boolean> {
 
     const inputData = job.inputData as any;
     const isRetry = job.jobType === "scf_retry";
+    // scf_tsc: high-priority TSC candidate; forces nspin=2 for spin-orbit gap physics
+    const isTSCJob = job.jobType === "scf_tsc";
     const startAttempt = isRetry ? (inputData?.startAttempt ?? SCF_RETRY_START_ATTEMPT) : 0;
+    const jobPressureGpa: number | undefined =
+      typeof inputData?.pressureGpa === "number" && inputData.pressureGpa > 20
+        ? inputData.pressureGpa
+        : undefined;
+
+    // Look up ensembleScore so the worker can decide whether to run full DFPT EPC.
+    let ensembleScore: number | undefined;
+    try {
+      const candidates = await storage.getSuperconductorsByFormula(job.formula);
+      const bestScore = candidates.reduce((best, c) => Math.max(best, c.ensembleScore ?? 0), 0);
+      if (bestScore > 0) ensembleScore = bestScore;
+    } catch { /* non-fatal — worker will skip DFPT if undefined */ }
 
     if (isQEAvailable()) {
-      dftResult = await runFullDFT(job.formula, { startAttempt });
+      dftResult = await runFullDFT(job.formula, { startAttempt, pressureGpa: jobPressureGpa, ensembleScore, forceSpin: isTSCJob });
     } else {
       dftResult = {
         formula: job.formula,
@@ -277,10 +294,16 @@ async function processNextJob(): Promise<boolean> {
           }
         }
 
+        if (dftResult.vcRelaxed && dftResult.relaxedLatticeA) {
+          scalarUpdates.latticeParams = { a: dftResult.relaxedLatticeA };
+        }
+
         const bandData = dftResult.bandStructure;
         const mlFeaturePatch: Record<string, any> = {
           qeDFT: true,
           qeConverged: dftResult.scf?.converged || false,
+          qeVcRelaxed: dftResult.vcRelaxed ?? false,
+          qeRelaxedLatticeA: dftResult.relaxedLatticeA ?? null,
           qeTotalEnergy: dftResult.scf?.totalEnergy,
           qeFermiEnergy: dftResult.scf?.fermiEnergy,
           qePressure: dftResult.scf?.pressure,
@@ -308,12 +331,91 @@ async function processNextJob(): Promise<boolean> {
           qeNodalLineIndicator: bandData?.topologicalIndicators?.nodalLineIndicator || 0,
           qeParityChanges: bandData?.topologicalIndicators?.parityChanges || 0,
           qeDiracPointCount: bandData?.topologicalIndicators?.diracPointCount || 0,
+          qeDFTPlusU: dftResult.qeDFTPlusU ?? false,
+          qeDFTPlusUTcModifier: dftResult.dftPlusUTcModifier ?? null,
+          // DFPT electron-phonon coupling — present only for ensembleScore > 0.7 candidates.
+          // These are DFT-quality λ/ω_log values; qeDFPTTc is the publishable-grade Tc.
+          // The GNN uses qeDFPTTc as target label instead of ML-estimated predictedTc.
+          qeDFPTLambda: dftResult.dfpt?.lambda ?? null,
+          qeDFPTOmegaLog: dftResult.dfpt?.omegaLog ?? null,
+          qeDFPTTc: dftResult.dfpt?.tcBest ?? null,
+          qeDFPTSource: dftResult.dfpt?.source ?? null,
+          qeDFPTPhConverged: dftResult.dfpt?.phConverged ?? null,
         };
+
+        // For top candidates where DFPT completed successfully, write the DFPT Tc
+        // back as the authoritative predictedTc — it replaces the ML estimate.
+        if (dftResult.dfpt?.tcBest && dftResult.dfpt.tcBest > 0) {
+          scalarUpdates.predictedTc = dftResult.dfpt.tcBest;
+          console.log(`[DFT-Queue] ${job.formula} DFPT Tc ${dftResult.dfpt.tcBest.toFixed(1)} K written as predictedTc (λ=${dftResult.dfpt.lambda.toFixed(3)}, source=${dftResult.dfpt.source})`);
+        }
 
         const updated = await storage.updateCandidateByFormulaDft(job.formula, scalarUpdates, mlFeaturePatch);
         if (updated) {
           console.log(`[DFT-Queue] Updated candidate ${job.formula} with QE DFT results (single-query upsert)`);
         }
+
+        // Feed the completed DFT run into the synthesis learning DB so
+        // getSynthesisPatterns() can identify which pressure/temperature/
+        // quenching combinations produce phonon-stable structures.
+        try {
+          const phononStable = dftResult.phonon
+            ? dftResult.phonon.lowestFrequency > IMAGINARY_PHONON_THRESHOLD_CM1
+            : true; // assume stable when phonon step was skipped (SCF-only run)
+          const pressureUsed = jobPressureGpa ?? 0;
+          const isHighPressure = pressureUsed >= 20;
+
+          const sv = {
+            temperature: isHighPressure ? 300 : 1200,   // DAC runs near RT; solid-state at ~1200 K
+            pressure: pressureUsed,
+            coolingRate: isHighPressure ? 0 : 5,        // HP: quench; solid-state: 5 K/min
+            annealTime: isHighPressure ? 0 : 24,        // HP: no anneal; solid-state: 24 h
+            currentDensity: 0,
+            magneticField: 0,
+            thermalCycles: isHighPressure ? 1 : 3,
+            strain: dftResult.vcRelaxed ? 0.05 : 0,
+            oxygenPressure: 0,
+            synthesisMethod: (isHighPressure ? "high-pressure" : "solid-state") as
+              "high-pressure" | "solid-state",
+          };
+
+          const resultTc = dftResult.dfpt?.tcBest
+            ?? (scalarUpdates.predictedTc as number | undefined)
+            ?? 0;
+          // stability: 1.0 = phonon-stable SCF success; 0.4 = imaginary modes present
+          const stability = phononStable ? 1.0 : 0.4;
+          const materialClass = classifyFamily(job.formula);
+
+          recordSynthesisResult(job.formula, materialClass, sv, resultTc, stability, 1.0);
+        } catch { /* non-fatal */ }
+
+        // Recompute Pareto ranks for top-500 candidates after each DFT cycle.
+        // Debounced so rapid successive completions collapse to one recompute.
+        // The onComplete callback writes paretoRank/paretoFront back to each
+        // candidate's mlFeatures so the UI can display the Pareto frontier.
+        scheduleParetoRecompute(
+          async () => {
+            const top = await storage.getTopCandidatesMerged(490, 10);
+            return top.map(c => ({
+              formula: c.formula,
+              predictedTc: c.predictedTc,
+              decompositionEnergy: c.decompositionEnergy,
+              mlFeatures: c.mlFeatures as Record<string, any> | null,
+            }));
+          },
+          8_000,
+          async (results) => {
+            for (const r of results) {
+              try {
+                await storage.updateCandidateByFormulaDft(
+                  r.formula,
+                  {},
+                  { paretoRank: r.rank, paretoFront: r.isFront },
+                );
+              } catch { /* non-fatal — best-effort write-back */ }
+            }
+          },
+        );
       } catch (err: any) {
         console.log(`[DFT-Queue] Failed to update candidate: ${err.message}`);
       }
@@ -360,7 +462,9 @@ async function processNextJob(): Promise<boolean> {
             broadcastFn("dftJobQueued", { jobId: retryJob.id, formula: job.formula, priority: retryJob.priority, retry: true });
           }
         }
-      } catch {}
+      } catch (err: any) {
+        console.debug(`[DFT-Queue] Auto-requeue failed for ${job.formula}: ${err?.message ?? err}`);
+      }
 
       if (broadcastFn) {
         broadcastFn("dftJobFailed", {

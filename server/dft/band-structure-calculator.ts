@@ -414,7 +414,9 @@ function parseProjwfcOutput(
         }
         kIdx++;
       }
-    } catch {}
+    } catch (err: any) {
+      console.debug(`[band-structure] PDOS parse failed for ${pdosFile}: ${err?.message ?? err}`);
+    }
   }
 
   let hasData = false;

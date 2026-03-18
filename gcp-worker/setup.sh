@@ -50,8 +50,12 @@ QE_BIN_DIR=/usr/bin
 # Pseudopotential directory — copy your .UPF files here
 PSEUDO_DIR=/opt/quantum-alchemy/server/dft/pseudo
 
-# 4 concurrent QE runs × 8 threads each = 32 vCPUs fully utilised
-OMP_NUM_THREADS=8
+# Main instance (DFT + GNN + XGB on same box):
+#   7 concurrent QE runs × 4 threads = 28 vCPUs for DFT, 4 reserved for GNN/XGB
+# Dedicated DFT-only instance (ENABLE_GNN_WORKER=false):
+#   5 concurrent QE runs × 3 threads = 15 vCPUs (use n2-standard-8 or c2-standard-8)
+OMP_NUM_THREADS=4
+DFT_MAX_CONCURRENT=7
 
 # Worker toggles (set to "false" to disable either loop)
 ENABLE_DFT_WORKER=true

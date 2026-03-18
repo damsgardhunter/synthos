@@ -145,18 +145,24 @@ export async function runStructureLearningCycle(
     try {
       trainStructurePredictor();
       retrainedModels.push("structure-predictor-ml");
-    } catch {}
+    } catch (err: any) {
+      console.debug(`[structure-loop] trainStructurePredictor failed: ${err?.message ?? err}`);
+    }
 
     // Stagger VAE and diffusion model training in worker threads so they never block the event loop
     try {
       setTimeout(() => { spawnMLTraining("init-crystal-vae").catch(() => {}); }, 5000);
       retrainedModels.push("crystal-vae");
-    } catch {}
+    } catch (err: any) {
+      console.debug(`[structure-loop] spawnMLTraining crystal-vae setup failed: ${err?.message ?? err}`);
+    }
 
     try {
       setTimeout(() => { spawnMLTraining("init-diffusion-model").catch(() => {}); }, 15000);
       retrainedModels.push("crystal-diffusion-model");
-    } catch {}
+    } catch (err: any) {
+      console.debug(`[structure-loop] spawnMLTraining diffusion-model setup failed: ${err?.message ?? err}`);
+    }
 
     if (retrainedModels.length > 0) {
       modelsRetrained = true;

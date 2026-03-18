@@ -70,6 +70,8 @@ function classifyMaterialForSynthesis(ctx: MaterialContext): string {
 }
 
 function selectOptimalTemperature(synthClass: string, meltingPoint: number, stability: string): number {
+  if (!meltingPoint || meltingPoint <= 0) meltingPoint = 1500; // conservative fallback for unknown elements
+
   const sinterFraction = stability === "thermodynamically-stable" ? 0.65
     : stability === "metastable-accessible" ? 0.55
     : 0.45;

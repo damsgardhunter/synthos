@@ -58,6 +58,7 @@ import { detectPhaseTransitions, getPhaseTransitionStats } from "./pressure-phas
 import { recordEvaluationResult, getCalibrationStats, notifyModelRetrain } from "./surrogate-fitness";
 import { getXTBStats, runXTBPhononCheck, checkXTBHealth } from "../dft/qe-dft-engine";
 import { submitDFTJob, promoteDFTJob, getDFTQueueStats, setDFTBroadcast, scheduleQEAvailabilityProbe } from "../dft/dft-job-queue";
+import { recordTSCFamily } from "../physics/tsc-generator-bias";
 import { runDiffusionGenerationCycle, getDiffusionStats } from "../ai/crystal-generator";
 import { runCrystalDiffusionCycle, getCrystalDiffusionStats, runDistributionBasedDiffusion, getDistributionDiffusionStats } from "../ai/crystal-structure-diffusion";
 import { multiTaskPredict, trackMultiTaskPrediction, getMultiTaskStats } from "./multi-task-gnn";
@@ -132,6 +133,7 @@ import { ELEMENTAL_DATA } from "./elemental-data";
 import { runModelImprovementCycle, runCombinedModelLLMCycle, getModelImprovementStats } from "./model-improvement-loop";
 import { ensureFeatureStateLoaded } from "./model-llm-controller";
 import { evaluateSynthesisGate, getSynthesisGateStats } from "../synthesis/synthesis-gate";
+import { buildReactionNetwork } from "../synthesis/reaction-network";
 import { recordPredictionOutcome } from "./model-diagnostics";
 import { checkFormulaNovelty } from "./cod-client";
 import { systematicSGSweep, getSpaceGroupCoverageReport } from "./space-group-explorer";
@@ -567,6 +569,12 @@ let autonomousTotalScreened = 0;
 let autonomousTotalPassed = 0;
 let autonomousBestTc = 0;
 let autonomousStartTime = Date.now();
+// Set true while runAutonomousFastPath is executing its main screening loop.
+// SG sweep checks this flag to avoid concurrent DB saturation (5-connection Neon pool).
+let isFastPathScreeningActive = false;
+// Set true while the SG sweep is running — backfill waits for this to clear so
+// both tasks don't simultaneously call extractFeatures for hundreds of candidates.
+let isSGSweepActive = false;
 
 const pipelineStageMetrics = {
   chemistryRejects: 0,
@@ -2327,6 +2335,15 @@ async function runDFTEnrichment() {
         for (const elite of eliteCandidates) {
           const mlFeatures = (elite.mlFeatures as Record<string, any>) ?? {};
           if (mlFeatures.qeDFT) continue;
+          if (mlFeatures.synthesisRejected) {
+            emit("log", {
+              phase: "engine",
+              event: "DFT skipped: synthesis gate reject",
+              detail: `${elite.formula}: synthesis gate previously hard-rejected this formula — ${(mlFeatures.synthesisRejectedReasons as string[] | undefined)?.join("; ") ?? "see synthesisPath"}`,
+              dataSource: "Synthesis Gate",
+            });
+            continue;
+          }
 
           try {
             const basePriority = Math.round((elite.ensembleScore ?? 0) * 100);
@@ -2804,6 +2821,26 @@ async function runPhase10_Physics() {
                 dataSource: "Topological Invariants Engine",
               });
             }
+            // If this material is a TSC candidate, record its element family
+            // so the generators can be steered toward similar chemistries, and
+            // submit a high-priority DFT job with spin-orbit coupling (nspin=2).
+            if (invariants.tscScore.isTSCCandidate) {
+              recordTSCFamily(
+                candidate.formula,
+                invariants.tscScore.tscClass,
+                invariants.tscScore.tscScore,
+              );
+              try {
+                await submitDFTJob(
+                  candidate.formula,
+                  typeof candidate.id === "string" ? parseInt(candidate.id, 10) || null : null,
+                  88,        // priority: higher than normal (90=room-temp, 88=TSC)
+                  "scf_tsc", // jobType flag — queue will force nspin=2
+                );
+              } catch {
+                // DFT submit failure is non-fatal: analysis still proceeds
+              }
+            }
           } catch (invErr) {
             // invariant computation is optional
           }
@@ -2854,6 +2891,31 @@ async function runPhase10_Physics() {
           } catch (rxnErr) {
             console.error(`[Engine] Reaction network failed for ${candidate.formula}:`, rxnErr instanceof Error ? rxnErr.message.slice(0, 100) : "unknown");
             recordEngineFailure("reaction_network", rxnErr);
+          }
+
+          // Surface Dijkstra path costs and bottleneck from synthesis reaction network
+          try {
+            const synthNetwork = buildReactionNetwork(candidate.formula);
+            if (synthNetwork.bestRoute) {
+              const rn = (updatedMlFeatures as any).reactionNetwork ?? {};
+              rn.graphPathCost = synthNetwork.graphPathCost;
+              rn.dijkstraBottleneck = synthNetwork.bestRoute.bottleneck;
+              rn.dijkstraMethod = synthNetwork.bestRoute.method;
+              rn.dijkstraMaxTemperature = synthNetwork.bestRoute.maxTemperature;
+              rn.dijkstraMaxPressure = synthNetwork.bestRoute.maxPressure;
+              rn.dijkstraStepCount = synthNetwork.bestRoute.stepCount;
+              (updatedMlFeatures as any).reactionNetwork = rn;
+              if (synthNetwork.bestRoute.bottleneck) {
+                emit("log", {
+                  phase: "phase-10",
+                  event: "Reaction network bottleneck",
+                  detail: `${candidate.formula}: bottleneck="${synthNetwork.bestRoute.bottleneck}", pathCost=${synthNetwork.graphPathCost.toFixed(3)}, method=${synthNetwork.bestRoute.method}, steps=${synthNetwork.bestRoute.stepCount}`,
+                  dataSource: "Synthesis Reaction Network",
+                });
+              }
+            }
+          } catch (synthRxnErr) {
+            console.error(`[Engine] Synthesis reaction network failed for ${candidate.formula}:`, synthRxnErr instanceof Error ? synthRxnErr.message.slice(0, 100) : "unknown");
           }
         }
 
@@ -3079,7 +3141,8 @@ async function runPhase10_Physics() {
         if (result.fdPhononSummary?.dynamicallyStable &&
             result.fdPhononSummary.lambdaContribution != null &&
             result.fdPhononSummary.lambdaContribution > 0.5 &&
-            updatedTc > 10) {
+            updatedTc > 10 &&
+            !(existingMlFeatures as any).synthesisRejected) {
           try {
             const dfptJob = await submitDFTJob(candidate.formula, null, 90, "scf");
             const promoted = dfptJob ? await promoteDFTJob(candidate.formula, 90) : false;
@@ -3207,13 +3270,23 @@ async function runPhase10_Physics() {
           } catch (e) { console.error(`[Engine] Phase-10 disorder generation failed for ${candidate.formula}:`, e); }
 
           try {
-            const corrEffects = await estimateCorrelationEffects(candidate.formula, {
-              UoverW: result.correlation?.ratio,
-              dosAtEF: result.electronicStructure?.densityOfStatesAtFermi,
-            });
-            if (corrEffects.tcModifier > 1.05) {
-              feedbackLoopStats.correlationBoostsApplied++;
-              feedbackLoopStats.correlationTotalTcBoost += Math.min(corrEffects.tcModifier, 1.5) - 1;
+            const dftPlusUTcMod = (candidate.mlFeatures as any)?.qeDFTPlusUTcModifier as number | null | undefined;
+            if ((candidate.mlFeatures as any)?.qeDFTPlusU && dftPlusUTcMod != null) {
+              // DFT+U result available: trust the DFT-derived correlationStrength/tcModifier
+              // directly from the Eliashberg+Hubbard pipeline rather than the ML estimate
+              if (dftPlusUTcMod > 1.05) {
+                feedbackLoopStats.correlationBoostsApplied++;
+                feedbackLoopStats.correlationTotalTcBoost += Math.min(dftPlusUTcMod, 1.5) - 1;
+              }
+            } else {
+              const corrEffects = await estimateCorrelationEffects(candidate.formula, {
+                UoverW: result.correlation?.ratio,
+                dosAtEF: result.electronicStructure?.densityOfStatesAtFermi,
+              });
+              if (corrEffects.tcModifier > 1.05) {
+                feedbackLoopStats.correlationBoostsApplied++;
+                feedbackLoopStats.correlationTotalTcBoost += Math.min(corrEffects.tcModifier, 1.5) - 1;
+              }
             }
           } catch (e) { console.error(`[Engine] Phase-10 correlation analysis failed for ${candidate.formula}:`, e); }
 
@@ -4435,15 +4508,17 @@ async function processSynthesisCandidate(candidate: any, emit: any): Promise<{
   newRoutes: any[];
   pendingSynthProcesses: any[];
   pendingReactions: any[];
-  candidateUpdate: { id: string; synthesisPath: any } | null;
-  failedUpdate: { id: string; synthesisPath: any } | null;
+  candidateUpdate: { id: string; synthesisPath: any; mlFeatures?: any } | null;
+  failedUpdate: { id: string; synthesisPath: any; mlFeatures?: any } | null;
+  gateRejected: boolean;
 }> {
   const result = {
     newRoutes: [] as any[],
     pendingSynthProcesses: [] as any[],
     pendingReactions: [] as any[],
-    candidateUpdate: null as { id: string; synthesisPath: any } | null,
-    failedUpdate: null as { id: string; synthesisPath: any } | null,
+    candidateUpdate: null as { id: string; synthesisPath: any; mlFeatures?: any } | null,
+    failedUpdate: null as { id: string; synthesisPath: any; mlFeatures?: any } | null,
+    gateRejected: false,
   };
 
   const existingPath = candidate.synthesisPath as any;
@@ -4502,7 +4577,7 @@ async function processSynthesisCandidate(candidate: any, emit: any): Promise<{
     if (!hasPlannedRoutes) {
       try {
         const formationEnergy = typeof candidate.formationEnergy === "number" ? candidate.formationEnergy : undefined;
-        const planResult = planAndTrack(candidate.formula, { formationEnergy: formationEnergy ?? null, maxRoutes: 5 });
+        const planResult = await planAndTrack(candidate.formula, { formationEnergy: formationEnergy ?? null, maxRoutes: 5 });
         const plannedRoutes = planResult.routes;
         if (plannedRoutes.length > 0) {
           const plannerRoutes = plannedRoutes.slice(0, 3).map((r: any) => ({
@@ -4615,6 +4690,64 @@ async function processSynthesisCandidate(candidate: any, emit: any): Promise<{
       };
     }
     result.newRoutes = allNewRoutes;
+
+    // ── Synthesis gate ───────────────────────────────────────────────────────
+    // Run the hard-gate check now that routes are planned.  A failed gate means
+    // the compound is too toxic / too many steps / too chemically distant / hull
+    // too high to be worth a DFT slot.  Stamp synthesisRejected into mlFeatures
+    // so that every DFT submission path in later phases can skip this formula.
+    try {
+      const gate = evaluateSynthesisGate(candidate.formula);
+      const dijkstraFields = {
+        ...(gate.graphPathCost !== null && { synthesisGraphPathCost: gate.graphPathCost }),
+        ...(gate.dijkstraBottleneck !== null && { synthesisBottleneck: gate.dijkstraBottleneck }),
+        ...(gate.dijkstraMethod !== null && { synthesisPreferredMethod: gate.dijkstraMethod }),
+        ...(gate.dijkstraStepCount !== null && { synthesisDijkstraSteps: gate.dijkstraStepCount }),
+      };
+      if (!gate.pass) {
+        result.gateRejected = true;
+        emit("log", {
+          phase: "phase-13",
+          event: "Synthesis gate: hard reject",
+          detail: `${candidate.formula}: ${gate.rejectionReasons.join("; ")} (score=${gate.compositeScore.toFixed(3)})`,
+          dataSource: "Synthesis Gate",
+        });
+        const existingMlf = (candidate.mlFeatures as Record<string, any>) ?? {};
+        const pendingPath = result.candidateUpdate?.synthesisPath ?? existingPath ?? {};
+        result.candidateUpdate = {
+          id: candidate.id,
+          synthesisPath: {
+            ...pendingPath,
+            synthesisGateRejected: true,
+            synthesisGateReasons: gate.rejectionReasons,
+            synthesisGateScore: gate.compositeScore,
+            synthesisGateCheckedAt: new Date().toISOString(),
+          },
+          mlFeatures: {
+            ...existingMlf,
+            synthesisRejected: true,
+            synthesisRejectedReasons: gate.rejectionReasons,
+            synthesisGateScore: gate.compositeScore,
+            ...dijkstraFields,
+          },
+        };
+      } else if (Object.keys(dijkstraFields).length > 0) {
+        // Gate passed — still persist the Dijkstra route info into mlFeatures
+        const existingMlf = (candidate.mlFeatures as Record<string, any>) ?? {};
+        const pendingUpdate = result.candidateUpdate ?? { id: candidate.id };
+        result.candidateUpdate = {
+          ...pendingUpdate,
+          mlFeatures: {
+            ...existingMlf,
+            ...(pendingUpdate.mlFeatures as Record<string, any> | undefined),
+            ...dijkstraFields,
+          },
+        };
+      }
+    } catch (gateErr: any) {
+      console.error(`[Engine] Synthesis gate check failed for ${candidate.formula}:`, gateErr?.message?.slice(0, 80));
+    }
+    // ────────────────────────────────────────────────────────────────────────
   } catch (err: any) {
     emit("log", {
       phase: "phase-13",
@@ -4650,15 +4783,17 @@ async function runPhase13_SynthesisReasoning() {
     );
 
     let proposed = 0;
+    let gateRejected = 0;
     const allSynthProcesses: any[] = [];
     const allReactions: any[] = [];
-    const allCandidateUpdates: { id: string; synthesisPath: any }[] = [];
+    const allCandidateUpdates: { id: string; synthesisPath: any; mlFeatures?: any }[] = [];
 
     for (const outcome of settled) {
       if (outcome.status === "rejected") continue;
       const r = outcome.value;
       proposed += r.newRoutes.length;
       totalNovelSynthesisProposed += r.newRoutes.length;
+      if (r.gateRejected) gateRejected++;
       allSynthProcesses.push(...r.pendingSynthProcesses);
       allReactions.push(...r.pendingReactions);
       if (r.candidateUpdate) allCandidateUpdates.push(r.candidateUpdate);
@@ -4669,6 +4804,7 @@ async function runPhase13_SynthesisReasoning() {
       try {
         await storage.updateSuperconductorCandidate(update.id, {
           synthesisPath: update.synthesisPath,
+          ...(update.mlFeatures ? { mlFeatures: update.mlFeatures } : {}),
         });
       } catch (_) {}
     }
@@ -4679,8 +4815,11 @@ async function runPhase13_SynthesisReasoning() {
       try { await storage.insertChemicalReaction(rxn); } catch (_) {}
     }
 
-    if (proposed > 0) {
-      allInsights.push(`Novel synthesis reasoning: proposed ${proposed} physics-reasoned routes for ${toProcess.length} candidates`);
+    if (proposed > 0 || gateRejected > 0) {
+      allInsights.push(
+        `Novel synthesis reasoning: proposed ${proposed} physics-reasoned routes for ${toProcess.length} candidates` +
+        (gateRejected > 0 ? `, ${gateRejected} hard-rejected by synthesis gate (DFT skipped)` : "")
+      );
     }
   } finally {
     activeTasks.delete("Novel Synthesis Reasoning");
@@ -4688,7 +4827,7 @@ async function runPhase13_SynthesisReasoning() {
   }
 }
 
-async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: boolean; tc: number; reason: string; physicsPred?: PhysicsPrediction }> {
+async function runAutonomousDiscoveryCycle(formula: string, opts?: { skipDbDupCheck?: boolean; skipStructurePrediction?: boolean }): Promise<{ passed: boolean; tc: number; reason: string; physicsPred?: PhysicsPrediction }> {
   try {
     if (typeof formula !== "string") {
       formula = String(formula ?? "");
@@ -4708,10 +4847,14 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
       return { passed: false, tc: prevRejection.tc, reason: `cached-reject: ${prevRejection.reason}` };
     }
 
-    const existingCandidate = await storage.getSuperconductorByFormula(formula);
-    if (existingCandidate) {
-      pipelineStageMetrics.duplicateRejects++;
-      return { passed: false, tc: existingCandidate.predictedTc ?? 0, reason: "duplicate" };
+    // skipDbDupCheck: used by SG sweep to avoid DB round-trips for each of 967 candidates.
+    // In-memory caches (rejectedFormulas, alreadyScreenedFormulas) still catch repeats.
+    if (!opts?.skipDbDupCheck) {
+      const existingCandidate = await storage.getSuperconductorByFormula(formula);
+      if (existingCandidate) {
+        pipelineStageMetrics.duplicateRejects++;
+        return { passed: false, tc: existingCandidate.predictedTc ?? 0, reason: "duplicate" };
+      }
     }
 
     const stabilityScreen = passesStabilityPreFilter(formula);
@@ -4817,24 +4960,38 @@ async function runAutonomousDiscoveryCycle(formula: string): Promise<{ passed: b
       verificationStage: 0,
     };
 
-    pipelineStageMetrics.prototypeAttempts++;
-    const structureBatch = await runStructurePredictionBatch(emit, [candidate as any]);
-    const structureResult = Array.isArray(structureBatch) ? structureBatch[0] : undefined;
-    if (structureResult) {
-      pipelineStageMetrics.prototypeSuccesses++;
-      (candidate as any).mlFeatures = { ...((candidate as any).mlFeatures ?? {}), structureSource: "predicted" };
+    if (!opts?.skipStructurePrediction) {
+      // skipStructurePrediction: fast path screening bypasses this — the MP API call
+      // (30s × 3 retries = 90s per candidate) blocks the event loop for each of 200+
+      // candidates, turning a 2-min cycle into a 30-min one. The prototype fallback
+      // below still runs so downstream physics has structural context.
+      pipelineStageMetrics.prototypeAttempts++;
+      const structureBatch = await runStructurePredictionBatch(emit, [candidate as any]);
+      const structureResult = Array.isArray(structureBatch) ? structureBatch[0] : undefined;
+      if (structureResult) {
+        pipelineStageMetrics.prototypeSuccesses++;
+        (candidate as any).mlFeatures = { ...((candidate as any).mlFeatures ?? {}), structureSource: "predicted" };
+      } else {
+        const protoFallback = matchPrototype(formula);
+        if (protoFallback) {
+          (candidate as any).prototype = protoFallback.prototype;
+          (candidate as any).crystalStructure = `${protoFallback.spaceGroup} (${protoFallback.crystalSystem})`;
+          (candidate as any).mlFeatures = { ...((candidate as any).mlFeatures ?? {}), structureSource: "prototype-fallback" };
+          console.log(`[Autonomous] ${formula}: structure prediction failed — using prototype fallback '${protoFallback.prototype}'`);
+        } else {
+          (candidate as any).mlFeatures = { ...((candidate as any).mlFeatures ?? {}), structureSource: "none" };
+          console.log(`[Autonomous] ${formula}: no structure or prototype — proceeding with composition-only features`);
+        }
+      }
     } else {
-      // Fallback: map formula to nearest known prototype so downstream physics
-      // analysis has structural context rather than silently proceeding with none.
+      // Fast path: skip MP API, use in-memory prototype lookup only.
       const protoFallback = matchPrototype(formula);
       if (protoFallback) {
         (candidate as any).prototype = protoFallback.prototype;
         (candidate as any).crystalStructure = `${protoFallback.spaceGroup} (${protoFallback.crystalSystem})`;
         (candidate as any).mlFeatures = { ...((candidate as any).mlFeatures ?? {}), structureSource: "prototype-fallback" };
-        console.log(`[Autonomous] ${formula}: structure prediction failed — using prototype fallback '${protoFallback.prototype}'`);
       } else {
         (candidate as any).mlFeatures = { ...((candidate as any).mlFeatures ?? {}), structureSource: "none" };
-        console.log(`[Autonomous] ${formula}: no structure or prototype — proceeding with composition-only features`);
       }
     }
 
@@ -5149,6 +5306,12 @@ async function runAutonomousFastPath() {
   if (!shouldContinue()) return;
   activeTasks.add("Autonomous Screening");
   broadcast("taskStart", { task: "Autonomous Screening" });
+  // Set flag at the TOP of the function — not just before the screening loop.
+  // The SG sweep checks this flag before each candidate; if it was only set
+  // inside the screening loop, the 5-10 min setup phase (DB queries, generation,
+  // proto-enum inserts) would overlap with the SG sweep and compete for the
+  // 5 Neon pool connections, causing cascading 20s timeouts.
+  isFastPathScreeningActive = true;
 
   try {
     let lastRetrainDatasetSize = 277;
@@ -6107,9 +6270,19 @@ async function runAutonomousFastPath() {
       autonomousTotalScreened++;
       batchCount++;
 
+      // Yield to event loop before every candidate so heartbeat timers can fire between
+      // the synchronous blocks inside runAutonomousDiscoveryCycle (computeFullTightBinding,
+      // computeElectronicStructure, etc.). Without this, back-to-back candidates can hold
+      // the event loop for hundreds of milliseconds and cause API unresponsiveness.
+      await new Promise<void>(r => setTimeout(r, 0));
+
       let result: { passed: boolean; tc: number; reason: string; physicsPred?: any };
       try {
-        result = await runAutonomousDiscoveryCycle(formula);
+        // skipDbDupCheck: in-memory alreadyScreenedFormulas set catches duplicates, DB
+        //   unique constraint rejects any that slip through.
+        // skipStructurePrediction: MP API (30s×3 retries=90s/candidate) would turn a
+        //   2-min cycle into 30+ min with 200+ candidates. Prototype lookup is used instead.
+        result = await runAutonomousDiscoveryCycle(formula, { skipDbDupCheck: true, skipStructurePrediction: true });
       } finally {
         releaseFormulaInFlight(formula);
       }
@@ -6757,6 +6930,7 @@ async function runAutonomousFastPath() {
       dataSource: "Autonomous Loop",
     });
   } finally {
+    isFastPathScreeningActive = false;
     activeTasks.delete("Autonomous Screening");
     broadcast("taskEnd", { task: "Autonomous Screening" });
   }
@@ -7198,6 +7372,7 @@ async function runLearningCycle() {
         try {
           console.log(`[Active Learning] Triggered at cycle ${cycleCount} (last AL cycle: ${lastActiveLearningCycle})`);
           const alStats = await runActiveLearningCycle(emit, { cycleCount, explorationMode: explorationModeActive });
+          console.log(`[Engine] runActiveLearningCycle returned at T+${Math.round((Date.now() - _engineStartMs) / 1000)}s`);
           lastActiveLearningCycle = cycleCount;
           emit("log", {
             phase: "engine",
@@ -7229,121 +7404,129 @@ async function runLearningCycle() {
             });
           }
 
-          try {
-            const topCandidates = await storage.getSuperconductorCandidates(10);
-            let pressureCurvesAnalyzed = 0;
-            let transitionsFound = 0;
-            // Run per-candidate pressure curve + transition analysis concurrently —
-            // each formula is independent so sequential for...await was serialising
-            // ~56 predictAtPressure awaits × 5 formulas for no reason.
-            const curveResults = await Promise.allSettled(
-              topCandidates.slice(0, 5).map(async (c) => {
-                await predictPressureCurve(c.formula);
-                const optimal = await findOptimalPressure(c.formula);
-                const transitions = await detectPhaseTransitions(c.formula);
-                return { formula: c.formula, optimal, transitions };
-              })
-            );
-            for (const r of curveResults) {
-              if (r.status === "rejected") continue;
-              const { optimal, transitions } = r.value;
-              pressureCurvesAnalyzed++;
-              transitionsFound += transitions.length;
-              if (optimal.maxTc > 77 && optimal.optimalPressureGpa > 0) {
-                emit("log", {
-                  phase: "engine",
-                  event: "Pressure-Tc curve",
-                  detail: `${r.value.formula}: peak Tc=${optimal.maxTc.toFixed(1)}K at ${optimal.optimalPressureGpa} GPa${transitions.length > 0 ? `, ${transitions.length} phase transition(s)` : ''}`,
-                  dataSource: "Pressure Surrogate",
-                });
-              }
-            }
-            const pcStats = getPressureCurveStats();
-            const ptStats = getPhaseTransitionStats();
-            emit("log", {
-              phase: "engine",
-              event: "Pressure analysis summary",
-              detail: `Curves: ${pcStats.totalCurves} cached (${pressureCurvesAnalyzed} new this cycle), transitions: ${ptStats.totalTransitionsDetected} total (${transitionsFound} this cycle), high-Tc materials: ${pcStats.highTcCount}, pressure-sensitive: ${pcStats.sensitiveCount}`,
-              dataSource: "Pressure Surrogate",
-            });
-
-            let enthalpyStableCount = 0;
-            // Run stability window checks concurrently — also independent per formula
-            const enthalpyResults = await Promise.allSettled(
-              topCandidates.slice(0, 5).map(c => findStabilityPressureWindow(c.formula))
-            );
-            for (const r of enthalpyResults) {
-              if (r.status === "fulfilled" && r.value && r.value.maxPressureGpa > r.value.minPressureGpa) {
-                enthalpyStableCount++;
-              }
-            }
-            const hStats = getEnthalpyStats();
-            emit("log", {
-              phase: "engine",
-              event: "Enthalpy stability summary",
-              detail: `Computed: ${hStats.totalComputed}, stable: ${hStats.stableCount}, metastable: ${hStats.metastableCount}, unstable: ${hStats.unstableCount}, avg stability window: ${hStats.avgStabilityWindow} GPa, stable windows found: ${enthalpyStableCount}/5 top candidates`,
-              dataSource: "Enthalpy H=E+PV",
-            });
-
-            let profilesBuilt = 0;
-            let bayesOptCount = 0;
-            const pressureResults = await Promise.allSettled(
-              topCandidates.slice(0, 5).map(async (c) => {
-                const profile = await buildPressureResponseProfile(c.formula);
-
-                for (const pt of profile.tcVsPressure) {
-                  const stabPt = profile.stabilityVsPressure.find(s => s.pressure === pt.pressure);
-                  addPressureObservation(c.formula, pt.pressure, pt.tc, stabPt?.stable ?? false, stabPt?.enthalpy ?? 0);
-                }
-
-                const familyP = estimateFamilyPressure(c.formula);
-                const bayesResult = await optimizePressureForFormula(c.formula, 3, 15, familyP);
-                return { formula: c.formula, bayesResult };
-              })
-            );
-            for (const r of pressureResults) {
-              if (r.status === "fulfilled") {
-                profilesBuilt++;
-                bayesOptCount++;
-                if (r.value.bayesResult.predictedTcAtOptimal > 50) {
+          // Fire-and-forget pressure analysis — predictPressureCurve makes 36+ sequential
+          // extractFeatures calls per formula (takes 2-5 min uncached). Running this as
+          // fire-and-forget lets the engine cycle advance immediately; results are cached
+          // for subsequent cycles.
+          console.log(`[Engine] post-AL: launching background pressure analysis at T+${Math.round((Date.now() - _engineStartMs) / 1000)}s`);
+          (async () => {
+            try {
+              const topCandidates = await storage.getSuperconductorCandidates(10);
+              let pressureCurvesAnalyzed = 0;
+              let transitionsFound = 0;
+              // Run per-candidate pressure curve + transition analysis concurrently —
+              // each formula is independent so sequential for...await was serialising
+              // ~56 predictAtPressure awaits × 5 formulas for no reason.
+              const curveResults = await Promise.allSettled(
+                topCandidates.slice(0, 5).map(async (c) => {
+                  await predictPressureCurve(c.formula);
+                  const optimal = await findOptimalPressure(c.formula);
+                  const transitions = await detectPhaseTransitions(c.formula);
+                  return { formula: c.formula, optimal, transitions };
+                })
+              );
+              for (const r of curveResults) {
+                if (r.status === "rejected") continue;
+                const { optimal, transitions } = r.value;
+                pressureCurvesAnalyzed++;
+                transitionsFound += transitions.length;
+                if (optimal.maxTc > 77 && optimal.optimalPressureGpa > 0) {
                   emit("log", {
                     phase: "engine",
-                    event: "Bayesian pressure optimization",
-                    detail: `${r.value.formula}: optimal P=${r.value.bayesResult.optimalPressure} GPa, predicted Tc=${r.value.bayesResult.predictedTcAtOptimal}K, stable=${r.value.bayesResult.stableAtOptimal}, confidence=${r.value.bayesResult.confidence}`,
-                    dataSource: "Bayesian Pressure GP",
+                    event: "Pressure-Tc curve",
+                    detail: `${r.value.formula}: peak Tc=${optimal.maxTc.toFixed(1)}K at ${optimal.optimalPressureGpa} GPa${transitions.length > 0 ? `, ${transitions.length} phase transition(s)` : ''}`,
+                    dataSource: "Pressure Surrogate",
                   });
                 }
               }
+              const pcStats = getPressureCurveStats();
+              const ptStats = getPhaseTransitionStats();
+              emit("log", {
+                phase: "engine",
+                event: "Pressure analysis summary",
+                detail: `Curves: ${pcStats.totalCurves} cached (${pressureCurvesAnalyzed} new this cycle), transitions: ${ptStats.totalTransitionsDetected} total (${transitionsFound} this cycle), high-Tc materials: ${pcStats.highTcCount}, pressure-sensitive: ${pcStats.sensitiveCount}`,
+                dataSource: "Pressure Surrogate",
+              });
+
+              let enthalpyStableCount = 0;
+              // Run stability window checks concurrently — also independent per formula
+              const enthalpyResults = await Promise.allSettled(
+                topCandidates.slice(0, 5).map(c => findStabilityPressureWindow(c.formula))
+              );
+              for (const r of enthalpyResults) {
+                if (r.status === "fulfilled" && r.value && r.value.maxPressureGpa > r.value.minPressureGpa) {
+                  enthalpyStableCount++;
+                }
+              }
+              const hStats = getEnthalpyStats();
+              emit("log", {
+                phase: "engine",
+                event: "Enthalpy stability summary",
+                detail: `Computed: ${hStats.totalComputed}, stable: ${hStats.stableCount}, metastable: ${hStats.metastableCount}, unstable: ${hStats.unstableCount}, avg stability window: ${hStats.avgStabilityWindow} GPa, stable windows found: ${enthalpyStableCount}/5 top candidates`,
+                dataSource: "Enthalpy H=E+PV",
+              });
+
+              let profilesBuilt = 0;
+              let bayesOptCount = 0;
+              const pressureResults = await Promise.allSettled(
+                topCandidates.slice(0, 5).map(async (c) => {
+                  const profile = await buildPressureResponseProfile(c.formula);
+
+                  for (const pt of profile.tcVsPressure) {
+                    const stabPt = profile.stabilityVsPressure.find(s => s.pressure === pt.pressure);
+                    addPressureObservation(c.formula, pt.pressure, pt.tc, stabPt?.stable ?? false, stabPt?.enthalpy ?? 0);
+                  }
+
+                  const familyP = estimateFamilyPressure(c.formula);
+                  const bayesResult = await optimizePressureForFormula(c.formula, 3, 15, familyP);
+                  return { formula: c.formula, bayesResult };
+                })
+              );
+              for (const r of pressureResults) {
+                if (r.status === "fulfilled") {
+                  profilesBuilt++;
+                  bayesOptCount++;
+                  if (r.value.bayesResult.predictedTcAtOptimal > 50) {
+                    emit("log", {
+                      phase: "engine",
+                      event: "Bayesian pressure optimization",
+                      detail: `${r.value.formula}: optimal P=${r.value.bayesResult.optimalPressure} GPa, predicted Tc=${r.value.bayesResult.predictedTcAtOptimal}K, stable=${r.value.bayesResult.stableAtOptimal}, confidence=${r.value.bayesResult.confidence}`,
+                      dataSource: "Bayesian Pressure GP",
+                    });
+                  }
+                }
+              }
+              // fastPressureScreen is independent per candidate — run concurrently
+              await Promise.allSettled(
+                topCandidates.slice(0, 8).map(async (c) => {
+                  const cPressure = c.pressureGpa ?? 0;
+                  const screen = await fastPressureScreen(c.formula, cPressure);
+                  const isHit = screen.passesPrescreen && (c.predictedTc ?? 0) > 20;
+                  recordClusterDiscovery(c.formula, cPressure, c.predictedTc ?? 0, isHit);
+                })
+              );
+
+              const mapStats = getPressurePropertyMapStats();
+              const bpStats = getBayesianPressureStats();
+              const clusterStats = getPressureClusterStats();
+              emit("log", {
+                phase: "engine",
+                event: "Pressure maps and Bayesian summary",
+                detail: `Profiles: ${mapStats.totalProfiles} (${profilesBuilt} new), avg peak Tc=${mapStats.avgPeakTc}K at ${mapStats.avgPeakPressure} GPa, low-P high-Tc: ${mapStats.lowPressureHighTcCount} | Bayesian: ${bpStats.totalOptimizations} optimized, avg optimal P=${bpStats.avgOptimalPressure} GPa, low-P optimal: ${bpStats.lowPressureOptimalCount}`,
+                dataSource: "Pressure Property Maps + Bayesian GP",
+              });
+
+              emit("log", {
+                phase: "engine",
+                event: "Pressure cluster analysis",
+                detail: `Discoveries: ${clusterStats.totalDiscoveries}, most productive: ${clusterStats.mostProductiveCluster}, clusters: ${clusterStats.clusters.map(c => `${c.id}(w=${c.weight.toFixed(2)},hits=${c.discoveryCount})`).join(', ')}`,
+                dataSource: "Pressure Clusters",
+              });
+              console.log(`[Engine] post-AL: background pressure analysis done`);
+            } catch (pressureErr: any) {
+              console.error(`[Pressure Analysis] Background error: ${pressureErr?.message?.slice(0, 150)}`);
             }
-            // fastPressureScreen is independent per candidate — run concurrently
-            await Promise.allSettled(
-              topCandidates.slice(0, 8).map(async (c) => {
-                const cPressure = c.pressureGpa ?? 0;
-                const screen = await fastPressureScreen(c.formula, cPressure);
-                const isHit = screen.passesPrescreen && (c.predictedTc ?? 0) > 20;
-                recordClusterDiscovery(c.formula, cPressure, c.predictedTc ?? 0, isHit);
-              })
-            );
-
-            const mapStats = getPressurePropertyMapStats();
-            const bpStats = getBayesianPressureStats();
-            const clusterStats = getPressureClusterStats();
-            emit("log", {
-              phase: "engine",
-              event: "Pressure maps and Bayesian summary",
-              detail: `Profiles: ${mapStats.totalProfiles} (${profilesBuilt} new), avg peak Tc=${mapStats.avgPeakTc}K at ${mapStats.avgPeakPressure} GPa, low-P high-Tc: ${mapStats.lowPressureHighTcCount} | Bayesian: ${bpStats.totalOptimizations} optimized, avg optimal P=${bpStats.avgOptimalPressure} GPa, low-P optimal: ${bpStats.lowPressureOptimalCount}`,
-              dataSource: "Pressure Property Maps + Bayesian GP",
-            });
-
-            emit("log", {
-              phase: "engine",
-              event: "Pressure cluster analysis",
-              detail: `Discoveries: ${clusterStats.totalDiscoveries}, most productive: ${clusterStats.mostProductiveCluster}, clusters: ${clusterStats.clusters.map(c => `${c.id}(w=${c.weight.toFixed(2)},hits=${c.discoveryCount})`).join(', ')}`,
-              dataSource: "Pressure Clusters",
-            });
-          } catch (pressureErr: any) {
-            console.error(`[Pressure Analysis] Error: ${pressureErr?.message?.slice(0, 150)}`);
-          }
+          })();
         } catch (err: any) {
           lastActiveLearningCycle = cycleCount;
           console.log(`[Active Learning] Error at cycle ${cycleCount}: ${err.message?.slice(0, 150)}`);
@@ -8286,6 +8469,7 @@ async function backfillGBScores() {
         emit("log", { phase: "engine", event: "GB score backfill running", detail: `Scoring unscored candidates with gradient boosting model...`, dataSource: "Internal" });
       }
 
+      let backfillDbErrors = 0;
       for (let i = 0; i < batch.length; i++) {
         await new Promise<void>(r => setTimeout(r, 0)); // yield after every candidate — getCachedFeatures blocks ~350ms
         const c = batch[i];
@@ -8300,6 +8484,7 @@ async function backfillGBScores() {
             ensembleScore: ensemble,
           });
           totalUpdated++;
+          backfillDbErrors = 0;
         } catch {
           try {
             await storage.updateSuperconductorCandidate(c.id, {
@@ -8307,10 +8492,21 @@ async function backfillGBScores() {
               neuralNetScore: 0.3,
               ensembleScore: 0.3,
             });
-          } catch (e) { console.error("[Engine] GB score backfill update failed:", e); }
+            backfillDbErrors = 0;
+          } catch (e) {
+            console.error("[Engine] GB score backfill update failed:", e);
+            backfillDbErrors++;
+            // Abort on persistent DB failures to avoid connection pool starvation
+            if (backfillDbErrors >= 3) {
+              console.warn("[Engine] GB score backfill: 3 consecutive DB errors, deferring remainder");
+              break;
+            }
+            await new Promise<void>(r => setTimeout(r, 2000));
+          }
           totalFailed++;
         }
       }
+      if (backfillDbErrors >= 3) break; // also break outer loop
     } while (batch.length === 50);
 
     if (totalUpdated > 0 || totalFailed > 0) {
@@ -8341,6 +8537,7 @@ async function recalculatePhysics() {
         emit("log", { phase: "engine", event: "Physics recalculation running", detail: `Recalculating Tc and ensemble scores for candidates on physics version ${PHYSICS_VERSION}...`, dataSource: "Internal" });
       }
 
+      let dbErrorCount = 0;
       for (let i = 0; i < needsRecalc.length; i++) {
         await new Promise<void>(r => setTimeout(r, 0)); // yield after every candidate
         const c = needsRecalc[i];
@@ -8349,6 +8546,7 @@ async function recalculatePhysics() {
           const gb = await gbPredict(features);
           const nnScore = c.neuralNetScore ?? c.quantumCoherence ?? 0.3;
           const ensemble = Math.min(0.95, gb.score * 0.4 + nnScore * 0.6);
+          dbErrorCount = 0; // reset on success
 
           const featureLambda = features.electronPhononLambda ?? 0;
           const metalScore = features.metallicity ?? 0.5;
@@ -8398,7 +8596,16 @@ async function recalculatePhysics() {
             ambientPressureStable: recalcPressure <= 50 ? c.ambientPressureStable : false,
           });
           totalRecalculated++;
-        } catch (e) { console.error("[Engine] Physics recalculation update failed:", e); }
+        } catch (e) {
+          console.error("[Engine] Physics recalculation update failed:", e);
+          dbErrorCount++;
+          // Abort this batch on persistent DB issues — don't starve the connection pool
+          if (dbErrorCount >= 3) {
+            console.warn("[Engine] Physics recalculation: 3 consecutive DB errors, deferring remainder");
+            break;
+          }
+          await new Promise<void>(r => setTimeout(r, 2000)); // back off on errors
+        }
       }
 
       if (totalRecalculated > 10000) break;
@@ -8482,13 +8689,20 @@ export async function startEngine() {
     }
   }, 120_000); // Run 2min after startup — well after first two cycles complete
 
-  setTimeout(() => {
+  // Starts 20 min after startup. Waits for SG sweep to finish (isSGSweepActive flag)
+  // so both tasks don't simultaneously call extractFeatures and saturate the DB pool.
+  setTimeout(async () => {
+    // Wait until SG sweep is done — poll every 30s
+    while (isSGSweepActive) {
+      console.log("[Engine] background: backfill waiting for SG sweep to finish...");
+      await new Promise(r => setTimeout(r, 30_000));
+    }
     console.log("[Engine] background: backfillGBScores + recalculatePhysics starting...");
     backfillGBScores()
       .then(() => recalculatePhysics())
       .then(() => console.log("[Engine] background: backfillGBScores + recalculatePhysics done"))
       .catch(e => console.error("[Engine] background score/physics recalc failed:", e));
-  }, 900_000);
+  }, 1_200_000); // 20 min — after SG sweep starts (15 min)
 
   // ── Background: systematic space-group sweep ─────────────────────────────────
   // Runs once at startup (15 min delay) then every 6 hours. Generates prototype
@@ -8501,6 +8715,7 @@ export async function startEngine() {
 
     async function runSGSweep() {
       if (state !== "running") return;
+      isSGSweepActive = true;
       try {
         const coverage = getSpaceGroupCoverageReport();
         const coveredSGs = Object.values(coverage.coveredByCrystalSystem).reduce((s, v) => s + v.withPrototype, 0);
@@ -8515,20 +8730,33 @@ export async function startEngine() {
         console.log(`[Engine] SG sweep: evaluating ${candidates.length} prototype formula candidates`);
 
         let submitted = 0;
+        let sweepIdx = 0;
         for (const candidate of candidates) {
           if (state !== "running") break;
+          sweepIdx++;
+          // Pause while the fast-path screening loop is active — both loops share the
+          // 5-connection Neon pool, and running them concurrently causes cascading
+          // 20s connection timeouts that freeze the event loop.
+          while (isFastPathScreeningActive) {
+            await new Promise(r => setTimeout(r, 500));
+          }
           try {
-            await runAutonomousDiscoveryCycle(candidate.formula);
+            await runAutonomousDiscoveryCycle(candidate.formula, { skipDbDupCheck: true });
             submitted++;
           } catch { /* non-fatal */ }
-          // Yield every 5 candidates so the event loop stays alive
-          if (submitted % 5 === 0) {
-            await new Promise(r => setTimeout(r, 100));
+          // Yield after every candidate (not just successes) so heartbeat stays alive.
+          // Use 100ms (not 20ms) to leave room for DB keepalive and pool recovery.
+          await new Promise(r => setTimeout(r, 100));
+          // Longer pause every 5 to let DB/GCP pollers run and pool recover
+          if (sweepIdx % 5 === 0) {
+            await new Promise(r => setTimeout(r, 500));
           }
         }
         console.log(`[Engine] SG sweep complete: ${submitted}/${candidates.length} candidates evaluated`);
       } catch (e: any) {
         console.warn("[Engine] SG sweep failed:", e?.message?.slice(0, 100));
+      } finally {
+        isSGSweepActive = false;
       }
       setTimeout(runSGSweep, repeatInterval);
     }

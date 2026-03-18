@@ -18,6 +18,7 @@ import {
 import { RadarChart, PolarGrid, PolarAngleAxis, Radar, ResponsiveContainer, Tooltip, LineChart, Line, AreaChart, Area } from "recharts";
 import { useWebSocket, type ThoughtMessage } from "@/hooks/use-websocket";
 import { EngineControls } from "@/components/engine-controls";
+import { ParetoFrontierChart } from "@/components/pareto-frontier";
 
 interface Stats {
   elementsLearned: number;
@@ -1994,6 +1995,21 @@ export default function Dashboard() {
     dftDatasetStats: { totalSize: number; bySource: Record<string, number>; growthHistory: { timestamp: number; size: number; source: string }[] };
   }>({ queryKey: ["/api/gnn/active-learning-stats"], refetchInterval: ri30 });
   const { data: theoryReport } = useQuery<any>({ queryKey: ["/api/theory-report"], refetchInterval: ri30 });
+  const { data: tscData } = useQuery<{
+    sessionCandidates: { formula: string; topologicalClass: string; tscScore: number; recordedAt: number }[];
+    dbCandidates: {
+      formula: string;
+      predictedTc: number | null;
+      tscScore: number;
+      tscClass: string;
+      z2Index: number[] | null;
+      chernNumber: number | null;
+      weylNodeCount: number | null;
+      phase: string | null;
+      isInProximityToTI: boolean | null;
+    }[];
+    stats: { elementFrequency: Record<string, number>; classFrequency: Record<string, number>; total: number };
+  }>({ queryKey: ["/api/tsc-candidates"], refetchInterval: ri30 });
   const ws = useWebSocket();
 
   const statsHistoryRef = useRef<Record<string, number[]>>({});
@@ -3063,6 +3079,102 @@ export default function Dashboard() {
                   Discovery progress will appear after running causal and symbolic physics engines
                 </p>
               )}
+            </CardContent>
+          </Card>
+
+          <ParetoFrontierChart />
+
+          <Card data-testid="card-tsc-candidates">
+            <CardHeader className="pb-2">
+              <div className="flex items-center justify-between">
+                <CardTitle className="text-base flex items-center gap-2">
+                  <Shield className="h-4 w-4 text-primary" />
+                  TSC Candidates
+                </CardTitle>
+                {(tscData?.stats?.total ?? 0) > 0 && (
+                  <Badge variant="secondary" className="text-xs border-0" data-testid="tsc-total-count">
+                    {tscData?.stats?.total ?? 0} tracked
+                  </Badge>
+                )}
+              </div>
+            </CardHeader>
+            <CardContent>
+              <ScrollArea className="h-52">
+                {(() => {
+                  const dbRows = tscData?.dbCandidates ?? [];
+                  const sessionRows = tscData?.sessionCandidates ?? [];
+                  if (dbRows.length === 0 && sessionRows.length === 0) {
+                    return (
+                      <p className="text-sm text-muted-foreground italic py-4" data-testid="tsc-placeholder">
+                        Topological superconductor candidates will appear as analysis runs
+                      </p>
+                    );
+                  }
+                  const rows = dbRows.length > 0 ? dbRows : sessionRows.map((s) => ({
+                    formula: s.formula,
+                    predictedTc: null,
+                    tscScore: s.tscScore,
+                    tscClass: s.topologicalClass,
+                    z2Index: null,
+                    chernNumber: null,
+                    weylNodeCount: null,
+                    phase: null,
+                    isInProximityToTI: null,
+                  }));
+                  return (
+                    <div className="space-y-2">
+                      {rows.slice(0, 12).map((c, i) => (
+                        <div key={`${c.formula}-${i}`} className="bg-muted/50 rounded-md px-3 py-2" data-testid={`tsc-row-${c.formula}`}>
+                          <div className="flex items-center justify-between gap-2 flex-wrap">
+                            <span className="font-mono text-xs font-semibold text-foreground">{c.formula}</span>
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              {c.tscClass && (
+                                <Badge variant="outline" className="text-[10px] h-4 px-1.5 border-0 bg-purple-500/15 text-purple-700 dark:text-purple-300">
+                                  {c.tscClass.replace("Majorana-hosting TSC", "Majorana").replace("time-reversal-invariant TSC", "TRI-TSC")}
+                                </Badge>
+                              )}
+                              <span className="text-[10px] font-mono text-muted-foreground">
+                                tsc: {(c.tscScore * 100).toFixed(0)}%
+                              </span>
+                              {c.predictedTc != null && c.predictedTc > 0 && (
+                                <span className="text-[10px] font-mono text-sky-600 dark:text-sky-400">
+                                  Tc {c.predictedTc.toFixed(1)} K
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-3 mt-1 flex-wrap">
+                            {c.z2Index && c.z2Index.length > 0 && (
+                              <span className="text-[10px] text-muted-foreground">
+                                Z₂: [{c.z2Index.join(",")}]
+                              </span>
+                            )}
+                            {c.chernNumber != null && c.chernNumber !== 0 && (
+                              <span className="text-[10px] text-muted-foreground">
+                                Chern: {c.chernNumber > 0 ? "+" : ""}{c.chernNumber}
+                              </span>
+                            )}
+                            {c.weylNodeCount != null && c.weylNodeCount > 0 && (
+                              <span className="text-[10px] text-muted-foreground">
+                                Weyl nodes: {c.weylNodeCount}
+                              </span>
+                            )}
+                            {c.isInProximityToTI && (
+                              <span className="text-[10px] text-amber-600 dark:text-amber-400 flex items-center gap-0.5">
+                                <Layers className="h-3 w-3" />
+                                near TI
+                              </span>
+                            )}
+                            {c.phase && (
+                              <span className="text-[10px] text-muted-foreground ml-auto">{c.phase}</span>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })()}
+              </ScrollArea>
             </CardContent>
           </Card>
 

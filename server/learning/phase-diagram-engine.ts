@@ -107,7 +107,14 @@ function computeMiedemaFromParsed(parsed: ParsedFormula): number {
       const aIsNonmetal = MIEDEMA_NONMETALS.has(elA);
       const bIsNonmetal = MIEDEMA_NONMETALS.has(elB);
       if (aIsNonmetal !== bIsNonmetal) {
-        interfaceEnergy -= (0.73 * deltaPhi * deltaPhi) / nwsAvgInv;
+        // Miedema ionicity correction (A.R. Miedema, J. Less-Common Met. 32, 1973;
+        // refined in Miedema & Niessen, CALPHAD 1983).
+        // The canonical 0.73 factor is derived for binary metallic alloys only.
+        // For metal–nonmetal pairs (oxides, nitrides, hydrides, sulfides, etc.)
+        // the ionic bonding character invalidates the metallic-contact model, so
+        // a reduced coefficient (~0.40) is used instead.
+        const ionicityCorrection = 0.40;
+        interfaceEnergy -= (ionicityCorrection * deltaPhi * deltaPhi) / nwsAvgInv;
       }
 
       const contribution = fAB * vAvg * interfaceEnergy;
@@ -499,7 +506,10 @@ interface CachedCompetingPhases {
 }
 
 let competingPhasesCache: CachedCompetingPhases | null = null;
-const COMPETING_PHASES_CACHE_TTL_MS = 60_000;
+// 10 min TTL — was 60s which caused per-minute DB rebuilds (2×20s timeout = 40s stall
+// during each rebuild). With the screening loop inserting tens of candidates/min,
+// a 60s TTL means the cache rebuilds ~once/cycle which is sufficient.
+const COMPETING_PHASES_CACHE_TTL_MS = 600_000;
 
 async function getOrBuildCompetingPhasesCache(): Promise<CachedCompetingPhases> {
   const now = Date.now();

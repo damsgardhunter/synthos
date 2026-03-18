@@ -957,8 +957,12 @@ export function computeWannierProjection(bands: TBBandStructure): WannierProject
 
   for (let b = 0; b < nBands; b++) {
     const energies = bands.bands.map(bk => bk[b] ?? 0);
-    const min = Math.min(...energies);
-    const max = Math.max(...energies);
+    // Avoid spread-based min/max which can overflow stack for large arrays
+    let min = energies[0] ?? 0, max = energies[0] ?? 0;
+    for (let i = 1; i < energies.length; i++) {
+      if (energies[i] < min) min = energies[i];
+      if (energies[i] > max) max = energies[i];
+    }
     const bandwidth = max - min;
     const center = (max + min) / 2;
 
@@ -1031,8 +1035,12 @@ export function detectBandTopology(bands: TBBandStructure): TopologyFeatures {
 
   for (let b = 0; b < nBands; b++) {
     const energies = bands.bands.map(bk => bk[b] ?? 0);
-    const min = Math.min(...energies);
-    const max = Math.max(...energies);
+    // Avoid spread-based min/max which can overflow stack for large arrays
+    let min = energies[0] ?? 0, max = energies[0] ?? 0;
+    for (let i = 1; i < energies.length; i++) {
+      if (energies[i] < min) min = energies[i];
+      if (energies[i] > max) max = energies[i];
+    }
     const bandwidth = max - min;
     const center = (max + min) / 2;
 
@@ -1149,8 +1157,13 @@ export function computeTightBindingDOS(bands: TBBandStructure): TBDOS {
     return { energies: [], dos: [], dosAtFermi: 0, totalStates: 0, uncertaintyMultiplier: 1.0 };
   }
 
-  const eMin = Math.min(...allEnergies);
-  const eMax = Math.max(...allEnergies);
+  // Use loop-based min/max to avoid "Maximum call stack size exceeded" from spread
+  // with large arrays (nBands × nK can exceed 15000 entries at MAX_TB_ORBITALS)
+  let eMin = allEnergies[0], eMax = allEnergies[0];
+  for (let i = 1; i < allEnergies.length; i++) {
+    if (allEnergies[i] < eMin) eMin = allEnergies[i];
+    if (allEnergies[i] > eMax) eMax = allEnergies[i];
+  }
   const nBins = 200;
   const rawDE = (eMax - eMin) / nBins;
   const dE = rawDE > 1e-6 ? rawDE : 0.01;

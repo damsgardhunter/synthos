@@ -10,7 +10,7 @@ import { gnnPredictWithUncertainty } from "./graph-neural-net";
 import { invalidateGNNModel, trainGNNSurrogate, trainEnsembleAsync, setCachedEnsemble, ENSEMBLE_SIZE, addDFTTrainingResult, getDFTTrainingDataset, logGNNVersion, getGNNModelVersion, applySerializedWeights } from "./graph-neural-net";
 import { resolveDFTFeatures, describeDFTSources } from "./dft-feature-resolver";
 import { extractFeatures } from "./ml-predictor";
-import { gbPredict, gbPredictWithUncertainty, incorporateFailureData, incorporateDFTResult, retrainXGBoostFromEvaluated, validateModel, getEvaluatedDatasetStats } from "./gradient-boost";
+import { gbPredict, gbPredictWithUncertainty, incorporateFailureData, incorporateDFTResult, retrainXGBoostFromEvaluated, validateModel, getEvaluatedDatasetStats, registerDFTVerifiedFormula } from "./gradient-boost";
 import { SUPERCON_TRAINING_DATA } from "./supercon-dataset";
 import { fetchCachedFormationEnergies } from "./materials-project-client";
 import { computeDiscoveryScore } from "./family-filters";
@@ -43,6 +43,7 @@ import {
   computeMetrics, computeRecentMetrics, getMetricsForLLM,
   recordCycleImprovement,
 } from "./prediction-reality-ledger";
+import { getLatestParetoRanks } from "../inverse/pareto-optimizer";
 
 export interface ActiveLearningConvergence {
   totalDFTRuns: number;
@@ -204,7 +205,7 @@ interface RankedCandidate {
   uncertainty: number;
   gnnUncertainty: number;
   xgbUncertainty: number;
-  selectionTier: "best-tc" | "high-uncertainty" | "random-exploration" | "pressure-exploration" | "pure-curiosity";
+  selectionTier: "best-tc" | "high-uncertainty" | "random-exploration" | "pressure-exploration" | "pure-curiosity" | "pareto-front";
   targetPressureGpa?: number;
   eiScore?: number;
   ucbScore?: number;
@@ -767,6 +768,37 @@ export async function selectForDFT(
     }
     addFromTier(remaining, "random-exploration", nonPressureBudget - selected.length);
   }
+
+  // ── Tier 5: Pareto rank-1 candidates (top multi-objective trade-offs) ────────
+  // Up to 20 candidates from the Pareto front are injected regardless of their
+  // individual Tc, as long as the total budget is not exceeded.
+  try {
+    const paretoRanks = getLatestParetoRanks();
+    if (paretoRanks.size > 0) {
+      const paretoFront = candidates
+        .filter(c => paretoRanks.get(c.formula) === 1 && !seenFormulas.has(c.formula))
+        .sort((a, b) => (b.predictedTc ?? 0) - (a.predictedTc ?? 0))
+        .slice(0, 20);
+      for (const c of paretoFront) {
+        if (selected.length >= budget) break;
+        seenFormulas.add(c.formula);
+        const fracs = computeCompositionFractions(c.formula);
+        selectedFracs.push(fracs);
+        selected.push({
+          candidate: c,
+          acquisitionScore: 1.0,
+          normalizedTc: finiteOr((c.predictedTc ?? 0) / tcScale, 0),
+          uncertainty: 0.5,
+          gnnUncertainty: 0.5,
+          xgbUncertainty: 0.5,
+          selectionTier: "pareto-front",
+        });
+      }
+    }
+  } catch (e) {
+    console.warn("[selectForDFT] Pareto tier injection failed:", e);
+  }
+  // ─────────────────────────────────────────────────────────────────────────────
 
   for (const s of selected) {
     const f = s.candidate.formula;
@@ -1394,7 +1426,9 @@ async function retrainGNNWithEnrichedData(
         const hasDFTValidation = hasDFTBandGap || hasDFTFormationEnergy;
         if (!hasDFTValidation) continue;
 
-        const storedTc = c.predictedTc ?? 0;
+        // Prefer the DFPT-derived Tc from the QE λ calculation over the ML estimate.
+        const qeDFPTTc = mlf?.qeDFPTTc != null ? Number(mlf.qeDFPTTc) : undefined;
+        const storedTc = qeDFPTTc ?? c.predictedTc ?? 0;
         if (storedTc > 0) {
           seenFormulas.add(c.formula);
           trainingData.push({
@@ -1403,7 +1437,26 @@ async function retrainGNNWithEnrichedData(
             formationEnergy: c.decompositionEnergy ?? undefined,
             structure: undefined,
             prototype: undefined,
+            dataConfidence: c.dataConfidence ?? undefined,
+            qeDFPTTc,
           });
+          if (c.dataConfidence === "dft-verified") {
+            registerDFTVerifiedFormula(c.formula);
+            // Also push the DFPT-derived Tc into the XGBoost evaluatedDataset so its
+            // training target matches what the GNN uses.  Using source="dft" (priority 2)
+            // so the entry supersedes any earlier active-learning/xtb estimate.
+            incorporateDFTResult(
+              c.formula,
+              qeDFPTTc ?? storedTc,
+              c.decompositionEnergy ?? null,
+              true, // treat as phonon-stable if dft-verified
+              "dft",
+              undefined,
+              undefined,
+              undefined,
+              (c as any).pressureGpa ?? 0
+            );
+          }
         }
       }
     }
@@ -1485,7 +1538,20 @@ async function retrainGNNWithEnrichedData(
     setCachedEnsemble(ensembleModels, trainingData);
   }
 
-  logGNNVersion("active-learning-retrain", trainingData.length, dftCount, enrichedCount);
+  const gnnVersionRecord = logGNNVersion("active-learning-retrain", trainingData.length, dftCount, enrichedCount);
+
+  // If the model's error on DFT-verified samples exceeds 30 K — the samples we
+  // trust most — do an immediate extra retrain before moving on.
+  if (!gcpMode && gnnVersionRecord.dftVerifiedMAE != null && gnnVersionRecord.dftVerifiedMAE > 30) {
+    console.warn(
+      `[ActiveLearning] DFT-verified MAE=${gnnVersionRecord.dftVerifiedMAE.toFixed(1)}K exceeds 30K threshold — ` +
+      `triggering immediate full retrain`
+    );
+    const correctionModels = await trainEnsembleAsync(trainingData);
+    invalidateGNNModel();
+    setCachedEnsemble(correctionModels, trainingData);
+    logGNNVersion("dft-mae-correction", trainingData.length, dftCount, enrichedCount);
+  }
 
   await incorporateFailureData();
 
@@ -1657,6 +1723,7 @@ export async function runActiveLearningCycle(
   let disorderBestFormula = "";
 
   for (const ranked of selected.slice(0, disorderTopN)) {
+    await new Promise<void>(r => setTimeout(r, 0)); // yield between candidates — extractFeatures calls ~350ms each
     const { candidate } = ranked;
     try {
       const suggestions = suggestDisorders(candidate.formula);
@@ -1722,6 +1789,7 @@ export async function runActiveLearningCycle(
   let dopingBestFormula = "";
 
   for (const ranked of selected.slice(0, dopingTopN)) {
+    await new Promise<void>(r => setTimeout(r, 0)); // yield between candidates — extractFeatures calls ~350ms each
     const { candidate } = ranked;
     try {
       const baseCounts = parseFormulaCountsLocal(candidate.formula);
@@ -1892,7 +1960,12 @@ export async function runActiveLearningCycle(
   totalEnrichedSinceLastRetrain += dftSuccessCount;
 
   const batchCycleNum = startNewBatchCycle();
-  const validationPre = await validateOnHeldOut();
+  // Skip held-out validation in GCP mode — local GNN weights are stale (GCP trains asynchronously)
+  // and extractFeatures on 77 samples takes ~27s with yields, adding unnecessary latency.
+  const gcpOuterMode = process.env.OFFLOAD_GNN_TO_GCP === "true";
+  console.log(`[ActiveLearning] validationPre start (gcpMode=${gcpOuterMode})`);
+  const validationPre = gcpOuterMode ? { r2: 0, mse: 0 } : await validateOnHeldOut();
+  console.log(`[ActiveLearning] validationPre done: R²=${validationPre.r2.toFixed(4)}`);
   const preR2 = validationPre.r2;
   const preMAE = Math.sqrt(validationPre.mse);
   const preDatasetSize = getEvaluatedDatasetStats().totalEvaluated;
@@ -1927,7 +2000,9 @@ export async function runActiveLearningCycle(
     });
   }
 
-  const validationPost = await validateOnHeldOut();
+  console.log(`[ActiveLearning] validationPost start (gcpMode=${gcpOuterMode})`);
+  const validationPost = gcpOuterMode ? { r2: 0, mse: 0 } : await validateOnHeldOut();
+  console.log(`[ActiveLearning] validationPost done: R²=${validationPost.r2.toFixed(4)}`);
   const postR2 = validationPost.r2;
   const postMAE = Math.sqrt(validationPost.mse);
   const postDatasetSize = getEvaluatedDatasetStats().totalEvaluated;
@@ -2098,7 +2173,7 @@ export async function runModelBenchmarks(emit: EventEmitter, cycle: number): Pro
   const ensPreds:  { formula: string; actual: number; predicted: number }[] = [];
 
   for (const ref of BENCHMARK_MATERIALS) {
-    await new Promise<void>(r => setImmediate(r)); // yield between each to avoid blocking
+    await new Promise<void>(r => setTimeout(r, 0)); // yield between each — setTimeout so timer callbacks (DB keepalive) can fire
 
     let gnnTc: number | null = null;
     try {

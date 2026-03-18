@@ -27,11 +27,15 @@ import { startGNNLoop, stopGNNLoop } from "./gnn-loop";
 import { startXGBLoop, stopXGBLoop } from "./xgb-loop";
 import { startMLLoop, stopMLLoop } from "./ml-loop";
 import { startSuperConIngestion } from "../server/learning/supercon-db-ingestion";
+import { startJarvisIngestion } from "../server/learning/jarvis-ingestion";
 import { startCODCachePopulation, printSpaceGroupCoverage } from "../server/learning/space-group-explorer";
 
-// Default OMP_NUM_THREADS: 4 concurrent QE jobs × 8 threads each = 32 vCPUs
+// Default OMP_NUM_THREADS: 7 concurrent QE jobs × 4 threads = 28 vCPUs (main instance).
+// On a dedicated DFT-only instance, set OMP_NUM_THREADS=3 and DFT_MAX_CONCURRENT=5.
+// QE small systems (≤16 atoms) don't scale past 4 OMP threads — beyond that
+// MPI/OpenMP overhead dominates, so halving threads doubles slot count for free.
 if (!process.env.OMP_NUM_THREADS) {
-  process.env.OMP_NUM_THREADS = "8";
+  process.env.OMP_NUM_THREADS = "4";
 }
 
 const ENABLE_DFT = process.env.ENABLE_DFT_WORKER !== "false";
@@ -55,10 +59,15 @@ printSpaceGroupCoverage();
 // Start background data ingestion tasks (non-blocking — fire-and-forget).
 // These run at lowest priority, yielding every 80 ms between batches.
 // SuperCon: ingests ~33k entries from local CSV / NIMS API / Hamidieh fallback.
+// JARVIS:   ingests supercon_chem (16k), supercon_3d/2d (1.2k), dft3d metallic negatives.
 // COD:      pre-populates structural data cache for high-relevance space groups.
 delay(15_000).then(() => {
   startSuperConIngestion();
   startCODCachePopulation(5);  // SGs with relevance score ≥ 5
+});
+// JARVIS starts 45 s after SuperCon to avoid DB connection contention on startup.
+delay(60_000).then(() => {
+  startJarvisIngestion();
 });
 
 // Stagger loop starts to avoid saturating the Neon connection pool.

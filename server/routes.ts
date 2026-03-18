@@ -56,6 +56,8 @@ import { predictLambda, getLambdaRegressorStats, initLambdaRegressor } from "./l
 import { predictPhononProperties, getPhononSurrogateStats, initPhononSurrogate } from "./physics/phonon-surrogate";
 import { getCalibrationStats as getSurrogateFitnessStats } from "./learning/surrogate-fitness";
 import { getPillarDFTFeedbackStats } from "./inverse/sc-pillars-optimizer";
+import { getParetoFrontierData } from "./inverse/pareto-optimizer";
+import { getTopTSCCandidates, getTSCFamilyStats } from "./physics/tsc-generator-bias";
 import { extractFeatures, computeUnifiedCI } from "./learning/ml-predictor";
 import { computeCompositionFeatures, COMPOSITION_FEATURE_NAMES } from "./learning/composition-features";
 import { cache, TTL, CACHE_KEYS } from "./cache";
@@ -546,6 +548,14 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json(result);
     } catch (e) {
       res.status(500).json({ error: "Failed to fetch superconductor candidates" });
+    }
+  });
+
+  app.get("/api/pareto-frontier", (_req, res) => {
+    try {
+      res.json(getParetoFrontierData());
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch Pareto frontier data" });
     }
   });
 
@@ -1186,6 +1196,63 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json(result.tscScore);
     } catch (e) {
       res.status(500).json({ error: "Failed to compute TSC score" });
+    }
+  });
+
+  // Returns top TSC candidates discovered in the current session (in-memory
+  // history from tsc-generator-bias.ts) plus database candidates that have
+  // topological invariant data.
+  app.get("/api/tsc-candidates", async (req, res) => {
+    try {
+      const limit = Math.min(parseInt((req.query.limit as string) ?? "30", 10), 100);
+
+      // Session-level TSC history (fast, always available)
+      const sessionCandidates = getTopTSCCandidates(limit);
+      const tscStats = getTSCFamilyStats();
+
+      // Database candidates with computed topological invariants
+      let dbCandidates: {
+        formula: string;
+        predictedTc: number | null;
+        tscScore: number;
+        tscClass: string;
+        z2Index: number[] | null;
+        chernNumber: number | null;
+        weylNodeCount: number;
+        phase: string | null;
+        isInProximityToTI: boolean;
+      }[] = [];
+
+      try {
+        const candidates = await storage.getSuperconductorCandidates(500);
+        for (const c of candidates) {
+          const ml = (c.mlFeatures as Record<string, any>) ?? {};
+          const inv = ml.topologicalInvariants as Record<string, any> | undefined;
+          if (!inv) continue;
+          const tsc = inv.tscScore as Record<string, any> | undefined;
+          if (!tsc?.isTSCCandidate) continue;
+
+          dbCandidates.push({
+            formula: c.formula,
+            predictedTc: c.predictedTc ?? null,
+            tscScore: typeof tsc.score === "number" ? tsc.score : 0,
+            tscClass: typeof tsc.tscClass === "string" ? tsc.tscClass : "TSC candidate",
+            z2Index: Array.isArray((inv.z2 as any)?.index) ? (inv.z2 as any).index : null,
+            chernNumber: typeof (inv.chern as any)?.number === "number" ? (inv.chern as any).number : null,
+            weylNodeCount: typeof (inv.weylNodes as any)?.count === "number" ? (inv.weylNodes as any).count : 0,
+            phase: typeof inv.phase === "string" ? inv.phase : null,
+            isInProximityToTI: typeof inv.phase === "string" && inv.phase.toLowerCase().includes("topological"),
+          });
+        }
+        dbCandidates.sort((a, b) => b.tscScore - a.tscScore);
+        dbCandidates = dbCandidates.slice(0, limit);
+      } catch {
+        // DB query failure is non-fatal — return session data only
+      }
+
+      res.json({ sessionCandidates, dbCandidates, stats: tscStats });
+    } catch (e) {
+      res.status(500).json({ error: "Failed to fetch TSC candidates" });
     }
   });
 
@@ -2317,10 +2384,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
-  app.get("/api/synthesis-planner/routes/:formula", generalLimiter, (req, res) => {
+  app.get("/api/synthesis-planner/routes/:formula", generalLimiter, async (req, res) => {
     try {
       const formula = decodeURIComponent(req.params.formula);
-      const result = planSynthesisRoutes(formula, { maxRoutes: 8 });
+      const result = await planSynthesisRoutes(formula, { maxRoutes: 8 });
       res.json(result);
     } catch (e: any) {
       res.status(500).json({ error: "Failed to plan synthesis routes", detail: e.message?.slice(0, 200) });
@@ -2361,7 +2428,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.get("/api/ml-synthesis/predict/:formula", generalLimiter, (req, res) => {
     try {
       const formula = decodeURIComponent(req.params.formula);
-      const result = predictSynthesisFeasibility(formula);
+      const pressureGpa = req.query.pressureGpa ? Number(req.query.pressureGpa) : undefined;
+      const result = predictSynthesisFeasibility(formula, undefined, pressureGpa);
       res.json(result);
     } catch (e: any) {
       res.status(500).json({ error: "Failed to predict synthesis feasibility", detail: e.message?.slice(0, 200) });

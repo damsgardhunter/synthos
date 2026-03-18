@@ -556,7 +556,9 @@ export async function generateHybridCandidates(
     try {
       const fp = computeStructureFingerprint(c.formula);
       addKnownFingerprint(c.formula, fp);
-    } catch {}
+    } catch (err: any) {
+      console.debug(`[hybrid-generator] Fingerprint failed for ${c.formula}: ${err?.message ?? err}`);
+    }
   }
 
   totalGenerated += deduped.length;

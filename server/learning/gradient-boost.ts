@@ -124,6 +124,14 @@ export function setCuriosityProvider(provider: () => number): void {
   curiosityProvider = provider;
 }
 
+// Formulas confirmed by a real DFPT run — receive 5× effective sample weight during XGB
+// retraining by oversampling their (X, y) rows in the training matrix.
+const dftVerifiedFormulas = new Set<string>();
+
+export function registerDFTVerifiedFormula(formula: string): void {
+  dftVerifiedFormulas.add(formula);
+}
+
 function getCuriosityMultiplier(): number {
   if (curiosityProvider) return curiosityProvider();
   return 1.5;
@@ -170,7 +178,7 @@ async function trainEnsembleXGB(X: number[][], y: number[]): Promise<GBEnsemble>
     const nTrees = overrides.nTrees ?? (isOffloaded ? 100 : 300);
     const model = await trainGradientBoosting(bsX, bsY, nTrees, lr, depth, FEATURE_SUBSAMPLE_RATIO);
     models.push(model);
-    await new Promise<void>(r => setImmediate(r)); // yield between each XGB model
+    await new Promise<void>(r => setTimeout(r, 0)); // yield between each XGB model
   }
   return { models, trainedAt: Date.now() };
 }
@@ -194,7 +202,7 @@ async function trainVarianceEnsembleXGB(X: number[][], y: number[], meanEnsemble
     const nTrees = overrides.nTrees ?? (isOffloaded ? 70 : 200);
     const model = await trainGradientBoosting(bsX, bsY, nTrees, lr, depth, FEATURE_SUBSAMPLE_RATIO);
     models.push(model);
-    await new Promise<void>(r => setImmediate(r)); // yield between each variance model
+    await new Promise<void>(r => setTimeout(r, 0)); // yield between each variance model
   }
   return { models, trainedAt: Date.now(), isLogVariance: true };
 }
@@ -1084,7 +1092,11 @@ class TrainingPool {
 
   async addBatch(entries: { formula: string; tc: number; pressureGPa?: number; lambda?: number; omegaLog?: number }[]): Promise<number> {
     let added = 0;
-    for (const e of entries) {
+    for (let _bi = 0; _bi < entries.length; _bi++) {
+      // Yield every 20 entries — each add() calls extractFeatures (~350ms),
+      // so without yields a large batch starves the event loop / timer callbacks.
+      if (_bi > 0 && _bi % 20 === 0) await new Promise<void>(r => setTimeout(r, 0));
+      const e = entries[_bi];
       const known = (e.lambda != null || e.omegaLog != null) ? { lambda: e.lambda, omegaLog: e.omegaLog } : undefined;
       if (await this.add(e.formula, e.tc, e.pressureGPa ?? 0, known)) added++;
     }
@@ -1955,10 +1967,31 @@ export async function retrainXGBoostFromEvaluated(cycleCount?: number): Promise<
     cachedTrainingSnapshot = null;
   }
 
-  const { X, y, formulas } = trainingPool.getTrainingData();
+  let { X, y, formulas } = trainingPool.getTrainingData();
 
   if (X.length < 10) {
     return { retrained: false, datasetSize: X.length, newEntries: newFromEval };
+  }
+
+  // Oversample DFT-verified rows to give them 5× effective weight in the
+  // bootstrap ensemble.  Appending 4 extra copies is equivalent to a 5× sample
+  // weight without modifying the bootstrap sampling kernel.
+  if (dftVerifiedFormulas.size > 0) {
+    const extraX: number[][] = [];
+    const extraY: number[] = [];
+    for (let i = 0; i < formulas.length; i++) {
+      if (dftVerifiedFormulas.has(formulas[i])) {
+        for (let k = 0; k < 4; k++) {
+          extraX.push(X[i]);
+          extraY.push(y[i]);
+        }
+      }
+    }
+    if (extraX.length > 0) {
+      X = [...X, ...extraX];
+      y = [...y, ...extraY];
+      console.log(`[XGBoost] DFT-verified oversampling: +${extraX.length} rows (${extraX.length / 4} DFT formulas × 4 extra copies)`);
+    }
   }
 
   const hp = getXGBoostHyperparamOverrides();
@@ -1977,7 +2010,7 @@ export async function retrainXGBoostFromEvaluated(cycleCount?: number): Promise<
   console.log(`[XGBoost] Retrain #${xgboostRetrainCount + 1} — ${X.length} samples, ${localTrees} trees (lr=${localLR}, depth=${hpDepth})${gcpXgbMode ? " [local placeholder; GCP trains full model]" : ""}...`);
   const retrainStart = Date.now();
   cachedModel = await trainGradientBoosting(X, y, localTrees, localLR, hpDepth);
-  await new Promise<void>(r => setImmediate(r));
+  await new Promise<void>(r => setTimeout(r, 0));
   cachedCalibration = await computeCalibration(cachedModel);
   console.log(`[XGBoost] Base model done in ${Date.now() - retrainStart}ms`);
 
@@ -1995,7 +2028,7 @@ export async function retrainXGBoostFromEvaluated(cycleCount?: number): Promise<
       console.log(`[XGBoost] Variance ensemble done in ${Date.now() - varStart}ms`);
       cachedGlobalFeatureImportance = null;
       buildFeatureImportanceCache();
-      await new Promise<void>(r => setImmediate(r));
+      await new Promise<void>(r => setTimeout(r, 0));
     }
   }
 
@@ -2015,19 +2048,19 @@ export async function retrainXGBoostFromEvaluated(cycleCount?: number): Promise<
     );
     invalidateModel();
     cachedModel = await trainGradientBoosting(X, y, hpTrees, correctedLR, correctedDepth);
-    await new Promise<void>(r => setImmediate(r));
+    await new Promise<void>(r => setTimeout(r, 0));
     cachedCalibration = await computeCalibration(cachedModel);
     if (X.length >= 30) {
       if (process.env.OFFLOAD_XGB_TO_GCP === "true") {
         dispatchXGBJobToGCP(X, y, formulas).catch(() => {});
       } else {
         cachedEnsembleXGB = await trainEnsembleXGB(X, y);
-        await new Promise<void>(r => setImmediate(r));
+        await new Promise<void>(r => setTimeout(r, 0));
         cachedVarianceEnsembleXGB = await trainVarianceEnsembleXGB(X, y, cachedEnsembleXGB);
-        await new Promise<void>(r => setImmediate(r));
+        await new Promise<void>(r => setTimeout(r, 0));
         cachedGlobalFeatureImportance = null;
         buildFeatureImportanceCache();
-        await new Promise<void>(r => setImmediate(r));
+        await new Promise<void>(r => setTimeout(r, 0));
       }
     }
     await logModelVersion("error-rate-correction", X.length);
@@ -2183,16 +2216,16 @@ export async function retrainWithAccumulatedData(): Promise<number> {
 
   invalidateModel();
   cachedModel = await trainGradientBoosting(X, y, 300, 0.05, 6);
-  await new Promise<void>(r => setImmediate(r));
+  await new Promise<void>(r => setTimeout(r, 0));
   cachedCalibration = await computeCalibration(cachedModel);
   if (X.length >= 30) {
     cachedEnsembleXGB = await trainEnsembleXGB(X, y);
-    await new Promise<void>(r => setImmediate(r));
+    await new Promise<void>(r => setTimeout(r, 0));
     cachedVarianceEnsembleXGB = await trainVarianceEnsembleXGB(X, y, cachedEnsembleXGB);
-    await new Promise<void>(r => setImmediate(r));
+    await new Promise<void>(r => setTimeout(r, 0));
     cachedGlobalFeatureImportance = null;
     buildFeatureImportanceCache();
-    await new Promise<void>(r => setImmediate(r));
+    await new Promise<void>(r => setTimeout(r, 0));
   }
   lastRetrainCycle = Date.now();
 
@@ -2236,16 +2269,16 @@ export async function incorporateFailureData(): Promise<number> {
 
     if (X.length >= 10) {
       cachedModel = await trainGradientBoosting(X, y, 300, 0.05, 6);
-      await new Promise<void>(r => setImmediate(r));
+      await new Promise<void>(r => setTimeout(r, 0));
       cachedCalibration = await computeCalibration(cachedModel);
       if (X.length >= 30) {
         cachedEnsembleXGB = await trainEnsembleXGB(X, y);
-        await new Promise<void>(r => setImmediate(r));
+        await new Promise<void>(r => setTimeout(r, 0));
         cachedVarianceEnsembleXGB = await trainVarianceEnsembleXGB(X, y, cachedEnsembleXGB);
-        await new Promise<void>(r => setImmediate(r));
+        await new Promise<void>(r => setTimeout(r, 0));
         cachedGlobalFeatureImportance = null;
         buildFeatureImportanceCache();
-        await new Promise<void>(r => setImmediate(r));
+        await new Promise<void>(r => setTimeout(r, 0));
       }
       await logModelVersion("failure-retrain", X.length);
     }

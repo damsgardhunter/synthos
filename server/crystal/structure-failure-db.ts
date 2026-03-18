@@ -158,7 +158,9 @@ export function getFailurePatterns(): FailurePattern {
     try {
       const cf = computeCompositionFeatures(entry.formula);
       featureVectors.push(compositionFeatureVector(cf));
-    } catch {}
+    } catch (err: any) {
+      console.debug(`[failure-db] Feature extraction failed for ${entry.formula}: ${err?.message ?? err}`);
+    }
   }
 
   const compositionFeatures: { feature: string; avgValue: number; correlation: number }[] = [];
@@ -237,7 +239,9 @@ export function getFailureFeatureVector(formula: string): number[] {
         if (dist < minCompDist) minCompDist = dist;
       } catch {}
     }
-  } catch {}
+  } catch (err: any) {
+    console.debug(`[failure-db] Composition distance failed for ${formula}: ${err?.message ?? err}`);
+  }
 
   const reasonCounts: Record<string, number> = {};
   for (const entry of entries) {
@@ -301,7 +305,9 @@ export function shouldAvoidStructure(
         }
       } catch {}
     }
-  } catch {}
+  } catch (err: any) {
+    console.debug(`[failure-db] shouldAvoidStructure similarity check failed for ${formula}: ${err?.message ?? err}`);
+  }
 
   return false;
 }

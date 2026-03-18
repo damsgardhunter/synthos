@@ -271,9 +271,7 @@ export async function multiTaskPredict(formula: string, opts?: MultiTaskOptions)
     ? features.fermiSurfaceNesting ?? sigmoid(topoOut[0] ?? 0) * 0.5
     : sigmoid(topoOut[0] ?? 0) * 0.5;
 
-  const correlationStrength = features
-    ? features.correlationStrength ?? sigmoid(topoOut[1] ?? 0) * 0.5
-    : sigmoid(topoOut[1] ?? 0) * 0.5;
+  const correlationStrength = features?.correlationStrength ?? sigmoid(topoOut[1] ?? 0) * 0.5;
 
   const magneticMoment = computeMagneticMoment(formula, magneticOut, correlationStrength);
 

@@ -3,6 +3,8 @@ import { findBestPrecursors, computePrecursorAvailabilityScore, type PrecursorSe
 import { computeReactionFeasibility, computeSynthesisTemperature, assessPressureRequirement, type ReactionFeasibilityResult } from "./thermodynamic-feasibility";
 import { classifyFamily } from "../learning/utils";
 import { getMeltingPoint } from "../learning/elemental-data";
+import { proposeAnalogousRoutes, type AnalogyTransferResult } from "./synthesis-analogy-engine";
+import { getAcousticRouteTemplates, computeAcousticSynthesisEffects, type AcousticRouteTemplate, type AcousticSynthesisResult, type MultiPhysicsConditions } from "../physics/acoustic-synthesis-engine";
 
 export interface SynthesisStep {
   stepNumber: number;
@@ -38,6 +40,10 @@ export interface SynthesisRoute {
   totalDuration: string;
   difficulty: string;
   reasoning: string[];
+  /** Acoustic/multi-physics conditions for acoustic-assisted routes */
+  multiPhysicsConditions?: MultiPhysicsConditions;
+  /** Full acoustic synthesis analysis for this route */
+  acousticSynthesisResult?: AcousticSynthesisResult;
 }
 
 export interface SynthesisPlanResult {
@@ -353,11 +359,11 @@ function buildStepsFromTemplate(
         reactants: ["calcined powder"],
         products: ["pellet"],
         temperature: 25,
-        pressure: 200,
+        pressure: 0.2,
         atmosphere: "air",
         reactionType: "pressing",
         duration: "30 minutes",
-        notes: "Uniaxial press at 200 MPa",
+        notes: "Uniaxial press at 0.2 GPa",
       });
 
       steps.push({
@@ -633,22 +639,66 @@ function buildStepsFromTemplate(
   return steps;
 }
 
+// Literature-grounded yield ranges [min%, max%] per synthesis method.
+// The feasibility score (0–1) modulates position within the range; it does NOT
+// act as a direct yield multiplier because a 0–1 ML score ≠ a 0–100 % mass yield.
+//
+// References:
+//   solid-state:   West (2014) "Solid State Chemistry and its Applications", 2nd ed.;
+//                  typical 60–90 % — incomplete sintering kinetics, grinding losses.
+//   arc-melting:   Canfield & Fisk (1992) Phil. Mag. B 65:1117;
+//                  80–95 % — mostly mass-conserving; volatile elements increase loss.
+//   high-pressure: Hemley et al. (1997) PNAS 94:2176;
+//                  70–92 % — small sample but high conversion efficiency in DAC/anvil.
+//   sputtering:    Puurunen (2005) J. Appl. Phys. 97:121301;
+//                  40–70 % — geometric deposition efficiency, chamber wall losses.
+//   PLD:           Eason ed. (2007) "Pulsed Laser Deposition of Thin Films";
+//                  50–75 % — plume angular distribution limits substrate coverage.
+//   MBE:           Arthur (2002) Surf. Sci. 500:189;
+//                  70–88 % — controlled flux but sticking coefficient < 1.
+//   CVD:           Pierson (1999) "Handbook of CVD", 2nd ed.;
+//                  70–85 % — optimised precursors give >80 %; simple oxides/nitrides.
+//   sol-gel:       Brinker & Scherer (1990) "Sol-Gel Science";
+//                  50–80 % — calcination shrinkage and densification losses.
+//   flux-growth:   Canfield (2020) Rev. Sci. Instrum. 91:103903;
+//                  20–60 % — crystallographic yield after decanting and acid etching.
+//   ball-milling:  Suryanarayana (2001) Prog. Mater. Sci. 46:1;
+//                  90–98 % — near-quantitative mechanical mixing, minimal loss.
+const METHOD_YIELD_RANGE: Record<string, readonly [number, number]> = {
+  "solid-state":   [60, 90],
+  "arc-melting":   [80, 95],
+  "high-pressure": [70, 92],
+  "sputtering":    [40, 70],
+  "PLD":           [50, 75],
+  "MBE":           [70, 88],
+  "CVD":           [70, 85],
+  "sol-gel":       [50, 80],
+  "flux-growth":   [20, 60],
+  "ball-milling":  [90, 98],
+} as const;
+const DEFAULT_YIELD_RANGE: readonly [number, number] = [50, 85];
+
+// Per-step yield loss: ~3 % per transfer/firing step beyond the first.
+// Source: empirical solid-state mass-loss data compiled in Ruiz-Hitzky et al. (2013)
+// Adv. Mater. 25:998 and West (2014) §3.2; typical range 2–5 %, 3 % is conservative.
+const STEP_YIELD_LOSS_FRACTION = 0.03;
+
 function estimateYield(feasibility: number, method: string, nSteps: number): string {
-  let baseYield = feasibility * 100;
+  const [minY, maxY] = METHOD_YIELD_RANGE[method] ?? DEFAULT_YIELD_RANGE;
+  const f = Math.max(0, Math.min(1, feasibility));
 
-  if (method === "solid-state") baseYield *= 0.9;
-  else if (method === "arc-melting") baseYield *= 0.85;
-  else if (method === "high-pressure") baseYield *= 0.5;
-  else if (method === "sputtering" || method === "PLD" || method === "MBE") baseYield *= 0.7;
-  else if (method === "CVD") baseYield *= 0.65;
-  else if (method === "sol-gel") baseYield *= 0.8;
-  else if (method === "flux-growth") baseYield *= 0.6;
-  else if (method === "ball-milling") baseYield *= 0.85;
+  // Feasibility shifts position within the literature baseline range.
+  // f = 0 → minY (worst-case for that method), f = 1 → maxY (best-case).
+  let yieldPct = minY + f * (maxY - minY);
 
-  baseYield *= Math.pow(0.95, nSteps - 1);
-  baseYield = Math.max(5, Math.min(95, baseYield));
+  // Compound per-step loss over each step beyond the first.
+  const extraSteps = Math.max(0, nSteps - 1);
+  yieldPct *= Math.pow(1 - STEP_YIELD_LOSS_FRACTION, extraSteps);
 
-  return `${Math.round(baseYield)}%`;
+  // Clamp: 0 % and 100 % are not physically meaningful at planning stage.
+  yieldPct = Math.max(5, Math.min(95, yieldPct));
+
+  return `${Math.round(yieldPct)}%`;
 }
 
 function estimateTotalDuration(steps: SynthesisStep[]): string {
@@ -752,10 +802,109 @@ function buildSynthesisRoute(
   };
 }
 
-export function planSynthesisRoutes(
+/** Convert an AcousticRouteTemplate to a SynthesisRoute for ranking alongside conventional routes. */
+function adaptAcousticRoute(
+  formula: string,
+  template: AcousticRouteTemplate,
+  acousticResult: AcousticSynthesisResult,
+  thermoResult: ReactionFeasibilityResult,
+): SynthesisRoute {
+  const steps: SynthesisStep[] = template.steps.map((s, i) => ({
+    stepNumber: i + 1,
+    reactants: [formula],
+    products: i === template.steps.length - 1 ? [formula] : ["intermediate"],
+    temperature: acousticResult.conditions.baseTemperatureK,
+    pressure: acousticResult.conditions.staticPressureGpa,
+    atmosphere: template.conditions.acousticField?.medium === "liquid-ammonia" ? "liquid NH₃ under pressure" : "controlled atmosphere",
+    reactionType: template.method,
+    duration: `${s.durationHours} hours`,
+    notes: s.description + (s.notes ? ` — ${s.notes}` : ""),
+  }));
+
+  // Acoustic feasibility = thermodynamic base + template modifier + synthesizability bonus
+  const baseFeasibility = Math.max(0.1, thermoResult.overallFeasibility);
+  const feasibility = Math.min(0.98, baseFeasibility + template.feasibilityModifier + acousticResult.synthesizabilityBonus);
+
+  const safetyNotes = [...acousticResult.warnings];
+  if (template.conditions.staticPressureGpa > 50) {
+    safetyNotes.push("High-pressure experiment: DAC safety protocols required");
+  }
+
+  const maxTemp = Math.max(
+    acousticResult.conditions.baseTemperatureK,
+    acousticResult.peakCavitationTemperatureK,
+  );
+
+  return {
+    routeId: `acoustic-${template.method}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    formula,
+    method: template.method,
+    routeName: template.name,
+    steps,
+    precursors: [],
+    precursorDetails: [],
+    feasibilityScore: Number(feasibility.toFixed(4)),
+    templateMatchScore: 0.5,
+    precursorAvailabilityScore: 0.5,
+    thermodynamicFeasibilityScore: thermoResult.overallFeasibility,
+    complexityPenalty: 0.85,
+    totalCostEstimate: template.method === "shock-wave-synthesis" ? "$$$$ (specialist facility)" : "$$$ (specialized equipment)",
+    equipmentList: template.equipmentRequired,
+    safetyNotes,
+    estimatedYield: template.method === "shock-wave-synthesis" ? "~20-40%" : "~60-75%",
+    maxTemperature: maxTemp,
+    maxPressure: Math.max(
+      template.conditions.staticPressureGpa,
+      acousticResult.peakAcousticPressureGpa,
+    ),
+    totalDuration: `~${template.steps.reduce((s, step) => s + step.durationHours, 0).toFixed(1)} hours`,
+    difficulty: template.method === "shock-wave-synthesis" ? "Expert" : "Advanced",
+    reasoning: [
+      template.notes,
+      ...acousticResult.activeEffects,
+      acousticResult.staticPressureReductionGpa > 1
+        ? `Static pressure reduction: ${acousticResult.staticPressureReductionGpa.toFixed(1)} GPa`
+        : "",
+      acousticResult.phononResonanceActive
+        ? `Phonon resonance: λ × ${acousticResult.lambdaEnhancementFactor.toFixed(2)}`
+        : "",
+    ].filter(Boolean),
+    multiPhysicsConditions: acousticResult.conditions,
+    acousticSynthesisResult: acousticResult,
+  };
+}
+
+/** Map an analogy engine route (reaction-pathway.ts types) to the planner's SynthesisRoute. */
+function adaptAnalogyRoute(formula: string, ar: AnalogyTransferResult["routes"][number]): SynthesisRoute {
+  return {
+    routeId: ar.routeId,
+    formula,
+    method: ar.method,
+    routeName: ar.routeName,
+    steps: ar.steps as unknown as SynthesisStep[], // ReactionStep is structurally identical to SynthesisStep
+    precursors: ar.precursors,
+    precursorDetails: [],
+    feasibilityScore: ar.feasibilityScore,
+    templateMatchScore: 0,
+    precursorAvailabilityScore: 0.6,
+    thermodynamicFeasibilityScore: ar.thermodynamics?.overallFeasibility ?? ar.feasibilityScore,
+    complexityPenalty: 0.1,
+    totalCostEstimate: "$$ (analogy-transferred)",
+    equipmentList: ar.equipment ?? [],
+    safetyNotes: [],
+    estimatedYield: "~70%",
+    maxTemperature: ar.maxTemperature,
+    maxPressure: ar.maxPressure,
+    totalDuration: ar.totalDuration,
+    difficulty: ar.difficulty,
+    reasoning: ar.notes ? [ar.notes] : [],
+  };
+}
+
+export async function planSynthesisRoutes(
   formula: string,
   options: SynthesisPlanOptions = {}
-): SynthesisPlanResult {
+): Promise<SynthesisPlanResult> {
   const {
     formationEnergy = null,
     maxRoutes = 8,
@@ -805,6 +954,39 @@ export function planSynthesisRoutes(
     }
   }
 
+  // Merge analogy-transferred routes from structurally similar known compounds.
+  // These carry real experimental conditions scaled by melting-point ratio — higher
+  // information value than pure template routes for novel compositions.
+  try {
+    const analogyResult = await proposeAnalogousRoutes(formula);
+    for (const ar of analogyResult.routes) {
+      if (!seenMethods.has(ar.method)) {
+        allRoutes.push(adaptAnalogyRoute(formula, ar));
+        seenMethods.add(ar.method);
+      }
+    }
+  } catch { /* non-fatal — analogy engine may have no data for this formula */ }
+
+  // Inject acoustic/multi-physics routes.
+  // For any compound requiring > 10 GPa, or any hydride, acoustic routes are generated.
+  // These can supplement or partially replace static DAC pressure via cavitation.
+  try {
+    const requiredPressure = thermoResult.pressureRequirement;
+    const acousticTemplates = getAcousticRouteTemplates(formula, family, requiredPressure);
+    for (const at of acousticTemplates) {
+      if (!seenMethods.has(at.method)) {
+        const acousticResult = computeAcousticSynthesisEffects(
+          formula,
+          at.conditions,
+          null,
+          requiredPressure,
+        );
+        allRoutes.push(adaptAcousticRoute(formula, at, acousticResult, thermoResult));
+        seenMethods.add(at.method);
+      }
+    }
+  } catch { /* non-fatal — acoustic engine may not apply to this formula */ }
+
   if (preferredMethods) {
     for (const method of preferredMethods) {
       if (!seenMethods.has(method)) {
@@ -850,23 +1032,29 @@ export function planSynthesisRoutes(
   };
 }
 
+const PLANNER_STATS_WINDOW = 10_000;
+
 let plannerStats = {
   totalPlans: 0,
   totalRoutes: 0,
   methodBreakdown: {} as Record<string, number>,
-  avgFeasibility: 0,
-  feasibilitySum: 0,
+  // Rolling window of the last PLANNER_STATS_WINDOW feasibility scores.
+  // Using a window instead of a running sum prevents unbounded float growth
+  // (feasibilitySum would lose precision after ~10^9 additions at 864 DFT/day).
+  feasibilityWindow: [] as number[],
 };
 
-export function planAndTrack(formula: string, options?: SynthesisPlanOptions): SynthesisPlanResult {
-  const result = planSynthesisRoutes(formula, options);
+export async function planAndTrack(formula: string, options?: SynthesisPlanOptions): Promise<SynthesisPlanResult> {
+  const result = await planSynthesisRoutes(formula, options);
 
   plannerStats.totalPlans++;
   plannerStats.totalRoutes += result.routes.length;
 
   if (result.bestRoute) {
-    plannerStats.feasibilitySum += result.bestRoute.feasibilityScore;
-    plannerStats.avgFeasibility = plannerStats.feasibilitySum / plannerStats.totalPlans;
+    plannerStats.feasibilityWindow.push(result.bestRoute.feasibilityScore);
+    if (plannerStats.feasibilityWindow.length > PLANNER_STATS_WINDOW) {
+      plannerStats.feasibilityWindow.shift();
+    }
 
     const method = result.bestRoute.method;
     plannerStats.methodBreakdown[method] = (plannerStats.methodBreakdown[method] || 0) + 1;
@@ -876,10 +1064,14 @@ export function planAndTrack(formula: string, options?: SynthesisPlanOptions): S
 }
 
 export function getSynthesisPlannerStats() {
+  const w = plannerStats.feasibilityWindow;
+  const avgFeasibility = w.length > 0
+    ? w.reduce((s, v) => s + v, 0) / w.length
+    : 0;
   return {
     totalPlans: plannerStats.totalPlans,
     totalRoutes: plannerStats.totalRoutes,
-    avgFeasibility: Number(plannerStats.avgFeasibility.toFixed(4)),
+    avgFeasibility: Number(avgFeasibility.toFixed(4)),
     methodBreakdown: { ...plannerStats.methodBreakdown },
   };
 }

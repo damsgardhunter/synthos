@@ -488,6 +488,8 @@ export interface CycleImprovementRecord {
   ciCoverage90: number;
   ciCoverage95: number;
   ciCoverage99: number;
+  /** MAE computed only on ledger entries that came from a real DFT/DFPT run — the true accuracy metric */
+  dftVerifiedMAE: number | null;
 }
 
 const cycleImprovementHistory: CycleImprovementRecord[] = [];
@@ -546,6 +548,13 @@ export function recordCycleImprovement(
   const ciCoverage95 = Number.isFinite(ci.coverage95) ? ci.coverage95 : 0.95;
   const ciCoverage99 = Number.isFinite(ci.coverage99) ? ci.coverage99 : 0.99;
 
+  // Compute MAE restricted to ledger entries whose ground truth came from a real DFT/DFPT run.
+  // This is the primary accuracy metric — ML-estimated Tc labels can self-reinforce errors.
+  const dftEntries = ledger.filter(e => e.source === "dft" || e.source.startsWith("dfpt"));
+  const dftVerifiedMAE = dftEntries.length > 0
+    ? dftEntries.reduce((s, e) => s + e.error.tc_abs_error, 0) / dftEntries.length
+    : null;
+
   const record: CycleImprovementRecord = {
     cycle,
     timestamp: Date.now(),
@@ -562,6 +571,7 @@ export function recordCycleImprovement(
     ciCoverage90: Math.round(ciCoverage90 * 10000) / 10000,
     ciCoverage95: Math.round(ciCoverage95 * 10000) / 10000,
     ciCoverage99: Math.round(ciCoverage99 * 10000) / 10000,
+    dftVerifiedMAE: dftVerifiedMAE != null ? Math.round(dftVerifiedMAE * 100) / 100 : null,
   };
 
   cycleImprovementHistory.push(record);
@@ -579,8 +589,11 @@ export function recordCycleImprovement(
   const coverageNote = hasCIData
     ? (ciCoverage95 < 0.90 ? " [CI95 MISCALIBRATED]" : ciCoverage95 > 0.99 ? " [CI95 OVERCONSERVATIVE]" : "")
     : "";
+  const dftMaeStr = record.dftVerifiedMAE != null
+    ? `, DFT-MAE=${record.dftVerifiedMAE.toFixed(2)}K (n=${dftEntries.length})`
+    : "";
   console.log(
-    `[Prediction Ledger] Cycle ${cycle}: Tc RMSE=${record.rmse.toFixed(2)}K, MAE=${record.mae.toFixed(2)}K, ` +
+    `[Prediction Ledger] Cycle ${cycle}: Tc RMSE=${record.rmse.toFixed(2)}K, MAE=${record.mae.toFixed(2)}K${dftMaeStr}, ` +
     `R²=${record.r2.toFixed(4)}, GNN R²=${gnnMetrics.r2.toFixed(4)}, XGB R²=${xgbMetrics.r2.toFixed(4)}, ` +
     `CI95 coverage=${coverageStr} (goal: 95%) [${trendDir}]${coverageNote}`
   );

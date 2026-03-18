@@ -270,6 +270,41 @@ function computeParameterCorrelations(): { parameter: string; correlation: numbe
   return results.sort((a, b) => Math.abs(b.correlation) - Math.abs(a.correlation));
 }
 
+/**
+ * Converts accumulated DFT run records into training entries for the ML synthesis
+ * predictor.  Each successful QE run is a labelled example: the phonon-stability
+ * score becomes the feasibility label, and the synthesis pressure is preserved so
+ * the GBM can learn the pressure-feasibility relationship for hydrides.
+ */
+export function getDFTTrainingEntries(): Array<{
+  formula: string;
+  feasible: number;
+  pressureGpa: number;
+  pressureConditioned: boolean;
+}> {
+  // Aggregate per-formula: keep the highest-stability record for each formula
+  // to avoid duplicate rows from retried or reprocessed jobs.
+  // Aggregate per-formula: keep the highest-stability record to avoid duplicates.
+  const best = new Map<string, { formula: string; feasible: number; pressureGpa: number; pressureConditioned: boolean }>();
+  for (const r of records) {
+    const prev = best.get(r.formula);
+    if (!prev || r.stability > prev.feasible) {
+      best.set(r.formula, {
+        formula: r.formula,
+        feasible: r.stability,
+        pressureGpa: r.synthesisVector.pressure,
+        pressureConditioned: r.synthesisVector.pressure >= 1,
+      });
+    }
+  }
+  return Array.from(best.values());
+}
+
+/** Number of DFT records currently stored — used to decide when to retrain the predictor. */
+export function getLearningDbRecordCount(): number {
+  return records.length;
+}
+
 function extractElements(formula: string): string[] {
   const els: string[] = [];
   const re = /([A-Z][a-z]?)/g;

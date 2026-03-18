@@ -2546,6 +2546,10 @@ export interface TrainingSample {
   prototype?: string;
   pressureGpa?: number;
   lambda?: number;
+  /** "dft-verified" when this Tc came from a real DFPT run; absent for ML estimates */
+  dataConfidence?: string;
+  /** DFPT-derived Tc (Allen-Dynes from QE λ) — overrides `tc` as primary training target when present */
+  qeDFPTTc?: number;
 }
 
 function structureHash(structure: any): string {
@@ -2793,13 +2797,17 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
         const { pred, cache } = GNNPredictForTraining(graph, weights);
         const nN = graph.nodes.length;
 
-        const tcTarget = sample.tc / 300;
+        // Prefer DFPT-derived Tc (from real QE λ) over the ML-estimated value when available.
+        const tcTarget = (sample.qeDFPTTc != null ? sample.qeDFPTTc : sample.tc) / 300;
+        const tcForWeight = sample.qeDFPTTc ?? sample.tc;
         const hasFormationEnergy = sample.formationEnergy != null;
         const feTarget = hasFormationEnergy ? sample.formationEnergy! : 0;
         const tcError = pred.predictedTc / 300 - tcTarget;
         // Weighted loss: high-Tc (discovery targets) are rare so up-weight them.
         // >100K: 4× (room-T SCs), 40-100K: 3×, >0: 2× (counteract contrast imbalance), =0: 1×
-        const scWeight = sample.tc >= 100 ? 4.0 : sample.tc >= 40 ? 3.0 : sample.tc > 0 ? 2.0 : 1.0;
+        // DFT-verified labels carry 5× the base weight — they are the ground truth.
+        const dftMult = sample.dataConfidence === "dft-verified" ? 5.0 : 1.0;
+        const scWeight = dftMult * (tcForWeight >= 100 ? 4.0 : tcForWeight >= 40 ? 3.0 : tcForWeight > 0 ? 2.0 : 1.0);
         const feError = hasFormationEnergy ? pred.formationEnergy - feTarget : 0;
 
         const phononTarget = (sample.tc > 0) ? 1.0 : 0.0;
@@ -3376,6 +3384,8 @@ export interface GNNVersionRecord {
   trigger: string;
   dftSamples: number;
   enrichedSamples: number;
+  /** MAE computed exclusively on DFT-verified validation samples; null when none present */
+  dftVerifiedMAE: number | null;
 }
 
 let gnnModelVersion = 0;
@@ -3408,6 +3418,10 @@ export function logGNNVersion(trigger: string, datasetSize: number, dftSamples =
   let sumActualSq = 0;
   const n = validationSet.length;
 
+  // Separate accumulators for DFT-verified samples only — the true accuracy signal.
+  let dftSumAbsError = 0;
+  let dftN = 0;
+
   for (const entry of validationSet) {
     const pred = getGNNPrediction(entry.formula);
     const actual = entry.tc;
@@ -3417,6 +3431,10 @@ export function logGNNVersion(trigger: string, datasetSize: number, dftSamples =
     sumAbsError += Math.abs(error);
     sumActual += actual;
     sumActualSq += actual * actual;
+    if (entry.dataConfidence === "dft-verified") {
+      dftSumAbsError += Math.abs(error);
+      dftN++;
+    }
   }
 
   const meanActual = n > 0 ? sumActual / n : 0;
@@ -3425,6 +3443,7 @@ export function logGNNVersion(trigger: string, datasetSize: number, dftSamples =
   const r2 = ssTot > 0 ? Math.max(-1, 1 - ssRes / ssTot) : 0;
   const mae = n > 0 ? sumAbsError / n : 0;
   const rmse = n > 0 ? Math.sqrt(sumSquaredError / n) : 0;
+  const dftVerifiedMAE = dftN > 0 ? dftSumAbsError / dftN : null;
 
   const record: GNNVersionRecord = {
     version: gnnModelVersion,
@@ -3437,6 +3456,7 @@ export function logGNNVersion(trigger: string, datasetSize: number, dftSamples =
     trigger,
     dftSamples,
     enrichedSamples,
+    dftVerifiedMAE: dftVerifiedMAE != null ? Math.round(dftVerifiedMAE * 100) / 100 : null,
   };
 
   gnnVersionHistory.push(record);
@@ -3445,7 +3465,8 @@ export function logGNNVersion(trigger: string, datasetSize: number, dftSamples =
   }
 
   const valSource = heldOutValidationSet.length > 0 ? `held-out (${heldOutValidationSet.length})` : "fallback (tail-50 shuffled)";
-  console.log(`[GNN] Version ${record.version} logged: R²=${record.r2}, MAE=${record.mae}, RMSE=${record.rmse}, trigger=${trigger}, dataset=${datasetSize}, dft=${dftSamples}, enriched=${enrichedSamples}, validation=${valSource}`);
+  const dftMaeStr = record.dftVerifiedMAE != null ? `, DFT-MAE=${record.dftVerifiedMAE}K (n=${dftN})` : "";
+  console.log(`[GNN] Version ${record.version} logged: R²=${record.r2}, MAE=${record.mae}, RMSE=${record.rmse}${dftMaeStr}, trigger=${trigger}, dataset=${datasetSize}, dft=${dftSamples}, enriched=${enrichedSamples}, validation=${valSource}`);
 
   return record;
 }

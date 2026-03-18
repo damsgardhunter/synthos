@@ -258,6 +258,78 @@ const PRECURSOR_DB: Precursor[] = [
 
   { name: "Carbon powder", formula: "C", element: "C", availability: 0.99, purity: "99.99%", costTier: "low", supplierAvailability: 0.99, safetyNotes: "Combustible dust", preferredMethods: ["solid-state", "arc-melting"] },
   { name: "Graphite", formula: "C", element: "C", availability: 0.99, purity: "99.999%", costTier: "low", supplierAvailability: 0.99, safetyNotes: "Safe", preferredMethods: ["solid-state", "CVD"] },
+
+  // ── Rare-earth hydrides ──────────────────────────────────────────────────────
+  // Critical precursors for high-pressure hydride superconductors (LaH10, YH6/9,
+  // CeH9, ScH12, LuH2±δ etc.).  These are typically synthesised in-situ from the
+  // metal + H2, but pre-formed hydrides allow direct diamond-anvil-cell loading
+  // without an intermediate hydrogenation step, improving run reproducibility.
+  { name: "Lanthanum trihydride", formula: "LaH3", element: "La", availability: 0.55, purity: "99.5%", costTier: "high", supplierAvailability: 0.6, safetyNotes: "Pyrophoric, store in inert atmosphere", preferredMethods: ["high-pressure"] },
+  { name: "Yttrium trihydride", formula: "YH3", element: "Y", availability: 0.55, purity: "99.5%", costTier: "high", supplierAvailability: 0.6, safetyNotes: "Pyrophoric, store in inert atmosphere", preferredMethods: ["high-pressure"] },
+  { name: "Cerium dihydride", formula: "CeH2", element: "Ce", availability: 0.5, purity: "99.5%", costTier: "high", supplierAvailability: 0.55, safetyNotes: "Pyrophoric", preferredMethods: ["high-pressure"] },
+  { name: "Praseodymium dihydride", formula: "PrH2", element: "Pr", availability: 0.45, purity: "99.5%", costTier: "high", supplierAvailability: 0.5, safetyNotes: "Pyrophoric", preferredMethods: ["high-pressure"] },
+  { name: "Neodymium dihydride", formula: "NdH2", element: "Nd", availability: 0.45, purity: "99.5%", costTier: "high", supplierAvailability: 0.5, safetyNotes: "Pyrophoric", preferredMethods: ["high-pressure"] },
+  { name: "Scandium dihydride", formula: "ScH2", element: "Sc", availability: 0.35, purity: "99%", costTier: "very-high", supplierAvailability: 0.4, safetyNotes: "Pyrophoric, rare", preferredMethods: ["high-pressure"] },
+  { name: "Ytterbium dihydride", formula: "YbH2", element: "Yb", availability: 0.5, purity: "99.5%", costTier: "high", supplierAvailability: 0.55, safetyNotes: "Pyrophoric", preferredMethods: ["high-pressure"] },
+  { name: "Lutetium dihydride", formula: "LuH2", element: "Lu", availability: 0.35, purity: "99%", costTier: "very-high", supplierAvailability: 0.4, safetyNotes: "Pyrophoric, expensive", preferredMethods: ["high-pressure"] },
+  { name: "Thorium dihydride", formula: "ThH2", element: "Th", availability: 0.25, purity: "99%", costTier: "very-high", supplierAvailability: 0.3, safetyNotes: "Radioactive, requires license", preferredMethods: ["high-pressure"] },
+  // Rare-earth hydrides also serve as hydrogen donors in DAC experiments
+  { name: "Lanthanum trihydride (H-source)", formula: "LaH3", element: "H", availability: 0.5, purity: "99.5%", costTier: "high", supplierAvailability: 0.55, safetyNotes: "Pyrophoric; used as solid H-source in DAC", preferredMethods: ["high-pressure"] },
+  { name: "Yttrium trihydride (H-source)", formula: "YH3", element: "H", availability: 0.5, purity: "99.5%", costTier: "high", supplierAvailability: 0.55, safetyNotes: "Pyrophoric; used as solid H-source in DAC", preferredMethods: ["high-pressure"] },
+
+  // ── Additional arsenic precursors for pnictide SC routes ─────────────────────
+  // As2O3 and elemental As are already in the DB; the following compounds are the
+  // actual starting materials for FeAs-based (1111, 122, 111) and related families.
+  { name: "Iron arsenide", formula: "FeAs", element: "As", availability: 0.65, purity: "99.9%", costTier: "medium", supplierAvailability: 0.7, safetyNotes: "Toxic; handle in fume hood", preferredMethods: ["solid-state", "arc-melting"] },
+  { name: "Cobalt arsenide", formula: "CoAs", element: "As", availability: 0.55, purity: "99.9%", costTier: "medium", supplierAvailability: 0.6, safetyNotes: "Toxic", preferredMethods: ["solid-state"] },
+  { name: "Nickel arsenide", formula: "NiAs", element: "As", availability: 0.55, purity: "99.9%", costTier: "medium", supplierAvailability: 0.6, safetyNotes: "Toxic", preferredMethods: ["solid-state", "arc-melting"] },
+  { name: "Indium arsenide", formula: "InAs", element: "As", availability: 0.6, purity: "99.999%", costTier: "high", supplierAvailability: 0.65, safetyNotes: "Toxic, semiconductor-grade", preferredMethods: ["sputtering", "CVD"] },
+  { name: "Gallium arsenide", formula: "GaAs", element: "As", availability: 0.7, purity: "99.999%", costTier: "medium", supplierAvailability: 0.75, safetyNotes: "Toxic, semiconductor-grade", preferredMethods: ["sputtering", "CVD"] },
+  { name: "Arsenic sulfide", formula: "As2S3", element: "As", availability: 0.6, purity: "99.9%", costTier: "medium", supplierAvailability: 0.65, safetyNotes: "Toxic", preferredMethods: ["solid-state"] },
+  { name: "Arsine gas", formula: "AsH3", element: "As", availability: 0.4, purity: "99.999%", costTier: "high", supplierAvailability: 0.45, safetyNotes: "Extremely toxic gas, requires specialist handling", preferredMethods: ["CVD"] },
+  // Iron arsenide also serves as iron precursor for pnictide routes
+  { name: "Iron arsenide (Fe-source)", formula: "FeAs", element: "Fe", availability: 0.65, purity: "99.9%", costTier: "medium", supplierAvailability: 0.7, safetyNotes: "Toxic; handle in fume hood", preferredMethods: ["solid-state", "arc-melting"] },
+
+  // ── Organometallic precursors ────────────────────────────────────────────────
+  // Metal acetylacetonates (acac = C5H7O2⁻) are the workhorses of sol-gel and
+  // MOD (metal-organic decomposition) routes to oxide superconductors and thin
+  // films.  Metallocenes and metal alkoxides cover CVD/ALD and MOCVD routes.
+
+  // Lanthanum / rare-earth acac (cuprate thin-films, sol-gel La2CuO4, LaFeAsO etc.)
+  { name: "Lanthanum acetylacetonate", formula: "La(acac)3", element: "La", availability: 0.75, purity: "99.9%", costTier: "medium", supplierAvailability: 0.8, safetyNotes: "Combustible", preferredMethods: ["sol-gel", "CVD"] },
+  { name: "Yttrium acetylacetonate", formula: "Y(acac)3", element: "Y", availability: 0.75, purity: "99.9%", costTier: "medium", supplierAvailability: 0.8, safetyNotes: "Combustible", preferredMethods: ["sol-gel", "CVD"] },
+  { name: "Cerium acetylacetonate", formula: "Ce(acac)3", element: "Ce", availability: 0.7, purity: "99.9%", costTier: "medium", supplierAvailability: 0.75, safetyNotes: "Combustible", preferredMethods: ["sol-gel", "CVD"] },
+  { name: "Neodymium acetylacetonate", formula: "Nd(acac)3", element: "Nd", availability: 0.65, purity: "99.9%", costTier: "medium", supplierAvailability: 0.7, safetyNotes: "Combustible", preferredMethods: ["sol-gel", "CVD"] },
+  { name: "Samarium acetylacetonate", formula: "Sm(acac)3", element: "Sm", availability: 0.6, purity: "99.9%", costTier: "medium", supplierAvailability: 0.65, safetyNotes: "Combustible", preferredMethods: ["sol-gel"] },
+  { name: "Gadolinium acetylacetonate", formula: "Gd(acac)3", element: "Gd", availability: 0.6, purity: "99.9%", costTier: "medium", supplierAvailability: 0.65, safetyNotes: "Combustible", preferredMethods: ["sol-gel"] },
+
+  // Transition metal acac (pnictides, cuprate building blocks, electrode films)
+  { name: "Iron(III) acetylacetonate", formula: "Fe(acac)3", element: "Fe", availability: 0.9, purity: "99.9%", costTier: "low", supplierAvailability: 0.92, safetyNotes: "Combustible, irritant", preferredMethods: ["sol-gel", "CVD"] },
+  { name: "Cobalt(II) acetylacetonate", formula: "Co(acac)2", element: "Co", availability: 0.85, purity: "99.9%", costTier: "medium", supplierAvailability: 0.88, safetyNotes: "Combustible, sensitizer", preferredMethods: ["sol-gel"] },
+  { name: "Nickel(II) acetylacetonate", formula: "Ni(acac)2", element: "Ni", availability: 0.85, purity: "99.9%", costTier: "low", supplierAvailability: 0.88, safetyNotes: "Sensitizer", preferredMethods: ["sol-gel", "CVD"] },
+  { name: "Copper(II) acetylacetonate", formula: "Cu(acac)2", element: "Cu", availability: 0.9, purity: "99.9%", costTier: "low", supplierAvailability: 0.92, safetyNotes: "Combustible", preferredMethods: ["sol-gel", "CVD"] },
+  { name: "Barium acetylacetonate", formula: "Ba(acac)2", element: "Ba", availability: 0.75, purity: "99.9%", costTier: "medium", supplierAvailability: 0.8, safetyNotes: "Toxic if ingested", preferredMethods: ["sol-gel", "CVD"] },
+  { name: "Strontium acetylacetonate", formula: "Sr(acac)2", element: "Sr", availability: 0.7, purity: "99.9%", costTier: "medium", supplierAvailability: 0.75, safetyNotes: "Combustible", preferredMethods: ["sol-gel"] },
+  { name: "Calcium acetylacetonate", formula: "Ca(acac)2", element: "Ca", availability: 0.8, purity: "99.9%", costTier: "low", supplierAvailability: 0.85, safetyNotes: "Combustible", preferredMethods: ["sol-gel"] },
+  { name: "Niobium ethoxide", formula: "Nb(OEt)5", element: "Nb", availability: 0.7, purity: "99.9%", costTier: "medium", supplierAvailability: 0.75, safetyNotes: "Moisture sensitive, flammable", preferredMethods: ["sol-gel", "CVD"] },
+  { name: "Vanadium acetylacetonate", formula: "V(acac)3", element: "V", availability: 0.75, purity: "99.9%", costTier: "medium", supplierAvailability: 0.8, safetyNotes: "Irritant", preferredMethods: ["sol-gel"] },
+  { name: "Manganese(II) acetylacetonate", formula: "Mn(acac)2", element: "Mn", availability: 0.8, purity: "99.9%", costTier: "low", supplierAvailability: 0.85, safetyNotes: "Irritant", preferredMethods: ["sol-gel"] },
+  { name: "Zinc acetylacetonate", formula: "Zn(acac)2", element: "Zn", availability: 0.85, purity: "99.9%", costTier: "low", supplierAvailability: 0.88, safetyNotes: "Combustible", preferredMethods: ["sol-gel", "CVD"] },
+  { name: "Ruthenium acetylacetonate", formula: "Ru(acac)3", element: "Ru", availability: 0.5, purity: "99.9%", costTier: "very-high", supplierAvailability: 0.55, safetyNotes: "Expensive PGM", preferredMethods: ["sol-gel", "CVD"] },
+  { name: "Iridium acetylacetonate", formula: "Ir(acac)3", element: "Ir", availability: 0.4, purity: "99.9%", costTier: "very-high", supplierAvailability: 0.45, safetyNotes: "Very expensive", preferredMethods: ["CVD"] },
+
+  // Metal alkoxides — sol-gel and thin-film deposition
+  { name: "Titanium isopropoxide", formula: "Ti(OiPr)4", element: "Ti", availability: 0.9, purity: "99.9%", costTier: "low", supplierAvailability: 0.92, safetyNotes: "Moisture sensitive, flammable", preferredMethods: ["sol-gel", "CVD"] },
+  { name: "Zirconium propoxide", formula: "Zr(OPr)4", element: "Zr", availability: 0.8, purity: "99.9%", costTier: "medium", supplierAvailability: 0.82, safetyNotes: "Moisture sensitive, flammable", preferredMethods: ["sol-gel", "CVD"] },
+  { name: "Hafnium tetrakis(diethylamide)", formula: "Hf(NEt2)4", element: "Hf", availability: 0.55, purity: "99.99%", costTier: "very-high", supplierAvailability: 0.6, safetyNotes: "Moisture sensitive, pyrophoric", preferredMethods: ["CVD"] },
+  { name: "Trimethylaluminum", formula: "Al(CH3)3", element: "Al", availability: 0.8, purity: "99.999%", costTier: "medium", supplierAvailability: 0.85, safetyNotes: "Pyrophoric, extremely flammable", preferredMethods: ["CVD"] },
+  { name: "Tetrakis(dimethylamido)titanium", formula: "Ti(NMe2)4", element: "Ti", availability: 0.65, purity: "99.9%", costTier: "medium", supplierAvailability: 0.7, safetyNotes: "Moisture sensitive", preferredMethods: ["CVD"] },
+
+  // Metallocenes — CVD and MOCVD sources
+  { name: "Ferrocene", formula: "Fe(C5H5)2", element: "Fe", availability: 0.85, purity: "99%", costTier: "low", supplierAvailability: 0.88, safetyNotes: "Combustible", preferredMethods: ["CVD", "vapor-deposition"] },
+  { name: "Nickelocene", formula: "Ni(C5H5)2", element: "Ni", availability: 0.65, purity: "99%", costTier: "medium", supplierAvailability: 0.7, safetyNotes: "Air/moisture sensitive", preferredMethods: ["CVD"] },
+  { name: "Cobaltocene", formula: "Co(C5H5)2", element: "Co", availability: 0.6, purity: "99%", costTier: "medium", supplierAvailability: 0.65, safetyNotes: "Air sensitive", preferredMethods: ["CVD"] },
+  { name: "Ruthenocene", formula: "Ru(C5H5)2", element: "Ru", availability: 0.45, purity: "99%", costTier: "very-high", supplierAvailability: 0.5, safetyNotes: "Expensive PGM", preferredMethods: ["CVD"] },
 ];
 
 const precursorsByElement = new Map<string, Precursor[]>();

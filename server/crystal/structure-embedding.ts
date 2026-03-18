@@ -344,7 +344,9 @@ export async function initStructureEmbedding(): Promise<void> {
         const inputVec = [...graphVec, ...compVec];
         trainingVectors.push(inputVec);
         formulas.push(entry.formula);
-      } catch {}
+      } catch (err: any) {
+        console.debug(`[structure-embedding] Training vector failed for ${entry.formula}: ${err?.message ?? err}`);
+      }
     }
 
     if (trainingVectors.length < 5) {

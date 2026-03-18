@@ -26,6 +26,9 @@ export interface SynthesisGateResult {
   mlFeasibility: number;
   chemicalDistance: ChemicalDistanceResult;
   graphPathCost: number | null;
+  dijkstraBottleneck: string | null;
+  dijkstraMethod: string | null;
+  dijkstraStepCount: number | null;
   rejectionReasons: string[];
   pressureFlag: string | null;
   classification: "trivial" | "one-pot" | "multi-step" | "complex" | "impractical";
@@ -322,10 +325,16 @@ export function evaluateSynthesisGate(
   const chemDist = computeChemicalDistance(formula);
 
   let graphPathCost: number | null = null;
+  let dijkstraBottleneck: string | null = null;
+  let dijkstraMethod: string | null = null;
+  let dijkstraStepCount: number | null = null;
   try {
     const network = buildReactionNetwork(formula);
     if (network.bestRoute) {
       graphPathCost = network.graphPathCost;
+      dijkstraBottleneck = network.bestRoute.bottleneck;
+      dijkstraMethod = network.bestRoute.method;
+      dijkstraStepCount = network.bestRoute.stepCount;
     }
   } catch (_) {
   }
@@ -460,6 +469,9 @@ export function evaluateSynthesisGate(
     mlFeasibility: mlResult.feasibility,
     chemicalDistance: chemDist,
     graphPathCost,
+    dijkstraBottleneck,
+    dijkstraMethod,
+    dijkstraStepCount,
     rejectionReasons,
     pressureFlag,
     classification,

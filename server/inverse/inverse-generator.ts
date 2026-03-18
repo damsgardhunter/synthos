@@ -1,4 +1,5 @@
 import { TargetProperties, CompositionBias, InverseCandidate } from "./target-schema";
+import { getTSCElementBias, getTSCPrototypeBias } from "../physics/tsc-generator-bias";
 import { defaultSynthesisVector, mutateSynthesisVector, optimizeSynthesisPath } from "../physics/synthesis-simulator";
 import { isValidFormula } from "../learning/utils";
 import { passesElementCountCap } from "../learning/candidate-generator";
@@ -555,6 +556,22 @@ export function createInitialBias(target: TargetProperties): CompositionBias {
   if (target.preferredElements) {
     for (const el of target.preferredElements) {
       elementWeights.set(el, (elementWeights.get(el) ?? 1.0) + 1.0);
+    }
+  }
+
+  // Blend in TSC family biases: elements and prototypes that have produced TSC
+  // candidates in the current session get a moderate upward nudge (×0.25 scale
+  // so they influence but don't dominate the existing TC-based weights).
+  const tscElBias = getTSCElementBias();
+  for (const [el, w] of tscElBias) {
+    if (w > 1.0) {
+      elementWeights.set(el, (elementWeights.get(el) ?? 1.0) + (w - 1.0) * 0.25);
+    }
+  }
+  const tscProtoBias = getTSCPrototypeBias();
+  for (const [proto, w] of tscProtoBias) {
+    if (w > 1.0) {
+      prototypeWeights.set(proto, (prototypeWeights.get(proto) ?? 1.0) + (w - 1.0) * 0.25);
     }
   }
 

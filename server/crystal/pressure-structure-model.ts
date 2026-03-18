@@ -561,5 +561,7 @@ export function getPressureStructureStats(): {
 export function initPressureStructureModel(): void {
   try {
     trainPressureStructureModel();
-  } catch {}
+  } catch (err: any) {
+    console.debug(`[pressure-structure] Model training failed: ${err?.message ?? err}`);
+  }
 }

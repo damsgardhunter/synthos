@@ -1,5 +1,6 @@
 import { ELEMENTAL_DATA, getElementData, getMeltingPoint } from "../learning/elemental-data";
 import { classifyFamily } from "../learning/utils";
+import { getDFTTrainingEntries, getLearningDbRecordCount } from "./synthesis-learning-db";
 
 interface SynthesisTreeNode {
   featureIndex: number;
@@ -19,6 +20,10 @@ interface SynthesisGBModel {
 interface SynthesisTrainingEntry {
   formula: string;
   feasible: number;
+  /** Synthesis pressure in GPa — required for high-pressure hydrides */
+  pressureGpa?: number;
+  /** True when the feasibility label is only valid at the given pressureGpa */
+  pressureConditioned?: boolean;
 }
 
 interface SynthesisFeasibilityResult {
@@ -55,6 +60,7 @@ const FEATURE_NAMES = [
   "hasOxygen",
   "hFraction",
   "metalFraction",
+  "pressureGpa",
 ];
 
 function parseFormulaCounts(formula: string): Record<string, number> {
@@ -97,7 +103,7 @@ function parseNestedFormula(s: string): Record<string, number> {
   return counts;
 }
 
-function extractSynthesisFeatures(formula: string): number[] {
+function extractSynthesisFeatures(formula: string, pressureGpa = 0): number[] {
   const counts = parseFormulaCounts(formula);
   const elements = Object.keys(counts);
   const totalAtoms = Object.values(counts).reduce((a, b) => a + b, 0);
@@ -237,6 +243,9 @@ function extractSynthesisFeatures(formula: string): number[] {
     hasOxygen ? 1 : 0,
     hFraction,
     metalFraction,
+    // Normalized pressure: 300 GPa is the reference upper bound for known HP hydride synthesis.
+    // Ambient-pressure materials use 0; pressure-conditioned entries use their actual pressureGpa.
+    Math.min(pressureGpa / 300, 1),
   ];
 }
 
@@ -343,11 +352,15 @@ const KNOWN_UNFEASIBLE: SynthesisTrainingEntry[] = [
 ];
 
 const MARGINAL_COMPOUNDS: SynthesisTrainingEntry[] = [
-  { formula: "LaH10", feasible: 0.4 },
-  { formula: "YH6", feasible: 0.4 },
-  { formula: "YH9", feasible: 0.35 },
-  { formula: "CaH6", feasible: 0.4 },
-  { formula: "H3S", feasible: 0.45 },
+  // Experimentally confirmed high-pressure syntheses — labels reflect conditional feasibility
+  // at the documented synthesis pressure.  At ambient pressure these remain marginal (the model
+  // learns this via the pressureGpa feature; the H-fraction post-processing cap is also
+  // bypassed only when pressureGpa >= 100 at inference time).
+  { formula: "LaH10", feasible: 0.85, pressureGpa: 170, pressureConditioned: true },  // Drozdov 2019, Tc~250 K
+  { formula: "YH6",  feasible: 0.75, pressureGpa: 183, pressureConditioned: true },  // Troyan 2021, Tc~224 K
+  { formula: "YH9",  feasible: 0.70, pressureGpa: 201, pressureConditioned: true },  // Kong 2021,   Tc~243 K
+  { formula: "CaH6", feasible: 0.65, pressureGpa: 200, pressureConditioned: true },  // Ma 2022,     Tc~215 K
+  { formula: "H3S",  feasible: 0.85, pressureGpa: 155, pressureConditioned: true },  // Drozdov 2015, Tc~203 K (Nobel-mentioned)
   { formula: "ScH12", feasible: 0.25 },
   { formula: "ThH10", feasible: 0.3 },
   { formula: "BaH12", feasible: 0.25 },
@@ -362,7 +375,33 @@ const MARGINAL_COMPOUNDS: SynthesisTrainingEntry[] = [
 ];
 
 function getAllTrainingData(): SynthesisTrainingEntry[] {
-  return [...KNOWN_SYNTHESIZABLE, ...KNOWN_UNFEASIBLE, ...MARGINAL_COMPOUNDS];
+  const base = [...KNOWN_SYNTHESIZABLE, ...KNOWN_UNFEASIBLE, ...MARGINAL_COMPOUNDS];
+
+  const dftEntries = getDFTTrainingEntries();
+  if (dftEntries.length === 0) return base;
+
+  // Merge: DFT-verified entries override hardcoded labels when both exist,
+  // since real QE results are higher quality than hand-assigned values.
+  const hardcodedFormulas = new Set(base.map(e => e.formula));
+  const merged: SynthesisTrainingEntry[] = [...base];
+  let overrides = 0;
+  for (const dft of dftEntries) {
+    if (hardcodedFormulas.has(dft.formula)) {
+      // Replace the hardcoded entry with the DFT-verified label
+      const idx = merged.findIndex(e => e.formula === dft.formula);
+      if (idx !== -1) {
+        merged[idx] = dft;
+        overrides++;
+      }
+    } else {
+      merged.push(dft);
+    }
+  }
+
+  if (overrides > 0 || dftEntries.length > 0) {
+    console.log(`[SynthesisPredictor] Training set: ${base.length} hardcoded + ${dftEntries.length - overrides} new DFT + ${overrides} DFT overrides = ${merged.length} total`);
+  }
+  return merged;
 }
 
 function findBestSplit(
@@ -515,9 +554,20 @@ function getTreeFeatureImportanceSynthesis(tree: SynthesisTreeNode | number): Ma
 let cachedSynthesisModel: SynthesisGBModel | null = null;
 let cachedFeatureImportance: Record<string, number> | null = null;
 let trainingSize = 0;
+let lastTrainingRecordCount = 0;
+// Retrain whenever this many new DFT records have accumulated since the last training run.
+// Low enough to capture early learning signal; high enough to avoid constant retraining.
+const RETRAIN_THRESHOLD = 25;
 
 function getTrainedSynthesisModel(): SynthesisGBModel {
-  if (cachedSynthesisModel) return cachedSynthesisModel;
+  const currentRecordCount = getLearningDbRecordCount();
+  const hasNewRecords = currentRecordCount >= lastTrainingRecordCount + RETRAIN_THRESHOLD;
+  if (cachedSynthesisModel && !hasNewRecords) return cachedSynthesisModel;
+
+  if (hasNewRecords) {
+    cachedSynthesisModel = null; // force full retrain with expanded dataset
+    console.log(`[SynthesisPredictor] DFT records grew by ${currentRecordCount - lastTrainingRecordCount} — retraining`);
+  }
 
   const data = getAllTrainingData();
   const X: number[][] = [];
@@ -525,11 +575,12 @@ function getTrainedSynthesisModel(): SynthesisGBModel {
 
   for (const entry of data) {
     try {
-      const features = extractSynthesisFeatures(entry.formula);
+      const features = extractSynthesisFeatures(entry.formula, entry.pressureGpa ?? 0);
       if (features.some(v => !Number.isFinite(v))) continue;
       X.push(features);
       y.push(entry.feasible);
-    } catch {
+    } catch (err: any) {
+      console.debug(`[ml-synth] Feature extraction failed for ${entry.formula}: ${err?.message ?? err}`);
       continue;
     }
   }
@@ -544,6 +595,7 @@ function getTrainedSynthesisModel(): SynthesisGBModel {
       featureNames: FEATURE_NAMES,
       trainedAt: Date.now(),
     };
+    lastTrainingRecordCount = getLearningDbRecordCount();
     return cachedSynthesisModel;
   }
 
@@ -566,15 +618,19 @@ function getTrainedSynthesisModel(): SynthesisGBModel {
     cachedFeatureImportance![name] = Math.round((count / totalSplits) * 10000) / 10000;
   });
 
+  lastTrainingRecordCount = getLearningDbRecordCount();
+  console.log(`[SynthesisPredictor] Trained on ${trainingSize} samples (${lastTrainingRecordCount} DFT records in DB)`);
+
   return cachedSynthesisModel;
 }
 
 export function predictSynthesisFeasibility(
   formula: string,
-  reactionType?: string
+  reactionType?: string,
+  pressureGpa?: number
 ): SynthesisFeasibilityResult {
   const model = getTrainedSynthesisModel();
-  const featureArray = extractSynthesisFeatures(formula);
+  const featureArray = extractSynthesisFeatures(formula, pressureGpa ?? 0);
   const rawPrediction = predictWithSynthesisModel(model, featureArray);
   const reasoning: string[] = [];
 
@@ -605,12 +661,23 @@ export function predictSynthesisFeasibility(
   }
 
   const hFrac = (counts["H"] || 0) / totalAtoms;
+  const isHighPressure = (pressureGpa ?? 0) >= 100;
   if (hFrac > 0.8) {
-    feasibility = Math.min(feasibility, 0.2);
-    reasoning.push("Extremely hydrogen-rich - requires extreme pressures for stabilization");
+    if (isHighPressure) {
+      // At ≥100 GPa the extreme-H cap does not apply — these compounds are experimentally
+      // accessible via diamond-anvil cell (LaH10, YH6, H3S etc.).
+      reasoning.push(`Extremely hydrogen-rich at ${pressureGpa} GPa — high-pressure synthesis route (DAC)`);
+    } else {
+      feasibility = Math.min(feasibility, 0.2);
+      reasoning.push("Extremely hydrogen-rich — requires extreme pressures (>100 GPa) for stabilization");
+    }
   } else if (hFrac > 0.6) {
-    feasibility = Math.min(feasibility, 0.4);
-    reasoning.push("High hydrogen content - likely requires high-pressure synthesis");
+    if (isHighPressure) {
+      reasoning.push(`High hydrogen content at ${pressureGpa} GPa — accessible via high-pressure synthesis`);
+    } else {
+      feasibility = Math.min(feasibility, 0.4);
+      reasoning.push("High hydrogen content — likely requires high-pressure synthesis");
+    }
   }
 
   const miedemaE = featureArray[2];

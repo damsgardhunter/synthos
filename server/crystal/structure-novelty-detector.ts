@@ -63,7 +63,9 @@ export function initFingerprintDB(): void {
           const graph = buildGraphFromStructure(seedData[idx]);
           const fp = normalizeVector(getGraphFeatureVector(graph));
           fingerprintDB.set(seedData[idx].formula, fp);
-        } catch {}
+        } catch (err: any) {
+          console.debug(`[novelty-detector] Fingerprint init failed for ${seedData[idx].formula}: ${err?.message ?? err}`);
+        }
       }
       if (idx < seedData.length) {
         setImmediate(processBatch);

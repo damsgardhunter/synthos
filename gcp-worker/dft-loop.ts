@@ -10,7 +10,10 @@ import * as fs from "fs";
 import * as path from "path";
 
 const POLL_INTERVAL_MS = 15_000;
-const MAX_CONCURRENT = 4; // 4 × 8 threads = 32 vCPUs
+// 7 concurrent jobs × 4 OMP threads = 28 vCPUs for DFT, leaving 4 for GNN/XGB/OS.
+// OMP_NUM_THREADS must be set to 4 in /etc/quantum-alchemy.env on the main instance.
+// On a dedicated DFT-only instance (no GNN/XGB), raise this to 5 and set OMP_NUM_THREADS=3.
+const MAX_CONCURRENT = parseInt(process.env.DFT_MAX_CONCURRENT ?? "7", 10);
 const SCF_RETRY_START_ATTEMPT = 3;
 const WORKER_NODE = "gcp";
 
@@ -59,9 +62,27 @@ async function claimAndRunJob(): Promise<boolean> {
 
   try {
     const isRetry = jobType === "scf_retry";
+    const isTSCJob = jobType === "scf_tsc";
     const startAttempt = isRetry ? (inputData?.startAttempt ?? SCF_RETRY_START_ATTEMPT) : 0;
+    const jobPressureGpa: number | undefined =
+      typeof inputData?.pressureGpa === "number" && inputData.pressureGpa > 20
+        ? inputData.pressureGpa
+        : undefined;
 
-    const dftResult = await runFullDFT(formula, { startAttempt });
+    // Look up ensembleScore so the worker can decide whether to run full DFPT EPC.
+    let ensembleScore: number | undefined;
+    try {
+      const candidates = await storage.getSuperconductorsByFormula(formula);
+      const best = candidates.reduce((b, c) => Math.max(b, c.ensembleScore ?? 0), 0);
+      if (best > 0) ensembleScore = best;
+    } catch { /* non-fatal */ }
+
+    const dftResult = await runFullDFT(formula, {
+      startAttempt,
+      pressureGpa: jobPressureGpa,
+      ensembleScore,
+      forceSpin: isTSCJob,
+    });
 
     const scfSuccess = dftResult.scf?.converged || false;
     const status = scfSuccess ? "completed" : "failed";
@@ -84,6 +105,8 @@ async function claimAndRunJob(): Promise<boolean> {
         const mlFeaturePatch: Record<string, any> = {
           qeDFT: true,
           qeConverged: true,
+          qeVcRelaxed: dftResult.vcRelaxed ?? false,
+          qeRelaxedLatticeA: dftResult.relaxedLatticeA ?? null,
           qeTotalEnergy: dftResult.scf.totalEnergy,
           qeFermiEnergy: dftResult.scf.fermiEnergy,
           qePressure: dftResult.scf.pressure,
@@ -95,7 +118,24 @@ async function claimAndRunJob(): Promise<boolean> {
           qeBands: bandData?.converged || false,
           qeBandGapPath: bandData?.bandGapAlongPath ?? null,
           qeFlatBandScore: bandData?.flatBandScore ?? 0,
+          qeDFTPlusU: dftResult.qeDFTPlusU ?? false,
+          qeDFTPlusUTcModifier: dftResult.dftPlusUTcModifier ?? null,
+          qeDFPTLambda: dftResult.dfpt?.lambda ?? null,
+          qeDFPTOmegaLog: dftResult.dfpt?.omegaLog ?? null,
+          qeDFPTTc: dftResult.dfpt?.tcBest ?? null,
+          qeDFPTSource: dftResult.dfpt?.source ?? null,
+          qeDFPTPhConverged: dftResult.dfpt?.phConverged ?? null,
         };
+
+        // DFPT Tc overrides ML estimate for top candidates
+        if (dftResult.dfpt?.tcBest && dftResult.dfpt.tcBest > 0) {
+          scalarUpdates.predictedTc = dftResult.dfpt.tcBest;
+          console.log(`[DFT-GCP] ${formula} DFPT Tc ${dftResult.dfpt.tcBest.toFixed(1)} K written as predictedTc (λ=${dftResult.dfpt.lambda.toFixed(3)})`);
+        }
+
+        if (dftResult.vcRelaxed && dftResult.relaxedLatticeA) {
+          scalarUpdates.latticeParams = { a: dftResult.relaxedLatticeA };
+        }
 
         const updated = await storage.updateCandidateByFormulaDft(formula, scalarUpdates, mlFeaturePatch);
         console.log(`[DFT-GCP] Job #${jobId} complete — ${formula}, SCF converged, updated=${updated} (${(wallMs / 1000).toFixed(1)}s)`);

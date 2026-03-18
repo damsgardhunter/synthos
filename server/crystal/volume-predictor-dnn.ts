@@ -317,7 +317,9 @@ export function initVolumeDNN(): void {
       model = trainDNN(data, 300, 0.0005);
       trainCount++;
     }
-  } catch {}
+  } catch (err: any) {
+    console.debug(`[volume-dnn] DNN training failed: ${err?.message ?? err}`);
+  }
 }
 
 export function isVolumeDNNTrained(): boolean {
@@ -343,7 +345,9 @@ export function predictVolume(formula: string, pressure: number = 0): {
           };
         }
       }
-    } catch {}
+    } catch (err: any) {
+      console.debug(`[volume-dnn] Forward pass failed for ${formula}: ${err?.message ?? err}`);
+    }
   }
 
   return heuristicVolume(formula, pressure);

@@ -220,7 +220,7 @@ async function stage0b_SynthesisPrescreen(
   const start = Date.now();
 
   const synthScore = computeSynthesisScore(candidate.formula);
-  const mlPrediction = predictSynthesisFeasibility(candidate.formula);
+  const mlPrediction = predictSynthesisFeasibility(candidate.formula, undefined, candidate.pressureGpa ?? undefined);
   const retroRoutes = generateRetrosynthesisRoutes(candidate.formula);
 
   const candidateFamily = classifyFamily(candidate.formula);

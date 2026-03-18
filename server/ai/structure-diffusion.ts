@@ -1014,7 +1014,9 @@ async function evaluateCandidate(formula: string): Promise<{ tc: number; lambda:
         gbTc = gb.tcPredicted;
         gbScore = gb.score;
       }
-    } catch {}
+    } catch (err: any) {
+      console.debug(`[structure-diffusion] GB prediction failed for ${formula}: ${err?.message ?? err}`);
+    }
 
     return {
       tc: Math.max(tc, gbTc * 0.3),

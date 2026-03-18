@@ -26,7 +26,8 @@ export type SynthesisCategory =
   | "atmosphere"
   | "structural"
   | "doping"
-  | "interface-layer";
+  | "interface-layer"
+  | "acoustic";
 
 export interface SynthesisConditionSet {
   synthesisTemperature: number;
@@ -261,6 +262,33 @@ export const INTERFACE_VARIABLES: SynthesisVariable[] = [
   },
 ];
 
+export const ACOUSTIC_VARIABLES: SynthesisVariable[] = [
+  {
+    parameter: "acousticFrequencyKHz",
+    category: "acoustic",
+    units: "kHz",
+    grid: [20, 40, 80, 200, 500, 1000, 5000],
+    importance: "Ultrasonic frequency determines cavitation regime and phonon coupling. 20-80 kHz: standard sonochemistry; 0.5-10 MHz: focused ultrasound",
+    applicableMaterials: ["all"],
+  },
+  {
+    parameter: "acousticPowerWattsCm2",
+    category: "acoustic",
+    units: "W/cm2",
+    grid: [1, 5, 10, 20, 50, 100, 500],
+    importance: "Acoustic intensity controls cavitation threshold and bubble collapse energy. >0.5 W/cm² activates cavitation in water",
+    applicableMaterials: ["all"],
+  },
+  {
+    parameter: "acousticPressureSupplementGpa",
+    category: "acoustic",
+    units: "GPa",
+    grid: [0, 0.01, 0.05, 0.1, 0.5, 1, 2],
+    importance: "Time-averaged acoustic pressure supplement to static DAC pressure. Up to ~35% static pressure reduction for hydrides",
+    applicableMaterials: ["hydrides", "high-pressure", "all"],
+  },
+];
+
 export const ALL_NUMERIC_VARIABLES: SynthesisVariable[] = [
   ...THERMAL_VARIABLES,
   ...PRESSURE_VARIABLES,
@@ -272,6 +300,7 @@ export const ALL_NUMERIC_VARIABLES: SynthesisVariable[] = [
   ...STRUCTURAL_VARIABLES,
   ...DOPING_VARIABLES,
   ...INTERFACE_VARIABLES,
+  ...ACOUSTIC_VARIABLES,
 ];
 
 export function getVariablesByCategory(category: SynthesisCategory): SynthesisVariable[] {
