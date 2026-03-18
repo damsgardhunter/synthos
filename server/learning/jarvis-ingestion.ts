@@ -22,9 +22,13 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as readline from "readline";
+import { fileURLToPath } from "url";
 import { db } from "../db";
 import { superconExternalEntries, systemState } from "@shared/schema";
 import { eq } from "drizzle-orm";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname  = path.dirname(__filename);
 
 const BATCH_SIZE = 150;
 const YIELD_MS   = 80;
