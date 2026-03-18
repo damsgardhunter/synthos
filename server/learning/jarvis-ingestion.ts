@@ -98,9 +98,18 @@ function delay(ms: number): Promise<void> {
 
 // ── CSV parsing ───────────────────────────────────────────────────────────────
 
+// PostgreSQL REAL type range: ~1.18e-38 to 3.4e+38.
+// JARVIS sometimes produces subnormal floats (e.g. 1e-46) that are outside this range.
+// Clamp them to 0 to avoid "out of range for type real" errors.
+const PG_REAL_MIN = 1.18e-38;
+const PG_REAL_MAX = 3.4e+38;
+
 function parseTc(val: string): number | null {
   const n = parseFloat(val);
-  return isFinite(n) ? n : null;
+  if (!isFinite(n)) return null;
+  if (n !== 0 && Math.abs(n) < PG_REAL_MIN) return 0;
+  if (Math.abs(n) > PG_REAL_MAX) return null;
+  return n;
 }
 
 function parseJarvisRow(
