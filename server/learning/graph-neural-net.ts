@@ -1712,7 +1712,11 @@ export function attentionMessagePassingLayer(
 
     const combined = [...embeddings[i], ...aggMessage];
     const updated = fusedUpdate(W_update, combined);
-    newEmbeddings.push(updated);
+    // Layer-norm the updated embedding to prevent cascading amplification across
+    // the 4 attention message-passing layers. Without this, weight drift during
+    // training on large datasets (12k+ samples) causes exponential activation growth
+    // through the 4-layer stack, producing predictions of 10^10+ K.
+    newEmbeddings.push(layerNorm(updated));
   }
 
   for (let i = 0; i < nNodes; i++) {
