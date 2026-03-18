@@ -699,7 +699,7 @@ export interface MPGNNSeedRecord {
  *         up to 500 metallic materials from the MP API and stores them in the cache.
  * Returns de-duplicated records suitable for passing to addDFTTrainingResult.
  */
-export async function fetchGNNSeedData(): Promise<MPGNNSeedRecord[]> {
+export async function fetchGNNSeedData(cacheOnly = false): Promise<MPGNNSeedRecord[]> {
   const seen = new Map<string, MPGNNSeedRecord>();
 
   // --- Step 1: read all cached summary rows from DB ---
@@ -728,7 +728,9 @@ export async function fetchGNNSeedData(): Promise<MPGNNSeedRecord[]> {
   }
 
   // --- Step 2: fetch summaries for metallic seed formulas not already cached ---
-  if (seen.size < 400 && getApiKey()) {
+  // cacheOnly=true skips all network calls — used in hot paths like the AL cycle
+  // so 772 formulas × 500ms gaps don't freeze training data assembly.
+  if (!cacheOnly && seen.size < 400 && getApiKey()) {
     try {
       const toFetch = METALLIC_SEED_FORMULAS.filter(f => !seen.has(f));
       let fetched = 0;

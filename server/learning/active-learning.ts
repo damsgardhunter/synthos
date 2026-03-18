@@ -1291,7 +1291,7 @@ async function retrainGNNWithEnrichedData(
   let mpMergeCount = 0;
   try {
     const { fetchGNNSeedData } = await import("../learning/materials-project-client");
-    const mpRecords = await fetchGNNSeedData();
+    const mpRecords = await fetchGNNSeedData(true); // cacheOnly — never block AL cycle with network fetches
     const superconTcMap = new Map(SUPERCON_TRAINING_DATA.map(e => [e.formula, e.tc]));
     for (const mp of mpRecords) {
       if (seenFormulas.has(mp.formula)) continue;
