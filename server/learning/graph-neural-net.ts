@@ -3918,7 +3918,7 @@ if (isMainThread) setTimeout(async () => {
       let mpSeeded1 = 0;
       try {
         const { fetchGNNSeedData } = await import("./materials-project-client");
-        const mpRecords1 = await fetchGNNSeedData();
+        const mpRecords1 = await fetchGNNSeedData(true); // cacheOnly — never block startup with 772-formula network fetch
         const result1 = mergeMPRecords(mpRecords1, currentTrainingData);
         currentTrainingData = result1.merged;
         mpSeeded1 = result1.seeded;
