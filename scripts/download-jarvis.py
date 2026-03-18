@@ -161,6 +161,26 @@ def download_supercon_chem():
 
 # ── Dataset 2+3: supercon_3d and supercon_2d ──────────────────────────────────
 
+def formula_from_atoms(atoms: dict) -> str:
+    """Build reduced formula from JARVIS atoms dict elements list."""
+    elements = atoms.get("elements", [])
+    if not elements:
+        return ""
+    from collections import Counter
+    counts = Counter(elements)
+    # Alphabetical order, omit count of 1
+    return "".join(
+        f"{el}{cnt}" if cnt > 1 else el
+        for el, cnt in sorted(counts.items())
+    )
+
+def parse_pressure_str(val) -> float:
+    """Parse JARVIS pressure strings like '0 GPa', '100 GPa', or plain numbers."""
+    if val is None:
+        return 0.0
+    s = str(val).strip().lower().replace("gpa", "").strip()
+    return safe_float(s) or 0.0
+
 def download_supercon_dft(dataset_name: str, filename: str, label: str):
     print(f"\n[2-3/4] Downloading {dataset_name}...")
     d = jarvis_data(dataset_name)
@@ -170,34 +190,42 @@ def download_supercon_dft(dataset_name: str, filename: str, label: str):
 
     rows = []
     for i, entry in enumerate(d):
+        # supercon_3d has no top-level formula — build it from atoms['elements']
         formula = str(get_key(entry, "formula", "composition", "material", default=""))
         if not formula:
-            # Try extracting from atoms dict
             atoms = entry.get("atoms", {})
             if isinstance(atoms, dict):
-                formula = str(atoms.get("composition", ""))
+                formula = formula_from_atoms(atoms)
         if not formula:
             continue
 
+        # supercon_3d uses 'Tc' (capital), 'lamb' for λ, 'wlog' for ω_log
         tc = safe_float(get_key(entry, "Tc", "tc", "critical_temp", "Tc_supercon", "Tc_K"))
+        lambda_val = safe_float(get_key(entry, "lamb", "lambda", "lambda_electron_phonon", "el_ph_coupling"))
+        wlog = safe_float(get_key(entry, "wlog", "omega_log", "w_log"))
+
         spg_num = safe_float(get_key(entry, "spg_number", "spg", "spacegroup_number"))
         spg = str(get_key(entry, "spacegroup", "space_group", default="") or
                   (str(int(spg_num)) if spg_num else ""))
         crystal_sys = crystal_system_from_spg(int(spg_num)) if spg_num else \
                       str(get_key(entry, "crys", "crystal_system", default="") or "")
 
-        bandgap = safe_float(get_key(
-            entry, "optb88vdw_bandgap", "bandgap", "bandgap_pbe", "gap"
-        ))
+        bandgap = safe_float(get_key(entry, "optb88vdw_bandgap", "bandgap", "bandgap_pbe", "gap"))
         formation_e = safe_float(get_key(
             entry, "formation_energy_peratom", "formation_energy_per_atom",
-            "ef_per_atom", "delta_e"
+            "ef_per_atom", "delta_e", "stability",
         ))
-        lambda_val = safe_float(get_key(
-            entry, "lambda_electron_phonon", "lambda", "el_ph_coupling"
-        ))
-        pressure = safe_float(get_key(entry, "pressure", "pressure_gpa", default=0)) or 0.0
-        jid = str(get_key(entry, "jid", "id", default=f"j3d-{i}"))
+        # 'stability' in supercon_3d is a string like 'stable' — don't use as float
+        if isinstance(get_key(entry, "stability", default=None), str):
+            formation_e = None
+
+        # 'press' is a string like '0 GPa'
+        pressure = parse_pressure_str(get_key(entry, "press", "pressure", "pressure_gpa", default="0"))
+        jid = str(get_key(entry, "jid", "id", default=f"j-{dataset_name}-{i}"))
+
+        raw_extra: dict = {}
+        if wlog is not None:
+            raw_extra["wlog_K"] = wlog  # ω_log in Kelvin — useful for Allen-Dynes Tc check
 
         rows.append({
             "formula": formula,
@@ -214,8 +242,10 @@ def download_supercon_dft(dataset_name: str, filename: str, label: str):
             "formation_energy_per_atom": formation_e if formation_e is not None else "",
             "data_confidence": "dft-verified",
             "raw_data": json.dumps({
-                k: str(v) for k, v in entry.items()
-                if k not in ("atoms", "wannier_bands", "phonon_bandstructure")
+                **raw_extra,
+                **{k: str(v) for k, v in entry.items()
+                   if k not in ("atoms", "cfid", "a2F", "a2F_original_x", "a2F_original_y",
+                                "wannier_bands", "phonon_bandstructure")},
             }),
         })
 
