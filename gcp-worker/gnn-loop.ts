@@ -443,6 +443,14 @@ async function loadMPContrastSamples(existingFormulas: Set<string>, scCount: num
 // ── Job processing ────────────────────────────────────────────────────────────
 
 async function processNextGnnJob(): Promise<boolean> {
+  // Check slot availability before touching the DB — avoids the claim→augment→requeue loop.
+  if (!acquireGNNTrainingSlot('dispatched-peek')) {
+    return false; // startup training holds the slot; try again next poll cycle
+  }
+  // Release immediately — we'll re-acquire properly after loading training data.
+  // This peek just prevents wasted augmentation queries when slot is busy.
+  releaseGNNTrainingSlot('dispatched-peek');
+
   const rows = await db.execute(
     `UPDATE gnn_training_jobs
      SET status = 'running', started_at = NOW()
