@@ -397,6 +397,7 @@ function ResearchMemoryCard() {
 
 function GNNActiveLearningCard() {
   const ri30 = useStartupSafeInterval(30000);
+  const ri60 = useStartupSafeInterval(60000);
   const { data: gnnVersionData } = useQuery<{
     currentVersion: number;
     ensembleSize: number;
@@ -1036,6 +1037,7 @@ function DistortionDetectorCard() {
 
 function HeterostructureGeneratorCard() {
   const ri30 = useStartupSafeInterval(30000);
+  const ri60 = useStartupSafeInterval(60000);
   const { data: heteroStats, isLoading } = useQuery<{
     totalGenerated: number;
     idealMismatchCount: number;
@@ -1416,6 +1418,7 @@ function DisorderGeneratorCard() {
 
 function InterfaceRelaxationCard() {
   const ri30 = useStartupSafeInterval(30000);
+  const ri60 = useStartupSafeInterval(60000);
   const { data: relaxStats, isLoading } = useQuery<{
     totalRelaxations: number;
     xtbSuccesses: number;
@@ -1554,6 +1557,7 @@ function InterfaceRelaxationCard() {
 
 function EnergyLandscapeCard() {
   const ri30 = useStartupSafeInterval(30000);
+  const ri60 = useStartupSafeInterval(60000);
   const { data: landscapeStats, isLoading } = useQuery<{
     totalExplored: number;
     multipleMinima: number;
@@ -1643,6 +1647,7 @@ function EnergyLandscapeCard() {
 
 function DistortionClassifierCard() {
   const ri30 = useStartupSafeInterval(30000);
+  const ri60 = useStartupSafeInterval(60000);
   const { data: classifierStats, isLoading } = useQuery<{
     trained: boolean;
     trainCount: number;
@@ -1745,6 +1750,7 @@ function DistortionClassifierCard() {
 
 function FeedbackLoopCard() {
   const ri30 = useStartupSafeInterval(30000);
+  const ri60 = useStartupSafeInterval(60000);
   const { data } = useQuery<{
     totalEvaluations: number;
     globalMeanAbsError: number;
