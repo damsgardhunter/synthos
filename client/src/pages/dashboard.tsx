@@ -206,11 +206,14 @@ function ThoughtFeed({ thoughts, tempo }: { thoughts: ThoughtMessage[]; tempo: s
 }
 
 function StrategyCard() {
+  const ri60 = useStartupSafeInterval(60000);
   const { data: strategy, isLoading } = useQuery<ResearchStrategy | null>({
     queryKey: ["/api/research-strategy"],
+    refetchInterval: ri60,
   });
   const { data: history } = useQuery<ResearchStrategy[]>({
     queryKey: ["/api/research-strategy/history"],
+    refetchInterval: ri60,
   });
 
   const evolutionCount = history?.length ?? 0;
@@ -1882,11 +1885,11 @@ function FeedbackLoopCard() {
 export default function Dashboard() {
   const ri30 = useStartupSafeInterval(30000);
   const ri60 = useStartupSafeInterval(60000);
-  const { data: stats, isLoading: statsLoading } = useQuery<Stats>({ queryKey: ["/api/stats"] });
-  const { data: phases, isLoading: phasesLoading } = useQuery<LearningPhase[]>({ queryKey: ["/api/learning-phases"] });
-  const { data: logs, isLoading: logsLoading } = useQuery<ResearchLog[]>({ queryKey: ["/api/research-logs"] });
-  const { data: milestoneData } = useQuery<{ milestones: any[]; total: number }>({ queryKey: ["/api/milestones"] });
-  const { data: dftStatus } = useQuery<{ total: number; dftEnrichedCount: number; breakdown: { high: number; medium: number; analytical: number } }>({ queryKey: ["/api/dft-status"] });
+  const { data: stats, isLoading: statsLoading } = useQuery<Stats>({ queryKey: ["/api/stats"], refetchInterval: ri30 });
+  const { data: phases, isLoading: phasesLoading } = useQuery<LearningPhase[]>({ queryKey: ["/api/learning-phases"], refetchInterval: ri30 });
+  const { data: logs, isLoading: logsLoading } = useQuery<ResearchLog[]>({ queryKey: ["/api/research-logs"], refetchInterval: ri30 });
+  const { data: milestoneData } = useQuery<{ milestones: any[]; total: number }>({ queryKey: ["/api/milestones"], refetchInterval: ri60 });
+  const { data: dftStatus } = useQuery<{ total: number; dftEnrichedCount: number; breakdown: { high: number; medium: number; analytical: number } }>({ queryKey: ["/api/dft-status"], refetchInterval: ri30 });
   const { data: bandCalcStats } = useQuery<{
     totalCalcs: number;
     succeeded: number;

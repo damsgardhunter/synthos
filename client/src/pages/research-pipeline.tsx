@@ -478,8 +478,10 @@ const MILESTONE_ICONS: Record<string, typeof Star> = {
 };
 
 function MilestoneTimeline() {
+  const ri60 = useStartupSafeInterval(60000);
   const { data, isLoading } = useQuery<{ milestones: Milestone[]; total: number }>({
     queryKey: ["/api/milestones"],
+    refetchInterval: ri60,
   });
 
   if (isLoading || !data || data.milestones.length === 0) return null;
@@ -848,14 +850,18 @@ function CycleJournal() {
 }
 
 export default function ResearchPipeline() {
+  const ri30 = useStartupSafeInterval(30000);
   const { data: phases, isLoading: phasesLoading } = useQuery<LearningPhase[]>({
     queryKey: ["/api/learning-phases"],
+    refetchInterval: ri30,
   });
   const { data: logs, isLoading: logsLoading } = useQuery<ResearchLog[]>({
     queryKey: ["/api/research-logs"],
+    refetchInterval: ri30,
   });
   const { data: insightData, isLoading: insightsLoading } = useQuery<{ insights: NovelInsight[]; total: number }>({
     queryKey: ["/api/novel-insights"],
+    refetchInterval: ri30,
   });
   const [familyFilter, setFamilyFilter] = useState<string | null>(null);
 

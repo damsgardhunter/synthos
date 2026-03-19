@@ -9,6 +9,7 @@ const openai = new OpenAI({
   baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
   apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY,
   timeout: 60_000,
+  maxRetries: 0, // Connection errors do not self-resolve; avoid 3x retry amplification
 });
 
 interface FocusArea {

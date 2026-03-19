@@ -4556,6 +4556,10 @@ export async function checkXTBHealth(): Promise<{ available: boolean; version: s
   const HESS_TIMEOUT = 40000;
 
   const result = { available: false, version: "", canOptimize: false, canHess: false, error: undefined as string | undefined };
+  // Track whether opt/hess actually succeeded vs were only skipped due to WSL infra errors.
+  // xtbHealthy uses these — WSL-skip alone does not count as verified healthy.
+  let actualOptSuccess = false;
+  let actualHessSuccess = false;
 
   if (!fs.existsSync(XTB_BIN)) {
     result.error = `xTB binary not found at ${XTB_BIN}`;
@@ -4624,9 +4628,11 @@ export async function checkXTBHealth(): Promise<{ available: boolean; version: s
         if (!wslInfraFail) {
           if (optOut.includes("normal termination")) {
             result.canOptimize = true;
+            actualOptSuccess = true;
             console.log(`[xTB-Health] Geometry optimization: OK`);
           } else if (optOut.includes("TOTAL ENERGY")) {
             result.canOptimize = true;
+            actualOptSuccess = true;
             console.log(`[xTB-Health] Geometry optimization: OK (non-zero exit but energy computed)`);
           } else {
             console.log(`[xTB-Health] Geometry optimization: FAILED (attempt ${attempt}) — ${optOut.slice(0, 200)}`);
@@ -4655,9 +4661,11 @@ export async function checkXTBHealth(): Promise<{ available: boolean; version: s
         if (!wslInfraFailH) {
           if (hessOut.includes("projected vibrational frequencies") || hessOut.includes("normal termination")) {
             result.canHess = true;
+            actualHessSuccess = true;
             console.log(`[xTB-Health] Hessian calculation: OK`);
           } else if (hessOut.includes("vibrational frequencies")) {
             result.canHess = true;
+            actualHessSuccess = true;
             console.log(`[xTB-Health] Hessian calculation: OK (non-zero exit but frequencies computed)`);
           } else {
             console.log(`[xTB-Health] Hessian calculation: FAILED (attempt ${attempt}) — ${hessOut.slice(0, 200)}`);
@@ -4684,9 +4692,14 @@ export async function checkXTBHealth(): Promise<{ available: boolean; version: s
     }
   }
 
-  xtbHealthy = result.available && result.canOptimize && result.canHess;
+  // Require actual verified success — WSL-infra skips set canOptimize/canHess=true so the
+  // engine will retry xTB once WSL recovers, but xtbHealthy stays false until a real test passes.
+  xtbHealthy = result.available && actualOptSuccess && actualHessSuccess;
   if (!xtbHealthy) {
-    console.warn(`[xTB-Health] WARNING: xTB is not fully functional after ${MAX_RETRIES} attempts. DFT calculations may fail or use fallbacks.`);
+    const reason = !result.available ? "binary unavailable"
+      : (!actualOptSuccess && !actualHessSuccess) ? "WSL infrastructure not ready — using analytical fallbacks"
+      : "opt or hess test failed";
+    console.warn(`[xTB-Health] WARNING: xTB not verified healthy (${reason}). DFT will use analytical fallbacks.`);
   }
   console.log(`[xTB-Health] Summary: available=${result.available}, opt=${result.canOptimize}, hess=${result.canHess}, healthy=${xtbHealthy}`);
   return result;

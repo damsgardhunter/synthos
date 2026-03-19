@@ -541,18 +541,22 @@ export default function SuperconductorLab() {
   const ri30 = useStartupSafeInterval(30000);
   const { data: scData, isLoading: scLoading } = useQuery<{ candidates: SuperconductorCandidate[]; total: number }>({
     queryKey: ["/api/superconductor-candidates"],
+    refetchInterval: ri30,
   });
 
   const { data: synthData, isLoading: synthLoading } = useQuery<{ processes: SynthesisProcess[]; total: number }>({
     queryKey: ["/api/synthesis-processes"],
+    refetchInterval: ri30,
   });
 
   const { data: rxnData, isLoading: rxnLoading } = useQuery<{ reactions: ChemicalReaction[]; total: number }>({
     queryKey: ["/api/chemical-reactions"],
+    refetchInterval: ri30,
   });
 
   const { data: calibrationData } = useQuery<CalibrationResponse>({
     queryKey: ["/api/ml-calibration"],
+    refetchInterval: ri30,
   });
 
   const { data: engineStatus } = useQuery<{

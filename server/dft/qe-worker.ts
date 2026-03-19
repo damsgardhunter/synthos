@@ -852,8 +852,33 @@ function cleanQETmpDir(tmpDir: string): void {
         const stat = fs.statSync(fullPath);
         if (stat.isDirectory() && (entry.endsWith(".save") || entry.endsWith(".save_tmp"))) {
           fs.rmSync(fullPath, { recursive: true, force: true });
-        } else if (entry.endsWith(".xml") || entry.endsWith(".wfc") || entry.endsWith(".mix") || entry.endsWith(".restart_xml")) {
+        } else if (
+          entry.endsWith(".xml") ||
+          entry.endsWith(".restart_xml") ||
+          /\.(wfc|mix)\d*(_new)?$/.test(entry) // .wfc, .wfc1, .wfc2, .mix, .mix1, .mix1_new, etc.
+        ) {
           fs.unlinkSync(fullPath);
+        }
+      } catch {}
+    }
+  } catch {}
+}
+
+// Remove jobDirs left behind by previous crashed server runs. Called once at startup.
+function cleanStaleQEJobDirs(): void {
+  if (!fs.existsSync(QE_WORK_DIR)) return;
+  const staleAgeMs = 2 * 60 * 60 * 1000; // 2 hours
+  const now = Date.now();
+  try {
+    const entries = fs.readdirSync(QE_WORK_DIR);
+    for (const entry of entries) {
+      if (!entry.startsWith("job_")) continue;
+      const fullPath = path.join(QE_WORK_DIR, entry);
+      try {
+        const stat = fs.statSync(fullPath);
+        if (stat.isDirectory() && now - stat.mtimeMs > staleAgeMs) {
+          fs.rmSync(fullPath, { recursive: true, force: true });
+          console.log(`[QE-Worker] Cleaned stale job dir: ${entry}`);
         }
       } catch {}
     }
@@ -879,6 +904,7 @@ function cleanupPseudoDir(): void {
 }
 
 cleanupPseudoDir();
+cleanStaleQEJobDirs();
 
 // GitHub pslibrary is the primary source — the QE website is often unreliable/down.
 // QE website kept as fallback only.

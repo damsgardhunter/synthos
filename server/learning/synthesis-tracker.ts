@@ -9,7 +9,8 @@ import type { EventEmitter } from "./engine";
 const openai = new OpenAI({
   baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
   apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY,
-  timeout: 60_000,
+  timeout: 20_000,
+  maxRetries: 0, // Connection errors don't self-resolve; retrying turns a 20s fail into 7 min
 });
 
 const SYNTHESIS_VALIDATION_BOUNDS = {
