@@ -657,6 +657,11 @@ const STARTUP_CORPUS_STATE_KEY = 'gnn_startup_corpus_training';
 const STARTUP_CKPT_KEY_PREFIX = 'gnn_startup_ckpt_';
 const STARTUP_CKPT_TTL_HOURS = 20; // checkpoints older than this are stale
 
+// Increment this whenever the GNN forward pass formula changes in a way that
+// makes old weights incompatible with the new code (e.g. hard-cap → sigmoid).
+// When the stored version doesn't match, startup retrains from scratch.
+const GNN_MODEL_VERSION = 2; // v2: sigmoid soft caps for ω_log and λ (2026-03-19)
+
 // In-process guard: run corpus training exactly once per GCP worker process lifetime.
 let _startupCorpusRan = false;
 
@@ -672,6 +677,12 @@ async function checkStartupCompletedRecently(): Promise<GNNWeights[] | null> {
     if (!stateRow?.value) return null;
     const state = typeof stateRow.value === 'string' ? JSON.parse(stateRow.value) : stateRow.value;
     if (!state?.doneAt) return null;
+    // Version check: if stored weights were trained with an older forward pass
+    // formula, they're incompatible with the current code and must be retrained.
+    if ((state.modelVersion ?? 1) !== GNN_MODEL_VERSION) {
+      console.log(`[GNN-GCP] Startup weights are model version ${state.modelVersion ?? 1} but code requires v${GNN_MODEL_VERSION} — will retrain from scratch`);
+      return null;
+    }
     const ageHours = (Date.now() - new Date(state.doneAt).getTime()) / 3_600_000;
     if (ageHours > 8) {
       console.log(`[GNN-GCP] Startup training record is ${ageHours.toFixed(1)}h old — will retrain`);
@@ -685,7 +696,7 @@ async function checkStartupCompletedRecently(): Promise<GNNWeights[] | null> {
     if (!jobRow?.weights) return null;
     const weights = typeof jobRow.weights === 'string' ? JSON.parse(jobRow.weights) : jobRow.weights;
     if (!Array.isArray(weights) || weights.length === 0) return null;
-    console.log(`[GNN-GCP] Startup training completed ${ageHours.toFixed(1)}h ago — restoring ${weights.length} models from DB`);
+    console.log(`[GNN-GCP] Startup training completed ${ageHours.toFixed(1)}h ago (v${GNN_MODEL_VERSION}) — restoring ${weights.length} models from DB`);
     return weights as GNNWeights[];
   } catch {
     return null;
@@ -901,7 +912,7 @@ async function runStartupFullCorpusTraining(): Promise<void> {
     const nowIso = new Date().toISOString();
     await db.execute(
       `INSERT INTO system_state (key, value, updated_at)
-       VALUES ('${STARTUP_CORPUS_STATE_KEY}', '{"doneAt":"${nowIso}","trainN":${trainSet.length},"valR2":${r2.toFixed(4)}}', NOW())
+       VALUES ('${STARTUP_CORPUS_STATE_KEY}', '{"doneAt":"${nowIso}","trainN":${trainSet.length},"valR2":${r2.toFixed(4)},"modelVersion":${GNN_MODEL_VERSION}}', NOW())
        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`
     );
   } catch { /* non-fatal */ }
