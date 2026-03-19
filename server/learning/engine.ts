@@ -3742,9 +3742,33 @@ async function runPhase11_StructurePrediction() {
           for (const cand of matchingCandidates) {
             const existingNotes = cand.notes || "";
             const hullNote = `[ConvexHull: eAboveHull=${hullResult.energyAboveHull.toFixed(4)}, onHull=${hullResult.isOnHull}, decomp=${hullResult.decompositionProducts.join("+")}]`;
+
+            // Hard sanity filter: delete any candidate whose real MP hull distance
+            // exceeds 0.5 eV/atom.  These are physically impossible — no Tc prediction
+            // from any ML model is meaningful for such structures.
+            if (hullResult.energyAboveHull > 0.5) {
+              emit("log", {
+                phase: "engine",
+                event: "ConvexHull hard reject — deleting",
+                detail: `${cand.formula}: eAboveHull=${hullResult.energyAboveHull.toFixed(4)} eV/atom > 0.5 limit — removing from DB`,
+                dataSource: "ConvexHull Analysis",
+              });
+              await storage.deleteSuperconductorCandidate(cand.id);
+              continue;
+            }
+
             if (!existingNotes.includes("[ConvexHull:")) {
               await storage.updateSuperconductorCandidate(cand.id, {
                 notes: `${existingNotes} ${hullNote}`.trim(),
+                mlFeatures: {
+                  ...(cand.mlFeatures as Record<string, any> ?? {}),
+                  stabilityGate: {
+                    pass: false,
+                    verdict: hullResult.isOnHull ? "stable" : (hullResult.energyAboveHull <= 0.1 ? "near-hull" : "unstable"),
+                    hullDistance: hullResult.energyAboveHull,
+                    reason: hullNote,
+                  },
+                },
               });
             }
           }

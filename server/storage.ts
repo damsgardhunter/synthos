@@ -62,6 +62,7 @@ export interface IStorage {
   insertSuperconductorCandidate(sc: InsertSuperconductorCandidate): Promise<SuperconductorCandidate>;
   bulkInsertSuperconductorCandidates(candidates: InsertSuperconductorCandidate[]): Promise<number>;
   updateSuperconductorCandidate(id: string, updates: Partial<InsertSuperconductorCandidate>): Promise<void>;
+  deleteSuperconductorCandidate(id: string): Promise<void>;
   bulkUpdateSuperconductorCandidates(batch: Array<{ id: string; updates: Partial<InsertSuperconductorCandidate> }>): Promise<number>;
   getSuperconductorCount(): Promise<number>;
   getConfidenceBreakdown(): Promise<{ high: number; medium: number; total: number; recentEnriched: Pick<SuperconductorCandidate, 'formula' | 'dataConfidence' | 'ensembleScore' | 'predictedTc'>[] }>;
@@ -277,20 +278,40 @@ export class DatabaseStorage implements IStorage {
     return Number(count);
   }
 
+  // Hull sanity guard: exclude any candidate whose real MP ConvexHull analysis
+  // recorded eAboveHull > 0.5 eV/atom in the notes field.  These are physically
+  // impossible structures that should never appear in the UI.
+  private readonly HULL_GUARD_SQL = sql`
+    NOT (notes ~ 'eAboveHull=[0-9]'
+         AND (regexp_match(notes, 'eAboveHull=([0-9]+\.?[0-9]*)'))[1]::float > 0.5)
+  `;
+
   async getSuperconductorCandidates(limit = 50): Promise<SuperconductorCandidate[]> {
-    return db.select().from(superconductorCandidates).orderBy(desc(superconductorCandidates.predictedTc)).limit(limit);
+    return db.select().from(superconductorCandidates)
+      .where(this.HULL_GUARD_SQL)
+      .orderBy(desc(superconductorCandidates.predictedTc))
+      .limit(limit);
   }
 
   async getSuperconductorCandidatesByTc(limit = 10): Promise<SuperconductorCandidate[]> {
-    return db.select().from(superconductorCandidates).orderBy(desc(superconductorCandidates.predictedTc)).limit(limit);
+    return db.select().from(superconductorCandidates)
+      .where(this.HULL_GUARD_SQL)
+      .orderBy(desc(superconductorCandidates.predictedTc))
+      .limit(limit);
   }
 
   async getTopCandidatesMerged(scoreLimit = 50, tcLimit = 10): Promise<SuperconductorCandidate[]> {
     const rows = await db.execute(sql`
       SELECT DISTINCT ON (formula) * FROM (
-        (SELECT * FROM superconductor_candidates ORDER BY ensemble_score DESC NULLS LAST LIMIT ${scoreLimit})
+        (SELECT * FROM superconductor_candidates
+          WHERE NOT (notes ~ 'eAboveHull=[0-9]'
+            AND (regexp_match(notes, 'eAboveHull=([0-9]+\.?[0-9]*)'))[1]::float > 0.5)
+          ORDER BY ensemble_score DESC NULLS LAST LIMIT ${scoreLimit})
         UNION
-        (SELECT * FROM superconductor_candidates ORDER BY predicted_tc DESC NULLS LAST LIMIT ${tcLimit})
+        (SELECT * FROM superconductor_candidates
+          WHERE NOT (notes ~ 'eAboveHull=[0-9]'
+            AND (regexp_match(notes, 'eAboveHull=([0-9]+\.?[0-9]*)'))[1]::float > 0.5)
+          ORDER BY predicted_tc DESC NULLS LAST LIMIT ${tcLimit})
       ) merged
       ORDER BY formula, predicted_tc DESC NULLS LAST
     `);
@@ -383,6 +404,10 @@ export class DatabaseStorage implements IStorage {
       }
     }
     await db.update(superconductorCandidates).set(sanitized).where(eq(superconductorCandidates.id, id));
+  }
+
+  async deleteSuperconductorCandidate(id: string): Promise<void> {
+    await db.delete(superconductorCandidates).where(eq(superconductorCandidates.id, id));
   }
 
   async bulkUpdateSuperconductorCandidates(batch: Array<{ id: string; updates: Partial<InsertSuperconductorCandidate> }>): Promise<number> {
