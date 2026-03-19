@@ -17,7 +17,7 @@ import path from "path";
 import {
   trainEnsemble, GNNPredict, buildCrystalGraph,
   ENSEMBLE_SIZE, ENSEMBLE_SEEDS, BOOTSTRAP_RATIOS,
-  splitTrainValidation,
+  splitTrainValidation, setCachedEnsemble,
 } from "../server/learning/graph-neural-net";
 import type { TrainingSample } from "../server/learning/graph-neural-net";
 import type { GNNWeights } from "../server/learning/graph-neural-net";
@@ -80,18 +80,22 @@ async function trainEnsembleParallel(
   maxPretrainEpochs = 15,
   label?: string,
   valSet?: TrainingSample[],
+  onModelComplete?: (model: GNNWeights, modelIndex: number) => Promise<void>,
+  indicesToTrain?: number[],
 ): Promise<GNNWeights[]> {
-  const n = Math.min(ENSEMBLE_SIZE, ENSEMBLE_SEEDS.length);
-  console.log(`[GNN-GCP] Launching ${n} worker threads for parallel ensemble training${label ? ` [${label}]` : ''}`);
+  const allIndices = Array.from({ length: Math.min(ENSEMBLE_SIZE, ENSEMBLE_SEEDS.length) }, (_, i) => i);
+  const indices = indicesToTrain ?? allIndices;
+  console.log(`[GNN-GCP] Launching ${indices.length} worker threads for parallel ensemble training${label ? ` [${label}]` : ''}${indicesToTrain ? ` (indices: ${indices.join(',')})` : ''}`);
 
-  // Fan out: all n models start simultaneously
-  const promises = Array.from({ length: n }, (_, i) =>
-    spawnModelWorker(trainingData, i, maxPretrainEpochs, label).then(model => {
+  // Fan out: all requested models start simultaneously
+  const promises = indices.map(i =>
+    spawnModelWorker(trainingData, i, maxPretrainEpochs, label).then(async model => {
       if (valSet && valSet.length >= 5) {
         const { r2, mae, rmse } = computeMetrics([model], valSet);
         console.log(`[GNN-Worker-${i}] R²=${r2.toFixed(3)} MAE=${mae.toFixed(1)}K RMSE=${rmse.toFixed(1)}K`);
       }
-      return model;
+      if (onModelComplete) await onModelComplete(model, i).catch(() => {});
+      return { model, i };
     }).catch((err: Error) => {
       console.warn(`[GNN-GCP] Worker ${i} failed (${err.message}) — will use sequential fallback for this model`);
       return null;
@@ -99,15 +103,15 @@ async function trainEnsembleParallel(
   );
 
   const results = await Promise.all(promises);
-  const models = results.filter((m): m is GNNWeights => m !== null);
+  const models = results.filter((r): r is { model: GNNWeights; i: number } => r !== null).map(r => r.model);
 
   if (models.length === 0) {
     console.warn("[GNN-GCP] All worker threads failed — falling back to sequential trainEnsemble");
     return trainEnsemble(trainingData);
   }
 
-  if (models.length < n) {
-    console.warn(`[GNN-GCP] Only ${models.length}/${n} workers succeeded — ensemble will be smaller`);
+  if (models.length < indices.length) {
+    console.warn(`[GNN-GCP] Only ${models.length}/${indices.length} workers succeeded — ensemble will be smaller`);
   }
 
   return models;
@@ -648,9 +652,102 @@ async function processNextGnnJob(): Promise<boolean> {
 // Subsequent dispatched retrains use only 5k samples so they finish in minutes.
 
 const STARTUP_CORPUS_STATE_KEY = 'gnn_startup_corpus_training';
+// Per-model checkpoint keys written to system_state as each worker completes.
+// These let a restarted process skip models that already finished.
+const STARTUP_CKPT_KEY_PREFIX = 'gnn_startup_ckpt_';
+const STARTUP_CKPT_TTL_HOURS = 20; // checkpoints older than this are stale
+
 // In-process guard: run corpus training exactly once per GCP worker process lifetime.
-// Every fresh restart always trains on the full corpus regardless of last DB timestamp.
 let _startupCorpusRan = false;
+
+// ── Startup checkpoint helpers ────────────────────────────────────────────────
+
+/** Returns loaded ensemble weights if startup training completed within TTL, else null. */
+async function checkStartupCompletedRecently(): Promise<GNNWeights[] | null> {
+  try {
+    const stateRows = await db.execute(
+      `SELECT value FROM system_state WHERE key = '${STARTUP_CORPUS_STATE_KEY}'`
+    );
+    const stateRow = (stateRows as any).rows?.[0] ?? (Array.isArray(stateRows) ? stateRows[0] : undefined);
+    if (!stateRow?.value) return null;
+    const state = typeof stateRow.value === 'string' ? JSON.parse(stateRow.value) : stateRow.value;
+    if (!state?.doneAt) return null;
+    const ageHours = (Date.now() - new Date(state.doneAt).getTime()) / 3_600_000;
+    if (ageHours > 8) {
+      console.log(`[GNN-GCP] Startup training record is ${ageHours.toFixed(1)}h old — will retrain`);
+      return null;
+    }
+    // Load weights from the most recent completed job
+    const jobRows = await db.execute(
+      `SELECT weights FROM gnn_training_jobs WHERE status = 'done' AND weights IS NOT NULL ORDER BY completed_at DESC LIMIT 1`
+    );
+    const jobRow = (jobRows as any).rows?.[0] ?? (Array.isArray(jobRows) ? jobRows[0] : undefined);
+    if (!jobRow?.weights) return null;
+    const weights = typeof jobRow.weights === 'string' ? JSON.parse(jobRow.weights) : jobRow.weights;
+    if (!Array.isArray(weights) || weights.length === 0) return null;
+    console.log(`[GNN-GCP] Startup training completed ${ageHours.toFixed(1)}h ago — restoring ${weights.length} models from DB`);
+    return weights as GNNWeights[];
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Loads any per-model checkpoints saved from a previous interrupted run.
+ * Returns a map of modelIndex → GNNWeights for models that already finished.
+ */
+async function loadStartupModelCheckpoints(): Promise<Map<number, GNNWeights>> {
+  const result = new Map<number, GNNWeights>();
+  const n = Math.min(ENSEMBLE_SIZE, ENSEMBLE_SEEDS.length);
+  try {
+    const keys = Array.from({ length: n }, (_, i) => `'${STARTUP_CKPT_KEY_PREFIX}${i}'`).join(', ');
+    const rows = await db.execute(
+      `SELECT key, value, updated_at FROM system_state WHERE key IN (${keys})`
+    );
+    const rowArr: any[] = (rows as any).rows ?? (Array.isArray(rows) ? rows : []);
+    const cutoff = Date.now() - STARTUP_CKPT_TTL_HOURS * 3_600_000;
+    for (const row of rowArr) {
+      const updatedAt = new Date(row.updated_at ?? 0).getTime();
+      if (updatedAt < cutoff) continue; // stale checkpoint
+      const idx = parseInt(String(row.key).replace(STARTUP_CKPT_KEY_PREFIX, ''), 10);
+      if (!Number.isFinite(idx)) continue;
+      const model = typeof row.value === 'string' ? JSON.parse(row.value) : row.value;
+      if (model && typeof model === 'object') {
+        result.set(idx, model as GNNWeights);
+        console.log(`[GNN-GCP] Restored checkpoint for model ${idx}`);
+      }
+    }
+  } catch (err: any) {
+    console.warn(`[GNN-GCP] Checkpoint load failed (non-fatal): ${err.message?.slice(0, 80)}`);
+  }
+  return result;
+}
+
+/** Saves a single trained model to system_state as a checkpoint. */
+async function saveStartupModelCheckpoint(model: GNNWeights, modelIndex: number): Promise<void> {
+  try {
+    const key = `${STARTUP_CKPT_KEY_PREFIX}${modelIndex}`;
+    // GNN weights are pure JSON numbers — no single-quote injection risk.
+    const value = JSON.stringify(model);
+    await db.execute(
+      `INSERT INTO system_state (key, value, updated_at)
+       VALUES ('${key}', '${value}'::jsonb, NOW())
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`
+    );
+    console.log(`[GNN-GCP] Checkpointed model ${modelIndex} (${(value.length / 1024).toFixed(0)} KB)`);
+  } catch (err: any) {
+    console.warn(`[GNN-GCP] Checkpoint save failed for model ${modelIndex}: ${err.message?.slice(0, 80)}`);
+  }
+}
+
+/** Clears per-model checkpoints after a full successful startup training. */
+async function clearStartupModelCheckpoints(): Promise<void> {
+  const n = Math.min(ENSEMBLE_SIZE, ENSEMBLE_SEEDS.length);
+  try {
+    const keys = Array.from({ length: n }, (_, i) => `'${STARTUP_CKPT_KEY_PREFIX}${i}'`).join(', ');
+    await db.execute(`DELETE FROM system_state WHERE key IN (${keys})`);
+  } catch { /* non-fatal */ }
+}
 
 async function runStartupFullCorpusTraining(): Promise<void> {
   // Skip if already ran in this process (e.g. called twice).
@@ -659,6 +756,25 @@ async function runStartupFullCorpusTraining(): Promise<void> {
     return;
   }
   _startupCorpusRan = true;
+
+  // ── Check if startup training completed recently ──────────────────────────
+  // If the VM was restarted after a successful training run, skip retraining
+  // and restore the saved weights instead of running again from scratch.
+  const recentWeights = await checkStartupCompletedRecently();
+  if (recentWeights) {
+    setCachedEnsemble(recentWeights);
+    console.log('[GNN-GCP] Startup training skipped — restored recent weights from DB');
+    return;
+  }
+
+  // ── Load partial checkpoints from a previous interrupted run ─────────────
+  const checkpointedModels = await loadStartupModelCheckpoints();
+  const allIndices = Array.from({ length: Math.min(ENSEMBLE_SIZE, ENSEMBLE_SEEDS.length) }, (_, i) => i);
+  const indicesToTrain = allIndices.filter(i => !checkpointedModels.has(i));
+
+  if (checkpointedModels.size > 0) {
+    console.log(`[GNN-GCP] Found ${checkpointedModels.size} checkpointed model(s) — only training ${indicesToTrain.length} remaining`);
+  }
 
   console.log('[GNN-GCP] ════════════════════════════════════════════════════════');
   console.log('[GNN-GCP]  STARTUP PHASE 3 — Full Corpus Training');
@@ -717,7 +833,24 @@ async function runStartupFullCorpusTraining(): Promise<void> {
       }
     }
     try {
-      models = await trainEnsembleParallel(trainSet, 15, 'STARTUP', valSet);
+      if (indicesToTrain.length === 0) {
+        // All models were checkpointed — nothing to train.
+        console.log('[GNN-GCP] All models restored from checkpoints — skipping training');
+        models = allIndices.map(i => checkpointedModels.get(i)!);
+      } else {
+        // Train only missing model indices; checkpoint each one as it finishes.
+        const newModels = await trainEnsembleParallel(
+          trainSet, 15, 'STARTUP', valSet,
+          saveStartupModelCheckpoint,
+          indicesToTrain,
+        );
+        // Merge checkpointed + newly trained, preserving original ensemble order.
+        const modelMap = new Map<number, GNNWeights>(checkpointedModels);
+        indicesToTrain.forEach((idx, pos) => {
+          if (newModels[pos]) modelMap.set(idx, newModels[pos]);
+        });
+        models = allIndices.map(i => modelMap.get(i)).filter((m): m is GNNWeights => !!m);
+      }
     } finally {
       releaseGNNTrainingSlot('STARTUP');
     }
@@ -763,7 +896,7 @@ async function runStartupFullCorpusTraining(): Promise<void> {
     console.warn(`[GNN-GCP] Failed to store startup weights in DB: ${err.message?.slice(0, 120)}`);
   }
 
-  // Mark startup complete in system_state
+  // Mark startup complete in system_state and clear per-model checkpoints
   try {
     const nowIso = new Date().toISOString();
     await db.execute(
@@ -772,6 +905,8 @@ async function runStartupFullCorpusTraining(): Promise<void> {
        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`
     );
   } catch { /* non-fatal */ }
+  // Per-model checkpoints are superseded by the full job stored above.
+  await clearStartupModelCheckpoints();
 }
 
 // ── Main loop ─────────────────────────────────────────────────────────────────
