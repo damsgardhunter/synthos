@@ -594,6 +594,7 @@ export async function scanMaterialSignals(
     let verificationsThisCycle = 0;
 
     for (const match of roundRobinOrder) {
+      const dedupeKey = `${match.signal.id}::${match.formula}`;
 
       emit("log", {
         phase: "signal-scanner",

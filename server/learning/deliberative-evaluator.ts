@@ -319,6 +319,49 @@ async function runPhysicsMerit(formula: string, predictedTc: number, mlFeatures?
   };
 }
 
+// ---------------------------------------------------------------------------
+// Module-level cache for comparative ranking DB data
+// Same stampede-prevention pattern as getOrBuildCompetingPhasesCache.
+// ---------------------------------------------------------------------------
+interface RankingCache {
+  globalStats: { count: number; median: number; p75: number; p25: number };
+  topCandidates: Array<{ formula: string; predictedTc: number | null }>;
+  builtAt: number;
+}
+let _rankingCache: RankingCache | null = null;
+let _rankingCacheBuilding = false;
+const RANKING_CACHE_TTL_MS = 600_000; // 10 min
+
+async function getOrBuildRankingCache(): Promise<RankingCache> {
+  const now = Date.now();
+  if (_rankingCache && (now - _rankingCache.builtAt) < RANKING_CACHE_TTL_MS) {
+    return _rankingCache;
+  }
+  if (_rankingCacheBuilding) {
+    // Return stale data rather than waiting; all concurrent callers share one rebuild.
+    return _rankingCache ?? { globalStats: { count: 0, median: 0, p75: 0, p25: 0 }, topCandidates: [], builtAt: now };
+  }
+  _rankingCacheBuilding = true;
+  try {
+    let globalStats: RankingCache["globalStats"] = { count: 0, median: 0, p75: 0, p25: 0 };
+    let topCandidates: RankingCache["topCandidates"] = [];
+    try {
+      globalStats = await storage.getGlobalTcStats();
+    } catch {
+      // DB unavailable — use defaults
+    }
+    try {
+      topCandidates = await storage.getSuperconductorCandidates(50);
+    } catch {
+      // DB unavailable — use empty list
+    }
+    _rankingCache = { globalStats, topCandidates, builtAt: Date.now() };
+    return _rankingCache;
+  } finally {
+    _rankingCacheBuilding = false;
+  }
+}
+
 async function runComparativeRanking(formula: string, predictedTc: number): Promise<DeliberationStage & { rank: number | null; novelty: number }> {
   const reasoning: string[] = [];
   let score = 0.5;
@@ -326,8 +369,7 @@ async function runComparativeRanking(formula: string, predictedTc: number): Prom
   let novelty = 0.5;
 
   try {
-    const globalStats = await storage.getGlobalTcStats();
-    const existing = await storage.getSuperconductorCandidates(50);
+    const { globalStats, topCandidates: existing } = await getOrBuildRankingCache();
     const sorted = existing
       .filter(c => (c.predictedTc ?? 0) > 0)
       .sort((a, b) => (b.predictedTc ?? 0) - (a.predictedTc ?? 0));

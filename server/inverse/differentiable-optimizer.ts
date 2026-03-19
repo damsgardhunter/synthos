@@ -158,7 +158,23 @@ const KNOWN_SC_TC: Record<string, number> = {
   "FeSe": 8, "LiFeAs": 18, "BaFe2As2": 38,
 };
 
+// Module-level cache for evaluatePhysics — keyed by "formula:pressure".
+// Capped at 2000 entries; evicted FIFO when full.  Avoids recomputing the
+// same perturbed formula multiple times across concurrent gradient-descent seeds.
+const _physicsCache = new Map<string, PhysicsOutput>();
+const _PHYSICS_CACHE_MAX = 2000;
+
+function _physicsKey(formula: string, pressure: number): string {
+  return `${formula}:${Math.round(pressure)}`;
+}
+
 async function evaluatePhysics(formula: string, pressure: number = 0, synthVec?: SynthesisVector): Promise<PhysicsOutput> {
+  // Only cache calls without a custom synthVec (the common hot-path case).
+  if (!synthVec) {
+    const key = _physicsKey(formula, pressure);
+    const cached = _physicsCache.get(key);
+    if (cached) return cached;
+  }
   const electronic = computeElectronicStructure(formula, null);
   const phonon = computePhononSpectrum(formula, electronic);
   const coupling = computeElectronPhononCoupling(electronic, phonon, formula, pressure);
@@ -214,7 +230,7 @@ async function evaluatePhysics(formula: string, pressure: number = 0, synthVec?:
     }
   } catch {}
 
-  return {
+  const result: PhysicsOutput = {
     tc: Math.max(tc, gbTc * 0.3),
     lambda,
     omegaLog,
@@ -226,6 +242,17 @@ async function evaluatePhysics(formula: string, pressure: number = 0, synthVec?:
     gbTc,
     gbScore,
   };
+
+  if (!synthVec) {
+    const key = _physicsKey(formula, pressure);
+    if (_physicsCache.size >= _PHYSICS_CACHE_MAX) {
+      // Evict oldest entry (FIFO)
+      _physicsCache.delete(_physicsCache.keys().next().value!);
+    }
+    _physicsCache.set(key, result);
+  }
+
+  return result;
 }
 
 function computeAnalyticMcMillanGradients(
@@ -1065,12 +1092,19 @@ export function getDifferentiableOptimizerStats(): DiffOptimizerStats {
   return { ...stats };
 }
 
+// How long (ms) a single runGradientDescentCycle call may run before the
+// continuous and cross-pollination phases are skipped.  Prevents campaigns
+// from blocking the engine cycle when extractFeatures is slow (observed
+// 18–28 min per campaign at cycle 274 without this guard).
+const GRAD_CYCLE_BUDGET_MS = 3 * 60 * 1000; // 3 minutes
+
 export async function runGradientDescentCycle(
   target: TargetProperties,
   seedCount: number = 6,
   stepsPerSeed: number = 15,
   existingTopFormulas?: string[]
 ): Promise<{ results: DifferentiableResult[]; bestFormula: string; bestTc: number }> {
+  const _cycleStart = Date.now();
   let seeds = generateGradientSeeds(target, seedCount);
 
   if (existingTopFormulas && existingTopFormulas.length > 0) {
@@ -1080,6 +1114,17 @@ export async function runGradientDescentCycle(
   }
 
   const standardResults = await runBatchDifferentiableOptimization(seeds, target, stepsPerSeed);
+
+  // Skip expensive continuous and cross-pollination phases if the batch
+  // phase already used the time budget.
+  if (Date.now() - _cycleStart > GRAD_CYCLE_BUDGET_MS) {
+    console.log(`[GradDescent] Budget exhausted after batch phase (${((Date.now() - _cycleStart) / 1000).toFixed(0)}s) — skipping continuous optimization`);
+    const results = standardResults;
+    let bestTc = 0; let bestFormula = "";
+    for (const r of results) { if (r.finalTc > bestTc) { bestTc = r.finalTc; bestFormula = r.finalFormula; } }
+    return { results, bestFormula, bestTc };
+  }
+
   const continuousResults = await Promise.all(seeds.slice(0, Math.ceil(seedCount / 2)).map(
     f => runContinuousOptimization(f, target, stepsPerSeed * 2)
   ));

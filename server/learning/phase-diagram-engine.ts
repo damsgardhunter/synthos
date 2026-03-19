@@ -510,6 +510,9 @@ let competingPhasesCache: CachedCompetingPhases | null = null;
 // during each rebuild). With the screening loop inserting tens of candidates/min,
 // a 60s TTL means the cache rebuilds ~once/cycle which is sufficient.
 const COMPETING_PHASES_CACHE_TTL_MS = 600_000;
+// Prevent concurrent stampede: when one rebuild is in-flight, all other callers
+// receive the stale (or empty) cache immediately rather than all racing to DB.
+let competingPhasesCacheBuilding = false;
 
 async function getOrBuildCompetingPhasesCache(): Promise<CachedCompetingPhases> {
   const now = Date.now();
@@ -517,25 +520,48 @@ async function getOrBuildCompetingPhasesCache(): Promise<CachedCompetingPhases> 
     return competingPhasesCache;
   }
 
-  const allMaterials = await storage.getMaterials(500, 0);
-  const materialEntries = allMaterials.map(mat => ({
-    formula: mat.formula,
-    energy: mat.formationEnergy ?? estimateFormationEnergy(mat.formula),
-    elements: parseFormulaElements(mat.formula),
-  }));
+  // Another async call is already rebuilding — return stale/empty cache immediately.
+  // Without this guard, 15+ concurrent proto-enum insertions all try to rebuild
+  // simultaneously, saturating the 5-connection Neon pool and causing 15×8s = 2 min stalls.
+  if (competingPhasesCacheBuilding) {
+    return competingPhasesCache ?? { materialEntries: [], candidateEntries: [], builtAt: now };
+  }
 
-  const candidates = await storage.getSuperconductorCandidates(200);
-  const seenFormulas = new Set(materialEntries.map(m => m.formula));
-  const candidateEntries = candidates
-    .filter(c => !seenFormulas.has(c.formula))
-    .map(cand => ({
-      formula: cand.formula,
-      energy: estimateFormationEnergy(cand.formula),
-      elements: parseFormulaElements(cand.formula),
-    }));
+  competingPhasesCacheBuilding = true;
+  try {
+    let materialEntries: CachedCompetingPhases["materialEntries"] = [];
+    let candidateEntries: CachedCompetingPhases["candidateEntries"] = [];
 
-  competingPhasesCache = { materialEntries, candidateEntries, builtAt: now };
-  return competingPhasesCache;
+    try {
+      const allMaterials = await storage.getMaterials(500, 0);
+      materialEntries = allMaterials.map(mat => ({
+        formula: mat.formula,
+        energy: mat.formationEnergy ?? estimateFormationEnergy(mat.formula),
+        elements: parseFormulaElements(mat.formula),
+      }));
+    } catch {
+      // DB unavailable — hull uses in-memory Miedema estimates only (hull distance ≈ 0 fallback)
+    }
+
+    try {
+      const candidates = await storage.getSuperconductorCandidates(200);
+      const seenFormulas = new Set(materialEntries.map(m => m.formula));
+      candidateEntries = candidates
+        .filter(c => !seenFormulas.has(c.formula))
+        .map(cand => ({
+          formula: cand.formula,
+          energy: estimateFormationEnergy(cand.formula),
+          elements: parseFormulaElements(cand.formula),
+        }));
+    } catch {
+      // DB unavailable — candidate hull entries empty, Miedema analytical fallback used
+    }
+
+    competingPhasesCache = { materialEntries, candidateEntries, builtAt: now };
+    return competingPhasesCache;
+  } finally {
+    competingPhasesCacheBuilding = false;
+  }
 }
 
 function selectPseudoBinaryAxes(

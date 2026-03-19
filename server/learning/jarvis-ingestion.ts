@@ -208,8 +208,31 @@ async function ingestFile(
   const state = await loadState(stateKey);
 
   if (state.status === "done") {
-    console.log(`[JARVIS] ${label}: already fully ingested (${state.rowsIngested.toLocaleString()} rows) — skipping`);
-    return;
+    // If a previous run completed but inserted 0 rows, the CSV may have had
+    // a parsing issue (e.g. formula extracted from atoms dict was empty).
+    // Re-run ingestion if the file now exists and has content, to pick up any
+    // regenerated CSV without requiring a manual DB state reset.
+    if (state.rowsIngested > 0) {
+      console.log(`[JARVIS] ${label}: already fully ingested (${state.rowsIngested.toLocaleString()} rows) — skipping`);
+      return;
+    }
+    if (!fs.existsSync(filePath)) {
+      console.log(`[JARVIS] ${label}: previously completed with 0 rows and CSV not found — skipping`);
+      return;
+    }
+    const fileSizeBytes = fs.statSync(filePath).size;
+    if (fileSizeBytes < 100) {
+      console.log(`[JARVIS] ${label}: previously completed with 0 rows and CSV is empty — skipping`);
+      return;
+    }
+    // CSV exists and has content — reset state and retry ingestion
+    console.log(`[JARVIS] ${label}: previous run inserted 0 rows but CSV exists (${(fileSizeBytes / 1024).toFixed(1)} KB) — retrying ingestion`);
+    state.status = "idle";
+    state.lastOffset = 0;
+    state.rowsIngested = 0;
+    state.finishedAt = null;
+    state.error = null;
+    await saveState(stateKey, state);
   }
 
   if (!fs.existsSync(filePath)) {

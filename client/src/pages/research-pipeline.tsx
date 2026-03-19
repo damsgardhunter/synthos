@@ -226,8 +226,10 @@ function computeMomentum(snapshots: ConvergenceSnapshot[]): { icon: typeof Trend
 }
 
 function ConvergenceTracker() {
+  const ri30 = useStartupSafeInterval(30000);
   const { data: snapshots, isLoading } = useQuery<ConvergenceSnapshot[]>({
     queryKey: ["/api/convergence"],
+    refetchInterval: ri30,
   });
 
   if (isLoading) {
@@ -592,13 +594,13 @@ function KnowledgeMap({ onFamilyClick, selectedFamily }: { onFamilyClick?: (fami
     refetchInterval: ri30,
   });
 
-  const { messages } = useWebSocket();
+  const { messages, messageCount } = useWebSocket();
   useEffect(() => {
-    const engineEvents = messages.filter(m => m.type === "log" && m.data?.phase === "engine");
-    if (engineEvents.length > 0) {
+    const last = messages[messages.length - 1];
+    if (last?.type === "log" && last.data?.phase === "engine") {
       queryClient.invalidateQueries({ queryKey: ["/api/engine/memory"] });
     }
-  }, [messages]);
+  }, [messageCount]);
 
   const familyStats = memory?.familyStats ?? {};
   const cycleCandidates = memory?.lastCycleCandidates ?? [];
@@ -860,24 +862,23 @@ export default function ResearchPipeline() {
   const ws = useWebSocket();
 
   useEffect(() => {
-    const relevantTypes = ["phaseUpdate", "progress", "insight", "cycleEnd", "log", "convergenceUpdate"];
-    const hasRelevant = ws.messages.some((m) => relevantTypes.includes(m.type));
-    if (hasRelevant) {
+    const last = ws.messages[ws.messages.length - 1];
+    if (!last) return;
+    const relevantTypes = new Set(["phaseUpdate", "progress", "insight", "cycleEnd", "log", "convergenceUpdate"]);
+    if (relevantTypes.has(last.type)) {
       queryClient.invalidateQueries({ queryKey: ["/api/learning-phases"] });
       queryClient.invalidateQueries({ queryKey: ["/api/research-logs"] });
       queryClient.invalidateQueries({ queryKey: ["/api/novel-insights"] });
       queryClient.invalidateQueries({ queryKey: ["/api/superconductor-candidates"] });
       queryClient.invalidateQueries({ queryKey: ["/api/engine/memory"] });
     }
-    const hasConvergence = ws.messages.some((m) => m.type === "convergenceUpdate");
-    if (hasConvergence) {
+    if (last.type === "convergenceUpdate") {
       queryClient.invalidateQueries({ queryKey: ["/api/convergence"] });
     }
-    const hasMilestone = ws.messages.some((m) => m.type === "milestone");
-    if (hasMilestone) {
+    if (last.type === "milestone") {
       queryClient.invalidateQueries({ queryKey: ["/api/milestones"] });
     }
-  }, [ws.messages.length]);
+  }, [ws.messageCount]);
 
   const logsByPhase: Record<string, ResearchLog[]> = {};
   logs?.forEach(log => {

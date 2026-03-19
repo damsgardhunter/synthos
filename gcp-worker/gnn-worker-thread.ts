@@ -13,13 +13,14 @@
 import { isMainThread, workerData, parentPort } from "worker_threads";
 
 if (!isMainThread) {
-  const { trainingData, seed, bootstrapRatio, maxPretrainEpochs, modelIndex } =
+  const { trainingData, seed, bootstrapRatio, maxPretrainEpochs, modelIndex, label } =
     workerData as {
       trainingData: import("../server/learning/graph-neural-net").TrainingSample[];
       seed: number;
       bootstrapRatio: number;
       maxPretrainEpochs: number;
       modelIndex: number;
+      label?: string;
     };
 
   const startMs = Date.now();
@@ -36,6 +37,7 @@ if (!isMainThread) {
         seed,
         bootstrapRatio,
         maxPretrainEpochs,
+        label ?? `M${modelIndex}`,
       );
       const wallSec = ((Date.now() - startMs) / 1000).toFixed(1);
       console.log(

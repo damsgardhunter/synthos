@@ -40,6 +40,7 @@ function spawnModelWorker(
   trainingData: TrainingSample[],
   modelIndex: number,
   maxPretrainEpochs: number,
+  label?: string,
 ): Promise<GNNWeights> {
   // Inline CJS bootstrap: enable tsx TypeScript loading, then run the worker.
   // Uses eval:true so Node sees a plain JS string — no ".ts extension" rejection.
@@ -56,6 +57,7 @@ require(${JSON.stringify(WORKER_SCRIPT)});
         bootstrapRatio: BOOTSTRAP_RATIOS[modelIndex],
         maxPretrainEpochs,
         modelIndex,
+        label: label ?? `M${modelIndex}`,
       },
     });
     worker.once("message", (msg: { ok: boolean; model?: GNNWeights; error?: string }) => {
@@ -75,13 +77,14 @@ require(${JSON.stringify(WORKER_SCRIPT)});
 async function trainEnsembleParallel(
   trainingData: TrainingSample[],
   maxPretrainEpochs = 15,
+  label?: string,
 ): Promise<GNNWeights[]> {
   const n = Math.min(ENSEMBLE_SIZE, ENSEMBLE_SEEDS.length);
-  console.log(`[GNN-GCP] Launching ${n} worker threads for parallel ensemble training`);
+  console.log(`[GNN-GCP] Launching ${n} worker threads for parallel ensemble training${label ? ` [${label}]` : ''}`);
 
   // Fan out: all n models start simultaneously
   const promises = Array.from({ length: n }, (_, i) =>
-    spawnModelWorker(trainingData, i, maxPretrainEpochs).catch((err: Error) => {
+    spawnModelWorker(trainingData, i, maxPretrainEpochs, label).catch((err: Error) => {
       console.warn(`[GNN-GCP] Worker ${i} failed (${err.message}) — will use sequential fallback for this model`);
       return null;
     }),
@@ -321,6 +324,86 @@ async function loadQEDatasetSamples(existingFormulas: Set<string>): Promise<Trai
   }
 }
 
+// ── SuperCon external entries (NIMS + JARVIS SC samples) ─────────────────────
+// Loads superconductors from supercon_external_entries, which contains both the
+// NIMS SuperCon database (~21k entries) and JARVIS SC datasets (SuperCon-Chem,
+// SuperCon-2D, etc.). The local server dispatch payload often contains only the
+// core SUPERCON_TRAINING_DATA (~274 samples); loading from the DB here ensures
+// every GNN training job uses the full 16k+ SC corpus.
+
+async function loadSuperconExternalSamples(existingFormulas: Set<string>, limit = 5000): Promise<TrainingSample[]> {
+  try {
+    const rows = await db.execute(
+      `SELECT formula, tc, lambda, space_group, crystal_system
+       FROM supercon_external_entries
+       WHERE is_superconductor = true AND tc > 0
+       ORDER BY tc DESC
+       LIMIT ${limit}`
+    );
+    const items: any[] = (rows as any).rows ?? (Array.isArray(rows) ? rows : []);
+    const samples: TrainingSample[] = [];
+    for (const row of items) {
+      const formula = row.formula as string;
+      if (!formula || existingFormulas.has(formula)) continue;
+      const tc = Number(row.tc);
+      if (!Number.isFinite(tc) || tc <= 0) continue;
+      const lambda = row.lambda != null ? Number(row.lambda) : undefined;
+      const spaceGroup = row.space_group as string | null;
+      const crystalSystem = row.crystal_system as string | null;
+      samples.push({
+        formula,
+        tc,
+        lambda: lambda != null && Number.isFinite(lambda) ? lambda : undefined,
+        structure: spaceGroup || crystalSystem
+          ? { spaceGroup: spaceGroup ?? undefined, crystalSystem: crystalSystem ?? undefined, dimensionality: undefined }
+          : undefined,
+        prototype: undefined,
+      });
+    }
+    return samples;
+  } catch (err: any) {
+    console.warn(`[GNN-GCP] loadSuperconExternalSamples failed: ${err.message?.slice(0, 120)}`);
+    return [];
+  }
+}
+
+// ── JARVIS DFT3D metallic negatives (Tc=0 contrast from JARVIS) ──────────────
+// Loads metallic (non-SC) materials from the JARVIS DFT3D dataset stored in
+// supercon_external_entries. These Tc=0 contrast examples teach the GNN that
+// most metals don't superconduct.
+
+async function loadJarvisDFT3DContrast(existingFormulas: Set<string>, scCount: number): Promise<TrainingSample[]> {
+  try {
+    const rows = await db.execute(
+      `SELECT formula, space_group, crystal_system
+       FROM supercon_external_entries
+       WHERE source IN ('jarvis-dft3d', 'JARVIS-DFT3D-Metallic') AND (tc IS NULL OR tc = 0)
+       ORDER BY RANDOM()
+       LIMIT ${Math.min(scCount, 2000)}`
+    );
+    const items: any[] = (rows as any).rows ?? (Array.isArray(rows) ? rows : []);
+    const samples: TrainingSample[] = [];
+    for (const row of items) {
+      const formula = row.formula as string;
+      if (!formula || existingFormulas.has(formula)) continue;
+      const spaceGroup = row.space_group as string | null;
+      const crystalSystem = row.crystal_system as string | null;
+      samples.push({
+        formula,
+        tc: 0,
+        structure: spaceGroup || crystalSystem
+          ? { spaceGroup: spaceGroup ?? undefined, crystalSystem: crystalSystem ?? undefined, dimensionality: undefined }
+          : undefined,
+        prototype: undefined,
+      });
+    }
+    return samples;
+  } catch (err: any) {
+    console.warn(`[GNN-GCP] loadJarvisDFT3DContrast failed: ${err.message?.slice(0, 120)}`);
+    return [];
+  }
+}
+
 // ── MP augmentation (Tc=0 contrast examples) ─────────────────────────────────
 
 async function loadMPContrastSamples(existingFormulas: Set<string>, scCount: number): Promise<TrainingSample[]> {
@@ -384,6 +467,16 @@ async function processNextGnnJob(): Promise<boolean> {
     await new Promise(r => setTimeout(r, 3000));
   }
 
+  // Augment with NIMS + JARVIS superconductors from supercon_external_entries.
+  // The local server dispatch payload often contains only the core SUPERCON seed
+  // (~274 samples); the full 16k+ SC corpus lives in the shared Neon DB.
+  const externalSCSamples = await loadSuperconExternalSamples(existingFormulas);
+  if (externalSCSamples.length > 0) {
+    trainingData = [...trainingData, ...externalSCSamples];
+    externalSCSamples.forEach(s => existingFormulas.add(s.formula));
+    console.log(`[GNN-GCP] Augmented job #${jobId} with ${externalSCSamples.length} NIMS+JARVIS SC entries — total ${trainingData.length}`);
+  }
+
   // Augment with DFT-verified SC entries from quantum_engine_dataset
   const qeSamples = await loadQEDatasetSamples(existingFormulas);
   if (qeSamples.length > 0) {
@@ -392,9 +485,18 @@ async function processNextGnnJob(): Promise<boolean> {
     console.log(`[GNN-GCP] Augmented job #${jobId} with ${qeSamples.length} QE dataset SC entries — total ${trainingData.length}`);
   }
 
-  // Augment with MP metallic materials (Tc=0) so GNN learns contrast with SCs
+  // Augment with Tc=0 contrast: JARVIS DFT3D metallic negatives (structure-enriched)
+  // plus MP metallic cache. 1:1 cap vs SC count to avoid label imbalance.
   const scCount = trainingData.filter(s => s.tc > 0).length;
-  const mpContrast = await loadMPContrastSamples(existingFormulas, scCount);
+  const jarvisContrast = await loadJarvisDFT3DContrast(existingFormulas, scCount);
+  if (jarvisContrast.length > 0) {
+    trainingData = [...trainingData, ...jarvisContrast];
+    jarvisContrast.forEach(s => existingFormulas.add(s.formula));
+    console.log(`[GNN-GCP] Augmented job #${jobId} with ${jarvisContrast.length} JARVIS DFT3D contrast (Tc=0) — total ${trainingData.length}`);
+  }
+
+  const remainingContrastSlots = Math.max(0, scCount - jarvisContrast.length);
+  const mpContrast = await loadMPContrastSamples(existingFormulas, remainingContrastSlots);
   if (mpContrast.length > 0) {
     trainingData = [...trainingData, ...mpContrast];
     console.log(`[GNN-GCP] Augmented job #${jobId} with ${mpContrast.length} MP contrast samples (Tc=0) — total ${trainingData.length}`);
@@ -402,7 +504,7 @@ async function processNextGnnJob(): Promise<boolean> {
 
   // Split BEFORE training so validation data is never seen by the models.
   // SC samples (Tc>0) are stratified: 80% train / 20% val.
-  // MP contrast (Tc=0) goes entirely into training — we validate on SC targets only.
+  // Tc=0 contrast goes entirely into training — we validate on SC targets only.
   const scSamples  = trainingData.filter(s => s.tc > 0);
   const nonScSamples = trainingData.filter(s => s.tc === 0);
   const { train: scTrain, validation: scVal } = splitTrainValidation(scSamples, 0.20, 42);
@@ -413,7 +515,7 @@ async function processNextGnnJob(): Promise<boolean> {
   const valSet   = scVal; // held-out SC samples only — these are the discovery targets
 
   console.log(
-    `[GNN-GCP] Starting training job #${jobId} — ${datasetSize} seed + ${qeSamples.length} QE + ${mpContrast.length} MP contrast (capped ${cappedNonSc.length})` +
+    `[GNN-GCP] Starting training job #${jobId} — ${datasetSize} seed + ${externalSCSamples.length} NIMS+JARVIS + ${qeSamples.length} QE + ${jarvisContrast.length + mpContrast.length} contrast (capped ${cappedNonSc.length})` +
     ` | train=${trainSet.length} val=${valSet.length} (SC holdout)`
   );
   const startMs = Date.now();
@@ -492,11 +594,143 @@ async function processNextGnnJob(): Promise<boolean> {
   return true;
 }
 
+// ── Startup full corpus training ──────────────────────────────────────────────
+// Runs once per GCP worker lifetime (guarded by system_state). Trains the GNN
+// ensemble on the full NIMS + JARVIS SC corpus (~15k entries) plus QE/MP contrast.
+// Subsequent dispatched retrains use only 5k samples so they finish in minutes.
+
+const STARTUP_CORPUS_STATE_KEY = 'gnn_startup_corpus_training';
+// Re-run startup corpus training if the last one is older than this.
+const STARTUP_CORPUS_MAX_AGE_MS = 12 * 3600_000; // 12 hours
+
+async function runStartupFullCorpusTraining(): Promise<void> {
+  // Skip if a recent full corpus training already completed.
+  try {
+    const stateRows = await db.execute(
+      `SELECT value FROM system_state WHERE key = '${STARTUP_CORPUS_STATE_KEY}'`
+    );
+    const row = (stateRows as any).rows?.[0] ?? (Array.isArray(stateRows) ? stateRows[0] : undefined);
+    const doneAt: string | undefined = (row?.value as any)?.doneAt;
+    if (doneAt) {
+      const ageMs = Date.now() - new Date(doneAt).getTime();
+      if (ageMs < STARTUP_CORPUS_MAX_AGE_MS) {
+        console.log(`[GNN-GCP] Startup full corpus training skipped — completed ${Math.round(ageMs / 3600_000)}h ago (< 12h)`);
+        return;
+      }
+    }
+  } catch { /* first run or DB unavailable — proceed */ }
+
+  console.log('[GNN-GCP] ════════════════════════════════════════════════════════');
+  console.log('[GNN-GCP]  STARTUP PHASE 3 — Full Corpus Training');
+  console.log('[GNN-GCP]  Loading NIMS + JARVIS SC corpus (up to 15,000 entries)');
+  console.log('[GNN-GCP] ════════════════════════════════════════════════════════');
+
+  // Pre-warm DB connection before heavy queries
+  try { await db.execute("SELECT 1"); } catch { await new Promise(r => setTimeout(r, 3000)); }
+
+  const existingFormulas = new Set<string>();
+
+  // Load full SC corpus from supercon_external_entries
+  const externalSC = await loadSuperconExternalSamples(existingFormulas, 15000);
+  externalSC.forEach(s => existingFormulas.add(s.formula));
+  console.log(`[GNN-GCP]  Loaded ${externalSC.length} NIMS+JARVIS SC entries`);
+
+  // Augment with DFT-verified QE entries
+  const qeSamples = await loadQEDatasetSamples(existingFormulas);
+  qeSamples.forEach(s => existingFormulas.add(s.formula));
+  if (qeSamples.length > 0) console.log(`[GNN-GCP]  +${qeSamples.length} QE DFT-verified entries`);
+
+  let trainingData: TrainingSample[] = [...externalSC, ...qeSamples];
+
+  // Contrast examples: JARVIS metallic negatives + MP
+  const scCount = trainingData.filter(s => s.tc > 0).length;
+  const jarvisContrast = await loadJarvisDFT3DContrast(existingFormulas, scCount);
+  jarvisContrast.forEach(s => existingFormulas.add(s.formula));
+  const remainingContrast = Math.max(0, scCount - jarvisContrast.length);
+  const mpContrast = await loadMPContrastSamples(existingFormulas, remainingContrast);
+  trainingData = [...trainingData, ...jarvisContrast, ...mpContrast];
+  if (jarvisContrast.length + mpContrast.length > 0) {
+    console.log(`[GNN-GCP]  +${jarvisContrast.length} JARVIS metallic + ${mpContrast.length} MP contrast (Tc=0)`);
+  }
+
+  // Train/val split
+  const scSamples = trainingData.filter(s => s.tc > 0);
+  const nonScSamples = trainingData.filter(s => s.tc === 0);
+  const { train: scTrain, validation: scVal } = splitTrainValidation(scSamples, 0.20, 42);
+  const cappedNonSc = nonScSamples.slice(0, scTrain.length);
+  const trainSet = [...scTrain, ...cappedNonSc];
+  const valSet = scVal;
+
+  console.log(`[GNN-GCP]  Dataset: ${scSamples.length} SC + ${cappedNonSc.length} contrast | train=${trainSet.length} val=${valSet.length}`);
+  console.log(`[GNN-GCP]  Starting 5-model parallel ensemble training...`);
+
+  const startMs = Date.now();
+  let models: GNNWeights[];
+  try {
+    models = await trainEnsembleParallel(trainSet, 15, 'STARTUP');
+  } catch (err: any) {
+    console.error(`[GNN-GCP] Startup corpus training failed: ${err.message}`);
+    return;
+  }
+
+  const wallSec = ((Date.now() - startMs) / 1000).toFixed(1);
+  const valMetrics = valSet.length >= 5 ? computeMetrics(models, valSet) : { r2: 0, mae: 0, rmse: 0, n: 0 };
+  const trainMetrics = computeMetrics(models, scTrain.slice(0, 200));
+  const { r2, mae, rmse, n: valN } = valMetrics;
+
+  console.log('[GNN-GCP] ────────────────────────────────────────────────────────');
+  console.log(`[GNN-GCP]  Startup training complete in ${wallSec}s`);
+  console.log(`[GNN-GCP]  VAL  (n=${valN}): R²=${r2.toFixed(3)}  MAE=${mae.toFixed(1)}K  RMSE=${rmse.toFixed(1)}K`);
+  console.log(`[GNN-GCP]  TRAIN(sample): R²=${trainMetrics.r2.toFixed(3)}  MAE=${trainMetrics.mae.toFixed(1)}K  overfit-gap=${(trainMetrics.r2 - r2).toFixed(3)}`);
+  console.log('[GNN-GCP] ════════════════════════════════════════════════════════');
+
+  // Store the trained weights as a completed job so the local server's GCP
+  // weight poller picks them up and applies them.
+  try {
+    await db.execute("SELECT 1"); // warm pool before large write
+    const insertedJob = await storage.insertGnnTrainingJob({
+      status: "queued" as any,
+      trainingData: [] as any, // payload stored on GCP side — not needed by local server
+      datasetSize: trainSet.length,
+      dftSamples: qeSamples.length,
+    });
+    await storage.updateGnnTrainingJob(insertedJob.id, {
+      status: "done",
+      weights: models as any,
+      r2,
+      mae,
+      rmse,
+      trainR2: trainMetrics.r2,
+      trainMae: trainMetrics.mae,
+      valN,
+      completedAt: new Date(),
+    } as any);
+    console.log(`[GNN-GCP] Startup weights stored as job #${insertedJob.id} — local server poller will apply them`);
+  } catch (err: any) {
+    console.warn(`[GNN-GCP] Failed to store startup weights in DB: ${err.message?.slice(0, 120)}`);
+  }
+
+  // Mark startup complete in system_state
+  try {
+    const nowIso = new Date().toISOString();
+    await db.execute(
+      `INSERT INTO system_state (key, value, updated_at)
+       VALUES ('${STARTUP_CORPUS_STATE_KEY}', '{"doneAt":"${nowIso}","trainN":${trainSet.length},"valR2":${r2.toFixed(4)}}', NOW())
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`
+    );
+  } catch { /* non-fatal */ }
+}
+
 // ── Main loop ─────────────────────────────────────────────────────────────────
 
 export async function startGNNLoop(): Promise<void> {
   console.log(`[GNN-GCP] GNN training worker started — poll every ${POLL_INTERVAL_MS / 1000}s`);
   console.log(`[GNN-GCP] Progressive MP fetch: ${MP_BATCH_SIZE} records/cycle, max cache ${MP_MAX_CACHE}`);
+
+  // Phase 3 startup: train on full NIMS+JARVIS corpus before entering the job poll loop.
+  // Regular dispatched jobs (from the local server's Active Learning cycle) use a
+  // 5k-sample subset so they complete in minutes; startup gets the full corpus once.
+  await runStartupFullCorpusTraining();
 
   while (running) {
     try {

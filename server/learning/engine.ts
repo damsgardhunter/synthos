@@ -5312,6 +5312,10 @@ async function runAutonomousFastPath() {
   // proto-enum inserts) would overlap with the SG sweep and compete for the
   // 5 Neon pool connections, causing cascading 20s timeouts.
   isFastPathScreeningActive = true;
+  // Track start time — abort screening if the whole fast path exceeds 10 min.
+  // When Neon DB is down, each sequential DB call waits up to 20s (connectionTimeoutMillis)
+  // before failing. With 200+ candidates × 20s = 66+ minutes, we need a hard cap.
+  const _fastPathStartMs = Date.now();
 
   try {
     let lastRetrainDatasetSize = 277;
@@ -5501,7 +5505,7 @@ async function runAutonomousFastPath() {
             }
           }
 
-          const gradResult = await runGradientDescentCycle(campaign.target, 4, 12);
+          const gradResult = await runGradientDescentCycle(campaign.target, 4, 6);
           for (const r of gradResult.results) {
             if (r.finalTc > 10 && isValidFormula(r.finalFormula)) {
               const norm = normalizeFormula(r.finalFormula);
@@ -5571,6 +5575,12 @@ async function runAutonomousFastPath() {
 
         for (const cand of topByTc) {
           if (!shouldContinue()) break;
+          // Same 10-min cap — if setup is already slow, skip remaining proto-enum candidates
+          // so the screening loop can start before the overall timeout fires.
+          if (Date.now() - _fastPathStartMs > 8 * 60 * 1000) {
+            console.log(`[Engine] Fast path: proto-enum setup exceeded 8 min, skipping remaining candidates`);
+            break;
+          }
           const formula = cand.formula;
           if (!formula || !isValidFormula(formula)) continue;
           const normalized = normalizeFormula(formula);
@@ -6264,28 +6274,46 @@ async function runAutonomousFastPath() {
     const enrichmentQueue: EnrichmentTask[] = [];
     let batchRlStateSnapshot = { ...rlState };
 
+    // ── Phase 1: pre-compute discovery results in parallel batches ─────────────────
+    // Running SCREENING_BATCH_SIZE candidates concurrently pipelines I/O (DB reads,
+    // prototype lookups, write-queue inserts) while CPU-bound GNN/physics still runs
+    // on the JS thread. Event-loop overhead drops from O(N) yields to O(N/BATCH_SIZE).
+    const SCREENING_BATCH_SIZE = 12;
+    const _discoveryResults = new Map<string, { passed: boolean; tc: number; reason: string; physicsPred?: any }>();
+    // Use a fresh start time for the screening loop — _fastPathStartMs was set at the
+    // top of runAutonomousFastPath before the SG sweep, which can itself take several
+    // minutes. Measuring from here gives the screening loop its own 3-min budget.
+    const _screeningStartMs = Date.now();
+    for (let _bi = 0; _bi < filteredCandidates.length; _bi += SCREENING_BATCH_SIZE) {
+      if (!shouldContinue()) break;
+      // 3-min hard cap — DB calls are now in-memory cached so ~0.5s/candidate;
+      // 3 min processes ~360 candidates which exceeds the family quota caps.
+      if (Date.now() - _screeningStartMs > 3 * 60 * 1000) {
+        console.log(`[Engine] Fast path timed out after 3 min — aborting screening loop (${filteredCandidates.length - _bi} candidates remaining)`);
+        break;
+      }
+      await new Promise<void>(r => setTimeout(r, 0)); // yield once per batch
+      await Promise.allSettled(
+        filteredCandidates.slice(_bi, _bi + SCREENING_BATCH_SIZE).map(async (_f) => {
+          if (!markFormulaInFlight(_f)) return;
+          try {
+            const _r = await runAutonomousDiscoveryCycle(_f, { skipDbDupCheck: true, skipStructurePrediction: true });
+            _discoveryResults.set(_f, _r);
+          } finally {
+            releaseFormulaInFlight(_f);
+          }
+        })
+      );
+    }
+
+    // ── Phase 2: sequential post-processing using pre-computed results ────────────
     for (const formula of filteredCandidates) {
       if (!shouldContinue()) break;
-      if (!markFormulaInFlight(formula)) continue;
+      if (!_discoveryResults.has(formula)) continue; // not pre-computed (batch aborted)
       autonomousTotalScreened++;
       batchCount++;
 
-      // Yield to event loop before every candidate so heartbeat timers can fire between
-      // the synchronous blocks inside runAutonomousDiscoveryCycle (computeFullTightBinding,
-      // computeElectronicStructure, etc.). Without this, back-to-back candidates can hold
-      // the event loop for hundreds of milliseconds and cause API unresponsiveness.
-      await new Promise<void>(r => setTimeout(r, 0));
-
-      let result: { passed: boolean; tc: number; reason: string; physicsPred?: any };
-      try {
-        // skipDbDupCheck: in-memory alreadyScreenedFormulas set catches duplicates, DB
-        //   unique constraint rejects any that slip through.
-        // skipStructurePrediction: MP API (30s×3 retries=90s/candidate) would turn a
-        //   2-min cycle into 30+ min with 200+ candidates. Prototype lookup is used instead.
-        result = await runAutonomousDiscoveryCycle(formula, { skipDbDupCheck: true, skipStructurePrediction: true });
-      } finally {
-        releaseFormulaInFlight(formula);
-      }
+      const result = _discoveryResults.get(formula)!;
 
       if (result.reason.startsWith("error:") || result.reason.startsWith("insert-failed")) {
         alreadyScreenedFormulas.delete(normalizeFormula(formula));

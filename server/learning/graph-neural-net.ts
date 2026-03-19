@@ -2563,7 +2563,13 @@ function graphCacheKey(formula: string, prototype?: string, structure?: any): st
   return `${formula}::s:${structureHash(structure)}`;
 }
 
-export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights?: GNNWeights, maxPretrainEpochs = 15): GNNWeights {
+/** Renders a compact ASCII progress bar, e.g. `[████████░░░░░░░░░░░░] 40%`. */
+function _gnnBar(epoch: number, total: number, width = 22): string {
+  const filled = Math.round(width * (epoch + 1) / total);
+  return '[' + '█'.repeat(filled) + '░'.repeat(width - filled) + ']';
+}
+
+export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights?: GNNWeights, maxPretrainEpochs = 15, label?: string): GNNWeights {
   const rng = seededRandom(42);
   const weights = preInitWeights ?? initWeights(rng);
 
@@ -3162,7 +3168,18 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
       }
     }
 
-    if (totalSamples > 0 && totalLoss / totalSamples < 0.01) break;
+    // Progress bar — log every ~20% of epochs, always log first and last.
+    const logInterval = Math.max(1, Math.ceil(epochs / 5));
+    const isLast = epoch === epochs - 1;
+    const avgLoss = totalSamples > 0 ? totalLoss / totalSamples : 0;
+    if (epoch === 0 || (epoch + 1) % logInterval === 0 || isLast) {
+      const bar = _gnnBar(epoch, epochs);
+      const pct = Math.round(100 * (epoch + 1) / epochs);
+      const pfx = label ? `[GNN|${label}]` : '[GNN]';
+      console.log(`${pfx} ${bar} ${String(pct).padStart(3)}% | Epoch ${epoch + 1}/${epochs} | loss=${avgLoss.toFixed(4)} | lr=${lr.toExponential(2)}`);
+    }
+
+    if (avgLoss > 0 && avgLoss < 0.01) break;
   }
 
   const scrubMatrix = (m: number[][]) => { for (let i = 0; i < m.length; i++) for (let j = 0; j < m[i].length; j++) if (!Number.isFinite(m[i][j])) m[i][j] = 0; };
@@ -3332,12 +3349,13 @@ export function trainSingleEnsembleModel(
   seed: number,
   bootstrapRatio: number,
   maxPretrainEpochs = 15,
+  label?: string,
 ): GNNWeights {
   const rng = seededRandom(seed);
   const w = initWeights(rng);
   const bootstrapRng = seededRandom(seed + 31);
   const bootstrapped = bootstrapSample(trainingData, bootstrapRatio, bootstrapRng);
-  return trainGNNSurrogate(bootstrapped, w, maxPretrainEpochs);
+  return trainGNNSurrogate(bootstrapped, w, maxPretrainEpochs, label);
 }
 
 export function getGNNModel(): GNNWeights {

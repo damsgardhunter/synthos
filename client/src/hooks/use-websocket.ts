@@ -17,6 +17,7 @@ export type EngineTempo = "excited" | "exploring" | "contemplating";
 interface GlobalWSState {
   connected: boolean;
   messages: WSMessage[];
+  messageCount: number;
   engineState: string;
   activeTasks: string[];
   thoughts: ThoughtMessage[];
@@ -27,6 +28,7 @@ interface GlobalWSState {
 const globalState: GlobalWSState = {
   connected: false,
   messages: [],
+  messageCount: 0,
   engineState: "stopped",
   activeTasks: [],
   thoughts: [],
@@ -95,6 +97,7 @@ function connectWS() {
       const msg: WSMessage = JSON.parse(event.data);
 
       globalState.messages = [...globalState.messages.slice(-100), msg];
+      globalState.messageCount++;
 
       if (msg.type === "status" || msg.type === "engineState") {
         globalState.engineState = msg.data.state ?? msg.data;
@@ -189,6 +192,7 @@ function getSnapshot() {
   if (
     snapshotRef.connected !== globalState.connected ||
     snapshotRef.messages !== globalState.messages ||
+    snapshotRef.messageCount !== globalState.messageCount ||
     snapshotRef.engineState !== globalState.engineState ||
     snapshotRef.activeTasks !== globalState.activeTasks ||
     snapshotRef.thoughts !== globalState.thoughts ||
@@ -211,6 +215,7 @@ export function useWebSocket() {
   return {
     connected: state.connected,
     messages: state.messages,
+    messageCount: state.messageCount,
     engineState: state.engineState,
     activeTasks: state.activeTasks,
     thoughts: state.thoughts,

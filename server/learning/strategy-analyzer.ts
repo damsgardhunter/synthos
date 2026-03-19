@@ -30,6 +30,10 @@ export async function analyzeAndEvolveStrategy(
   cycleNumber: number
 ): Promise<StrategyResult | null> {
   try {
+    // Only call the OpenAI LLM every 5 cycles — the response is rarely different
+    // cycle-to-cycle and each call takes ~2s. Null return leaves currentStrategyFocusAreas unchanged.
+    if (cycleNumber % 5 !== 0 && previousFocusAreas.length > 0) return null;
+
     const candidates = await storage.getSuperconductorCandidates(100);
     if (candidates.length < 5) return null;
 
