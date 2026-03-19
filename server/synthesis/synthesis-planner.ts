@@ -739,6 +739,99 @@ function computeComplexityPenalty(nSteps: number, nElements: number, pressure: n
   return Math.max(0.3, penalty);
 }
 
+// ── Synthesis sanity checks ───────────────────────────────────────────────────
+
+/**
+ * Elements that are NOT metals (loosely defined for chemical-soup risk detection).
+ * Anything outside this set is treated as a metallic or semi-metallic contributor.
+ */
+const NON_METAL_ELEMENTS = new Set([
+  "H","He","B","C","N","O","F","Ne","Si","P","S","Cl","Ar",
+  "As","Se","Br","Kr","Te","I","Xe","At","Rn",
+]);
+
+/**
+ * Common byproduct hints for orphan (extra) elements found in precursors but
+ * not in the target formula.  Used to make the mass-balance warning actionable.
+ */
+function byproductHint(orphan: string, companions: string[]): string {
+  if (orphan === "O") {
+    if (companions.includes("Li")) return "Li₂O";
+    if (companions.includes("Na")) return "Na₂O";
+    if (companions.includes("K"))  return "K₂O";
+    if (companions.includes("C"))  return "CO₂ gas";
+    return "metal oxide (gas or solid)";
+  }
+  if (orphan === "C") return "CO₂ gas";
+  if (orphan === "N") return "N₂ gas";
+  if (orphan === "Li") return "Li₂O or LiOH";
+  if (orphan === "Na") return "Na₂O or NaOH";
+  if (orphan === "K")  return "K₂O or KOH";
+  return `${orphan}-containing compound`;
+}
+
+/**
+ * Mass-balance / stoichiometry guard.
+ *
+ * For each selected precursor, any element it contains that is NOT in the target
+ * formula is an "orphan" — it must appear in a listed byproduct or the route is
+ * chemically invalid.  Returns human-readable warning strings for every violation.
+ */
+function checkPrecursorMassBalance(
+  targetFormula: string,
+  precursorSelections: PrecursorSelection[],
+): string[] {
+  const targetEls = new Set(parseFormulaElements(targetFormula));
+  const warnings: string[] = [];
+
+  for (const sel of precursorSelections) {
+    const precEl = parseFormulaElements(sel.precursor.formula);
+    const orphans = precEl.filter(el => !targetEls.has(el));
+    if (orphans.length === 0) continue;
+
+    const hints = orphans.map(el => byproductHint(el, precEl));
+    warnings.push(
+      `MASS BALANCE: precursor ${sel.precursor.formula} introduces [${orphans.join(", ")}] ` +
+      `not present in target — expected byproduct(s): ${hints.join("; ")}. ` +
+      `Route is stoichiometrically invalid without specifying and removing these byproducts.`
+    );
+  }
+  return warnings;
+}
+
+/**
+ * Multi-component "chemical soup" risk detector.
+ *
+ * When a target has ≥4 elements including ≥2 metals combined with H and/or N,
+ * solid-state synthesis is likely to produce a mixture of competing binary phases
+ * (e.g., CaH₂ + MoN) rather than a unified quaternary phase.
+ */
+function checkChemicalSoupRisk(formula: string): string[] {
+  const elements = parseFormulaElements(formula);
+  if (elements.length < 4) return [];
+
+  const metals = elements.filter(el => !NON_METAL_ELEMENTS.has(el));
+  if (metals.length < 2) return [];
+
+  const hasH = elements.includes("H");
+  const hasN = elements.includes("N");
+  if (!hasH && !hasN) return [];
+
+  const lightEl = [hasH ? "H" : null, hasN ? "N" : null].filter(Boolean).join("/");
+  const competingPhases = metals.flatMap(m => [
+    hasH ? `${m}Hₓ` : null,
+    hasN ? `${m}N` : null,
+  ]).filter(Boolean) as string[];
+
+  return [
+    `CHEMICAL SOUP RISK: ${elements.length}-element system with metals (${metals.join(", ")}) + ${lightEl} ` +
+    `is prone to preferential binary phase segregation instead of a unified phase. ` +
+    `Expected competing products: ${competingPhases.slice(0, 4).join(", ")}. ` +
+    `Mitigation: use a pre-alloyed single-source precursor (e.g., arc-melted alloy target), ` +
+    `or sequential synthesis (metal alloy → hydrogenation/nitridation under pressure).`,
+  ];
+}
+
 function buildSynthesisRoute(
   formula: string,
   elements: string[],
@@ -773,6 +866,18 @@ function buildSynthesisRoute(
   if (pressure > 50) safetyNotes.push("High-pressure experiment: DAC safety protocols required");
   if (template.method === "arc-melting") safetyNotes.push("Arc furnace: UV protection and electrical safety required");
 
+  // ── Stoichiometry guard & chemical-soup risk ─────────────────────────────
+  const massBalanceWarnings = checkPrecursorMassBalance(formula, precursorSelections);
+  const soupWarnings = checkChemicalSoupRisk(formula);
+  safetyNotes.push(...massBalanceWarnings, ...soupWarnings);
+
+  // Apply a feasibility penalty for mass-balance violations: a route whose
+  // precursors introduce elements not in the target is physically incomplete
+  // and should rank below stoichiometrically consistent routes.
+  const massBalancePenaltyFactor = massBalanceWarnings.length > 0 ? 0.65 : 1.0;
+  const soupPenaltyFactor        = soupWarnings.length > 0        ? 0.85 : 1.0;
+  const adjustedScore = compositeScore * massBalancePenaltyFactor * soupPenaltyFactor;
+
   const maxTemp = Math.max(...steps.map(s => s.temperature));
   const maxPressure = Math.max(...steps.map(s => s.pressure));
 
@@ -786,7 +891,7 @@ function buildSynthesisRoute(
     steps,
     precursors: precursorSelections.map(s => s.precursor.formula),
     precursorDetails: precursorSelections,
-    feasibilityScore: Number(Math.max(0, Math.min(1, compositeScore)).toFixed(4)),
+    feasibilityScore: Number(Math.max(0, Math.min(1, adjustedScore)).toFixed(4)),
     templateMatchScore: templateMatch.score,
     precursorAvailabilityScore: precursorResult.overallScore,
     thermodynamicFeasibilityScore: thermoResult.overallFeasibility,
@@ -794,7 +899,7 @@ function buildSynthesisRoute(
     totalCostEstimate: precursorResult.costEstimate,
     equipmentList: [...template.equipment],
     safetyNotes,
-    estimatedYield: estimateYield(compositeScore, template.method, steps.length),
+    estimatedYield: estimateYield(adjustedScore, template.method, steps.length),
     maxTemperature: maxTemp,
     maxPressure,
     totalDuration: estimateTotalDuration(steps),

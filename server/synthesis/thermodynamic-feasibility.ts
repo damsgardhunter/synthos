@@ -314,6 +314,26 @@ export function computeSynthesisTemperature(formula: string, family?: string): S
       break;
   }
 
+  // ── Tammann temperature guard ─────────────────────────────────────────────
+  // Solid-state and arc-melting reactions require T_synth ≥ T_Tammann (0.57 × T_melt)
+  // for meaningful atomic diffusion to occur. Using a multiplier of T_Tammann itself
+  // (e.g., tammTemp × 0.7) can yield a temperature BELOW T_Tammann, producing
+  // negligible reaction rates in practice. High-pressure/CVD/deposition methods
+  // are exempt because pressure and plasma alter kinetics independently of T_Tammann.
+  const SOLID_STATE_LIKE = [
+    "solid-state",
+    "solid-state or flux",
+    "arc-melting or solid-state",
+    "arc-melting with annealing",
+    "arc-melting",
+  ];
+  if (SOLID_STATE_LIKE.includes(method) && temperature < tammTemp) {
+    const clamped = Math.round(tammTemp * 1.05); // 5% above T_Tammann minimum
+    basis += ` — T raised from ${temperature} K to ${clamped} K (Tammann + 5% margin; solid-state diffusion is negligible below T_Tammann = ${Math.round(tammTemp)} K)`;
+    confidence = Math.min(confidence, 0.55); // lower confidence since family estimate was below physical minimum
+    temperature = clamped;
+  }
+
   return {
     temperature,
     method,
