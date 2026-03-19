@@ -1642,19 +1642,34 @@ async function insertCandidateWithStabilityCheck(candidateData: Parameters<typeo
     };
 
     if (!stabilityResult.pass) {
-      // Apply a score penalty proportional to how far above hull the candidate is.
-      const hullPenalty = Math.min(0.7, (stabilityResult.hullDistance ?? 0) * 2);
+      const hullDist = stabilityResult.hullDistance ?? 0;
+
+      // Hard sanity filter: hull distance > 0.5 eV/atom means the atomic configuration is
+      // physically impossible (overlapping atoms, wrong prototype, or ML hallucination).
+      // No Tc prediction is meaningful for such a material — hard-reject it.
+      if (hullDist > 0.5) {
+        emit("log", {
+          phase: "engine",
+          event: "Hull distance sanity reject",
+          detail: `${candidateData.formula}: hull=${hullDist.toFixed(4)} eV/atom > 0.5 eV/atom hard limit — UNSTABLE, Tc zeroed`,
+          dataSource: "Stability Gate",
+        });
+        if (generatorSource) recordGeneratorOutcome(generatorSource, false, 0, 0);
+        return false;
+      }
+
+      // Below the hard limit but still failing the stability gate: apply a score penalty
+      // proportional to how far above hull the candidate is and allow it through for DFT.
+      const hullPenalty = Math.min(0.7, hullDist * 2);
       const currentScore = candidateData.ensembleScore ?? 0.5;
       candidateData.ensembleScore = Math.round(Math.max(0.01, currentScore * (1 - hullPenalty)) * 10000) / 10000;
       candidateData.dataConfidence = candidateData.dataConfidence === "high" ? "medium" : "low";
       emit("log", {
         phase: "engine",
         event: "Stability gate penalty",
-        detail: `${candidateData.formula}: hull=${stabilityResult.hullDistance?.toFixed(4)} eV/atom (${stabilityResult.verdict}), score penalised ${currentScore.toFixed(3)} → ${candidateData.ensembleScore}`,
+        detail: `${candidateData.formula}: hull=${hullDist.toFixed(4)} eV/atom (${stabilityResult.verdict}), score penalised ${currentScore.toFixed(3)} → ${candidateData.ensembleScore}`,
         dataSource: "Stability Gate",
       });
-      // Only hard-reject if the formula is clearly chemically impossible (ABSOLUTE_MAX exceeded)
-      // — those are caught earlier in passesStabilityGate by ABSOLUTE_MAX_HULL_DISTANCE check.
     }
 
     let kineticResult: KineticStabilityResult | null = null;

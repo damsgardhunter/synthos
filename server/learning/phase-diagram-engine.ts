@@ -930,9 +930,10 @@ function isEntropyStabilized(parsed: ParsedFormulaCounts, formationEnergy: numbe
 }
 
 const PRESSURE_MULT_CAP = 2.0;
-// Widened from 0.4: Miedema estimates have ±0.2 eV/atom error; Materials Project lists
-// compounds up to 0.5 eV/atom above hull as "potentially synthesizable under special conditions."
-const ABSOLUTE_MAX_HULL_DISTANCE = 0.6;
+// Hard thermodynamic sanity limit: no crystalline phase is expected above 0.5 eV/atom.
+// Values above this are physically impossible artifacts (overlapping atoms, wrong prototype,
+// or ML hallucination) — these materials cannot be superconductors regardless of other metrics.
+const ABSOLUTE_MAX_HULL_DISTANCE = 0.5;
 
 function pressureHullMultiplier(pressureGpa: number): number {
   if (pressureGpa <= 0) return 1.0;
