@@ -116,6 +116,19 @@ interface GNNWeights {
   b_mlp2: number[];
   W_mlp2_var: number[][];
   b_mlp2_var: number[];
+  // ── GLFN-TC: Graph Learning Module weights ───────────────────────────────
+  /** 119 × GRAPH_FEAT_DIM — one learnable feature vector per element (atomic number 0–118). */
+  W_elem_feat: number[][];
+  /** GRAPH_FEAT_DIM × GRAPH_FEAT_DIM — asymmetric bilinear compatibility matrix.
+   *  adaptive_logit(i,j) = W_elem_feat[atomI] · W_graph_adapt · W_elem_feat[atomJ]
+   *  Added as a scalar bias to every CGCNN gate dimension so the model learns
+   *  which element pairs should pass more (or less) information. */
+  W_graph_adapt: number[][];
+  // ── GLFN-TC: Dense Residual scalar gate ──────────────────────────────────
+  /** Scalar raw gate. sigmoid(dense_skip_gate) controls how much H0 (original
+   *  post-projection embeddings) is added to H1 before layer-2 attention,
+   *  creating a dense skip connection akin to GLFN-TC §2.4. */
+  dense_skip_gate: number;
   trainedAt: number;
   nSamples: number;
 }
@@ -152,6 +165,9 @@ interface CGCNNLayerCache {
   concats: number[][][];
   cutoffWts: number[][];
   totalWeights: number[];
+  /** GLFN-TC Graph Learning Module: adaptive scalar logit per edge (node_i × neighbor_idx).
+   *  Stored so cgcnnLayerBackward can compute dL/d(W_graph_adapt) and dL/d(W_elem_feat). */
+  adaptiveLogits?: number[][];
 }
 
 interface GNNForwardCache {
@@ -169,6 +185,9 @@ interface GNNForwardCache {
   inputProjPreActs: number[][];
   maxPoolArgmax: number[];
   attnPoolWeights: number[];
+  /** GLFN-TC Dense Residual: H0 embeddings saved after input projection.
+   *  Used in backward to route the dense-skip gradient back to input_proj. */
+  denseH0?: number[][];
 }
 
 export interface UncertaintyBreakdown {
@@ -235,6 +254,15 @@ const MC_DROPOUT_PASSES = 10;
 const MC_DROPOUT_RATE = 0.25;
 const GNN_MSG_LAYERS = 2;         // active message-passing layers (2 = less overfit for small datasets)
 const WEIGHT_DECAY = 1e-4;        // AdamW L2 regularization
+// ── GLFN-TC inspired modules ──────────────────────────────────────────────────
+// Graph Learning Module: learnable per-element feature vectors that compute an
+// adaptive adjacency score, modulating the CGCNN gate to discover latent chemical
+// pair compatibility beyond fixed bond-distance geometry (paper §2.2).
+const GRAPH_FEAT_DIM = 12;        // dimension of per-element learnable feature vector
+// Densely Connected Residual Module: a learnable skip gate passes H0 (post-input-
+// projection embeddings) forward to the layer-2 attention input, so later layers
+// can access the original node representations without over-smoothing (paper §2.4).
+// dense_skip_gate scalar is initialised to -2 → sigmoid(-2)≈0.12 (small initial skip).
 const GAUSSIAN_START = 0.5;
 const GAUSSIAN_END = 6.0;
 const GAUSSIAN_STEP = (GAUSSIAN_END - GAUSSIAN_START) / (N_GAUSSIAN_BASIS - 1);
@@ -1583,6 +1611,7 @@ export function cgcnnConvolutionLayer(
   W_value: number[][],
   b_gate: number[],
   b_value: number[],
+  adaptiveLogits?: number[][],
 ): number[][] {
   const nNodes = graph.nodes.length;
   const embeddings = graph.nodes.map(n => n.embedding);
@@ -1599,7 +1628,8 @@ export function cgcnnConvolutionLayer(
     const aggUpdate = initVector(HIDDEN_DIM);
     let totalWeight = 0;
 
-    for (const j of neighbors) {
+    for (let nIdx = 0; nIdx < neighbors.length; nIdx++) {
+      const j = neighbors[nIdx];
       const edgeFeat = getEdgeFromIndex(graph.edgeIndex, nNodes, i, j);
       const distance = edgeFeat?.distance ?? 2.5;
       const cutoffWeight = cosineCutoff(distance);
@@ -1619,6 +1649,11 @@ export function cgcnnConvolutionLayer(
       }
 
       const gateRaw = vecAdd(matVecMul(W_gate, concat), b_gate);
+      // GLFN-TC Graph Learning Module: add adaptive element-pair logit to gate.
+      const adaptLogit = adaptiveLogits?.[i]?.[nIdx] ?? 0;
+      if (adaptLogit !== 0) {
+        for (let k = 0; k < HIDDEN_DIM; k++) gateRaw[k] += adaptLogit;
+      }
       const valueRaw = vecAdd(matVecMul(W_value, concat), b_value);
 
       for (let k = 0; k < HIDDEN_DIM; k++) {
@@ -1863,6 +1898,7 @@ function cgcnnConvCached(
   graph: CrystalGraph,
   W_gate: number[][], W_value: number[][],
   b_gate: number[], b_value: number[],
+  adaptiveLogits?: number[][],
 ): { embeddings: number[][]; cache: CGCNNLayerCache } {
   const nNodes = graph.nodes.length;
   const inputEmbs = graph.nodes.map(n => [...n.embedding]);
@@ -1893,7 +1929,8 @@ function cgcnnConvCached(
     const aggUpdate = initVector(HIDDEN_DIM);
     let totalWeight = 0;
 
-    for (const j of neighbors) {
+    for (let nIdx = 0; nIdx < neighbors.length; nIdx++) {
+      const j = neighbors[nIdx];
       const edgeFeat = getEdgeFromIndex(graph.edgeIndex, nNodes, i, j);
       const distance = edgeFeat?.distance ?? 2.5;
       const cw = cosineCutoff(distance);
@@ -1912,6 +1949,15 @@ function cgcnnConvCached(
       for (let k = 0; k < EDGE_DIM; k++) concat[HIDDEN_DIM * 2 + k] = edgeVec[k] ?? 0;
 
       const gateRaw = vecAdd(matVecMul(W_gate, concat), b_gate);
+      // GLFN-TC Graph Learning Module: add adaptive element-pair logit to every gate
+      // dimension. This biases the gate uniformly, making compatible element pairs
+      // exchange more information without altering the gate's per-feature learned
+      // selectivity. The logit is a small scalar (≈0 at init) so training starts
+      // identically to the baseline and the model learns to use it gradually.
+      const adaptLogit = adaptiveLogits?.[i]?.[nIdx] ?? 0;
+      if (adaptLogit !== 0) {
+        for (let k = 0; k < HIDDEN_DIM; k++) gateRaw[k] += adaptLogit;
+      }
       const valueRaw = vecAdd(matVecMul(W_value, concat), b_value);
 
       nodeGates.push(gateRaw);
@@ -1945,7 +1991,7 @@ function cgcnnConvCached(
 
   return {
     embeddings: newEmbeddings,
-    cache: { inputEmbs, gateRaws, valueRaws, concats, cutoffWts, totalWeights },
+    cache: { inputEmbs, gateRaws, valueRaws, concats, cutoffWts, totalWeights, adaptiveLogits },
   };
 }
 
@@ -2046,6 +2092,9 @@ function cgcnnLayerBackward(
   dW_gate: number[][]; dW_value: number[][];
   db_gate: number[]; db_value: number[];
   dLdInput: number[][];
+  /** GLFN-TC: gradient at the adaptive scalar logit for each edge [node_i][neighbor_idx].
+   *  = Σ_k dL/d(gateRaw_ij[k]). Used to backprop through W_graph_adapt and W_elem_feat. */
+  dAdaptiveLogits: number[][];
 } {
   const nNodes = dLdOutput.length;
   const dW_gate = W_gate.map(r => new Array(r.length).fill(0));
@@ -2053,6 +2102,7 @@ function cgcnnLayerBackward(
   const db_gate = new Array(HIDDEN_DIM).fill(0);
   const db_value = new Array(HIDDEN_DIM).fill(0);
   const dLdInput: number[][] = Array.from({ length: nNodes }, () => new Array(HIDDEN_DIM).fill(0));
+  const dAdaptiveLogits: number[][] = graph.adjacency.map(ns => new Array(ns.length).fill(0));
 
   for (let i = 0; i < nNodes; i++) {
     for (let k = 0; k < HIDDEN_DIM; k++) {
@@ -2075,6 +2125,7 @@ function cgcnnLayerBackward(
 
       const j = neighbors[nIdx];
 
+      let dAdaptLogitEdge = 0;
       for (let k = 0; k < HIDDEN_DIM; k++) {
         const gateVal = sigmoid(gateRaw[k] ?? 0);
         const valVal = softplus(valueRaw[k] ?? 0);
@@ -2085,6 +2136,10 @@ function cgcnnLayerBackward(
 
         const dGateRaw = dGateVal * gateVal * (1 - gateVal);
         const dValRaw = dValVal * sigmoid(valueRaw[k] ?? 0);
+
+        // GLFN-TC: adaptive logit is added to gateRaw[k] for all k, so its gradient
+        // is the sum of all per-dimension gate gradients.
+        dAdaptLogitEdge += dGateRaw;
 
         db_gate[k] += dGateRaw;
         db_value[k] += dValRaw;
@@ -2106,10 +2161,47 @@ function cgcnnLayerBackward(
           dLdInput[j][c] += contrib;
         }
       }
+      if (dAdaptiveLogits[i]) dAdaptiveLogits[i][nIdx] = dAdaptLogitEdge;
     }
   }
 
-  return { dW_gate, dW_value, db_gate, db_value, dLdInput };
+  return { dW_gate, dW_value, db_gate, db_value, dLdInput, dAdaptiveLogits };
+}
+
+// ── GLFN-TC: Graph Learning Module ───────────────────────────────────────────
+/**
+ * Compute per-edge adaptive logits for the Graph Learning Module (GLFN-TC §2.2).
+ *
+ * For each directed edge i→j:
+ *   logit(i,j) = W_elem_feat[atomI]ᵀ · W_graph_adapt · W_elem_feat[atomJ]
+ *
+ * This scalar is added uniformly to all CGCNN gate dimensions for that edge,
+ * effectively learning which element pairs should exchange more information.
+ * Initialised near zero (small weights) so the model starts like the baseline.
+ *
+ * Returns a jagged array [nNodes][nNeighbors] of raw (pre-sigmoid) logits.
+ */
+function computeAdaptiveLogits(
+  graph: CrystalGraph,
+  W_elem_feat: number[][],
+  W_graph_adapt: number[][]
+): number[][] {
+  const nNodes = graph.nodes.length;
+  const result: number[][] = [];
+  for (let i = 0; i < nNodes; i++) {
+    const atomI = Math.min(Math.max(graph.nodes[i].atomicNumber, 0), 118);
+    const ei = W_elem_feat[atomI] ?? new Array(GRAPH_FEAT_DIM).fill(0);
+    const neighbors = graph.adjacency[i] ?? [];
+    const nodeLogits: number[] = [];
+    for (const j of neighbors) {
+      const atomJ = Math.min(Math.max(graph.nodes[j].atomicNumber, 0), 118);
+      const ej = W_elem_feat[atomJ] ?? new Array(GRAPH_FEAT_DIM).fill(0);
+      // Asymmetric bilinear form: logit = eᵢᵀ W_adapt eⱼ = dot(ei, W_adapt @ ej)
+      nodeLogits.push(dotProduct(ei, matVecMul(W_graph_adapt, ej)));
+    }
+    result.push(nodeLogits);
+  }
+  return result;
 }
 
 export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?: () => number): GNNPrediction {
@@ -2119,6 +2211,13 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
     const projected = fusedMatVecAddLeakyRelu(weights.W_input_proj, input, weights.b_input_proj);
     graph.nodes[i].embedding = projected;
   }
+
+  // GLFN-TC Dense Residual: save H0 (post-projection) for skip to layer-2 input.
+  const denseH0 = graph.nodes.map(n => [...n.embedding]);
+  // GLFN-TC Graph Learning Module: pre-compute adaptive edge logits once.
+  const adaptLogits = (weights.W_elem_feat && weights.W_graph_adapt)
+    ? computeAdaptiveLogits(graph, weights.W_elem_feat, weights.W_graph_adapt)
+    : undefined;
 
   const saveResidual = (nodes: CrystalGraph["nodes"]) =>
     nodes.map(n => [...n.embedding]);
@@ -2134,7 +2233,7 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
     }
   }
 
-  cgcnnConvolutionLayer(graph, weights.W_conv_gate, weights.W_conv_value, weights.b_conv_gate, weights.b_conv_value);
+  cgcnnConvolutionLayer(graph, weights.W_conv_gate, weights.W_conv_value, weights.b_conv_gate, weights.b_conv_value, adaptLogits);
   if (dropoutRng) {
     for (const node of graph.nodes) {
       node.embedding = applyDropout(node.embedding, MC_DROPOUT_RATE, dropoutRng);
@@ -2149,6 +2248,18 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
   for (let i = 0; i < graph.nodes.length; i++) {
     for (let k = 0; k < HIDDEN_DIM; k++) {
       graph.nodes[i].embedding[k] = (graph.nodes[i].embedding[k] ?? 0) + (residual0[i][k] ?? 0) * g0;
+    }
+  }
+
+  // GLFN-TC Dense Residual (§2.4): add a learned fraction of H0 to H1 before
+  // layer-2 attention so later convolutions can access the original node features.
+  // dense_skip_gate is a learnable scalar; sigmoid(-2)≈0.12 at init → small skip.
+  const denseGate = sigmoid(weights.dense_skip_gate ?? -2);
+  if (denseGate > 1e-4) {
+    for (let i = 0; i < graph.nodes.length; i++) {
+      for (let k = 0; k < HIDDEN_DIM; k++) {
+        graph.nodes[i].embedding[k] += denseGate * (denseH0[i][k] ?? 0);
+      }
     }
   }
 
@@ -2307,11 +2418,18 @@ function GNNPredictForTraining(graph: CrystalGraph, weights: GNNWeights): { pred
   const gates = weights.residual_gates;
   const attnCaches: AttnLayerCache[] = [];
 
+  // GLFN-TC Dense Residual: save H0 after input projection for dense skip.
+  const denseH0 = graph.nodes.map(n => [...n.embedding]);
+  // GLFN-TC Graph Learning Module: pre-compute adaptive edge logits once per graph.
+  const adaptLogits = (weights.W_elem_feat && weights.W_graph_adapt)
+    ? computeAdaptiveLogits(graph, weights.W_elem_feat, weights.W_graph_adapt)
+    : undefined;
+
   const residual0 = saveResidual(graph.nodes);
   const { cache: ac0 } = attnMessagePassCached(graph, weights.W_message, weights.W_update, weights.W_attn_query, weights.W_attn_key, true);
   attnCaches.push(ac0);
 
-  const { cache: cgcnnC } = cgcnnConvCached(graph, weights.W_conv_gate, weights.W_conv_value, weights.b_conv_gate, weights.b_conv_value);
+  const { cache: cgcnnC } = cgcnnConvCached(graph, weights.W_conv_gate, weights.W_conv_value, weights.b_conv_gate, weights.b_conv_value, adaptLogits);
 
   if (graph.threeBodyFeatures.length > 0) {
     threeBodyInteractionLayer(graph, weights.W_3body, weights.W_3body_update);
@@ -2320,6 +2438,17 @@ function GNNPredictForTraining(graph: CrystalGraph, weights: GNNWeights): { pred
   for (let i = 0; i < nNodes; i++) {
     for (let k = 0; k < HIDDEN_DIM; k++) {
       graph.nodes[i].embedding[k] = (graph.nodes[i].embedding[k] ?? 0) + (residual0[i][k] ?? 0) * g0;
+    }
+  }
+
+  // GLFN-TC Dense Residual (§2.4): inject H0 into layer-2 input.
+  // residual1 is saved BEFORE the skip so the gated-residual path stays clean (gate1 → H1).
+  const denseGate = sigmoid(weights.dense_skip_gate ?? -2);
+  if (denseGate > 1e-4) {
+    for (let i = 0; i < nNodes; i++) {
+      for (let k = 0; k < HIDDEN_DIM; k++) {
+        graph.nodes[i].embedding[k] += denseGate * (denseH0[i][k] ?? 0);
+      }
     }
   }
 
@@ -2464,6 +2593,7 @@ function GNNPredictForTraining(graph: CrystalGraph, weights: GNNWeights): { pred
     inputProjPreActs,
     maxPoolArgmax,
     attnPoolWeights,
+    denseH0,  // GLFN-TC: saved for dense-skip gradient in backward pass
   };
 
   return { pred, cache };
@@ -2500,6 +2630,12 @@ function initWeights(rng: () => number): GNNWeights {
     W_pressure: Array.from({ length: HIDDEN_DIM }, () => (rng() - 0.5) * 2 * Math.sqrt(2.0 / HIDDEN_DIM)),
     W_mlp1: initMatrix(HIDDEN_DIM, HIDDEN_DIM * 2 + GLOBAL_COMP_DIM, rng),
     b_mlp1: initVector(HIDDEN_DIM),
+    // GLFN-TC: Graph Learning Module weights — initialised very small so
+    // adaptive logits start near 0 and the model begins identical to baseline.
+    W_elem_feat: initMatrix(119, GRAPH_FEAT_DIM, rng, 0.01),
+    W_graph_adapt: initMatrix(GRAPH_FEAT_DIM, GRAPH_FEAT_DIM, rng, 0.01),
+    // GLFN-TC: Dense Residual scalar gate — sigmoid(-2) ≈ 0.12 (tiny initial skip).
+    dense_skip_gate: -2.0,
     W_mlp2: initMatrix(OUTPUT_DIM, HIDDEN_DIM, rng, 0.01),
     b_mlp2: (() => {
       const b = initVector(OUTPUT_DIM);
@@ -2549,6 +2685,9 @@ function cloneWeights(w: GNNWeights): GNNWeights {
     W_pressure: [...w.W_pressure],
     W_mlp1: w.W_mlp1.map(r => [...r]),
     b_mlp1: [...w.b_mlp1],
+    W_elem_feat: w.W_elem_feat.map(r => [...r]),
+    W_graph_adapt: w.W_graph_adapt.map(r => [...r]),
+    dense_skip_gate: w.dense_skip_gate,
     W_mlp2: w.W_mlp2.map(r => [...r]),
     b_mlp2: [...w.b_mlp2],
     W_mlp2_var: w.W_mlp2_var.map(r => [...r]),
@@ -2556,6 +2695,25 @@ function cloneWeights(w: GNNWeights): GNNWeights {
     trainedAt: w.trainedAt,
     nSamples: w.nSamples,
   };
+}
+
+/**
+ * GLFN-TC migration: add new weight fields to models trained before the
+ * Graph Learning + Dense Residual modules were added. Old weights load fine —
+ * new fields start near zero so the model behaves identically to baseline on
+ * the first forward pass, then learns to use the new parameters during training.
+ */
+function migrateWeights(w: GNNWeights, rng: () => number): GNNWeights {
+  if (!w.W_elem_feat || w.W_elem_feat.length !== 119) {
+    w.W_elem_feat = initMatrix(119, GRAPH_FEAT_DIM, rng, 0.01);
+  }
+  if (!w.W_graph_adapt || w.W_graph_adapt.length !== GRAPH_FEAT_DIM) {
+    w.W_graph_adapt = initMatrix(GRAPH_FEAT_DIM, GRAPH_FEAT_DIM, rng, 0.01);
+  }
+  if (typeof w.dense_skip_gate !== 'number' || !Number.isFinite(w.dense_skip_gate)) {
+    w.dense_skip_gate = -2.0;
+  }
+  return w;
 }
 
 export interface TrainingSample {
@@ -2598,7 +2756,7 @@ function _gnnBar(epoch: number, total: number, width = 22): string {
 
 export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights?: GNNWeights, maxPretrainEpochs = 15, label?: string): GNNWeights {
   const rng = seededRandom(42);
-  const weights = preInitWeights ?? initWeights(rng);
+  const weights = migrateWeights(preInitWeights ?? initWeights(rng), rng);
 
   if (trainingData.length < 5) {
     weights.trainedAt = Date.now();
@@ -2646,6 +2804,10 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
     bInputProj: mkAdamVecG(HIDDEN_DIM),
     pressure:   mkAdamVecG(HIDDEN_DIM),
     gates:      mkAdamVecG(weights.residual_gates.length),
+    // GLFN-TC: Adam state for Graph Learning Module and Dense Residual gate.
+    elemFeat:       mkAdamMatG(weights.W_elem_feat),
+    graphAdapt:     mkAdamMatG(weights.W_graph_adapt),
+    denseSkipGate:  mkAdamVecG(1),
   };
 
   const graphCache = new Map<string, CrystalGraph>();
@@ -2814,6 +2976,10 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
         dW_input_proj: zeroMat(weights.W_input_proj),
         db_input_proj: new Array(HIDDEN_DIM).fill(0),
         dGates: new Array(4).fill(0),
+        // GLFN-TC gradient accumulators
+        dW_elem_feat:   zeroMat(weights.W_elem_feat),
+        dW_graph_adapt: zeroMat(weights.W_graph_adapt),
+        dDenseSkipGate: 0,
       };
 
       for (let b = batchStart; b < batchEnd; b++) {
@@ -3033,6 +3199,9 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
         const layerWeights = allLayerWeights.slice(4 - GNN_MSG_LAYERS);
         const layerCacheIndices = layerWeights.map(lw => lw.gateIdx);
 
+        // GLFN-TC Dense Residual backward: save layer-2 attention input gradient
+        // so we can route it back to H0 through the dense skip connection.
+        let dLdInput_layer2: number[][] | null = null;
         let dLdCur = dLdNodeEmb;
         for (let li = 0; li < layerWeights.length; li++) {
           const lw = layerWeights[li];
@@ -3049,6 +3218,10 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
           }
 
           const { dW_update, dW_message, dLdInput } = attnLayerBackward(ac, dLdCur, graph, lw.W_upd, lw.W_msg, lw.useLeaky);
+
+          // GLFN-TC: capture the gradient at layer-2's attention input (= H1 + denseGate*H0).
+          // This is used below to back-propagate through the dense skip to H0.
+          if (gi === 1) dLdInput_layer2 = dLdInput;
 
           const gradIdx = lw.gateIdx;
           const addMat = (dst: number[][], src: number[][]) => {
@@ -3074,9 +3247,24 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
           dLdCur = dLdLayerIn;
         }
 
+        // GLFN-TC Dense Residual (§2.4) backward:
+        //   Forward:  layer2_input = H1 + denseGate * H0
+        //   ∂L/∂H0_dense  = denseGate  * dLdInput_layer2  (added to dLdPreProj below)
+        //   ∂L/∂dense_raw = Σ dLdInput_layer2[i][k] * H0[i][k]  * gate*(1-gate)
+        const denseGateVal = sigmoid(weights.dense_skip_gate ?? -2);
+        if (dLdInput_layer2 && cache.denseH0) {
+          let dDenseSkipRaw = 0;
+          for (let ni = 0; ni < nN; ni++) {
+            for (let k = 0; k < HIDDEN_DIM; k++) {
+              dDenseSkipRaw += (dLdInput_layer2[ni]?.[k] ?? 0) * (cache.denseH0[ni]?.[k] ?? 0);
+            }
+          }
+          graphGrads.dDenseSkipGate += clipGrad(dDenseSkipRaw * denseGateVal * (1 - denseGateVal));
+        }
+
         const ac0 = cache.attnCaches[0];
         if (cache.cgcnnCache) {
-          const { dW_gate, dW_value, db_gate, db_value, dLdInput: dLdCgcnnIn } =
+          const { dW_gate, dW_value, db_gate, db_value, dLdInput: dLdCgcnnIn, dAdaptiveLogits } =
             cgcnnLayerBackward(cache.cgcnnCache, dLdCur, graph, weights.W_conv_gate, weights.W_conv_value);
           const addMat = (dst: number[][], src: number[][]) => {
             for (let r = 0; r < dst.length; r++)
@@ -3090,6 +3278,40 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
             graphGrads.db_conv_value[k] += clipGrad(db_value[k]);
           }
           dLdCur = dLdCgcnnIn;
+
+          // GLFN-TC Graph Learning Module backward:
+          //   adaptive_logit(i,j) = eᵢᵀ W_adapt eⱼ
+          //   ∂L/∂W_adapt[p][q]  += dLogit * ei[p] * ej[q]
+          //   ∂L/∂ei[p]          += dLogit * (W_adapt @ ej)[p]
+          //   ∂L/∂ej[q]          += dLogit * (W_adaptᵀ @ ei)[q]
+          if (dAdaptiveLogits) {
+            for (let i = 0; i < nN; i++) {
+              const atomI = Math.min(Math.max(graph.nodes[i].atomicNumber, 0), 118);
+              const ei = weights.W_elem_feat[atomI] ?? new Array(GRAPH_FEAT_DIM).fill(0);
+              const neighbors = graph.adjacency[i] ?? [];
+              for (let nIdx = 0; nIdx < neighbors.length; nIdx++) {
+                const dLogit = dAdaptiveLogits[i]?.[nIdx] ?? 0;
+                if (Math.abs(dLogit) < 1e-12) continue;
+                const j = neighbors[nIdx];
+                const atomJ = Math.min(Math.max(graph.nodes[j].atomicNumber, 0), 118);
+                const ej = weights.W_elem_feat[atomJ] ?? new Array(GRAPH_FEAT_DIM).fill(0);
+                // Gradient of the bilinear form logit = eᵢᵀ W_adapt eⱼ
+                for (let p = 0; p < GRAPH_FEAT_DIM; p++) {
+                  for (let q = 0; q < GRAPH_FEAT_DIM; q++) {
+                    graphGrads.dW_graph_adapt[p][q] += clipGrad(dLogit * (ei[p] ?? 0) * (ej[q] ?? 0));
+                  }
+                  // ∂L/∂ei via W_adapt @ ej
+                  let wAdaptEj_p = 0;
+                  for (let q = 0; q < GRAPH_FEAT_DIM; q++) wAdaptEj_p += (weights.W_graph_adapt[p]?.[q] ?? 0) * (ej[q] ?? 0);
+                  graphGrads.dW_elem_feat[atomI][p] += clipGrad(dLogit * wAdaptEj_p);
+                  // ∂L/∂ej via W_adaptᵀ @ ei
+                  let wAdaptTEi_p = 0;
+                  for (let q = 0; q < GRAPH_FEAT_DIM; q++) wAdaptTEi_p += (weights.W_graph_adapt[q]?.[p] ?? 0) * (ei[q] ?? 0);
+                  graphGrads.dW_elem_feat[atomJ][p] += clipGrad(dLogit * wAdaptTEi_p);
+                }
+              }
+            }
+          }
         }
 
         {
@@ -3106,7 +3328,11 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
           const dLdPreProj: number[][] = Array.from({ length: nN }, () => new Array(HIDDEN_DIM).fill(0));
           for (let ni = 0; ni < nN; ni++) {
             for (let k = 0; k < HIDDEN_DIM; k++) {
-              dLdPreProj[ni][k] = clipGrad(dLdInput[ni][k]) + dLdCur[ni][k] * g0v;
+              // Standard gradients: layer-1 attention backward + gated residual to H0.
+              // GLFN-TC Dense Residual: dLdInput_layer2 (grad at layer-2 attention input)
+              // also flows back to H0 through the dense skip (H0 was added to H1).
+              const denseSkipContrib = dLdInput_layer2 ? denseGateVal * (dLdInput_layer2[ni]?.[k] ?? 0) : 0;
+              dLdPreProj[ni][k] = clipGrad(dLdInput[ni][k]) + dLdCur[ni][k] * g0v + clipGrad(denseSkipContrib);
             }
           }
 
@@ -3211,6 +3437,19 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
         weights.residual_gates[g] -= graphLR * (graphAdam.gates.m[g] / bc1) / (Math.sqrt(graphAdam.gates.v[g] / bc2) + adamEps);
         weights.residual_gates[g] = Math.max(-3, Math.min(3, weights.residual_gates[g]));
       }
+
+      // GLFN-TC: Adam updates for Graph Learning Module and Dense Residual gate.
+      adamUpdateGraph(weights.W_elem_feat,   graphGrads.dW_elem_feat,   graphAdam.elemFeat);
+      adamUpdateGraph(weights.W_graph_adapt, graphGrads.dW_graph_adapt, graphAdam.graphAdapt);
+      {
+        const dsg = graphGrads.dDenseSkipGate * invN;
+        graphAdam.denseSkipGate.m[0] = adamBeta1 * graphAdam.denseSkipGate.m[0] + (1 - adamBeta1) * dsg;
+        graphAdam.denseSkipGate.v[0] = adamBeta2 * graphAdam.denseSkipGate.v[0] + (1 - adamBeta2) * dsg * dsg;
+        weights.dense_skip_gate -= graphLR * (graphAdam.denseSkipGate.m[0] / bc1) / (Math.sqrt(graphAdam.denseSkipGate.v[0] / bc2) + adamEps);
+        // Clamp so denseGate = sigmoid(raw) stays in (0.01, 0.99) — prevents the skip
+        // from either fully vanishing or drowning the gated-residual path.
+        weights.dense_skip_gate = Math.max(-4.6, Math.min(4.6, weights.dense_skip_gate));
+      }
     }
 
     // Progress bar — log every ~20% of epochs, always log first and last.
@@ -3236,10 +3475,12 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
     weights.W_attn_query3, weights.W_attn_key3, weights.W_attn_query4, weights.W_attn_key4,
     weights.W_conv_gate, weights.W_conv_value, weights.W_input_proj, weights.W_3body, weights.W_3body_update,
     weights.W_mlp1, weights.W_mlp2, weights.W_mlp2_var, weights.W_attn_pool,
+    weights.W_elem_feat, weights.W_graph_adapt,
   ]) { scrubMatrix(wMat); }
   for (const bVec of [weights.b_mlp1, weights.b_mlp2, weights.b_mlp2_var, weights.b_conv_gate, weights.b_conv_value, weights.b_input_proj, weights.W_pressure, weights.residual_gates]) {
     scrubVector(bVec);
   }
+  if (!Number.isFinite(weights.dense_skip_gate)) weights.dense_skip_gate = -2.0;
 
   for (const wMat of [
     weights.W_message, weights.W_update, weights.W_message2, weights.W_update2,
@@ -3248,6 +3489,7 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
     weights.W_attn_query3, weights.W_attn_key3, weights.W_attn_query4, weights.W_attn_key4,
     weights.W_conv_gate, weights.W_conv_value, weights.W_input_proj, weights.W_3body, weights.W_3body_update,
     weights.W_mlp1, weights.W_mlp2, weights.W_mlp2_var, weights.W_attn_pool,
+    weights.W_elem_feat, weights.W_graph_adapt,
   ]) { invalidateFlatCache(wMat); }
 
   weights.trainedAt = Date.now();
