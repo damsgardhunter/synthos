@@ -78,13 +78,20 @@ async function trainEnsembleParallel(
   trainingData: TrainingSample[],
   maxPretrainEpochs = 15,
   label?: string,
+  valSet?: TrainingSample[],
 ): Promise<GNNWeights[]> {
   const n = Math.min(ENSEMBLE_SIZE, ENSEMBLE_SEEDS.length);
   console.log(`[GNN-GCP] Launching ${n} worker threads for parallel ensemble training${label ? ` [${label}]` : ''}`);
 
   // Fan out: all n models start simultaneously
   const promises = Array.from({ length: n }, (_, i) =>
-    spawnModelWorker(trainingData, i, maxPretrainEpochs, label).catch((err: Error) => {
+    spawnModelWorker(trainingData, i, maxPretrainEpochs, label).then(model => {
+      if (valSet && valSet.length >= 5) {
+        const { r2, mae, rmse } = computeMetrics([model], valSet);
+        console.log(`[GNN-Worker-${i}] R²=${r2.toFixed(3)} MAE=${mae.toFixed(1)}K RMSE=${rmse.toFixed(1)}K`);
+      }
+      return model;
+    }).catch((err: Error) => {
       console.warn(`[GNN-GCP] Worker ${i} failed (${err.message}) — will use sequential fallback for this model`);
       return null;
     }),
@@ -521,7 +528,7 @@ async function processNextGnnJob(): Promise<boolean> {
   const startMs = Date.now();
 
   try {
-    const models = await trainEnsembleParallel(trainSet, 15, `Job#${jobId}`);
+    const models = await trainEnsembleParallel(trainSet, 15, `Job#${jobId}`, valSet);
 
     // Evaluate on HELD-OUT validation set — these R²/MAE/RMSE are honest.
     const valMetrics = valSet.length >= 5
@@ -659,7 +666,7 @@ async function runStartupFullCorpusTraining(): Promise<void> {
   const startMs = Date.now();
   let models: GNNWeights[];
   try {
-    models = await trainEnsembleParallel(trainSet, 15, 'STARTUP');
+    models = await trainEnsembleParallel(trainSet, 15, 'STARTUP', valSet);
   } catch (err: any) {
     console.error(`[GNN-GCP] Startup corpus training failed: ${err.message}`);
     return;
