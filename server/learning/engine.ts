@@ -8726,9 +8726,15 @@ export async function startEngine() {
 
   // Starts 20 min after startup. Waits for SG sweep to finish (isSGSweepActive flag)
   // so both tasks don't simultaneously call extractFeatures and saturate the DB pool.
+  // Gives up waiting after 3 hours so backfill always runs even if SG sweep is huge.
   setTimeout(async () => {
-    // Wait until SG sweep is done — poll every 30s
+    const backfillWaitStart = Date.now();
+    const BACKFILL_MAX_WAIT_MS = 3 * 60 * 60 * 1000; // 3 hours
     while (isSGSweepActive) {
+      if (Date.now() - backfillWaitStart > BACKFILL_MAX_WAIT_MS) {
+        console.log("[Engine] background: backfill max-wait exceeded — running alongside SG sweep");
+        break;
+      }
       console.log("[Engine] background: backfill waiting for SG sweep to finish...");
       await new Promise(r => setTimeout(r, 30_000));
     }
@@ -8766,8 +8772,14 @@ export async function startEngine() {
 
         let submitted = 0;
         let sweepIdx = 0;
+        const SG_SWEEP_WALL_LIMIT_MS = 2 * 60 * 60 * 1000; // 2-hour cap per run
+        const sgSweepStart = Date.now();
         for (const candidate of candidates) {
           if (state !== "running") break;
+          if (Date.now() - sgSweepStart > SG_SWEEP_WALL_LIMIT_MS) {
+            console.log(`[Engine] SG sweep: wall-time limit reached after ${sweepIdx} candidates — stopping early, will resume next 6h cycle`);
+            break;
+          }
           sweepIdx++;
           // Pause while the fast-path screening loop is active — both loops share the
           // 5-connection Neon pool, and running them concurrently causes cascading
