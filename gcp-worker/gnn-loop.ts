@@ -222,7 +222,7 @@ function computeMetrics(
       const graph = buildCrystalGraph(sample.formula, sample.structure);
       const preds = models.map(m => GNNPredict(graph, m).predictedTc);
       const pred = preds.reduce((a, b) => a + b, 0) / preds.length;
-      if (!Number.isFinite(pred)) continue;
+      if (!Number.isFinite(pred) || pred > 500) continue; // guard: predictions >500K are unphysical
       const diff = sample.tc - pred;
       ssTot += (sample.tc - meanActual) ** 2;
       ssRes += diff ** 2;

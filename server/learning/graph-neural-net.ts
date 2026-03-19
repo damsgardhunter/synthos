@@ -224,7 +224,11 @@ const GLOBAL_COMP_DIM = 19;
 // Typical range: 0.10 (metals), 0.12-0.13 (hydrides, higher Coulomb screening).
 const FIXED_MU_STAR = 0.10;
 // Scale for out[2] → ω_log (K). softplus(0)*500+10 ≈ 357 K — reasonable default for BCS metals.
-const OMEGA_LOG_SCALE = 500;              // 6 composition + 7 XGBoost-inspired composition + 6 physics (λ, logω, DOS, FE, isCuprate, isIronBased)
+const OMEGA_LOG_SCALE = 500;
+// Physical upper bound on λ — no known conventional SC has λ > 3.8 (LaH10 hydride); cap prevents Allen-Dynes blowup.
+const LAMBDA_MAX = 5.5;
+// Allen-Dynes formula is unconventional above ~300 K; cap predictions at training normalization ceiling.
+const TC_MAX_K = 300;              // 6 composition + 7 XGBoost-inspired composition + 6 physics (λ, logω, DOS, FE, isCuprate, isIronBased)
 const CGCNN_CONCAT_DIM = HIDDEN_DIM * 2 + EDGE_DIM;
 export const ENSEMBLE_SIZE = 5;
 const MC_DROPOUT_PASSES = 10;
@@ -2252,9 +2256,13 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
   const omegaLog = Math.max(10, softplus(omegaLogRaw) * OMEGA_LOG_SCALE + 10);
   // out[4] → λ via softplus (NOT ReLU): softplus has non-zero gradient everywhere,
   // preventing the dead-neuron problem that blocks gradient flow when out[4]<0.
-  const lambdaRaw = softplus(sf(out[4] ?? 0));
+  // Cap λ — softplus is unbounded; without a cap, FE-pretraining-inflated h1 drives λ → billions
+  // and Allen-Dynes f1 ≈ √λ amplifies that into 100M-K predictions.
+  const lambdaRaw = Math.min(LAMBDA_MAX, softplus(sf(out[4] ?? 0)));
   // Tc computed via Allen-Dynes formula: Tc = (ω_log/1.2)*exp(-1.04(1+λ)/(λ-μ*(1+0.62λ)))
-  const predictedTcRaw = allenDynesTcRaw(lambdaRaw, omegaLog, FIXED_MU_STAR);
+  // omegaLog is already in Kelvin; allenDynesTcRaw expects cm⁻¹ and multiplies by 1.4388 internally,
+  // so we divide here to undo that spurious conversion.
+  const predictedTcRaw = allenDynesTcRaw(lambdaRaw, omegaLog / 1.4388, FIXED_MU_STAR);
   const confidenceRaw = sigmoid(sf(out[3] ?? 0));
   const bandgapRaw = sigmoid(sf(out[5] ?? 0)) * 5.0;
   const dosProxyRaw = softplus(sf(out[6] ?? 0));
@@ -2264,7 +2272,7 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
   return {
     formationEnergy: Math.round(formationEnergy * 1000) / 1000,
     phononStability: phononStabilityRaw > 0.5,
-    predictedTc: Math.round(Math.max(0, predictedTcRaw) * 10) / 10,
+    predictedTc: Math.round(Math.max(0, Math.min(TC_MAX_K, predictedTcRaw)) * 10) / 10,
     omegaLog: Math.round(omegaLog * 10) / 10,
     confidence: Math.round(Math.max(0.05, Math.min(0.95, confidenceRaw)) * 100) / 100,
     lambda: Math.round(Math.max(0, lambdaRaw) * 1000) / 1000,
@@ -2410,8 +2418,9 @@ function GNNPredictForTraining(graph: CrystalGraph, weights: GNNWeights): { pred
   // out[2] → ω_log (K) — two-stage Allen-Dynes prediction (same as GNNPredict)
   const omegaLogRaw = sf(out[2] ?? 0);
   const omegaLog = Math.max(10, softplus(omegaLogRaw) * OMEGA_LOG_SCALE + 10);
-  const lambdaRaw = softplus(sf(out[4] ?? 0)); // softplus: always positive, always differentiable
-  const predictedTcRaw = allenDynesTcRaw(lambdaRaw, omegaLog, FIXED_MU_STAR);
+  const lambdaRaw = Math.min(LAMBDA_MAX, softplus(sf(out[4] ?? 0))); // softplus: always positive, always differentiable; capped to prevent Allen-Dynes blowup
+  // omegaLog is in Kelvin; divide by 1.4388 to undo the cm⁻¹→K conversion inside allenDynesTcRaw
+  const predictedTcRaw = allenDynesTcRaw(lambdaRaw, omegaLog / 1.4388, FIXED_MU_STAR);
   const confidenceRaw = sigmoid(sf(out[3] ?? 0));
   const bandgapRaw = sigmoid(sf(out[5] ?? 0)) * 5.0;
   const dosProxyRaw = softplus(sf(out[6] ?? 0));
@@ -2424,7 +2433,7 @@ function GNNPredictForTraining(graph: CrystalGraph, weights: GNNWeights): { pred
   const pred: GNNPrediction = {
     formationEnergy: Math.round(formationEnergy * 1000) / 1000,
     phononStability: phononStabilityRaw > 0.5,
-    predictedTc: Math.round(Math.max(0, predictedTcRaw) * 10) / 10,
+    predictedTc: Math.round(Math.max(0, Math.min(TC_MAX_K, predictedTcRaw)) * 10) / 10,
     omegaLog: Math.round(omegaLog * 10) / 10,
     confidence: Math.round(Math.max(0.05, Math.min(0.95, confidenceRaw)) * 100) / 100,
     lambda: Math.round(Math.max(0, lambdaRaw) * 1000) / 1000,
@@ -2851,8 +2860,9 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
         const adOmegaLog    = Math.max(10, softplus(adOmegaLogRaw) * OMEGA_LOG_SCALE + 10);
         // λ uses softplus in the forward pass — reconstruct with softplus here too
         const adLambdaRaw   = cache.outRaw[4] ?? 0;
-        const adLambda      = softplus(adLambdaRaw);
-        const adTc          = allenDynesTcRaw(adLambda, adOmegaLog, FIXED_MU_STAR);
+        const adLambda      = Math.min(LAMBDA_MAX, softplus(adLambdaRaw));
+        // omegaLog is in Kelvin; divide by 1.4388 to match the forward-pass unit fix
+        const adTc          = allenDynesTcRaw(adLambda, adOmegaLog / 1.4388, FIXED_MU_STAR);
         // McMillan denominator: D = λ(1−0.62μ*) − μ*  (μ*=0.10 → D = 0.938λ − 0.10)
         const adD = adLambda * (1 - 0.62 * FIXED_MU_STAR) - FIXED_MU_STAR;
         // dTc/dω_log = Tc / ω_log  (linear dependence in Allen-Dynes)
