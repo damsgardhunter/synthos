@@ -521,7 +521,7 @@ async function processNextGnnJob(): Promise<boolean> {
   const startMs = Date.now();
 
   try {
-    const models = await trainEnsembleParallel(trainSet);
+    const models = await trainEnsembleParallel(trainSet, 15, `Job#${jobId}`);
 
     // Evaluate on HELD-OUT validation set — these R²/MAE/RMSE are honest.
     const valMetrics = valSet.length >= 5
@@ -600,25 +600,17 @@ async function processNextGnnJob(): Promise<boolean> {
 // Subsequent dispatched retrains use only 5k samples so they finish in minutes.
 
 const STARTUP_CORPUS_STATE_KEY = 'gnn_startup_corpus_training';
-// Re-run startup corpus training if the last one is older than this.
-const STARTUP_CORPUS_MAX_AGE_MS = 12 * 3600_000; // 12 hours
+// In-process guard: run corpus training exactly once per GCP worker process lifetime.
+// Every fresh restart always trains on the full corpus regardless of last DB timestamp.
+let _startupCorpusRan = false;
 
 async function runStartupFullCorpusTraining(): Promise<void> {
-  // Skip if a recent full corpus training already completed.
-  try {
-    const stateRows = await db.execute(
-      `SELECT value FROM system_state WHERE key = '${STARTUP_CORPUS_STATE_KEY}'`
-    );
-    const row = (stateRows as any).rows?.[0] ?? (Array.isArray(stateRows) ? stateRows[0] : undefined);
-    const doneAt: string | undefined = (row?.value as any)?.doneAt;
-    if (doneAt) {
-      const ageMs = Date.now() - new Date(doneAt).getTime();
-      if (ageMs < STARTUP_CORPUS_MAX_AGE_MS) {
-        console.log(`[GNN-GCP] Startup full corpus training skipped — completed ${Math.round(ageMs / 3600_000)}h ago (< 12h)`);
-        return;
-      }
-    }
-  } catch { /* first run or DB unavailable — proceed */ }
+  // Skip if already ran in this process (e.g. called twice).
+  if (_startupCorpusRan) {
+    console.log('[GNN-GCP] Startup full corpus training already ran this session — skipping');
+    return;
+  }
+  _startupCorpusRan = true;
 
   console.log('[GNN-GCP] ════════════════════════════════════════════════════════');
   console.log('[GNN-GCP]  STARTUP PHASE 3 — Full Corpus Training');

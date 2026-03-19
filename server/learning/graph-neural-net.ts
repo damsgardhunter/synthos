@@ -3849,7 +3849,10 @@ if (isMainThread) setTimeout(async () => {
   // When GNN training is offloaded to GCP, skip local startup training entirely.
   // The GCP worker handles all ensemble training; local server just applies weights.
   if (process.env.OFFLOAD_GNN_TO_GCP === "true") {
-    console.log("[GNN] OFFLOAD_GNN_TO_GCP=true — skipping local startup training, GCP handles GNN");
+    // Only log on the local server (not on GCP where this env var is set by index.ts)
+    if (!process.env.QE_BIN_DIR) {
+      console.log("[GNN] OFFLOAD_GNN_TO_GCP=true — GCP handles GNN training, skipping local startup");
+    }
     return;
   }
   try {
