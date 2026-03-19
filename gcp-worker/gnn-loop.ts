@@ -770,10 +770,16 @@ export async function startGNNLoop(): Promise<void> {
   // Phase 3 startup: train on full NIMS+JARVIS corpus as a background task.
   // Delayed 30s so XGB/ML/DFT loops can claim their DB connections first.
   // Regular dispatched jobs use a 5k-sample subset; startup gets the full corpus once.
-  // Fire-and-forget so job polling starts immediately.
+  // Fire-and-forget so job polling starts immediately after startup training acquires the slot.
   new Promise<void>(r => setTimeout(r, 30_000))
     .then(() => runStartupFullCorpusTraining())
     .catch(err => console.error("[GNN-GCP] Startup corpus training error:", err?.message ?? String(err)));
+
+  // Delay job polling by 35s so the startup corpus training acquires the slot first.
+  // Without this delay the poll loop grabs a queued job immediately, wins the slot race,
+  // and startup training gets deferred for 5+ minutes.
+  await new Promise(r => setTimeout(r, 35_000));
+  console.log("[GNN-GCP] Job polling starting — startup training should hold the slot");
 
   while (running) {
     try {
