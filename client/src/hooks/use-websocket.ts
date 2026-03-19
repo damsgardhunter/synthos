@@ -68,9 +68,11 @@ function connectWS() {
   ws.onopen = () => {
     reconnectAttempts = 0;
     updateState({ connected: true });
-    // Flush stale query cache on every reconnect so UI immediately reflects current server state.
-    // Without this, queries cached from before a server restart stay stale indefinitely.
-    queryClient.invalidateQueries();
+    // Flush only the core queries on reconnect — invalidating ALL queries causes a
+    // thundering herd of 25+ simultaneous fetches that queue up and each take ~1s.
+    for (const key of ["/api/stats", "/api/learning-phases", "/api/research-logs", "/api/engine/memory", "/api/dft-status"]) {
+      queryClient.invalidateQueries({ queryKey: [key] });
+    }
     // Seed the activity feed with recent log history so it's not empty on connect/reconnect
     fetch("/api/research-logs?limit=20")
       .then((r) => r.json())

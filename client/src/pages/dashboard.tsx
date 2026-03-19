@@ -413,7 +413,7 @@ function GNNActiveLearningCard() {
     recentCycles: any[];
     avgUncertaintyTrend: { cycle: number; before: number; after: number; reductionPct: number }[];
     dftDatasetStats: { totalSize: number; bySource: Record<string, number>; growthHistory: { timestamp: number; size: number; source: string }[] };
-  }>({ queryKey: ["/api/gnn/active-learning-stats"], refetchInterval: ri30 });
+  }>({ queryKey: ["/api/gnn/active-learning-stats"], refetchInterval: ri60 });
 
   const growthData = useMemo(() => {
     if (!alStats?.dftDatasetStats?.growthHistory?.length) return [];
@@ -1060,7 +1060,7 @@ function HeterostructureGeneratorCard() {
       quality: string;
       atoms: number;
     }>;
-  }>({ queryKey: ["/api/heterostructure/stats"], refetchInterval: ri30 });
+  }>({ queryKey: ["/api/heterostructure/stats"], refetchInterval: ri60 });
 
   const qualityColors: Record<string, string> = {
     ideal: "text-green-400",
@@ -1205,7 +1205,7 @@ function DisorderGeneratorCard() {
       tcModifier: number;
       formationEnergy: number;
     }>;
-  }>({ queryKey: ["/api/disorder-generator/stats"], refetchInterval: ri30 });
+  }>({ queryKey: ["/api/disorder-generator/stats"], refetchInterval: ri60 });
 
   const { data: metricsStats } = useQuery<{
     totalAnalyzed: number;
@@ -1217,7 +1217,7 @@ function DisorderGeneratorCard() {
     avgLocalStrain: number;
     avgConfigEntropy: number;
     avgDosDisorderSignal: number;
-  }>({ queryKey: ["/api/disorder-metrics/stats"], refetchInterval: ri30 });
+  }>({ queryKey: ["/api/disorder-metrics/stats"], refetchInterval: ri60 });
 
   const { data: searchLimits } = useQuery<{
     maxVacancyFraction: number;
@@ -1441,7 +1441,7 @@ function InterfaceRelaxationCard() {
       wallTimeMs: number;
     }>;
     activeLearningSelections: number;
-  }>({ queryKey: ["/api/interface-relaxation/stats"], refetchInterval: ri30 });
+  }>({ queryKey: ["/api/interface-relaxation/stats"], refetchInterval: ri60 });
 
   return (
     <Card data-testid="card-interface-relaxation">
@@ -1567,7 +1567,7 @@ function EnergyLandscapeCard() {
       energySpread: number;
       distortionModes: boolean;
     }>;
-  }>({ queryKey: ["/api/energy-landscape/stats"], refetchInterval: ri30 });
+  }>({ queryKey: ["/api/energy-landscape/stats"], refetchInterval: ri60 });
 
   return (
     <Card data-testid="card-energy-landscape">
@@ -1656,7 +1656,7 @@ function DistortionClassifierCard() {
       confidence: number;
       topFeature: string;
     }>;
-  }>({ queryKey: ["/api/distortion/classifier/stats"], refetchInterval: ri30 });
+  }>({ queryKey: ["/api/distortion/classifier/stats"], refetchInterval: ri60 });
 
   const predColors: Record<string, string> = {
     "distorted": "text-red-400",
@@ -1756,7 +1756,7 @@ function FeedbackLoopCard() {
     explorationWeight: number;
     explorationSchedule: { maxWeight: number; minWeight: number; decayHalfLife: number; currentWeight: number };
     noveltySearch: { knownCompositions: number; vectorDimensions: number };
-  }>({ queryKey: ["/api/surrogate-fitness/stats"], refetchInterval: ri30 });
+  }>({ queryKey: ["/api/surrogate-fitness/stats"], refetchInterval: ri60 });
 
   if (!data || data.totalEvaluations === 0) return null;
 
@@ -1895,7 +1895,7 @@ export default function Dashboard() {
     succeeded: number;
     failed: number;
     avgWallTimeSeconds: number;
-  }>({ queryKey: ["/api/dft-band-structure/stats"], refetchInterval: ri30 });
+  }>({ queryKey: ["/api/dft-band-structure/stats"], refetchInterval: ri60 });
   const { data: bandAnalysisStats } = useQuery<{
     totalAnalyses: number;
     withPockets: number;
@@ -1903,7 +1903,7 @@ export default function Dashboard() {
     withVHS: number;
     withDiracCrossings: number;
     avgPocketCount: number;
-  }>({ queryKey: ["/api/dft-band-analysis/stats"], refetchInterval: ri30 });
+  }>({ queryKey: ["/api/dft-band-analysis/stats"], refetchInterval: ri60 });
   const { data: engineMemory } = useQuery<EngineMemory>({ queryKey: ["/api/engine/memory"], refetchInterval: ri60 });
   const { data: scData } = useQuery<{ candidates: any[]; total: number }>({ queryKey: ["/api/superconductor-candidates"] });
   const { data: novelInsightData } = useQuery<{
@@ -1943,13 +1943,13 @@ export default function Dashboard() {
       totalMotifs: number;
       activeMotifs: number;
     };
-  }>({ queryKey: ["/api/synthesis-discovery/ga-evolution"], refetchInterval: ri30 });
+  }>({ queryKey: ["/api/synthesis-discovery/ga-evolution"], refetchInterval: ri60 });
   const { data: genCompStats } = useQuery<{
     generators: { name: string; weight: number; discoveryRate: number; dftSuccesses: number; dftFailures: number; dftBestTc: number; pipelinePassRate: number }[];
     totalDFTSuccesses: number;
     totalDFTFailures: number;
     rebalanceCount: number;
-  }>({ queryKey: ["/api/generator-competition/stats"], refetchInterval: ri30 });
+  }>({ queryKey: ["/api/generator-competition/stats"], refetchInterval: ri60 });
   const { data: synthPlannerStats } = useQuery<{
     totalPlans: number;
     totalRoutes: number;
@@ -1966,7 +1966,7 @@ export default function Dashboard() {
     trained: boolean;
     trainingSize: number;
     featureImportance: Record<string, number>;
-  }>({ queryKey: ["/api/ml-synthesis/stats"], refetchInterval: ri30 });
+  }>({ queryKey: ["/api/ml-synthesis/stats"], refetchInterval: ri60 });
   const { data: retroStats } = useQuery<{
     totalAnalyzed: number;
     avgRoutesPerTarget: number;
@@ -1996,8 +1996,8 @@ export default function Dashboard() {
     recentCycles: any[];
     avgUncertaintyTrend: { cycle: number; before: number; after: number; reductionPct: number }[];
     dftDatasetStats: { totalSize: number; bySource: Record<string, number>; growthHistory: { timestamp: number; size: number; source: string }[] };
-  }>({ queryKey: ["/api/gnn/active-learning-stats"], refetchInterval: ri30 });
-  const { data: theoryReport } = useQuery<any>({ queryKey: ["/api/theory-report"], refetchInterval: ri30 });
+  }>({ queryKey: ["/api/gnn/active-learning-stats"], refetchInterval: ri60 });
+  const { data: theoryReport } = useQuery<any>({ queryKey: ["/api/theory-report"], refetchInterval: ri60 });
   const { data: tscData } = useQuery<{
     sessionCandidates: { formula: string; topologicalClass: string; tscScore: number; recordedAt: number }[];
     dbCandidates: {
