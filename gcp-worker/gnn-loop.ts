@@ -726,6 +726,22 @@ export async function startGNNLoop(): Promise<void> {
   console.log(`[GNN-GCP] GNN training worker started — poll every ${POLL_INTERVAL_MS / 1000}s`);
   console.log(`[GNN-GCP] Progressive MP fetch: ${MP_BATCH_SIZE} records/cycle, max cache ${MP_MAX_CACHE}`);
 
+  // Reset any jobs left in 'running' state from a previous crashed/restarted process.
+  // Without this, the local server sees an active job and won't dispatch new ones.
+  try {
+    const reset = await db.execute(
+      `UPDATE gnn_training_jobs SET status = 'queued', started_at = NULL
+       WHERE status = 'running' AND started_at < NOW() - INTERVAL '5 minutes'
+       RETURNING id`
+    );
+    const resetIds: number[] = ((reset as any).rows ?? (Array.isArray(reset) ? reset : [])).map((r: any) => r.id);
+    if (resetIds.length > 0) {
+      console.log(`[GNN-GCP] Reset ${resetIds.length} stale running job(s) back to queued: #${resetIds.join(', #')}`);
+    }
+  } catch (err: any) {
+    console.warn(`[GNN-GCP] Stale job reset failed (non-fatal): ${err.message?.slice(0, 80)}`);
+  }
+
   // Phase 3 startup: train on full NIMS+JARVIS corpus as a background task.
   // Delayed 30s so XGB/ML/DFT loops can claim their DB connections first.
   // Regular dispatched jobs use a 5k-sample subset; startup gets the full corpus once.
