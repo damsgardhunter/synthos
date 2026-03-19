@@ -61,6 +61,7 @@ export interface SynthesisPlanOptions {
   maxRoutes?: number;
   preferredMethods?: string[];
   includeMultiStep?: boolean;
+  pressureGpa?: number; // actual DFT/candidate pressure — overrides heuristic in thermodynamic-feasibility
 }
 
 interface MaterialNode {
@@ -910,6 +911,7 @@ export async function planSynthesisRoutes(
     maxRoutes = 8,
     preferredMethods,
     includeMultiStep = true,
+    pressureGpa,
   } = options;
 
   const family = classifyFamily(formula);
@@ -920,7 +922,8 @@ export async function planSynthesisRoutes(
   const thermoResult = computeReactionFeasibility(
     formula,
     formationEnergy,
-    elements
+    elements,
+    pressureGpa, // pass actual DFT pressure — prevents ambient-pressure synthesis of 128 GPa materials
   );
 
   const allRoutes: SynthesisRoute[] = [];

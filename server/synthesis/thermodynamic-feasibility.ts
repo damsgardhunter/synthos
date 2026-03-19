@@ -430,7 +430,8 @@ export function assessPressureRequirement(formula: string, family?: string): Pre
 export function computeReactionFeasibility(
   formula: string,
   formationEnergyPerAtom: number | null,
-  precursors: string[]
+  precursors: string[],
+  pressureGpaOverride?: number // actual pressure from DFT/candidate record — overrides heuristic
 ): ReactionFeasibilityResult {
   const elements = parseFormulaElements(formula);
   const counts = parseFormulaCounts(formula);
@@ -450,7 +451,11 @@ export function computeReactionFeasibility(
   const synthesisTemperature = tempEstimate.temperature;
 
   const pressureAssessment = assessPressureRequirement(formula, family);
-  const pressureRequirement = pressureAssessment.pressureGpa;
+  // Use the actual stored/DFT pressure when available — heuristic can be wrong by 50+ GPa
+  const pressureRequirement = pressureGpaOverride != null ? pressureGpaOverride : pressureAssessment.pressureGpa;
+  if (pressureGpaOverride != null && Math.abs(pressureGpaOverride - pressureAssessment.pressureGpa) > 20) {
+    notes.push(`Pressure: using DFT-evaluated ${pressureGpaOverride} GPa (heuristic estimated ${pressureAssessment.pressureGpa} GPa — overridden)`);
+  }
 
   const entropy = computeConfigurationalEntropy(elements, counts);
   const gibbsRT = computeGibbsFreeEnergy(deltaE, 300, entropy);
@@ -493,6 +498,31 @@ export function computeReactionFeasibility(
     notes.push(`High pressure (${pressureRequirement} GPa) required — multi-anvil or DAC`);
   } else if (pressureRequirement > 0) {
     notes.push(`Moderate pressure (${pressureRequirement} GPa) beneficial`);
+  }
+
+  // Decompression survivability: can the material retain its structure after pressure release?
+  // Estimated from metastable quench feasibility computed later — use formation energy as proxy here.
+  if (pressureRequirement > 50) {
+    const ambientGibbs = computeGibbsFreeEnergy(deltaE, 300, computeConfigurationalEntropy(elements, counts));
+    const likelyMetastable = ambientGibbs < 0.3; // within 0.3 eV/atom of stability at ambient
+    if (likelyMetastable) {
+      notes.push(
+        `Decompression: Formation energy near-stable at ambient (ΔG≈${ambientGibbs.toFixed(2)} eV/atom) — ` +
+        `rapid quench may retain metastable structure; verify with phonon calculation at 0 GPa`
+      );
+    } else {
+      notes.push(
+        `Decompression: High ambient Gibbs energy (ΔG≈${ambientGibbs.toFixed(2)} eV/atom) — ` +
+        `structure will likely decompose upon pressure release; ambient-pressure Tc is not physically meaningful`
+      );
+    }
+    if (pressureRequirement > 100) {
+      notes.push(
+        `Commercial viability: Requires DAC (${pressureRequirement} GPa) — cannot be produced at scale. ` +
+        `Predicted Tc applies only under pressure. Material is commercially non-viable unless a ` +
+        `metastable ambient-pressure polymorph can be stabilized by chemical substitution or doping.`
+      );
+    }
   }
 
   if (precursors.length > 0) {

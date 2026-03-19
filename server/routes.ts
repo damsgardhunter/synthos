@@ -2386,8 +2386,12 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.get("/api/synthesis-planner/routes/:formula", generalLimiter, async (req, res) => {
     try {
-      const formula = decodeURIComponent(req.params.formula);
-      const result = await planSynthesisRoutes(formula, { maxRoutes: 8 });
+      const formula = decodeURIComponent(req.params.formula as string);
+      // Fetch the candidate's actual DFT-evaluated pressure so the planner doesn't
+      // default to ambient when the material requires e.g. 128 GPa to be stable.
+      const candidate = await storage.getSuperconductorByFormula(formula);
+      const pressureGpa = candidate?.pressureGpa ?? undefined;
+      const result = await planSynthesisRoutes(formula, { maxRoutes: 8, pressureGpa });
       res.json(result);
     } catch (e: any) {
       res.status(500).json({ error: "Failed to plan synthesis routes", detail: e.message?.slice(0, 200) });
