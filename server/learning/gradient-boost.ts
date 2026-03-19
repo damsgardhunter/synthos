@@ -1212,18 +1212,20 @@ export async function initPoolAsync(): Promise<void> {
 
   await new Promise<void>(r => setTimeout(r, 50));
 
-  try {
-    const { X, y } = trainingPool.getTrainingData();
-    if (X.length >= 10) {
-      const trainStart = Date.now();
-      console.log(`[GradientBoost] Phase 1 training — ${X.length} samples, 30 trees...`);
-      cachedModel = await trainGradientBoosting(X, y, 30, 0.12, 4);
-      cachedCalibration = await computeCalibration(cachedModel);
-      await logModelVersion("phase1-training", X.length);
-      console.log(`[GradientBoost] Phase 1 model ready in ${Date.now() - trainStart}ms`);
+  if (process.env.OFFLOAD_XGB_TO_GCP !== "true") {
+    try {
+      const { X, y } = trainingPool.getTrainingData();
+      if (X.length >= 10) {
+        const trainStart = Date.now();
+        console.log(`[GradientBoost] Phase 1 training — ${X.length} samples, 30 trees...`);
+        cachedModel = await trainGradientBoosting(X, y, 30, 0.12, 4);
+        cachedCalibration = await computeCalibration(cachedModel);
+        await logModelVersion("phase1-training", X.length);
+        console.log(`[GradientBoost] Phase 1 model ready in ${Date.now() - trainStart}ms`);
+      }
+    } catch (e) {
+      console.error("[GradientBoost] Phase 1 training failed:", e);
     }
-  } catch (e) {
-    console.error("[GradientBoost] Phase 1 training failed:", e);
   }
 
   backfillPool(phase2, startTime);
