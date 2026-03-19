@@ -9,6 +9,7 @@ import { getAllActiveCampaigns, runInverseCycle, processInverseResults, getSeria
 import { getNextGenPipelineStats as getNextGenPipelineStatsForEngine } from "../inverse/next-gen-pipeline";
 import { getAllLabStats as getSelfImprovingLabStatsForEngine } from "../inverse/self-improving-lab";
 import { runGradientDescentCycle, getDifferentiableOptimizerStats } from "../inverse/differentiable-optimizer";
+import { getGNNLatestR2 } from "./graph-neural-net";
 import { runStructureDiffusionCycle, getStructureDiffusionStats } from "../ai/structure-diffusion";
 import { constraintGuidedGenerate, checkPhysicsConstraints, updateConstraintWeightsFromReward, getConstraintEngineStats } from "../inverse/physics-constraint-engine";
 import { runPillarCycle, evaluatePillars, updatePillarWeightsFromReward, getPillarOptimizerStats, incorporateDFTFeedbackIntoPillars, getPillarDFTFeedbackStats } from "../inverse/sc-pillars-optimizer";
@@ -1359,39 +1360,43 @@ async function runPhase7_Superconductor() {
 
     if (cycleCount % 12 === 0 && shouldContinue()) {
       try {
-        const topExistingForGrad = await storage.getSuperconductorCandidatesByTc(8);
-        const topFormulasForGrad = topExistingForGrad.map(c => c.formula);
-        const activeCampaignList = getAllActiveCampaigns();
-        for (const campaign of activeCampaignList) {
-          const gradResult = await runGradientDescentCycle(campaign.target, 4, 12, topFormulasForGrad);
-          if (gradResult.bestTc > 10) {
-            for (const r of gradResult.results) {
-              if (r.finalTc > 10) {
-                try {
-                  const features = await extractFeatures(r.finalFormula);
-                  if (!features) continue;
-                  const gb = await gbPredict(features);
-                  if (gb.tcPredicted >= 10) {
-                    const gdInserted = await insertCandidateWithStabilityCheck({
-                      formula: normalizeFormula(r.finalFormula),
-                      predictedTc: Math.round(gb.tcPredicted),
-                      dataConfidence: "low",
-                      ensembleScore: Math.min(0.9, gb.score),
-                      verificationStage: 0,
-                      notes: `[gradient-descent: ${r.totalSteps} steps, ${r.initialFormula}->${r.finalFormula}, improvement=${r.improvementRatio}]`,
-                    }, "bo_exploration");
-                    if (gdInserted) totalScCandidates++;
+        if (getGNNLatestR2() <= 0) {
+          emit("log", { phase: "gradient-descent", event: "Skipping gradient descent — GNN not yet trained (R²≤0)" });
+        } else {
+          const topExistingForGrad = await storage.getSuperconductorCandidatesByTc(8);
+          const topFormulasForGrad = topExistingForGrad.map(c => c.formula);
+          const activeCampaignList = getAllActiveCampaigns();
+          for (const campaign of activeCampaignList) {
+            const gradResult = await runGradientDescentCycle(campaign.target, 4, 12, topFormulasForGrad);
+            if (gradResult.bestTc > 10) {
+              for (const r of gradResult.results) {
+                if (r.finalTc > 10) {
+                  try {
+                    const features = await extractFeatures(r.finalFormula);
+                    if (!features) continue;
+                    const gb = await gbPredict(features);
+                    if (gb.tcPredicted >= 10) {
+                      const gdInserted = await insertCandidateWithStabilityCheck({
+                        formula: normalizeFormula(r.finalFormula),
+                        predictedTc: Math.round(gb.tcPredicted),
+                        dataConfidence: "low",
+                        ensembleScore: Math.min(0.9, gb.score),
+                        verificationStage: 0,
+                        notes: `[gradient-descent: ${r.totalSteps} steps, ${r.initialFormula}->${r.finalFormula}, improvement=${r.improvementRatio}]`,
+                      }, "bo_exploration");
+                      if (gdInserted) totalScCandidates++;
+                    }
+                  } catch (gdErr: any) {
+                    console.log(`[Engine] Gradient descent candidate insert failed: ${gdErr?.message?.slice(0, 100) ?? "unknown"}`);
                   }
-                } catch (gdErr: any) {
-                  console.log(`[Engine] Gradient descent candidate insert failed: ${gdErr?.message?.slice(0, 100) ?? "unknown"}`);
                 }
               }
+              emit("log", {
+                phase: "gradient-optimizer",
+                event: `Gradient descent cycle`,
+                detail: `Campaign ${campaign.id}: best=${gradResult.bestFormula} Tc=${gradResult.bestTc.toFixed(1)}K from ${gradResult.results.length} seeds`,
+              });
             }
-            emit("log", {
-              phase: "gradient-optimizer",
-              event: `Gradient descent cycle`,
-              detail: `Campaign ${campaign.id}: best=${gradResult.bestFormula} Tc=${gradResult.bestTc.toFixed(1)}K from ${gradResult.results.length} seeds`,
-            });
           }
         }
       } catch (err: any) {
@@ -5505,14 +5510,16 @@ async function runAutonomousFastPath() {
             }
           }
 
-          const gradResult = await runGradientDescentCycle(campaign.target, 4, 6);
-          for (const r of gradResult.results) {
-            if (r.finalTc > 10 && isValidFormula(r.finalFormula)) {
-              const norm = normalizeFormula(r.finalFormula);
-              if (!alreadyScreenedFormulas.has(norm) && !inverseSeen.has(norm)) {
-                inverseSeen.add(norm);
-                alreadyScreenedFormulas.add(norm);
-                inverseDesignCandidates.push(norm);
+          if (getGNNLatestR2() > 0) {
+            const gradResult = await runGradientDescentCycle(campaign.target, 4, 6);
+            for (const r of gradResult.results) {
+              if (r.finalTc > 10 && isValidFormula(r.finalFormula)) {
+                const norm = normalizeFormula(r.finalFormula);
+                if (!alreadyScreenedFormulas.has(norm) && !inverseSeen.has(norm)) {
+                  inverseSeen.add(norm);
+                  alreadyScreenedFormulas.add(norm);
+                  inverseDesignCandidates.push(norm);
+                }
               }
             }
           }

@@ -3497,6 +3497,12 @@ export function getGNNModelVersion(): number {
   return gnnModelVersion;
 }
 
+/** Returns the most recent logged R² (0 if GNN has never completed a positive-R² training). */
+export function getGNNLatestR2(): number {
+  if (gnnVersionHistory.length === 0) return 0;
+  return gnnVersionHistory[gnnVersionHistory.length - 1].r2;
+}
+
 const GNN_PRED_CACHE_MAX = 500;
 const gnnPredictionCache = new Map<string, { prediction: GNNPrediction; trainedAt: number }>();
 
