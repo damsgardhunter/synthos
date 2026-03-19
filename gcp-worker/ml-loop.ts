@@ -10,6 +10,7 @@
  * local server can poll, deserialize, and apply them without any local CPU cost.
  */
 import { db, isConnectionError } from "../server/db";
+import { isGNNMajorTrainingActive } from "./training-priority";
 import { mlTrainingJobs } from "@shared/schema";
 import { eq, and, or, sql } from "drizzle-orm";
 import { seedDatasetFromArray } from "../server/crystal/crystal-structure-dataset";
@@ -96,6 +97,10 @@ export async function startMLLoop(): Promise<void> {
 
   while (running) {
     try {
+      if (isGNNMajorTrainingActive()) {
+        await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
+        continue;
+      }
       const job = await claimNextJob();
       if (job) {
         await processJob(job.id, job.taskType, job.inputData);

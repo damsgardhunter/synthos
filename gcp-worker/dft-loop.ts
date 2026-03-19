@@ -6,6 +6,7 @@
 import { db, isConnectionError } from "../server/db";
 import { storage } from "../server/storage";
 import { runFullDFT } from "../server/dft/qe-worker";
+import { isGNNMajorTrainingActive, DFT_GNN_CONCURRENT } from "./training-priority";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -204,7 +205,8 @@ export async function startDFTLoop(): Promise<void> {
 
   while (running) {
     try {
-      const slots = MAX_CONCURRENT - activeWorkers;
+      const effectiveMax = isGNNMajorTrainingActive() ? Math.min(MAX_CONCURRENT, DFT_GNN_CONCURRENT) : MAX_CONCURRENT;
+      const slots = effectiveMax - activeWorkers;
       const launches: Promise<boolean>[] = [];
       for (let i = 0; i < slots; i++) {
         launches.push(claimAndRunJob());

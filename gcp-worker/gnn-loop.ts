@@ -10,6 +10,7 @@
  */
 import { db, isConnectionError } from "../server/db";
 import { storage } from "../server/storage";
+import { setGNNMajorTrainingActive, waitForXGBIdle } from "./training-priority";
 import { Worker } from "worker_threads";
 import { fileURLToPath } from "url";
 import path from "path";
@@ -528,7 +529,14 @@ async function processNextGnnJob(): Promise<boolean> {
   const startMs = Date.now();
 
   try {
-    const models = await trainEnsembleParallel(trainSet, 15, `Job#${jobId}`, valSet);
+    await waitForXGBIdle();
+    setGNNMajorTrainingActive(true);
+    let models: GNNWeights[];
+    try {
+      models = await trainEnsembleParallel(trainSet, 15, `Job#${jobId}`, valSet);
+    } finally {
+      setGNNMajorTrainingActive(false);
+    }
 
     // Evaluate on HELD-OUT validation set — these R²/MAE/RMSE are honest.
     const valMetrics = valSet.length >= 5
@@ -666,7 +674,13 @@ async function runStartupFullCorpusTraining(): Promise<void> {
   const startMs = Date.now();
   let models: GNNWeights[];
   try {
-    models = await trainEnsembleParallel(trainSet, 15, 'STARTUP', valSet);
+    await waitForXGBIdle();
+    setGNNMajorTrainingActive(true);
+    try {
+      models = await trainEnsembleParallel(trainSet, 15, 'STARTUP', valSet);
+    } finally {
+      setGNNMajorTrainingActive(false);
+    }
   } catch (err: any) {
     console.error(`[GNN-GCP] Startup corpus training failed: ${err.message}`);
     return;

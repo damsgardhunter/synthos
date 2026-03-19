@@ -8,6 +8,7 @@
 import { db, isConnectionError } from "../server/db";
 import { storage } from "../server/storage";
 import { trainGradientBoosting } from "../server/learning/gradient-boost";
+import { isGNNMajorTrainingActive, setXGBTrainingActive } from "./training-priority";
 
 const POLL_INTERVAL_MS = 15_000;
 let running = true;
@@ -101,6 +102,8 @@ function computeMetrics(ensemble: any, X: number[][], y: number[]): { r2: number
 }
 
 async function processNextXgbJob(): Promise<boolean> {
+  if (isGNNMajorTrainingActive()) return false; // yield CPU to GNN training
+
   const rows = await db.execute(
     `UPDATE xgb_training_jobs
      SET status = 'running', started_at = NOW()
@@ -124,6 +127,7 @@ async function processNextXgbJob(): Promise<boolean> {
 
   console.log(`[XGB-GCP] Starting XGBoost training job #${jobId} — ${datasetSize} samples`);
   const startMs = Date.now();
+  setXGBTrainingActive(true);
 
   try {
     console.log(`[XGB-GCP] Training base model (${N_TREES_BASE} trees)...`);
@@ -158,6 +162,8 @@ async function processNextXgbJob(): Promise<boolean> {
       errorMessage: err.message?.slice(0, 1000) ?? "unknown error",
       completedAt: new Date(),
     }).catch(() => {});
+  } finally {
+    setXGBTrainingActive(false);
   }
 
   return true;
