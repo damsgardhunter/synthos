@@ -8725,16 +8725,10 @@ export async function startEngine() {
   }, 120_000); // Run 2min after startup — well after first two cycles complete
 
   // Starts 20 min after startup. Waits for SG sweep to finish (isSGSweepActive flag)
-  // so both tasks don't simultaneously call extractFeatures and saturate the DB pool.
-  // Gives up waiting after 3 hours so backfill always runs even if SG sweep is huge.
+  // so both tasks don't simultaneously hit the DB and saturate the Neon pool.
+  // The SG sweep has a 2-hour wall-time cap so this wait is bounded.
   setTimeout(async () => {
-    const backfillWaitStart = Date.now();
-    const BACKFILL_MAX_WAIT_MS = 3 * 60 * 60 * 1000; // 3 hours
     while (isSGSweepActive) {
-      if (Date.now() - backfillWaitStart > BACKFILL_MAX_WAIT_MS) {
-        console.log("[Engine] background: backfill max-wait exceeded — running alongside SG sweep");
-        break;
-      }
       console.log("[Engine] background: backfill waiting for SG sweep to finish...");
       await new Promise(r => setTimeout(r, 30_000));
     }
