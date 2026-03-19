@@ -10,7 +10,7 @@
  */
 import { db, isConnectionError } from "../server/db";
 import { storage } from "../server/storage";
-import { setGNNMajorTrainingActive, waitForXGBIdle } from "./training-priority";
+import { acquireGNNTrainingSlot, releaseGNNTrainingSlot, waitForXGBIdle } from "./training-priority";
 import { Worker } from "worker_threads";
 import { fileURLToPath } from "url";
 import path from "path";
@@ -530,12 +530,16 @@ async function processNextGnnJob(): Promise<boolean> {
 
   try {
     await waitForXGBIdle();
-    setGNNMajorTrainingActive(true);
+    if (!acquireGNNTrainingSlot(`Job#${jobId}`)) {
+      // Another GNN training is already running — requeue this job and retry later
+      await db.execute(`UPDATE gnn_training_jobs SET status = 'queued', started_at = NULL WHERE id = ${jobId}`);
+      return false;
+    }
     let models: GNNWeights[];
     try {
       models = await trainEnsembleParallel(trainSet, 15, `Job#${jobId}`, valSet);
     } finally {
-      setGNNMajorTrainingActive(false);
+      releaseGNNTrainingSlot(`Job#${jobId}`);
     }
 
     // Evaluate on HELD-OUT validation set — these R²/MAE/RMSE are honest.
@@ -675,11 +679,18 @@ async function runStartupFullCorpusTraining(): Promise<void> {
   let models: GNNWeights[];
   try {
     await waitForXGBIdle();
-    setGNNMajorTrainingActive(true);
+    if (!acquireGNNTrainingSlot('STARTUP')) {
+      console.log('[GNN-GCP] Startup corpus training deferred — dispatched job is training, will retry in 5 min');
+      await new Promise(r => setTimeout(r, 5 * 60_000));
+      if (!acquireGNNTrainingSlot('STARTUP-retry')) {
+        console.log('[GNN-GCP] Startup corpus training skipped — GNN still busy');
+        return;
+      }
+    }
     try {
       models = await trainEnsembleParallel(trainSet, 15, 'STARTUP', valSet);
     } finally {
-      setGNNMajorTrainingActive(false);
+      releaseGNNTrainingSlot('STARTUP');
     }
   } catch (err: any) {
     console.error(`[GNN-GCP] Startup corpus training failed: ${err.message}`);

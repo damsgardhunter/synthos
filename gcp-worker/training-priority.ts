@@ -6,6 +6,9 @@
  *   - DFT loop caps concurrent jobs at DFT_GNN_CONCURRENT (default 2)
  *     so running vc-relax jobs can finish but new ones don't compete
  *
+ * A mutex (acquireGNNTrainingSlot) ensures only ONE GNN training runs at
+ * a time — startup corpus training and dispatched jobs can't overlap.
+ *
  * This gives GNN ~24 of the 32 vCPUs during training instead of competing
  * equally with 7 DFT jobs + XGB + ML for the same cores.
  */
@@ -16,18 +19,39 @@ let _xgbTrainingActive = false;
 // How many DFT slots to allow while GNN is training (default 2).
 export const DFT_GNN_CONCURRENT = parseInt(process.env.DFT_GNN_CONCURRENT ?? "2", 10);
 
-export function setGNNMajorTrainingActive(active: boolean): void {
-  _gnnMajorTrainingActive = active;
-  if (active) {
-    console.log("[Priority] GNN major training started — XGB/ML pausing, DFT capped at " + DFT_GNN_CONCURRENT + " slots");
-  } else {
-    console.log("[Priority] GNN major training complete — all loops resuming normal operation");
+// ── GNN training mutex ────────────────────────────────────────────────────────
+// Prevents a dispatched job and the startup corpus training from both launching
+// 5 worker threads simultaneously (which would pin all 32 vCPUs and slow both).
+
+let _gnnTrainingSlotTaken = false;
+
+/**
+ * Try to acquire the exclusive GNN training slot.
+ * Returns true if acquired (caller should train then call releaseGNNTrainingSlot).
+ * Returns false if another GNN training is already running — caller should skip.
+ */
+export function acquireGNNTrainingSlot(label: string): boolean {
+  if (_gnnTrainingSlotTaken) {
+    console.log(`[Priority] GNN training slot busy — ${label} will skip this cycle`);
+    return false;
   }
+  _gnnTrainingSlotTaken = true;
+  _gnnMajorTrainingActive = true;
+  console.log(`[Priority] GNN training slot acquired by ${label} — XGB/ML pausing, DFT capped at ${DFT_GNN_CONCURRENT} slots`);
+  return true;
+}
+
+export function releaseGNNTrainingSlot(label: string): void {
+  _gnnTrainingSlotTaken = false;
+  _gnnMajorTrainingActive = false;
+  console.log(`[Priority] GNN training slot released by ${label} — all loops resuming`);
 }
 
 export function isGNNMajorTrainingActive(): boolean {
   return _gnnMajorTrainingActive;
 }
+
+// ── XGB active flag ───────────────────────────────────────────────────────────
 
 export function setXGBTrainingActive(active: boolean): void {
   _xgbTrainingActive = active;
@@ -39,8 +63,8 @@ export function isXGBTrainingActive(): boolean {
 
 /**
  * Waits until XGB is not actively training (or until maxWaitMs elapses).
- * Called by GNN before launching its worker threads so XGB gets to finish
- * its current job and free CPU before GNN saturates all cores.
+ * Called by GNN before acquiring the training slot so XGB finishes its current
+ * job and frees CPU before GNN saturates all cores.
  */
 export async function waitForXGBIdle(maxWaitMs = 10 * 60_000): Promise<void> {
   if (!_xgbTrainingActive) return;
