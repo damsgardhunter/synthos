@@ -38,6 +38,12 @@ if (!process.env.OMP_NUM_THREADS) {
   process.env.OMP_NUM_THREADS = "4";
 }
 
+// Suppress the graph-neural-net.ts local startup (Phases 1-3 trained on SUPERCON seed data).
+// The GCP worker runs its own full-corpus startup via runStartupFullCorpusTraining() in
+// gnn-loop.ts — the local startup would waste ~10 min and saturate the DB pool.
+// This must be set before the isMainThread setTimeout in graph-neural-net.ts fires.
+process.env.OFFLOAD_GNN_TO_GCP = "true";
+
 const ENABLE_DFT = process.env.ENABLE_DFT_WORKER !== "false";
 const ENABLE_GNN = process.env.ENABLE_GNN_WORKER !== "false";
 const ENABLE_XGB = process.env.ENABLE_XGB_WORKER !== "false";

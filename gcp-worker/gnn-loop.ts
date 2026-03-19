@@ -727,10 +727,12 @@ export async function startGNNLoop(): Promise<void> {
   console.log(`[GNN-GCP] GNN training worker started — poll every ${POLL_INTERVAL_MS / 1000}s`);
   console.log(`[GNN-GCP] Progressive MP fetch: ${MP_BATCH_SIZE} records/cycle, max cache ${MP_MAX_CACHE}`);
 
-  // Phase 3 startup: train on full NIMS+JARVIS corpus before entering the job poll loop.
-  // Regular dispatched jobs (from the local server's Active Learning cycle) use a
-  // 5k-sample subset so they complete in minutes; startup gets the full corpus once.
-  await runStartupFullCorpusTraining();
+  // Phase 3 startup: train on full NIMS+JARVIS corpus as a background task.
+  // Delayed 30s so XGB/ML/DFT loops can claim their DB connections first.
+  // Regular dispatched jobs use a 5k-sample subset; startup gets the full corpus once.
+  // Fire-and-forget so job polling starts immediately.
+  delay(30_000).then(() => runStartupFullCorpusTraining()).catch(err =>
+    console.error("[GNN-GCP] Startup corpus training error:", err?.message ?? String(err)));
 
   while (running) {
     try {
