@@ -147,6 +147,7 @@ export interface IStorage {
   getQueuedGnnTrainingJob(): Promise<GnnTrainingJob | undefined>;
   updateGnnTrainingJob(id: number, updates: Partial<GnnTrainingJob>): Promise<void>;
   getLatestCompletedGnnJob(): Promise<GnnTrainingJob | undefined>;
+  resetStuckGnnJobs(): Promise<number>;
 
   insertXgbTrainingJob(job: InsertXgbTrainingJob): Promise<XgbTrainingJob>;
   updateXgbTrainingJob(id: number, updates: Partial<XgbTrainingJob>): Promise<void>;
@@ -958,6 +959,16 @@ export class DatabaseStorage implements IStorage {
       .orderBy(desc(gnnTrainingJobs.completedAt))
       .limit(1);
     return row;
+  }
+
+  async resetStuckGnnJobs(): Promise<number> {
+    // Reset 'running' GNN jobs back to 'queued' so the GCP worker re-picks them up
+    // after a VM restart that killed the job mid-flight.
+    const rows = await db.update(gnnTrainingJobs)
+      .set({ status: "queued" })
+      .where(eq(gnnTrainingJobs.status, "running"))
+      .returning({ id: gnnTrainingJobs.id });
+    return rows.length;
   }
 
   async insertXgbTrainingJob(job: InsertXgbTrainingJob): Promise<XgbTrainingJob> {

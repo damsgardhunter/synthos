@@ -74,27 +74,33 @@ if (isMainThread) {
     console.warn("[DB] Startup warm-up failed (Neon may be cold-starting):", err.message);
   });
 
-  // Keepalive ping every 45s — Neon suspends after 5 min inactivity on serverless.
-  // On failure, retry up to 3× with backoff so a single cold-start (30-60s) doesn't
-  // leave the pool dead until the next ping cycle 60s later.
+  // Keepalive ping every 60s — Neon suspends after 5 min inactivity on serverless.
+  // Uses a reschedule-after-completion pattern (not setInterval) to prevent concurrent
+  // keepalive loops from piling up and saturating the 5-connection pool.
+  // Retry backoff: 5s+10s — total retry budget ~31s, well under the 60s interval.
+  let keepaliveRunning = false;
   async function keepalivePing(): Promise<void> {
+    if (keepaliveRunning) return; // previous ping still in progress — skip
+    keepaliveRunning = true;
     try {
       await pool.query("SELECT 1");
     } catch (err: any) {
       console.warn("[DB] Keepalive ping failed:", err.message?.slice(0, 80));
-      for (let attempt = 1; attempt <= 3; attempt++) {
-        await new Promise(r => setTimeout(r, attempt * 5000)); // 5s, 10s, 15s
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        await new Promise(r => setTimeout(r, attempt * 5000)); // 5s, 10s
         try {
           const client = await pool.connect();
           await client.query("SELECT 1");
           client.release();
           console.log(`[DB] Keepalive reconnect succeeded (attempt ${attempt})`);
-          return;
+          break;
         } catch (err2: any) {
-          console.warn(`[DB] Keepalive reconnect attempt ${attempt}/3 failed: ${err2.message?.slice(0, 80)}`);
+          console.warn(`[DB] Keepalive reconnect attempt ${attempt}/2 failed: ${err2.message?.slice(0, 80)}`);
         }
       }
+    } finally {
+      keepaliveRunning = false;
     }
   }
-  setInterval(keepalivePing, 45 * 1000);
+  setInterval(keepalivePing, 60 * 1000);
 }

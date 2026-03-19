@@ -677,7 +677,7 @@ export async function executeExperiment(experiment: ExperimentProposal): Promise
           await Promise.resolve(trainPhononSurrogate());
           break;
         case "tb-surrogate":
-          await Promise.resolve(retrainTBSurrogate());
+          await retrainTBSurrogate();
           break;
         case "gnn":
           break;

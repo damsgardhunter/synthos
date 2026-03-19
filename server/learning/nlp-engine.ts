@@ -586,7 +586,13 @@ export async function classifyMaterialApplications(
         ];
         if (mat.predictedTc != null) props.push(`predicted Tc: ${mat.predictedTc} K`);
         if (mat.stabilityScore != null) props.push(`stability: ${mat.stabilityScore}`);
-        if (mat.criticalCurrentDensity != null) props.push(`Jc: ${mat.criticalCurrentDensity} A/cm²`);
+        if (mat.criticalCurrentDensity != null) {
+          props.push(
+            mat.criticalCurrentDensity === 0
+              ? "Jc: Under-determined"
+              : `Jc: ${mat.criticalCurrentDensity} A/cm²`
+          );
+        }
         if (mat.electronPhononCoupling != null) props.push(`λ: ${mat.electronPhononCoupling}`);
 
         const response = await openai.chat.completions.create({

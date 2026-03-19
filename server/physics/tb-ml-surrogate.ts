@@ -3,6 +3,10 @@ import { getTrainingData } from "../crystal/crystal-structure-dataset";
 import { getAllPhysicsResults } from "../learning/physics-results-store";
 import { computeCompositionFeatures, compositionFeatureVector } from "../learning/composition-features";
 
+function yieldToEventLoop(): Promise<void> {
+  return new Promise<void>(resolve => setTimeout(resolve, 0));
+}
+
 interface TBSurrogateTarget {
   dosAtEF: number;
   bandFlatness: number;
@@ -171,7 +175,7 @@ function predictGBM(model: GBMModel, x: number[]): number {
   return Number.isFinite(pred) ? pred : model.basePrediction;
 }
 
-function generateTrainingData(maxFormulas = 70): { formulas: string[]; X: number[][]; Y: Map<string, number[]> } {
+async function generateTrainingData(maxFormulas = 70): Promise<{ formulas: string[]; X: number[][]; Y: Map<string, number[]> }> {
   const formulas: string[] = [];
   const X: number[][] = [];
   const Y = new Map<string, number[]>();
@@ -185,10 +189,12 @@ function generateTrainingData(maxFormulas = 70): { formulas: string[]; X: number
   const physicsFormulas = physicsResults.slice(0, 20).map(r => r.formula);
 
   // Cap total formulas to avoid long synchronous blocking. computeTBProperties
-  // takes ~0.9s per formula; processing 70 = 63s freeze, maxFormulas=10 → ~9s max.
+  // takes ~0.9s per formula. Yield before each call so the event loop stays
+  // responsive — each computation is still ~0.9s but they are now separated.
   const allFormulas = Array.from(new Set([...seedFormulas, ...physicsFormulas])).slice(0, maxFormulas);
 
   for (const formula of allFormulas) {
+    await yieldToEventLoop(); // prevent stacking multiple 0.9s blocks back-to-back
     try {
       const tbProps = computeTBProperties(formula, 0);
       const features = buildFeatureVector(formula);
@@ -213,13 +219,14 @@ function generateTrainingData(maxFormulas = 70): { formulas: string[]; X: number
   return { formulas, X, Y };
 }
 
-function trainAllModels(X: number[][], Y: Map<string, number[]>, quickInit = false): TBSurrogateModels {
+async function trainAllModels(X: number[][], Y: Map<string, number[]>, quickInit = false): Promise<TBSurrogateModels> {
   const models = new Map<string, GBMModel>();
   // quickInit: use 8 trees (fast startup) instead of 40 (full quality).
-  // Full retrains use 40 trees. This reduces blocking from ~21s to ~4s.
+  // Full retrains use 40 trees. Yield between targets so heartbeats can fire.
   const nTrees = quickInit ? 8 : 40;
 
   for (const targetName of TARGET_NAMES) {
+    await yieldToEventLoop();
     const y = Y.get(targetName)!;
     if (y.length < 5) {
       models.set(targetName, { trees: [], learningRate: 0.05, basePrediction: y.length > 0 ? y.reduce((s, v) => s + v, 0) / y.length : 0 });
@@ -244,12 +251,12 @@ function trainAllModels(X: number[][], Y: Map<string, number[]>, quickInit = fal
 let initDeferred = false;
 let initInProgress = false;
 
-function trainImmediate(maxFormulas?: number): void {
+async function trainImmediate(maxFormulas?: number): Promise<void> {
   if (initInProgress) return;
   initInProgress = true;
   try {
-    const { X, Y } = generateTrainingData(maxFormulas);
-    surrogateModels = trainAllModels(X, Y, true); // quickInit=true: 8 trees instead of 40
+    const { X, Y } = await generateTrainingData(maxFormulas);
+    surrogateModels = await trainAllModels(X, Y, true); // quickInit=true: 8 trees instead of 40
     console.log(`[TB-ML Surrogate] Immediate init: ${surrogateModels.datasetSize} samples`);
   } catch (e) {
     console.log(`[TB-ML Surrogate] Immediate init failed: ${e instanceof Error ? e.message : "unknown"}`);
@@ -262,15 +269,13 @@ function deferInit(): void {
   if (initDeferred) return;
   initDeferred = true;
   // Delay 600s — let learning cycles warm the physics cache first.
-  // Use maxFormulas=10 to cap synchronous computeTBProperties calls to ~9s (not 63s).
+  // trainImmediate is now async: each computeTBProperties call is separated by a
+  // yieldToEventLoop so the event loop is never blocked more than ~0.9s at a time.
   setTimeout(() => {
-    try {
-      if (!surrogateModels) {
-        trainImmediate(10);
-        console.log(`[TB-ML Surrogate] Deferred init complete: ${surrogateModels?.datasetSize ?? 0} samples`);
-      }
-    } catch (e) {
-      console.log(`[TB-ML Surrogate] Deferred init failed: ${e instanceof Error ? e.message : "unknown"}`);
+    if (!surrogateModels) {
+      trainImmediate(10)
+        .then(() => console.log(`[TB-ML Surrogate] Deferred init complete: ${surrogateModels?.datasetSize ?? 0} samples`))
+        .catch(e => console.log(`[TB-ML Surrogate] Deferred init failed: ${e instanceof Error ? e.message : "unknown"}`));
     }
   }, 600_000);
 }
@@ -351,15 +356,14 @@ function incrementalTrainGBM(existing: GBMModel, X: number[][], y: number[], add
   };
 }
 
-export function retrainTBSurrogate(): { retrained: boolean; datasetSize: number; reason: string } {
+export async function retrainTBSurrogate(): Promise<{ retrained: boolean; datasetSize: number; reason: string }> {
   if (newComputationCount < RETRAIN_THRESHOLD && surrogateModels) {
     return { retrained: false, datasetSize: surrogateModels.datasetSize, reason: `Only ${newComputationCount} new computations (need ${RETRAIN_THRESHOLD})` };
   }
 
-  // Cap at 15 formulas — computeTBProperties takes ~0.9s/formula; 15 → ~13.5s max synchronous
-  // work broken into per-call chunks (each trainGBM call is 0.5-1s). The caller wraps this in
-  // Promise.resolve() which does NOT yield internally, so the cap is the only guard here.
-  const { X, Y } = generateTrainingData(15);
+  // generateTrainingData is now async and yields between each computeTBProperties call
+  // (~0.9s each), so the event loop is never blocked for more than ~0.9s at a time.
+  const { X, Y } = await generateTrainingData(15);
   const prevCount = newComputationCount;
   newComputationCount = 0;
 
@@ -369,6 +373,7 @@ export function retrainTBSurrogate(): { retrained: boolean; datasetSize: number;
     const additionalTrees = Math.min(20, Math.max(5, Math.floor(prevCount / 5)));
 
     for (const targetName of TARGET_NAMES) {
+      await yieldToEventLoop();
       const y = Y.get(targetName)!;
       const existing = existingModels.get(targetName);
       if (!existing || existing.trees.length === 0 || y.length < 5) {
@@ -397,7 +402,7 @@ export function retrainTBSurrogate(): { retrained: boolean; datasetSize: number;
     return { retrained: true, datasetSize: X.length, reason: `Incremental retrain: +${additionalTrees} trees per target` };
   }
 
-  surrogateModels = trainAllModels(X, Y);
+  surrogateModels = await trainAllModels(X, Y);
   return { retrained: true, datasetSize: X.length, reason: "Full retrain (no prior models)" };
 }
 

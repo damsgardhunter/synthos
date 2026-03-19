@@ -3253,29 +3253,18 @@ function getEnsembleModels(): GNNWeights[] {
     return cachedEnsembleModels;
   }
 
-  const trainingData: TrainingSample[] = SUPERCON_TRAINING_DATA
-    .filter(e => e.isSuperconductor)
-    .map(e => {
-      const proto = matchPrototype(e.formula);
-      return {
-        formula: e.formula,
-        tc: e.tc,
-        lambda: (e as any).lambda ?? undefined,
-        formationEnergy: undefined,
-        structure: proto ? {
-          spaceGroup: proto.spaceGroup,
-          crystalSystem: proto.crystalSystem,
-          dimensionality: proto.dimensionality,
-        } : undefined,
-        prototype: proto?.prototype,
-      };
-    });
-
-  cachedEnsembleModels = trainEnsemble(trainingData);
-  modelTrainedAt = now;
-  const allTraining = [...trainingData, ...dftTrainingDataset.map(r => ({ formula: r.formula, tc: r.tc }))];
-  updateTrainingEmbeddings(allTraining, cachedEnsembleModels[0]);
-  latentEmbeddingDatasetSize = dftTrainingDataset.length;
+  // Training is handled exclusively by the GCP pipeline (startup warmup or active-learning).
+  // Never retrain synchronously here — that would block the request thread for 60–90 s.
+  // Return fresh-initialized weights so prediction can proceed; quality will improve once
+  // the GCP worker applies serialized weights via applySerializedWeights().
+  if (!cachedEnsembleModels) {
+    console.warn("[GNN] Model cache is cold — returning fresh-initialized weights. Awaiting GCP training result.");
+    const freshModels: GNNWeights[] = Array.from({ length: ENSEMBLE_SIZE }, (_, i) =>
+      initWeights(seededRandom(ENSEMBLE_SEEDS[i]))
+    );
+    cachedEnsembleModels = freshModels;
+    modelTrainedAt = now;
+  }
   return cachedEnsembleModels;
 }
 

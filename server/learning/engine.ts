@@ -8712,6 +8712,11 @@ export async function startEngine() {
   // last checkpoint if the server restarts mid-ingestion.
   startSuperConIngestion();
 
+  // Reset any GNN training jobs that were stuck in 'running' due to a VM shutdown.
+  storage.resetStuckGnnJobs().then(n => {
+    if (n > 0) console.log(`[Engine] startup: reset ${n} stuck GNN training job(s) to 'queued' for GCP retry`);
+  }).catch(() => {});
+
   // Background poller: applies GNN weights from GCP when training jobs complete.
   startGCPWeightPoller();
   // Background poller: applies XGBoost models from GCP when training jobs complete.

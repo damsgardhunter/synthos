@@ -4618,7 +4618,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.post("/api/tb-surrogate/retrain", writeLimiter, async (_req, res) => {
     try {
-      const result = retrainTBSurrogate();
+      const result = await retrainTBSurrogate();
       res.json(result);
     } catch (e: any) {
       res.status(500).json({ error: "Failed to retrain TB surrogate", detail: e.message });

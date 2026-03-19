@@ -423,6 +423,18 @@ export interface CompetingPhase {
   suppressesSC: boolean;
 }
 
+export interface GLValidation {
+  /** BCS clean-limit coherence length: ξ₀ = ℏvF / (kB·Tc·π), in nm */
+  xiGL: number;
+  /** Fermi velocity used in the calculation, in m/s */
+  vFUsed: number;
+  /** "ok" = physically plausible; "unphysical" = Tc or vF produced ξ≈0;
+   *  "underdetermined" = missing inputs (e.g. Tc=0) */
+  status: "ok" | "unphysical" | "underdetermined";
+  /** Human-readable explanation when status ≠ "ok" */
+  diagnosis: string;
+}
+
 export interface CriticalFieldResult {
   upperCriticalField: number;
   lowerCriticalField: number;
@@ -431,6 +443,11 @@ export interface CriticalFieldResult {
   anisotropyRatio: number;
   criticalCurrentDensity: number;
   typeIorII: string;
+  /** True when key inputs (Tc, vF) were missing or zero — parameters are
+   *  under-determined, not a physical failure of the material. */
+  underdetermined?: boolean;
+  /** Ginzburg-Landau coherence-length validation result */
+  glValidation?: GLValidation;
 }
 
 export function parseFormulaElements(formula: string): string[] {
@@ -2771,6 +2788,14 @@ export function computeCriticalFields(
       anisotropyRatio: 1,
       criticalCurrentDensity: 0,
       typeIorII: "N/A",
+      underdetermined: true,
+      glValidation: {
+        xiGL: 0,
+        vFUsed: 0,
+        status: "underdetermined",
+        diagnosis:
+          "Tc is zero or negative — superconducting parameters are under-determined, not a physical failure of the material.",
+      },
     };
   }
 
@@ -2790,6 +2815,24 @@ export function computeCriticalFields(
 
   const vFRaw = Math.sqrt(bw * eCharge / mElectron) / Math.sqrt(1 + lambda);
   const vF = Math.max(1e4, Math.min(2e6, vFRaw));
+
+  // Ginzburg-Landau validation: BCS clean-limit ξ₀ = ℏvF / (kB·Tc·π)
+  // If this is ≈ 0 the Tc or vF input is wrong, not a material failure.
+  const xiGL_raw = (hbar * vF) / (kB * tc * Math.PI);
+  const xiGL_nm = xiGL_raw * 1e9;
+  let glStatus: GLValidation["status"] = "ok";
+  let glDiagnosis = "";
+  if (!Number.isFinite(xiGL_nm) || xiGL_nm <= 0) {
+    glStatus = "unphysical";
+    glDiagnosis =
+      vFRaw < 1e4
+        ? "Fermi velocity is at its lower bound — bandwidth input may be wrong or dense k-point sampling is needed for accurate ξ."
+        : "GL coherence length is non-physical — verify the Tc input.";
+  } else if (xiGL_nm < 0.05) {
+    glStatus = "unphysical";
+    glDiagnosis =
+      `GL coherence length (${xiGL_nm.toExponential(2)} nm) is below 0.05 nm — Tc or Fermi velocity input is likely incorrect.`;
+  }
 
   const carbotteRatio = 1.764 * (1 + 5.3 * Math.pow(lambda / (lambda + 6), 2));
   const delta0 = carbotteRatio * kB * tc;
@@ -2856,6 +2899,12 @@ export function computeCriticalFields(
     anisotropyRatio: Number(anisotropyRatio.toFixed(2)),
     criticalCurrentDensity,
     typeIorII,
+    glValidation: {
+      xiGL: Number.isFinite(xiGL_nm) ? Number(xiGL_nm.toFixed(2)) : 0,
+      vFUsed: Math.round(vF),
+      status: glStatus,
+      diagnosis: glDiagnosis,
+    },
   };
 }
 

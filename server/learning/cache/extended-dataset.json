@@ -1,0 +1,1780 @@
+[
+  {
+    "formula": "K",
+    "tc": 0,
+    "family": "Other",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "Y",
+    "tc": 0,
+    "family": "Other",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "VC",
+    "tc": 0,
+    "family": "Carbides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "TiC",
+    "tc": 0,
+    "family": "Carbides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "ZrC",
+    "tc": 0,
+    "family": "Carbides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "HfC",
+    "tc": 0,
+    "family": "Carbides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "ScN",
+    "tc": 0,
+    "family": "Nitrides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "YN",
+    "tc": 0,
+    "family": "Nitrides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "LaN",
+    "tc": 0,
+    "family": "Nitrides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "CrN",
+    "tc": 0,
+    "family": "Nitrides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "CrC",
+    "tc": 0,
+    "family": "Carbides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "MnN",
+    "tc": 0,
+    "family": "Nitrides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "FeN",
+    "tc": 0,
+    "family": "Nitrides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "CoN",
+    "tc": 0,
+    "family": "Nitrides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "NiN",
+    "tc": 0,
+    "family": "Nitrides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "CuN",
+    "tc": 0,
+    "family": "Nitrides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "CeN",
+    "tc": 0,
+    "family": "Nitrides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "PrN",
+    "tc": 0,
+    "family": "Nitrides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "NdN",
+    "tc": 0,
+    "family": "Nitrides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "GdN",
+    "tc": 0,
+    "family": "Nitrides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "TbN",
+    "tc": 0,
+    "family": "Nitrides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "DyN",
+    "tc": 0,
+    "family": "Nitrides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "HoN",
+    "tc": 0,
+    "family": "Nitrides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "ErN",
+    "tc": 0,
+    "family": "Nitrides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "TmN",
+    "tc": 0,
+    "family": "Nitrides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "LuN",
+    "tc": 0,
+    "family": "Nitrides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "W2C",
+    "tc": 0,
+    "family": "Carbides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "V2C",
+    "tc": 0,
+    "family": "Carbides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "Nb2C",
+    "tc": 0,
+    "family": "Carbides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "Ta2C",
+    "tc": 0,
+    "family": "Carbides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "Cr3C2",
+    "tc": 0,
+    "family": "Carbides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "Fe3C",
+    "tc": 0,
+    "family": "Carbides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "Mn3C",
+    "tc": 0,
+    "family": "Carbides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "Si3N4",
+    "tc": 0,
+    "family": "Other",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "InN",
+    "tc": 0,
+    "family": "Nitrides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "MgB4",
+    "tc": 0,
+    "family": "Borides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "CeB6",
+    "tc": 0,
+    "family": "Borides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "PrB6",
+    "tc": 0,
+    "family": "Borides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "NdB6",
+    "tc": 0,
+    "family": "Borides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "SmB6",
+    "tc": 0,
+    "family": "Borides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "EuB6",
+    "tc": 0,
+    "family": "Borides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "GdB6",
+    "tc": 0,
+    "family": "Borides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "TbB6",
+    "tc": 0,
+    "family": "Borides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "DyB6",
+    "tc": 0,
+    "family": "Borides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "HoB6",
+    "tc": 0,
+    "family": "Borides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "ErB6",
+    "tc": 0,
+    "family": "Borides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "TmB6",
+    "tc": 0,
+    "family": "Borides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "YbB6",
+    "tc": 0,
+    "family": "Borides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "LuB6",
+    "tc": 0,
+    "family": "Borides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "Fe2B",
+    "tc": 0,
+    "family": "Borides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "Co2B",
+    "tc": 0,
+    "family": "Borides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "Ni3B",
+    "tc": 0,
+    "family": "Borides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "LiB",
+    "tc": 0,
+    "family": "Borides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "TiFe2",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "TiMn2",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "ZrFe2",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "ZrNi2",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "ZrMn2",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "ZrCr2",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "HfFe2",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "HfCo2",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "HfNi2",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "YFe2",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "YCo2",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "YNi2",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "YMn2",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "YAl2",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "GdFe2",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "GdCo2",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "GdNi2",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "SmFe2",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "NdFe2",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "CeFe2",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "GdAl2",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "CeAl2",
+    "tc": 0,
+    "family": "Heavy Fermions",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "ThFe2",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "ThNi2",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "ThCo2",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "MgCu2",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "MgNi2",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "MgZn2",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "CaAl2",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "SrAl2",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "BaAl2",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "TiH2",
+    "tc": 0,
+    "family": "Hydrides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "ZrH2",
+    "tc": 0,
+    "family": "Hydrides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "NbH",
+    "tc": 0,
+    "family": "Hydrides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "HfH2",
+    "tc": 0,
+    "family": "Hydrides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "VH",
+    "tc": 0,
+    "family": "Hydrides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "VH2",
+    "tc": 0,
+    "family": "Hydrides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "LaH3",
+    "tc": 0,
+    "family": "Hydrides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "YH3",
+    "tc": 0,
+    "family": "Hydrides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "CeH3",
+    "tc": 0,
+    "family": "Hydrides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "PrH3",
+    "tc": 0,
+    "family": "Hydrides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "NdH3",
+    "tc": 0,
+    "family": "Hydrides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "GdH3",
+    "tc": 0,
+    "family": "Hydrides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "TbH3",
+    "tc": 0,
+    "family": "Hydrides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "DyH3",
+    "tc": 0,
+    "family": "Hydrides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "HoH3",
+    "tc": 0,
+    "family": "Hydrides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "ErH3",
+    "tc": 0,
+    "family": "Hydrides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "TmH3",
+    "tc": 0,
+    "family": "Hydrides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "LuH3",
+    "tc": 0,
+    "family": "Hydrides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "SmH3",
+    "tc": 0,
+    "family": "Hydrides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "EuH2",
+    "tc": 0,
+    "family": "Hydrides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "ScH3",
+    "tc": 0,
+    "family": "Hydrides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "UH3",
+    "tc": 0,
+    "family": "Hydrides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "ZrSi2",
+    "tc": 0,
+    "family": "Other",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "HfSi2",
+    "tc": 0,
+    "family": "Other",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "CaSi2",
+    "tc": 0,
+    "family": "Other",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "BaSi2",
+    "tc": 0,
+    "family": "Other",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "SrSi2",
+    "tc": 0,
+    "family": "Other",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "NbP",
+    "tc": 0,
+    "family": "Phosphides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "TaP",
+    "tc": 0,
+    "family": "Other",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "WP",
+    "tc": 0,
+    "family": "Other",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "MoP",
+    "tc": 0,
+    "family": "Other",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "ZrP",
+    "tc": 0,
+    "family": "Other",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "HfP",
+    "tc": 0,
+    "family": "Other",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "PtP",
+    "tc": 0,
+    "family": "Other",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "BP",
+    "tc": 0,
+    "family": "Phosphides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "MoTe2",
+    "tc": 0,
+    "family": "Chalcogenides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "ZrSe2",
+    "tc": 0,
+    "family": "Chalcogenides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "HfSe2",
+    "tc": 0,
+    "family": "Chalcogenides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "VTe2",
+    "tc": 0,
+    "family": "Chalcogenides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "CrSe2",
+    "tc": 0,
+    "family": "Chalcogenides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "CrTe2",
+    "tc": 0,
+    "family": "Chalcogenides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "PtSe2",
+    "tc": 0,
+    "family": "Chalcogenides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "PdSe2",
+    "tc": 0,
+    "family": "Chalcogenides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "PtS2",
+    "tc": 0,
+    "family": "Other",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "PdS2",
+    "tc": 0,
+    "family": "Other",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "IrSe2",
+    "tc": 0,
+    "family": "Chalcogenides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "RhSe2",
+    "tc": 0,
+    "family": "Chalcogenides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "CoSe2",
+    "tc": 0,
+    "family": "Mixed-mechanism",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "NiSe2",
+    "tc": 0,
+    "family": "Mixed-mechanism",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "FeSe2",
+    "tc": 0,
+    "family": "Mixed-mechanism",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "ReS2",
+    "tc": 0,
+    "family": "Layered-chalcogenide",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "ReSe2",
+    "tc": 0,
+    "family": "Chalcogenides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "As2Te3",
+    "tc": 0,
+    "family": "Other",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "HgS",
+    "tc": 0,
+    "family": "Other",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "In2Te3",
+    "tc": 0,
+    "family": "Chalcogenides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "Tl2Te3",
+    "tc": 0,
+    "family": "Chalcogenides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "Ag2S",
+    "tc": 0,
+    "family": "Other",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "Cu2S",
+    "tc": 0,
+    "family": "Other",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "CoSb3",
+    "tc": 0,
+    "family": "Other",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "RhSb3",
+    "tc": 0,
+    "family": "Other",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "IrSb3",
+    "tc": 0,
+    "family": "Other",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "CoAs3",
+    "tc": 0,
+    "family": "Mixed-mechanism",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "CoP3",
+    "tc": 0,
+    "family": "Phosphides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "RhAs3",
+    "tc": 0,
+    "family": "Other",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "IrAs3",
+    "tc": 0,
+    "family": "Other",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "NiP3",
+    "tc": 0,
+    "family": "Phosphides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "FeS",
+    "tc": 0,
+    "family": "Other",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "SmFeAsO",
+    "tc": 0,
+    "family": "Mixed-mechanism",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "PrFeAsO",
+    "tc": 0,
+    "family": "Mixed-mechanism",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "CeFeAsO",
+    "tc": 0,
+    "family": "Mixed-mechanism",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "GdFeAsO",
+    "tc": 0,
+    "family": "Mixed-mechanism",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "EuFe2As2",
+    "tc": 0,
+    "family": "Pnictides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "Sm2CuO4",
+    "tc": 0,
+    "family": "Cuprates",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "Eu2CuO4",
+    "tc": 0,
+    "family": "Cuprates",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "Gd2CuO4",
+    "tc": 0,
+    "family": "Cuprates",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "UPd2Al3",
+    "tc": 0,
+    "family": "Heavy Fermions",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "UNi2Al3",
+    "tc": 0,
+    "family": "Heavy Fermions",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "UPd3",
+    "tc": 0,
+    "family": "Heavy Fermions",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "CeRu2Si2",
+    "tc": 0,
+    "family": "Other",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "CeRu2Ge2",
+    "tc": 0,
+    "family": "Other",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "YbCu2Si2",
+    "tc": 0,
+    "family": "Heavy Fermions",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "YbNi2Ge2",
+    "tc": 0,
+    "family": "Heavy Fermions",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "CaC6",
+    "tc": 0,
+    "family": "Carbides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "KC8",
+    "tc": 0,
+    "family": "Intercalated-layered",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "RbC8",
+    "tc": 0,
+    "family": "Intercalated-layered",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "CsC8",
+    "tc": 0,
+    "family": "Intercalated-layered",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "LiC6",
+    "tc": 0,
+    "family": "Intercalated-layered",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "SrC6",
+    "tc": 0,
+    "family": "Carbides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "BaC6",
+    "tc": 0,
+    "family": "Carbides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "SrVO3",
+    "tc": 0,
+    "family": "Oxides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "CaVO3",
+    "tc": 0,
+    "family": "Oxides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "BaVO3",
+    "tc": 0,
+    "family": "Oxides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "BaMoO3",
+    "tc": 0,
+    "family": "Oxides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "SrMoO3",
+    "tc": 0,
+    "family": "Oxides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "CaMoO3",
+    "tc": 0,
+    "family": "Oxides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "SrRuO3",
+    "tc": 0,
+    "family": "Oxides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "CaRuO3",
+    "tc": 0,
+    "family": "Oxides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "BaRuO3",
+    "tc": 0,
+    "family": "Oxides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "LaTiO3",
+    "tc": 0,
+    "family": "Oxides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "YTiO3",
+    "tc": 0,
+    "family": "Oxides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "BaPbO3",
+    "tc": 0,
+    "family": "Oxides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "BaBiO3",
+    "tc": 0,
+    "family": "Oxides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "SrPbO3",
+    "tc": 0,
+    "family": "Oxides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "Ba2PbO4",
+    "tc": 0,
+    "family": "Oxides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "Ba2SnO4",
+    "tc": 0,
+    "family": "Oxides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "Ca2RuO4",
+    "tc": 0,
+    "family": "Oxides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "Sr3Ru2O7",
+    "tc": 0,
+    "family": "Oxides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "Ca3Ru2O7",
+    "tc": 0,
+    "family": "Oxides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "OsO2",
+    "tc": 0,
+    "family": "Oxides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "RhO2",
+    "tc": 0,
+    "family": "Oxides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "VO2",
+    "tc": 0,
+    "family": "Oxides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "V2O3",
+    "tc": 0,
+    "family": "Oxides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "TiO",
+    "tc": 0,
+    "family": "Oxides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "NbO",
+    "tc": 0,
+    "family": "Oxides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "NbO2",
+    "tc": 0,
+    "family": "Oxides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "FeO",
+    "tc": 0,
+    "family": "Oxides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "YPd2",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "LaPd2",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "NbPd3",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "MoPd3",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "LaRh3",
+    "tc": 0,
+    "family": "Hydrides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "YRh3",
+    "tc": 0,
+    "family": "Hydrides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "LuRu2",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "GdRu2",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "NiAl3",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "TiAl3",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "ZrAl2",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "HfAl2",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "NbAl3",
+    "tc": 0,
+    "family": "Intermetallics",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "TaAl3",
+    "tc": 0,
+    "family": "Intermetallics",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "CuAu3",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "Cd3As2",
+    "tc": 0,
+    "family": "Other",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "ZrSiS",
+    "tc": 0,
+    "family": "Sulfides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "TlBiSe2",
+    "tc": 0,
+    "family": "Chalcogenides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "TlBiTe2",
+    "tc": 0,
+    "family": "Chalcogenides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "TlBiS2",
+    "tc": 0,
+    "family": "Sulfides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "BaBi3",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "SmCo5",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "SmCo3",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "Sm2Co17",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "Sm2Co7",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "GdCo5",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "GdNi5",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "TbFe2",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "DyFe2",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "HoFe2",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "ErFe2",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "CeRu4Sn6",
+    "tc": 0,
+    "family": "Alloys",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "YbFe4Sb12",
+    "tc": 0,
+    "family": "Pnictides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "LaFe4Sb12",
+    "tc": 0,
+    "family": "Pnictides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "CeOs4Sb12",
+    "tc": 0,
+    "family": "Other",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "PrOs4Sb12",
+    "tc": 0,
+    "family": "Other",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "NiAs2",
+    "tc": 0,
+    "family": "Mixed-mechanism",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "CoAs2",
+    "tc": 0,
+    "family": "Mixed-mechanism",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "FeAs2",
+    "tc": 0,
+    "family": "Mixed-mechanism",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "Cu2ZnSnS4",
+    "tc": 0,
+    "family": "Sulfides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "Cu2ZnSnSe4",
+    "tc": 0,
+    "family": "Chalcogenides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "Cu2ZnGeS4",
+    "tc": 0,
+    "family": "Sulfides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "Cu2CdSnS4",
+    "tc": 0,
+    "family": "Sulfides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "AgGaS2",
+    "tc": 0,
+    "family": "Intercalated-layered",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "AgGaSe2",
+    "tc": 0,
+    "family": "Chalcogenides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "AgInS2",
+    "tc": 0,
+    "family": "Intercalated-layered",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "AgInSe2",
+    "tc": 0,
+    "family": "Chalcogenides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "CuGaS2",
+    "tc": 0,
+    "family": "Intercalated-layered",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "CuInS2",
+    "tc": 0,
+    "family": "Intercalated-layered",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "CuInSe2",
+    "tc": 0,
+    "family": "Chalcogenides",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "ZnGeAs2",
+    "tc": 0,
+    "family": "Other",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "CdGeAs2",
+    "tc": 0,
+    "family": "Other",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "ZnSiAs2",
+    "tc": 0,
+    "family": "Other",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  },
+  {
+    "formula": "CdSiAs2",
+    "tc": 0,
+    "family": "Other",
+    "isSuperconductor": false,
+    "pressureGPa": 0
+  }
+]

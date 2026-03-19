@@ -1533,25 +1533,11 @@ async function retrainGNNWithEnrichedData(
       console.warn(`[ActiveLearning] Failed to dispatch GNN job to GCP: ${err.message}`);
     });
   } else {
-    const ensembleModels = await trainEnsembleAsync(trainingData);
-    invalidateGNNModel();
-    setCachedEnsemble(ensembleModels, trainingData);
+    // Local server: GNN training is GCP-only. Skip local retrain entirely.
+    console.log(`[ActiveLearning] GNN retrain skipped locally (OFFLOAD_GNN_TO_GCP not set) — training is GCP-only.`);
   }
 
   const gnnVersionRecord = logGNNVersion("active-learning-retrain", trainingData.length, dftCount, enrichedCount);
-
-  // If the model's error on DFT-verified samples exceeds 30 K — the samples we
-  // trust most — do an immediate extra retrain before moving on.
-  if (!gcpMode && gnnVersionRecord.dftVerifiedMAE != null && gnnVersionRecord.dftVerifiedMAE > 30) {
-    console.warn(
-      `[ActiveLearning] DFT-verified MAE=${gnnVersionRecord.dftVerifiedMAE.toFixed(1)}K exceeds 30K threshold — ` +
-      `triggering immediate full retrain`
-    );
-    const correctionModels = await trainEnsembleAsync(trainingData);
-    invalidateGNNModel();
-    setCachedEnsemble(correctionModels, trainingData);
-    logGNNVersion("dft-mae-correction", trainingData.length, dftCount, enrichedCount);
-  }
 
   await incorporateFailureData();
 

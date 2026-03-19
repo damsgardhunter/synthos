@@ -19,8 +19,9 @@ import { importMaterialsVAEWeights } from "../physics/materials-vae";
 import { importCrystalVAEState } from "../crystal/crystal-vae";
 import { importDiffusionState } from "../crystal/crystal-diffusion-model";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
+// import.meta.url is undefined in CJS bundles — fall back to process.cwd() for the worker path
+const __filename = typeof import.meta?.url === "string" ? fileURLToPath(import.meta.url) : "";
+const __dirname = __filename ? dirname(__filename) : process.cwd();
 
 export type MLTask = "train-materials-vae" | "init-crystal-vae" | "init-diffusion-model";
 
