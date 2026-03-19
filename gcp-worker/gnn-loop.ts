@@ -641,7 +641,7 @@ async function runStartupFullCorpusTraining(): Promise<void> {
 
   console.log('[GNN-GCP] ════════════════════════════════════════════════════════');
   console.log('[GNN-GCP]  STARTUP PHASE 3 — Full Corpus Training');
-  console.log('[GNN-GCP]  Loading NIMS + JARVIS SC corpus (up to 15,000 entries)');
+  console.log('[GNN-GCP]  Loading NIMS + JARVIS SC corpus (up to 5,000 entries)');
   console.log('[GNN-GCP] ════════════════════════════════════════════════════════');
 
   // Pre-warm DB connection before heavy queries
@@ -650,7 +650,7 @@ async function runStartupFullCorpusTraining(): Promise<void> {
   const existingFormulas = new Set<string>();
 
   // Load full SC corpus from supercon_external_entries
-  const externalSC = await loadSuperconExternalSamples(existingFormulas, 15000);
+  const externalSC = await loadSuperconExternalSamples(existingFormulas, 5000);
   externalSC.forEach(s => existingFormulas.add(s.formula));
   console.log(`[GNN-GCP]  Loaded ${externalSC.length} NIMS+JARVIS SC entries`);
 
