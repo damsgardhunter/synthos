@@ -2557,6 +2557,13 @@ export interface TrainingSample {
   prototype?: string;
   pressureGpa?: number;
   lambda?: number;
+  /** ω_log in Kelvin from DFPT (JARVIS wlog_K or QE omega_log×1.4388). Used as direct supervision
+   *  target for the GNN's out[2] channel and for material-specific Allen-Dynes Tc. */
+  omegaLog?: number;
+  /** Coulomb pseudopotential μ* from DFPT (QE mu_star). When present, replaces FIXED_MU_STAR
+   *  in the training Allen-Dynes calculation so the model learns correct (λ, ω_log) → Tc mappings
+   *  for materials with non-standard Coulomb screening (cuprates ~0.15, hydrides ~0.08). */
+  muStar?: number;
   /** "dft-verified" when this Tc came from a real DFPT run; absent for ML estimates */
   dataConfidence?: string;
   /** DFPT-derived Tc (Allen-Dynes from QE λ) — overrides `tc` as primary training target when present */
@@ -2868,8 +2875,12 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
         const adLambda      = Math.min(LAMBDA_MAX, adLambdaUncapped);
         // omegaLog is in Kelvin; divide by 1.4388 to match the forward-pass unit fix
         const adTc          = allenDynesTcRaw(adLambda, adOmegaLog / 1.4388, FIXED_MU_STAR);
-        // McMillan denominator: D = λ(1−0.62μ*) − μ*  (μ*=0.10 → D = 0.938λ − 0.10)
-        const adD = adLambda * (1 - 0.62 * FIXED_MU_STAR) - FIXED_MU_STAR;
+        // Use material-specific μ* from DFPT (JARVIS/QE) when available; fall back to 0.10.
+        // Improves gradient accuracy for cuprates (μ*~0.15) and hydrides (μ*~0.08).
+        const sampleMuStar = (sample.muStar != null && Number.isFinite(sample.muStar) && sample.muStar > 0)
+          ? sample.muStar : FIXED_MU_STAR;
+        // McMillan denominator: D = λ(1−0.62μ*) − μ*
+        const adD = adLambda * (1 - 0.62 * sampleMuStar) - sampleMuStar;
         // dTc/dω_log = Tc / ω_log  (linear dependence in Allen-Dynes)
         // Zero when omegaLog is at cap: d(min(MAX, x))/dx = 0 when x >= MAX
         const dTcdOmegaLog = (!adOmegaLogAtCap && adOmegaLog > 10 && adTc > 0) ? adTc / adOmegaLog : 0;
@@ -2883,18 +2894,26 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
         // d(min(LAMBDA_MAX, softplus(x)))/dx = sigmoid(x) when below cap, 0 when at cap
         const dLambdadOut4 = adLambdaAtCap ? 0 : sigmoid(adLambdaRaw);
 
-        // Direct ω_log supervision: invert Allen-Dynes from (Tc_target, λ_target) to get ω_log target.
-        // Only reliable when Tc>0 and the McMillan denominator is well-defined.
+        // Direct ω_log supervision.
+        // Priority 1: measured DFPT value from JARVIS/QE (sample.omegaLog in Kelvin) — most accurate.
+        // Priority 2: invert Allen-Dynes from (Tc_target, λ_target) — derived, less reliable.
         let omegaLogGradBoost = 0;
-        if (sample.tc > 0 && lambdaTarget > 0) {
-          const adDtarget = lambdaTarget * (1 - 0.62 * FIXED_MU_STAR) - FIXED_MU_STAR;
+        const dfptOmegaLog = (sample.omegaLog != null && Number.isFinite(sample.omegaLog) && sample.omegaLog > 10)
+          ? sample.omegaLog : null;
+        if (dfptOmegaLog !== null) {
+          // Use measured ω_log directly — 3× weight vs. inferred target since it's ground truth.
+          const omegaLogRelErr = (adOmegaLog - dfptOmegaLog) / dfptOmegaLog;
+          totalLoss += 0.3 * omegaLogRelErr * omegaLogRelErr;
+          omegaLogGradBoost = 0.6 * omegaLogRelErr / dfptOmegaLog;
+        } else if (sample.tc > 0 && lambdaTarget > 0) {
+          // Fall back: invert Allen-Dynes from (Tc_target, λ_target) to estimate ω_log target.
+          // Only reliable when Tc>0 and the McMillan denominator is well-defined.
+          const adDtarget = lambdaTarget * (1 - 0.62 * sampleMuStar) - sampleMuStar;
           if (adDtarget > 0.05) {
             const omegaLogTarget = 1.2 * sample.tc * Math.exp(1.04 * (1 + lambdaTarget) / adDtarget);
             if (Number.isFinite(omegaLogTarget) && omegaLogTarget > 10 && omegaLogTarget < 4000) {
-              // Relative error supervision: loss = 0.1*(ω_log−ω_log_target)²/ω_log_target²
               const omegaLogRelErr = (adOmegaLog - omegaLogTarget) / omegaLogTarget;
               totalLoss += 0.1 * omegaLogRelErr * omegaLogRelErr;
-              // d(loss)/d(ω_log) = 0.2 * relErr / ω_log_target
               omegaLogGradBoost = 0.2 * omegaLogRelErr / omegaLogTarget;
             }
           }

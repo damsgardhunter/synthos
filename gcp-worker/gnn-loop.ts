@@ -307,7 +307,7 @@ async function storeCalibrationMetric(
 async function loadQEDatasetSamples(existingFormulas: Set<string>): Promise<TrainingSample[]> {
   try {
     const rows = await db.execute(
-      `SELECT material, tc, formation_energy, band_gap, lambda
+      `SELECT material, tc, formation_energy, band_gap, lambda, omega_log, mu_star
        FROM quantum_engine_dataset
        WHERE scf_converged = true AND tc > 0 AND tier IN ('full-dft', 'xtb')
        ORDER BY tc DESC
@@ -317,10 +317,18 @@ async function loadQEDatasetSamples(existingFormulas: Set<string>): Promise<Trai
     const samples: TrainingSample[] = [];
     for (const row of items) {
       if (!row.material || existingFormulas.has(row.material)) continue;
+      // omega_log in quantum_engine_dataset is stored in cm⁻¹; convert to Kelvin (×1.4388)
+      // so TrainingSample.omegaLog is always in Kelvin (matching GNN internal units).
+      const omegaLogCm1 = row.omega_log != null ? Number(row.omega_log) : null;
+      const omegaLogK = omegaLogCm1 != null && omegaLogCm1 > 0 ? omegaLogCm1 * 1.4388 : undefined;
+      const muStar = row.mu_star != null ? Number(row.mu_star) : undefined;
       samples.push({
         formula: row.material,
         tc: Number(row.tc) || 0,
         formationEnergy: row.formation_energy != null ? Number(row.formation_energy) : undefined,
+        lambda: row.lambda != null ? Number(row.lambda) : undefined,
+        omegaLog: omegaLogK != null && Number.isFinite(omegaLogK) ? omegaLogK : undefined,
+        muStar: muStar != null && Number.isFinite(muStar) && muStar > 0 ? muStar : undefined,
         structure: undefined,
         prototype: undefined,
       });
@@ -341,8 +349,12 @@ async function loadQEDatasetSamples(existingFormulas: Set<string>): Promise<Trai
 
 async function loadSuperconExternalSamples(existingFormulas: Set<string>, limit = 5000): Promise<TrainingSample[]> {
   try {
+    // raw_data->>'wlog_K' extracts the JARVIS-SuperCon-3D ω_log (already in Kelvin).
+    // raw_data->>'mu_star' extracts μ* if the source stored it (rare, but future-proof).
     const rows = await db.execute(
-      `SELECT formula, tc, lambda, space_group, crystal_system
+      `SELECT formula, tc, lambda, space_group, crystal_system,
+              (raw_data->>'wlog_K')::real   AS omega_log_k,
+              (raw_data->>'mu_star')::real  AS raw_mu_star
        FROM supercon_external_entries
        WHERE is_superconductor = true AND tc > 0
        ORDER BY tc DESC
@@ -356,12 +368,21 @@ async function loadSuperconExternalSamples(existingFormulas: Set<string>, limit 
       const tc = Number(row.tc);
       if (!Number.isFinite(tc) || tc <= 0) continue;
       const lambda = row.lambda != null ? Number(row.lambda) : undefined;
+      // wlog_K from JARVIS-SuperCon-3D is already in Kelvin
+      const omegaLogRaw = row.omega_log_k != null ? Number(row.omega_log_k) : null;
+      const omegaLog = omegaLogRaw != null && Number.isFinite(omegaLogRaw) && omegaLogRaw > 0
+        ? omegaLogRaw : undefined;
+      const muStarRaw = row.raw_mu_star != null ? Number(row.raw_mu_star) : null;
+      const muStar = muStarRaw != null && Number.isFinite(muStarRaw) && muStarRaw > 0
+        ? muStarRaw : undefined;
       const spaceGroup = row.space_group as string | null;
       const crystalSystem = row.crystal_system as string | null;
       samples.push({
         formula,
         tc,
         lambda: lambda != null && Number.isFinite(lambda) ? lambda : undefined,
+        omegaLog,
+        muStar,
         structure: spaceGroup || crystalSystem
           ? { spaceGroup: spaceGroup ?? undefined, crystalSystem: crystalSystem ?? undefined, dimensionality: undefined }
           : undefined,
