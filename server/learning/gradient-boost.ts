@@ -2002,25 +2002,26 @@ export async function retrainXGBoostFromEvaluated(cycleCount?: number): Promise<
   const hpDepth = hp.maxDepth ?? 6;
 
   const gcpXgbMode = process.env.OFFLOAD_XGB_TO_GCP === "true";
-  // In GCP mode, GCP trains the full 300-tree base model and ensemble.
-  // Train a lightweight 50-tree placeholder locally so scoring works immediately;
-  // the GCP poller overwrites cachedModel once GCP finishes (~45-60s later).
-  const localTrees = gcpXgbMode ? 50 : hpTrees;
-  const localLR = gcpXgbMode ? 0.1 : hpLR;
+
+  if (gcpXgbMode) {
+    // GCP handles all training — dispatch and return immediately, no local training.
+    if (X.length >= 30) {
+      console.log(`[XGBoost] OFFLOAD_XGB_TO_GCP=true — dispatching retrain to GCP (${X.length} samples)`);
+      dispatchXGBJobToGCP(X, y, formulas).catch(err => console.warn("[XGBoost] GCP dispatch failed:", err.message));
+    }
+    return { retrained: true, datasetSize: X.length, newEntries: newFromEval };
+  }
 
   invalidateModel();
-  console.log(`[XGBoost] Retrain #${xgboostRetrainCount + 1} — ${X.length} samples, ${localTrees} trees (lr=${localLR}, depth=${hpDepth})${gcpXgbMode ? " [local placeholder; GCP trains full model]" : ""}...`);
+  console.log(`[XGBoost] Retrain #${xgboostRetrainCount + 1} — ${X.length} samples, ${hpTrees} trees (lr=${hpLR}, depth=${hpDepth})...`);
   const retrainStart = Date.now();
-  cachedModel = await trainGradientBoosting(X, y, localTrees, localLR, hpDepth);
+  cachedModel = await trainGradientBoosting(X, y, hpTrees, hpLR, hpDepth);
   await new Promise<void>(r => setTimeout(r, 0));
   cachedCalibration = await computeCalibration(cachedModel);
   console.log(`[XGBoost] Base model done in ${Date.now() - retrainStart}ms`);
 
   if (X.length >= 30) {
-    if (process.env.OFFLOAD_XGB_TO_GCP === "true") {
-      console.log(`[XGBoost] OFFLOAD_XGB_TO_GCP=true — dispatching ensemble retrain to GCP (${X.length} samples)`);
-      dispatchXGBJobToGCP(X, y, formulas).catch(err => console.warn("[XGBoost] GCP dispatch failed:", err.message));
-    } else {
+    if (false) { // local-only path
       console.log(`[XGBoost] Training mean ensemble (${X.length} samples)...`);
       const ensStart = Date.now();
       cachedEnsembleXGB = await trainEnsembleXGB(X, y);

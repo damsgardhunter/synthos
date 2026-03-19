@@ -338,6 +338,13 @@ async function evaluateTestSet(): Promise<{
 // ── 5-fold CV ─────────────────────────────────────────────────────────────────
 
 export async function runCrossValidation(k = 5): Promise<CVReport> {
+  if (process.env.OFFLOAD_XGB_TO_GCP === "true") {
+    return {
+      k, meanMAE: 0, stdMAE: 0, meanRMSE: 0, stdRMSE: 0, meanR2: 0, stdR2: 0,
+      folds: [], trainingSetSize: 0, updatedAt: Date.now(),
+    };
+  }
+
   const { X, y, formulas } = await getXGBTrainingData();
   const n = X.length;
 
