@@ -27,8 +27,8 @@ import { db } from "../db";
 import { superconExternalEntries, systemState } from "@shared/schema";
 import { eq } from "drizzle-orm";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname  = path.dirname(__filename);
+const __filename = typeof import.meta?.url === "string" ? fileURLToPath(import.meta.url) : "";
+const __dirname  = __filename ? path.dirname(__filename) : process.cwd();
 
 const BATCH_SIZE = 150;
 const YIELD_MS   = 80;
