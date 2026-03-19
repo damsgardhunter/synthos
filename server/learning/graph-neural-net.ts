@@ -223,8 +223,6 @@ const GLOBAL_COMP_DIM = 19;
 // Coulomb pseudopotential μ* — fixed at conventional BCS value.
 // Typical range: 0.10 (metals), 0.12-0.13 (hydrides, higher Coulomb screening).
 const FIXED_MU_STAR = 0.10;
-// Scale for out[2] → ω_log (K). softplus(0)*500+10 ≈ 357 K — reasonable default for BCS metals.
-const OMEGA_LOG_SCALE = 500;
 // Physical upper bound on λ — no known conventional SC has λ > 3.8 (LaH10 hydride); cap prevents Allen-Dynes blowup.
 const LAMBDA_MAX = 5.5;
 // Allen-Dynes formula is unconventional above ~300 K; cap predictions at training normalization ceiling.
@@ -2252,15 +2250,16 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
   const sf = (v: number, fallback = 0) => Number.isFinite(v) ? v : fallback;
   const formationEnergy = sf(out[0] ?? 0);
   const phononStabilityRaw = sigmoid(sf(out[1] ?? 0));
-  // out[2] → ω_log (K) via softplus — two-stage Allen-Dynes prediction.
-  // softplus ensures positivity; OMEGA_LOG_SCALE sets the physical range.
+  // out[2] → ω_log (K): sigmoid-based soft map into (10, OMEGA_LOG_MAX).
+  // sigmoid(x/3) keeps gradient non-zero everywhere — hard min() kills gradients at the cap,
+  // trapping the model in a state where ω_log is pinned at max and predictions never improve.
   const omegaLogRaw = sf(out[2] ?? 0);
-  const omegaLog = Math.min(OMEGA_LOG_MAX, Math.max(10, softplus(omegaLogRaw) * OMEGA_LOG_SCALE + 10));
-  // out[4] → λ via softplus (NOT ReLU): softplus has non-zero gradient everywhere,
-  // preventing the dead-neuron problem that blocks gradient flow when out[4]<0.
-  // Cap λ — softplus is unbounded; without a cap, FE-pretraining-inflated h1 drives λ → billions
-  // and Allen-Dynes f1 ≈ √λ amplifies that into 100M-K predictions.
-  const lambdaRaw = Math.min(LAMBDA_MAX, softplus(sf(out[4] ?? 0)));
+  const omegaLog = 10 + (OMEGA_LOG_MAX - 10) * sigmoid(omegaLogRaw / 3);
+  // out[4] → λ via sigmoid soft cap into (0, LAMBDA_MAX).
+  // sigmoid ensures λ ∈ (0, LAMBDA_MAX) with non-zero gradient everywhere.
+  // Hard min(LAMBDA_MAX, softplus(x)) had zero derivative when softplus(x) ≥ LAMBDA_MAX,
+  // which caused permanent gradient death once training pushed λ to the cap.
+  const lambdaRaw = LAMBDA_MAX * sigmoid(sf(out[4] ?? 0));
   // Tc computed via Allen-Dynes formula: Tc = (ω_log/1.2)*exp(-1.04(1+λ)/(λ-μ*(1+0.62λ)))
   // omegaLog is already in Kelvin; allenDynesTcRaw expects cm⁻¹ and multiplies by 1.4388 internally,
   // so we divide here to undo that spurious conversion.
@@ -2417,10 +2416,11 @@ function GNNPredictForTraining(graph: CrystalGraph, weights: GNNWeights): { pred
   const sf = (v: number, fallback = 0) => Number.isFinite(v) ? v : fallback;
   const formationEnergy = sf(out[0] ?? 0);
   const phononStabilityRaw = sigmoid(sf(out[1] ?? 0));
-  // out[2] → ω_log (K) — two-stage Allen-Dynes prediction (same as GNNPredict)
+  // out[2] → ω_log (K): sigmoid soft map into (10, OMEGA_LOG_MAX) — gradient everywhere.
   const omegaLogRaw = sf(out[2] ?? 0);
-  const omegaLog = Math.min(OMEGA_LOG_MAX, Math.max(10, softplus(omegaLogRaw) * OMEGA_LOG_SCALE + 10));
-  const lambdaRaw = Math.min(LAMBDA_MAX, softplus(sf(out[4] ?? 0))); // softplus: always positive, always differentiable; capped to prevent Allen-Dynes blowup
+  const omegaLog = 10 + (OMEGA_LOG_MAX - 10) * sigmoid(omegaLogRaw / 3);
+  // out[4] → λ: sigmoid soft map into (0, LAMBDA_MAX) — gradient everywhere.
+  const lambdaRaw = LAMBDA_MAX * sigmoid(sf(out[4] ?? 0));
   // omegaLog is in Kelvin; divide by 1.4388 to undo the cm⁻¹→K conversion inside allenDynesTcRaw
   const predictedTcRaw = allenDynesTcRaw(lambdaRaw, omegaLog / 1.4388, FIXED_MU_STAR);
   const confidenceRaw = sigmoid(sf(out[3] ?? 0));
@@ -2501,7 +2501,16 @@ function initWeights(rng: () => number): GNNWeights {
     W_mlp1: initMatrix(HIDDEN_DIM, HIDDEN_DIM * 2 + GLOBAL_COMP_DIM, rng),
     b_mlp1: initVector(HIDDEN_DIM),
     W_mlp2: initMatrix(OUTPUT_DIM, HIDDEN_DIM, rng, 0.01),
-    b_mlp2: initVector(OUTPUT_DIM),
+    b_mlp2: (() => {
+      const b = initVector(OUTPUT_DIM);
+      // out[2] → ω_log via sigmoid(x/3): bias -4.0 → sigmoid(-4/3)≈0.21 → ω_log≈320K (physical BCS range)
+      // Without this, sigmoid(0/3)=0.5 → ω_log=755K, giving Allen-Dynes Tc>>100K before any training.
+      b[2] = -4.0;
+      // out[4] → λ via sigmoid(x): bias -1.5 → sigmoid(-1.5)≈0.18 → λ≈1.0 (typical phonon-mediated SC)
+      // Without this, sigmoid(0)=0.5 → λ=2.75, immediately predicting Tc≈90K for all materials.
+      b[4] = -1.5;
+      return b;
+    })(),
     W_mlp2_var: initMatrix(OUTPUT_DIM, HIDDEN_DIM, rng, 0.05),
     b_mlp2_var: initVector(OUTPUT_DIM, -2.0),
     trainedAt: 0,
@@ -2857,24 +2866,26 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
         const heteroLossLambda = (lambdaError * lambdaError) / lambdaVarNorm + Math.log(lambdaVarNorm);
 
         const feWeight = hasFormationEnergy ? 0.1 : 0.0;
-        const loss = scWeight * (tcError * tcError + 0.1 * heteroLossTc) + feWeight * feError * feError + 0.05 * heteroLossLambda;
+        // Keep hetero weights small so the model can't "win" by collapsing σ² (which drives
+        // training loss negative while Tc predictions remain garbage). The MSE term tcError²
+        // must dominate so the model improves predictions rather than just tuning variance.
+        const loss = scWeight * (tcError * tcError + 0.02 * heteroLossTc) + feWeight * feError * feError + 0.01 * heteroLossLambda;
         totalLoss += loss;
         totalSamples++;
 
         // ── Allen-Dynes chain-rule gradient setup ───────────────────────────────
         // Reconstruct ω_log / λ / Tc from outRaw so we can differentiate through
         // the Allen-Dynes formula without adding fields to GNNForwardCache.
-        const adOmegaLogRaw = cache.outRaw[2] ?? 0;
-        const adOmegaLogUncapped = Math.max(10, softplus(adOmegaLogRaw) * OMEGA_LOG_SCALE + 10);
-        const adOmegaLogAtCap = adOmegaLogUncapped >= OMEGA_LOG_MAX;
-        const adOmegaLog    = Math.min(OMEGA_LOG_MAX, adOmegaLogUncapped);
-        // λ uses softplus in the forward pass — reconstruct with softplus here too
-        const adLambdaRaw   = cache.outRaw[4] ?? 0;
-        const adLambdaUncapped = softplus(adLambdaRaw);
-        const adLambdaAtCap = adLambdaUncapped >= LAMBDA_MAX;
-        const adLambda      = Math.min(LAMBDA_MAX, adLambdaUncapped);
+        // Reconstruct ω_log and λ using the same sigmoid soft-cap formulas as the forward pass.
+        // Hard min() was replaced with sigmoid to keep gradients non-zero everywhere.
+        const adOmegaLogRaw  = cache.outRaw[2] ?? 0;
+        const adOmegaLogNorm = sigmoid(adOmegaLogRaw / 3);
+        const adOmegaLog     = 10 + (OMEGA_LOG_MAX - 10) * adOmegaLogNorm;
+        const adLambdaRaw    = cache.outRaw[4] ?? 0;
+        const adLambdaSig    = sigmoid(adLambdaRaw);
+        const adLambda       = LAMBDA_MAX * adLambdaSig;
         // omegaLog is in Kelvin; divide by 1.4388 to match the forward-pass unit fix
-        const adTc          = allenDynesTcRaw(adLambda, adOmegaLog / 1.4388, FIXED_MU_STAR);
+        const adTc           = allenDynesTcRaw(adLambda, adOmegaLog / 1.4388, FIXED_MU_STAR);
         // Use material-specific μ* from DFPT (JARVIS/QE) when available; fall back to 0.10.
         // Improves gradient accuracy for cuprates (μ*~0.15) and hydrides (μ*~0.08).
         const sampleMuStar = (sample.muStar != null && Number.isFinite(sample.muStar) && sample.muStar > 0)
@@ -2882,17 +2893,13 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
         // McMillan denominator: D = λ(1−0.62μ*) − μ*
         const adD = adLambda * (1 - 0.62 * sampleMuStar) - sampleMuStar;
         // dTc/dω_log = Tc / ω_log  (linear dependence in Allen-Dynes)
-        // Zero when omegaLog is at cap: d(min(MAX, x))/dx = 0 when x >= MAX
-        const dTcdOmegaLog = (!adOmegaLogAtCap && adOmegaLog > 10 && adTc > 0) ? adTc / adOmegaLog : 0;
-        // dTc/dλ = Tc × 1.04×(D−(1+λ)(1−0.62μ*)) ... = Tc × (-1.04×(-1.038)) / D²
-        //        = Tc × 1.07952 / D²   (McMillan simplified, always positive for D>0)
-        // Zero when lambda is at cap: d(min(LAMBDA_MAX, softplus(x)))/dx = 0 when softplus(x) >= LAMBDA_MAX
-        const dTcdLambda = (!adLambdaAtCap && adD > 0.05 && adTc > 0) ? adTc * 1.07952 / (adD * adD) : 0;
-        // d(softplus(x))/dx = sigmoid(x)  →  d(ω_log)/d(out[2]) = sigmoid(out[2]) * OMEGA_LOG_SCALE
-        // Zero when omegaLog cap is active (chain rule: cap has zero derivative)
-        const dOmegaLogdOut2 = adOmegaLogAtCap ? 0 : sigmoid(adOmegaLogRaw) * OMEGA_LOG_SCALE;
-        // d(min(LAMBDA_MAX, softplus(x)))/dx = sigmoid(x) when below cap, 0 when at cap
-        const dLambdadOut4 = adLambdaAtCap ? 0 : sigmoid(adLambdaRaw);
+        const dTcdOmegaLog = (adOmegaLog > 10 && adTc > 0) ? adTc / adOmegaLog : 0;
+        // dTc/dλ = Tc × 1.07952 / D²  (McMillan simplified, always positive for D>0)
+        const dTcdLambda = (adD > 0.05 && adTc > 0) ? adTc * 1.07952 / (adD * adD) : 0;
+        // d(ω_log)/d(out[2]) = (OMEGA_LOG_MAX−10) × sigmoid'(out[2]/3) — always non-zero
+        const dOmegaLogdOut2 = (OMEGA_LOG_MAX - 10) * adOmegaLogNorm * (1 - adOmegaLogNorm) / 3;
+        // d(λ)/d(out[4]) = LAMBDA_MAX × sigmoid'(out[4]) — always non-zero
+        const dLambdadOut4 = LAMBDA_MAX * adLambdaSig * (1 - adLambdaSig);
 
         // Direct ω_log supervision.
         // Priority 1: measured DFPT value from JARVIS/QE (sample.omegaLog in Kelvin) — most accurate.
@@ -2919,8 +2926,8 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
           }
         }
 
-        // d(loss)/d(predictedTc) in K (the 1/300 comes from tcError = ΔTc/300)
-        const dLossDTcK = scWeight * (2 * tcError / 300 + 0.1 * 2 * tcError / 300 / tcVarNorm);
+        // d(loss)/d(predictedTc) — hetero coefficient matches the 0.02 weight in the loss above
+        const dLossDTcK = scWeight * (2 * tcError / 300 + 0.02 * 2 * tcError / 300 / tcVarNorm);
 
         const dLdOut = new Array(OUTPUT_DIM).fill(0);
         dLdOut[0] = hasFormationEnergy ? clipGrad(2 * feError * 0.1) : 0;
@@ -2929,8 +2936,9 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
         dLdOut[2] = clipGrad((dLossDTcK * dTcdOmegaLog + omegaLogGradBoost) * dOmegaLogdOut2);
         dLdOut[3] = clipGrad(2 * confError * 0.05);
         // out[4] → λ: Tc chain rule through Allen-Dynes + direct λ supervision
+        // hetero coefficient matches the 0.01 weight in the loss above
         dLdOut[4] = clipGrad(
-          (dLossDTcK * dTcdLambda + (2 * lambdaError * 0.1 + 0.05 * 2 * lambdaError / lambdaVarNorm))
+          (dLossDTcK * dTcdLambda + (2 * lambdaError * 0.1 + 0.01 * 2 * lambdaError / lambdaVarNorm))
           * dLambdadOut4
         );
         dLdOut[5] = clipGrad(2 * bgError * 0.05);
@@ -2945,8 +2953,8 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
         const dLdLambdaVarNorm = -(lambdaError * lambdaError) / (lambdaVarNorm * lambdaVarNorm) + 1.0 / lambdaVarNorm;
 
         const dLdLogVarOut = new Array(OUTPUT_DIM).fill(0);
-        dLdLogVarOut[2] = clipGrad(0.1 * dLdTcVarNorm * spGradTc);
-        dLdLogVarOut[4] = clipGrad(0.05 * dLdLambdaVarNorm * spGradLambda);
+        dLdLogVarOut[2] = clipGrad(0.02 * dLdTcVarNorm * spGradTc);
+        dLdLogVarOut[4] = clipGrad(0.01 * dLdLambdaVarNorm * spGradLambda);
 
         for (let i = 0; i < weights.W_mlp2.length; i++) {
           for (let j = 0; j < weights.W_mlp2[i].length; j++) {

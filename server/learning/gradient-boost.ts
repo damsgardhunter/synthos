@@ -849,14 +849,23 @@ function leafValue(residuals: number[], indices: number[]): number {
   return indices.reduce((s, i) => s + residuals[i], 0) / indices.length;
 }
 
-function buildTree(
+async function buildTree(
   X: number[][],
   residuals: number[],
   indices: number[],
   depth: number,
   maxDepth: number,
-  minSamples: number
-): TreeNode | number {
+  minSamples: number,
+  yieldCounter: { n: number } = { n: 0 }
+): Promise<TreeNode | number> {
+  // Yield every 300 recursive calls so the event loop can handle HTTP requests
+  // between subtree builds. At depth 6-7 with large datasets this prevents
+  // 5-15s event-loop freezes.
+  yieldCounter.n++;
+  if (yieldCounter.n % 300 === 0) {
+    await new Promise<void>(r => setTimeout(r, 0));
+  }
+
   const clampedMaxDepth = Math.min(maxDepth, MAX_TREE_DEPTH);
   if (depth >= clampedMaxDepth || indices.length < minSamples) {
     return leafValue(residuals, indices);
@@ -900,8 +909,8 @@ function buildTree(
   return {
     featureIndex: bestFeature,
     threshold: bestThreshold,
-    left: buildTree(X, residuals, bestLeftIdx, depth + 1, clampedMaxDepth, minSamples),
-    right: buildTree(X, residuals, bestRightIdx, depth + 1, clampedMaxDepth, minSamples),
+    left: await buildTree(X, residuals, bestLeftIdx, depth + 1, clampedMaxDepth, minSamples, yieldCounter),
+    right: await buildTree(X, residuals, bestRightIdx, depth + 1, clampedMaxDepth, minSamples, yieldCounter),
   };
 }
 
@@ -981,7 +990,7 @@ export async function trainGradientBoosting(
     const residualMSE = residuals.reduce((s, r) => s + r * r, 0) / nTrain;
     if (residualMSE < RESIDUAL_EPSILON) break;
 
-    const tree = buildTree(trainX, residuals, allTrainIndices, 0, maxDepth, 12);
+    const tree = await buildTree(trainX, residuals, allTrainIndices, 0, maxDepth, 12);
     if (typeof tree === "number") break;
 
     trees.push(tree);

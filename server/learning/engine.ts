@@ -5986,8 +5986,8 @@ async function runAutonomousFastPath() {
     if (cycleCount - lastTheoryDiscoveryCycle >= 15 && cycleCount % 15 === 0) {
       try {
         const synthDataset = await generateSyntheticDataset(40);
-        // Reduced config: 20 gen × 60 pop to limit event-loop block (was 60gen × 100pop)
-        const theories = runSymbolicPhysicsDiscovery(synthDataset, { generations: 20, populationSize: 60 });
+        // Async with yields every 5 gen — prevents event-loop freeze (was 60gen × 100pop sync)
+        const theories = await runSymbolicPhysicsDiscovery(synthDataset, { generations: 20, populationSize: 60 });
         lastTheoryDiscoveryCycle = cycleCount;
         if (theories.length > 0) {
           const allTheories = getTheoryDatabase();
@@ -6038,7 +6038,7 @@ async function runAutonomousFastPath() {
           causalDataset = await generateCausalDataset(Math.max(60, gtSummary.totalDatapoints));
         }
 
-        const causalResult = runCausalDiscovery(causalDataset);
+        const causalResult = await runCausalDiscovery(causalDataset);
         lastCausalDiscoveryCycle = cycleCount;
         if (causalResult.designGuidance.length > 0) {
           causalDesignGuidance = causalResult.designGuidance.map(g => ({

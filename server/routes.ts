@@ -744,13 +744,14 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.get("/api/research-strategy", async (_req, res) => {
     try {
-      const result = await cache.getOrSet(CACHE_KEYS.STRATEGY_LATEST, TTL.STRATEGY, async () => {
+      const result = await cache.getOrSetStale(CACHE_KEYS.STRATEGY_LATEST, TTL.STRATEGY, async () => {
         const strategy = await storage.getLatestStrategy();
         return strategy || null;
       });
       res.json(result);
     } catch (e) {
-      res.status(500).json({ error: "Failed to fetch research strategy" });
+      // Return null gracefully — the engine hasn't written a strategy yet or DB is busy
+      res.json(null);
     }
   });
 
@@ -758,12 +759,13 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     try {
       const limit = Math.min(Number(req.query.limit) || 20, 100);
       const cacheKey = `${CACHE_KEYS.STRATEGY_HISTORY}:${limit}`;
-      const result = await cache.getOrSet(cacheKey, TTL.STRATEGY, async () => {
+      const result = await cache.getOrSetStale(cacheKey, TTL.STRATEGY, async () => {
         return storage.getStrategyHistory(limit);
       });
       res.json(result);
     } catch (e) {
-      res.status(500).json({ error: "Failed to fetch strategy history" });
+      // Return empty array gracefully — DB busy or no history yet
+      res.json([]);
     }
   });
 

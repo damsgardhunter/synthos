@@ -1448,21 +1448,30 @@ class CausalDiscoveryStore {
 
 const discoveryStore = new CausalDiscoveryStore();
 
-export function runCausalDiscovery(dataset: CausalDataRecord[]): {
+export async function runCausalDiscovery(dataset: CausalDataRecord[]): Promise<{
   graph: CausalGraph;
   hypotheses: CausalMechanismHypothesis[];
   rules: CausalRule[];
   crossFamilyValidation: CrossFamilyValidation[];
   designGuidance: DesignGuidance[];
   pressureComparison: PressureRegimeComparison;
-} {
+}> {
   discoveryStore.incrementRuns();
 
+  // Yield between each major phase so HTTP requests aren't blocked during
+  // the 3-8s causal graph discovery run.
+  const yieldNow = () => new Promise<void>(r => setTimeout(r, 0));
+
   const graph = discoverCausalGraph(dataset);
+  await yieldNow();
   const hypotheses = generateMechanismHypotheses(graph, dataset);
+  await yieldNow();
   const rules = extractCausalRules(graph, dataset);
+  await yieldNow();
   const crossFamilyValidation = validateAcrossFamilies(graph, dataset);
+  await yieldNow();
   const designGuidance = generateDesignGuidance(graph, dataset);
+  await yieldNow();
   const pressureComparison = comparePressureRegimes(dataset, graph);
 
   discoveryStore.addGraph(graph);

@@ -911,10 +911,10 @@ const theoryDatabase: DiscoveredTheory[] = [];
 let totalDiscoveryRuns = 0;
 let totalEquationsEvaluated = 0;
 
-export function runSymbolicPhysicsDiscovery(
+export async function runSymbolicPhysicsDiscovery(
   dataset: PhysicsDiscoveryRecord[],
   config: Partial<SymbolicDiscoveryConfig> = {},
-): DiscoveredTheory[] {
+): Promise<DiscoveredTheory[]> {
   const cfg = { ...DEFAULT_CONFIG, ...config };
   const target = cfg.targetVariable;
   totalDiscoveryRuns++;
@@ -943,6 +943,12 @@ export function runSymbolicPhysicsDiscovery(
   const discovered: DiscoveredTheory[] = [];
 
   for (let gen = 0; gen < cfg.generations; gen++) {
+    // Yield to the event loop every 5 generations so HTTP requests aren't starved
+    // during the 2-4s symbolic discovery run (20 gen × 60 pop).
+    if (gen > 0 && gen % 5 === 0) {
+      await new Promise<void>(r => setTimeout(r, 0));
+    }
+
     const fitnesses = population.map(tree => {
       totalEquationsEvaluated++;
       return computeEquationFitness(tree, dataset, target, cfg);
