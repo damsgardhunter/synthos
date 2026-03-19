@@ -731,8 +731,9 @@ export async function startGNNLoop(): Promise<void> {
   // Delayed 30s so XGB/ML/DFT loops can claim their DB connections first.
   // Regular dispatched jobs use a 5k-sample subset; startup gets the full corpus once.
   // Fire-and-forget so job polling starts immediately.
-  delay(30_000).then(() => runStartupFullCorpusTraining()).catch(err =>
-    console.error("[GNN-GCP] Startup corpus training error:", err?.message ?? String(err)));
+  new Promise<void>(r => setTimeout(r, 30_000))
+    .then(() => runStartupFullCorpusTraining())
+    .catch(err => console.error("[GNN-GCP] Startup corpus training error:", err?.message ?? String(err)));
 
   while (running) {
     try {
