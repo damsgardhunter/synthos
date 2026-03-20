@@ -2978,6 +2978,10 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
     const lr = LR_INIT * (0.1 + 0.9 * 0.5 * (1 + Math.cos(Math.PI * epoch / epochs)));
     let totalLoss = 0;
     let totalSamples = 0;
+    let tcSumErr2 = 0;    // sum of (predictedTcK - actualTcK)² — SC samples only
+    let tcSumActual = 0;  // sum of actualTcK — for R² SS_tot
+    let tcSumActual2 = 0; // sum of actualTcK² — for R² SS_tot
+    let nTcSamples = 0;   // count of SC samples seen
 
     // Stratified shuffle: interleave high-Tc samples so every batch sees them.
     // Shuffle each bucket independently, then interleave high-Tc evenly through others.
@@ -3091,6 +3095,16 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         // This ensures message-passing layers receive meaningful gradient every step.
         // Allen-Dynes path is retained as physics constraint (λ/ω_log stay calibrated).
         // Direct path loss is added to totalLoss here; Allen-Dynes loss added after adTc.
+        // Track Tc predictions in Kelvin for inline R²/RMSE reporting.
+        if (sample.tc > 0) {
+          const predTcK = softplus(cache.outRaw[8] ?? 0) * 30;
+          const actTcK  = sample.qeDFPTTc ?? sample.tc;
+          tcSumErr2    += (predTcK - actTcK) ** 2;
+          tcSumActual  += actTcK;
+          tcSumActual2 += actTcK * actTcK;
+          nTcSamples++;
+        }
+
         const directOut8 = cache.outRaw[8] ?? 0;
         // Logit-space MSE: target out[8] directly rather than softplus(out[8]).
         // Softplus-space MSE caused out[8] to explode: non-SC target=0 but softplus>0 always,
@@ -3527,7 +3541,15 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
       const bar = _gnnBar(epoch, epochs);
       const pct = Math.round(100 * (epoch + 1) / epochs);
       const pfx = label ? `[GNN|${label}]` : '[GNN]';
-      console.log(`${pfx} ${bar} ${String(pct).padStart(3)}% | Epoch ${epoch + 1}/${epochs} | loss=${avgLoss.toFixed(4)} | lr=${lr.toExponential(2)}`);
+      let r2Str = '?.???', rmseStr = '???K';
+      if (nTcSamples > 1) {
+        const ssTot = tcSumActual2 - (tcSumActual * tcSumActual) / nTcSamples;
+        const r2 = ssTot > 0 ? 1 - tcSumErr2 / ssTot : 0;
+        const rmse = Math.sqrt(tcSumErr2 / nTcSamples);
+        r2Str   = r2.toFixed(3);
+        rmseStr = `${rmse.toFixed(1)}K`;
+      }
+      console.log(`${pfx} ${bar} ${String(pct).padStart(3)}% | Epoch ${epoch + 1}/${epochs} | loss=${avgLoss.toFixed(4)} | R²=${r2Str} RMSE=${rmseStr} | lr=${lr.toExponential(2)}`);
     }
 
     // yield after each training epoch so heartbeat timers and HTTP requests can proceed
