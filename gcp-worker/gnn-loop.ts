@@ -344,13 +344,16 @@ async function loadQEDatasetSamples(existingFormulas: Set<string>): Promise<Trai
       const omegaLogCm1 = row.omega_log != null ? Number(row.omega_log) : null;
       const omegaLogK = omegaLogCm1 != null && omegaLogCm1 > 0 ? omegaLogCm1 * 1.4388 : undefined;
       const muStar = row.mu_star != null ? Number(row.mu_star) : undefined;
+      const bgRaw = row.band_gap != null ? Number(row.band_gap) : null;
       samples.push({
         formula: row.material,
         tc: Number(row.tc) || 0,
         formationEnergy: row.formation_energy != null ? Number(row.formation_energy) : undefined,
+        bandgap: bgRaw != null && Number.isFinite(bgRaw) && bgRaw >= 0 ? bgRaw : undefined,
         lambda: row.lambda != null ? Number(row.lambda) : undefined,
         omegaLog: omegaLogK != null && Number.isFinite(omegaLogK) ? omegaLogK : undefined,
         muStar: muStar != null && Number.isFinite(muStar) && muStar > 0 ? muStar : undefined,
+        dataConfidence: "dft-verified", // QE entries are real DFT — unlock 5× loss weight
         structure: undefined,
         prototype: undefined,
       });
@@ -375,8 +378,10 @@ async function loadSuperconExternalSamples(existingFormulas: Set<string>, limit 
     // raw_data->>'mu_star' extracts μ* if the source stored it (rare, but future-proof).
     const rows = await db.execute(
       `SELECT formula, tc, lambda, space_group, crystal_system,
-              (raw_data->>'wlog_K')::real   AS omega_log_k,
-              (raw_data->>'mu_star')::real  AS raw_mu_star
+              (raw_data->>'wlog_K')::real                        AS omega_log_k,
+              (raw_data->>'mu_star')::real                       AS raw_mu_star,
+              (raw_data->>'formation_energy_per_atom')::real     AS fe_per_atom,
+              (raw_data->>'formation_energy')::real              AS fe_total
        FROM supercon_external_entries
        WHERE is_superconductor = true AND tc > 0
        ORDER BY tc DESC
@@ -399,9 +404,15 @@ async function loadSuperconExternalSamples(existingFormulas: Set<string>, limit 
         ? muStarRaw : undefined;
       const spaceGroup = row.space_group as string | null;
       const crystalSystem = row.crystal_system as string | null;
+      // Extract formation energy from JARVIS raw_data — prefer per_atom field, fall back to total.
+      const feRaw = row.fe_per_atom != null ? Number(row.fe_per_atom)
+                  : row.fe_total    != null ? Number(row.fe_total) : null;
+      const formationEnergy = feRaw != null && Number.isFinite(feRaw) && feRaw > -20 && feRaw < 5
+        ? feRaw : undefined;
       samples.push({
         formula,
         tc,
+        formationEnergy,
         lambda: lambda != null && Number.isFinite(lambda) ? lambda : undefined,
         omegaLog,
         muStar,
