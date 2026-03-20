@@ -708,7 +708,7 @@ const STARTUP_CKPT_TTL_HOURS = 20; // checkpoints older than this are stale
 // Increment this whenever the GNN forward pass formula changes in a way that
 // makes old weights incompatible with the new code (e.g. hard-cap → sigmoid).
 // When the stored version doesn't match, startup retrains from scratch.
-const GNN_MODEL_VERSION = 8; // v8: logit-space MSE for out[8] — fixes softplus gradient explosion (2026-03-20)
+const GNN_MODEL_VERSION = 9; // v9: log1p-normalised sigmoid MSE, remove heuristic aux losses (2026-03-20)
 
 // In-process guard: run corpus training exactly once per GCP worker process lifetime.
 let _startupCorpusRan = false;

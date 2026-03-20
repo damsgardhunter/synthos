@@ -246,6 +246,11 @@ const FIXED_MU_STAR = 0.10;
 const LAMBDA_MAX = 5.5;
 // Allen-Dynes formula is unconventional above ~300 K; cap predictions at training normalization ceiling.
 const TC_MAX_K = 300;
+// log1p normalisation for Tc regression:
+//   target  = log1p(Tc / 10) / TC_LOG_SCALE  ∈ [0, 1]
+//   inverse = 10 * expm1(sigmoid(out[8]) * TC_LOG_SCALE) → Tc in K
+// Compresses the 0–300 K range logarithmically; no arbitrary scale factor needed.
+const TC_LOG_SCALE = Math.log1p(TC_MAX_K / 10);  // log1p(30) ≈ 3.434
 // Absolute ceiling on ω_log — even high-pressure hydrides (H₃S, LaH₁₀) have ω_log < 1500 K.
 const OMEGA_LOG_MAX = 1500;              // 6 composition + 7 XGBoost-inspired composition + 6 physics (λ, logω, DOS, FE, isCuprate, isIronBased)
 const CGCNN_CONCAT_DIM = HIDDEN_DIM * 2 + EDGE_DIM;
@@ -2402,12 +2407,10 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
   // Hard min(LAMBDA_MAX, softplus(x)) had zero derivative when softplus(x) ≥ LAMBDA_MAX,
   // which caused permanent gradient death once training pushed λ to the cap.
   const lambdaRaw = LAMBDA_MAX * sigmoid(sf(out[4] ?? 0));
-  // out[8] → direct Tc prediction via softplus. No Allen-Dynes blend.
-  // Allen-Dynes with saturated λ≈5.5 gives ~228K constant — blending it in poisons
-  // every prediction with a 68K bias regardless of material (R²≈-99 observed in v6).
-  // softplus ensures gradient is non-zero everywhere: d(softplus)/dx = sigmoid(x).
-  const directTcK = softplus(sf(out[8] ?? 0)) * 30;
-  const predictedTcRaw = directTcK;
+  // out[8] → Tc via log1p-normalised sigmoid.
+  // sigmoid maps out[8] to (0,1); inverse log1p maps back to Tc in K.
+  // No arbitrary scale factors — TC_LOG_SCALE = log1p(TC_MAX_K/10) is derived from TC_MAX_K.
+  const predictedTcRaw = 10 * Math.expm1(sigmoid(sf(out[8] ?? 0)) * TC_LOG_SCALE);
   const confidenceRaw = sigmoid(sf(out[3] ?? 0));
   const bandgapRaw = sigmoid(sf(out[5] ?? 0)) * 5.0;
   const dosProxyRaw = softplus(sf(out[6] ?? 0));
@@ -2583,9 +2586,8 @@ function GNNPredictForTraining(graph: CrystalGraph, weights: GNNWeights): { pred
   const omegaLog = 10 + (OMEGA_LOG_MAX - 10) * sigmoid(omegaLogRaw / 3);
   // out[4] → λ: sigmoid soft map into (0, LAMBDA_MAX) — gradient everywhere.
   const lambdaRaw = LAMBDA_MAX * sigmoid(sf(out[4] ?? 0));
-  // out[8] → direct Tc via softplus (no Allen-Dynes blend — see GNNPredict for rationale).
-  const directTcK = softplus(sf(out[8] ?? 0)) * 30;
-  const predictedTcRaw = directTcK;
+  // out[8] → Tc via log1p-normalised sigmoid (see GNNPredict for rationale).
+  const predictedTcRaw = 10 * Math.expm1(sigmoid(sf(out[8] ?? 0)) * TC_LOG_SCALE);
   const confidenceRaw = sigmoid(sf(out[3] ?? 0));
   const bandgapRaw = sigmoid(sf(out[5] ?? 0)) * 5.0;
   const dosProxyRaw = softplus(sf(out[6] ?? 0));
@@ -2682,10 +2684,9 @@ function initWeights(rng: () => number): GNNWeights {
       // out[4] → λ via sigmoid(x): bias -1.5 → sigmoid(-1.5)≈0.18 → λ≈1.0 (typical phonon-mediated SC)
       // Without this, sigmoid(0)=0.5 → λ=2.75, immediately predicting Tc≈90K for all materials.
       b[4] = -1.5;
-      // out[8] → logit-space Tc. Bias=-2 → softplus(-2)*30 ≈ 3.5K (near non-SC target=-5,
-      // halfway toward mean SC logit ~1-3). Avoids initial explosion from b[8]=0 where
-      // SC gradients (-1 each) would immediately dominate and push out[8] upward.
-      b[8] = -2.0;
+      // out[8] → log1p-normalised sigmoid Tc. Bias=0 → sigmoid(0)=0.5 →
+      // 10*expm1(0.5*TC_LOG_SCALE) ≈ 45K — near the mean of high-Tc SC training data.
+      b[8] = 0.0;
       return b;
     })(),
     W_mlp2_var: initMatrix(OUTPUT_DIM, HIDDEN_DIM, rng, 0.05),
@@ -2868,7 +2869,6 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
 
   const graphCache = new Map<string, CrystalGraph>();
   const origEmbeddings = new Map<string, number[][]>();
-  const lambdaTargets = new Map<number, number>();
   for (let si = 0; si < trainingData.length; si++) {
     const sample = trainingData[si];
     const key = graphCacheKey(sample.formula, sample.prototype, sample.structure);
@@ -2884,16 +2884,6 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         : buildCrystalGraph(sample.formula, sample.structure, sample.pressureGpa, sampleHints);
       graphCache.set(key, g);
       origEmbeddings.set(key, g.nodes.map(n => [...n.embedding]));
-    }
-    if (sample.lambda != null && sample.lambda > 0) {
-      lambdaTargets.set(si, Math.min(4.0, sample.lambda));
-    } else {
-      try {
-        const lp = predictLambda(sample.formula, sample.pressureGpa ?? 0);
-        if (lp && lp.lambda > 0 && lp.confidence >= 0.5) {
-          lambdaTargets.set(si, Math.min(4.0, lp.lambda));
-        }
-      } catch {}
     }
   }
 
@@ -3059,45 +3049,20 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
 
         // Prefer DFPT-derived Tc (from real QE λ) over the ML-estimated value when available.
         const tcTarget = (sample.qeDFPTTc != null ? sample.qeDFPTTc : sample.tc) / 300;
-        const tcForWeight = sample.qeDFPTTc ?? sample.tc;
         const hasFormationEnergy = sample.formationEnergy != null;
         const feTarget = hasFormationEnergy ? sample.formationEnergy! : 0;
         // Weighted loss: high-Tc (discovery targets) are rare so up-weight them.
         // >100K: 4× (room-T SCs), 40-100K: 3×, >0: 2× (counteract contrast imbalance), =0: 1×
         // DFT-verified labels carry 5× the base weight — they are the ground truth.
-        const dftMult = sample.dataConfidence === "dft-verified" ? 5.0 : 1.0;
-        const scWeight = dftMult * (tcForWeight >= 100 ? 4.0 : tcForWeight >= 40 ? 3.0 : tcForWeight > 0 ? 2.0 : 1.0);
         const feError = hasFormationEnergy ? pred.formationEnergy - feTarget : 0;
-
-        // Prefer DFT-calculated phonon stability when available; fall back to Tc>0 heuristic.
-        const phononTarget = sample.phononStable != null ? (sample.phononStable ? 1.0 : 0.0) : (sample.tc > 0 ? 1.0 : 0.0);
-        const phononPred = pred.phononStability ? 1.0 : 0.0;
-        const phononError = phononPred - phononTarget;
-
-        const confTarget = Math.min(1.0, sample.tc > 0 ? 0.8 : 0.3);
-        const confError = pred.confidence - confTarget;
-
-        const lambdaTarget = lambdaTargets.has(idx) ? lambdaTargets.get(idx)!
-          : (sample.tc > 0 ? Math.min(4.0, 0.3 + Math.sqrt(sample.tc / 40)) : 0.1);
-        const lambdaError = pred.lambda - lambdaTarget;
-
-        const bgTarget = sample.bandgap ?? (sample.tc > 0 ? 0 : 1.5);
-        const bgError = pred.bandgap - bgTarget;
-        const dosTarget = sample.tc > 0 ? Math.min(5.0, sample.tc / 30) : 0.3;
-        const dosError = pred.dosProxy - dosTarget;
-        const stabTarget = sample.tc > 0 ? 0.8 : 0.3;
-        const stabError = pred.stabilityProbability - stabTarget;
+        // Bandgap: real measured value when available, otherwise skip.
+        const bgTarget = sample.bandgap ?? null;
+        const bgError  = bgTarget != null ? pred.bandgap - bgTarget : 0;
 
         const feWeight = hasFormationEnergy ? 0.1 : 0.0;
-        // Dual-path Tc loss: Allen-Dynes (0.3×) + Direct out[8] (1.0×).
-        // Direct path: out[8] predicts tc/30. Gradient magnitude = scWeight*2*directErr
-        //   = up to ±2 (clipped to ±1) → 2000× larger than Allen-Dynes chain (≈0.0004).
-        // This ensures message-passing layers receive meaningful gradient every step.
-        // Allen-Dynes path is retained as physics constraint (λ/ω_log stay calibrated).
-        // Direct path loss is added to totalLoss here; Allen-Dynes loss added after adTc.
         // Track Tc predictions in Kelvin for inline R²/RMSE reporting.
         if (sample.tc > 0) {
-          const predTcK = softplus(cache.outRaw[8] ?? 0) * 30;
+          const predTcK = 10 * Math.expm1(sigmoid(cache.outRaw[8] ?? 0) * TC_LOG_SCALE);
           const actTcK  = sample.qeDFPTTc ?? sample.tc;
           tcSumErr2    += (predTcK - actTcK) ** 2;
           tcSumActual  += actTcK;
@@ -3106,19 +3071,17 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         }
 
         const directOut8 = cache.outRaw[8] ?? 0;
-        // Logit-space MSE: target out[8] directly rather than softplus(out[8]).
-        // Softplus-space MSE caused out[8] to explode: non-SC target=0 but softplus>0 always,
-        // so non-SC gradient=+0.693/sample while SC gradient clips to -1/sample. When SC
-        // outnumber non-SC×0.693, the SC upward pull dominates and out[8]→+∞ (TC_MAX_K clamp).
-        // In logit space both SC and non-SC clip to ±1, giving a stable equilibrium.
-        // SC:    logit target = softplus_inv(tc/30) = log(exp(tc/30) - 1)
-        // Non-SC: logit target = -5 → softplus(-5)*30 ≈ 0.2K ≈ 0
-        const tc30 = tcTarget * 10;  // == tc / 30
-        const tcLogitTarget = (tc30 > 0.01)
-          ? Math.log(Math.expm1(tc30) < 1e-9 ? 1e-9 : Math.expm1(tc30))
-          : -5.0;
-        const directErr = directOut8 - tcLogitTarget;
-        const directLoss = scWeight * directErr * directErr;
+        // Log1p-normalised sigmoid MSE — the only principled loss term for Tc regression.
+        // target = log1p(Tc/10) / TC_LOG_SCALE ∈ [0,1] for Tc ∈ [0, TC_MAX_K].
+        // sigmoid(out[8]) is the prediction in the same [0,1] space.
+        // log1p compresses the Tc range naturally — no need for arbitrary scWeight tiers.
+        // Simple 3× upweight for SC vs non-SC to counteract dataset imbalance.
+        const actualTcK   = sample.qeDFPTTc ?? sample.tc;
+        const directTarget = Math.log1p(actualTcK / 10) / TC_LOG_SCALE;
+        const directPred   = sigmoid(directOut8);
+        const scW          = actualTcK > 0 ? 3.0 : 1.0;
+        const directErr    = directPred - directTarget;
+        const directLoss   = scW * directErr * directErr;
         totalLoss += feWeight * feError * feError + directLoss;
         totalSamples++;
 
@@ -3135,9 +3098,9 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         const adLambda       = LAMBDA_MAX * adLambdaSig;
         // omegaLog is in Kelvin; divide by 1.4388 to match the forward-pass unit fix
         const adTc           = allenDynesTcRaw(adLambda, adOmegaLog / 1.4388, FIXED_MU_STAR);
-        // Allen-Dynes path loss (0.3× weight): physics constraint on λ/ω_log
+        // Allen-Dynes auxiliary loss (0.1× weight): soft physics prior keeping λ/ω_log calibrated.
         const allenDynesError = adTc / 300 - tcTarget;
-        totalLoss += 0.3 * scWeight * allenDynesError * allenDynesError;
+        totalLoss += 0.1 * scW * allenDynesError * allenDynesError;
         // Use material-specific μ* from DFPT (JARVIS/QE) when available; fall back to 0.10.
         // Improves gradient accuracy for cuprates (μ*~0.15) and hydrides (μ*~0.08).
         const sampleMuStar = (sample.muStar != null && Number.isFinite(sample.muStar) && sample.muStar > 0)
@@ -3160,44 +3123,33 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         const dfptOmegaLog = (sample.omegaLog != null && Number.isFinite(sample.omegaLog) && sample.omegaLog > 10)
           ? sample.omegaLog : null;
         if (dfptOmegaLog !== null) {
-          // Use measured ω_log directly — 3× weight vs. inferred target since it's ground truth.
+          // Measured DFPT ω_log: real ground truth, supervise directly.
           const omegaLogRelErr = (adOmegaLog - dfptOmegaLog) / dfptOmegaLog;
-          totalLoss += 0.3 * omegaLogRelErr * omegaLogRelErr;
-          omegaLogGradBoost = 0.6 * omegaLogRelErr / dfptOmegaLog;
-        } else if (sample.tc > 0 && lambdaTarget > 0) {
-          // Fall back: invert Allen-Dynes from (Tc_target, λ_target) to estimate ω_log target.
-          // Only reliable when Tc>0 and the McMillan denominator is well-defined.
-          const adDtarget = lambdaTarget * (1 - 0.62 * sampleMuStar) - sampleMuStar;
-          if (adDtarget > 0.05) {
-            const omegaLogTarget = 1.2 * sample.tc * Math.exp(1.04 * (1 + lambdaTarget) / adDtarget);
-            if (Number.isFinite(omegaLogTarget) && omegaLogTarget > 10 && omegaLogTarget < 4000) {
-              const omegaLogRelErr = (adOmegaLog - omegaLogTarget) / omegaLogTarget;
-              totalLoss += 0.1 * omegaLogRelErr * omegaLogRelErr;
-              omegaLogGradBoost = 0.2 * omegaLogRelErr / omegaLogTarget;
-            }
-          }
+          totalLoss += 0.1 * omegaLogRelErr * omegaLogRelErr;
+          omegaLogGradBoost = 0.2 * omegaLogRelErr / dfptOmegaLog;
         }
 
-        // Allen-Dynes gradient (0.3× weight — auxiliary physics path)
-        const dLossDAd = 0.3 * scWeight * 2 * allenDynesError / 300;
+        // Allen-Dynes auxiliary: 0.1× weight — soft physics prior on λ/ω_log outputs.
+        // Not used for Tc prediction (no blend), only keeps λ and ω_log physically calibrated.
+        const dLossDAd = 0.1 * scW * 2 * allenDynesError / 300;
 
         const dLdOut = new Array(OUTPUT_DIM).fill(0);
+        // out[0] → formation energy: real DFT target when available.
         dLdOut[0] = hasFormationEnergy ? clipGrad(2 * feError * 0.1) : 0;
-        dLdOut[1] = clipGrad(2 * phononError * 0.05);
-        // out[2] → ω_log: Allen-Dynes chain (0.3×) + direct ω_log supervision
+        // out[1], [3], [6], [7]: phonon/confidence/DOS/stability — heuristic boolean targets
+        // derived from tc>0 flag, not real measurements. Removed to reduce noise.
+        dLdOut[1] = 0;
+        // out[2] → ω_log via Allen-Dynes chain + direct DFPT supervision if available.
         dLdOut[2] = clipGrad((dLossDAd * dTcdOmegaLog + omegaLogGradBoost) * dOmegaLogdOut2);
-        dLdOut[3] = clipGrad(2 * confError * 0.05);
-        // out[4] → λ: Allen-Dynes chain (0.3×) + direct λ supervision (MSE)
-        dLdOut[4] = clipGrad(
-          (dLossDAd * dTcdLambda + 2 * lambdaError * 0.1)
-          * dLambdadOut4
-        );
-        dLdOut[5] = clipGrad(2 * bgError * 0.05);
-        dLdOut[6] = clipGrad(2 * dosError * 0.05);
-        dLdOut[7] = clipGrad(2 * stabError * 0.05);
-        // out[8] → logit-space MSE: gradient = scWeight * 2 * (out[8] - logitTarget)
-        // No sigmoid factor — loss is on the logit directly, not on softplus(logit).
-        dLdOut[8] = clipGrad(scWeight * 2 * directErr);
+        dLdOut[3] = 0;
+        // out[4] → λ via Allen-Dynes chain only (removed heuristic lambda MSE target).
+        dLdOut[4] = clipGrad(dLossDAd * dTcdLambda * dLambdadOut4);
+        dLdOut[5] = clipGrad(2 * bgError * 0.05);  // bandgap when real data available
+        dLdOut[6] = 0;
+        dLdOut[7] = 0;
+        // out[8] → log1p-normalised sigmoid MSE, exact sigmoid derivative.
+        const sigOut8 = sigmoid(directOut8);
+        dLdOut[8] = clipGrad(scW * 2 * directErr * sigOut8 * (1 - sigOut8));
 
         // Uncertainty head (W_mlp2_var) receives no gradient — NLL removed.
         // Uncertainty outputs can be calibrated post-training via isotonic regression.
