@@ -2682,10 +2682,10 @@ function initWeights(rng: () => number): GNNWeights {
       // out[4] → λ via sigmoid(x): bias -1.5 → sigmoid(-1.5)≈0.18 → λ≈1.0 (typical phonon-mediated SC)
       // Without this, sigmoid(0)=0.5 → λ=2.75, immediately predicting Tc≈90K for all materials.
       b[4] = -1.5;
-      // out[8] → direct Tc/30 prediction. Bias=0 → initial prediction=0K for all materials.
-      // For SC samples (tc>0), directErr = 0 - tc/30 gives a strong negative gradient (push up).
-      // For non-SC samples (tc=0), directErr = 0 → no gradient (already correct). Ideal init.
-      b[8] = 0.0;
+      // out[8] → logit-space Tc. Bias=-2 → softplus(-2)*30 ≈ 3.5K (near non-SC target=-5,
+      // halfway toward mean SC logit ~1-3). Avoids initial explosion from b[8]=0 where
+      // SC gradients (-1 each) would immediately dominate and push out[8] upward.
+      b[8] = -2.0;
       return b;
     })(),
     W_mlp2_var: initMatrix(OUTPUT_DIM, HIDDEN_DIM, rng, 0.05),
@@ -3092,8 +3092,18 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         // Allen-Dynes path is retained as physics constraint (λ/ω_log stay calibrated).
         // Direct path loss is added to totalLoss here; Allen-Dynes loss added after adTc.
         const directOut8 = cache.outRaw[8] ?? 0;
-        const directPred30 = softplus(directOut8);                   // always positive, smooth
-        const directErr = directPred30 - tcTarget * 10;              // tcTarget*10 = tc/30
+        // Logit-space MSE: target out[8] directly rather than softplus(out[8]).
+        // Softplus-space MSE caused out[8] to explode: non-SC target=0 but softplus>0 always,
+        // so non-SC gradient=+0.693/sample while SC gradient clips to -1/sample. When SC
+        // outnumber non-SC×0.693, the SC upward pull dominates and out[8]→+∞ (TC_MAX_K clamp).
+        // In logit space both SC and non-SC clip to ±1, giving a stable equilibrium.
+        // SC:    logit target = softplus_inv(tc/30) = log(exp(tc/30) - 1)
+        // Non-SC: logit target = -5 → softplus(-5)*30 ≈ 0.2K ≈ 0
+        const tc30 = tcTarget * 10;  // == tc / 30
+        const tcLogitTarget = (tc30 > 0.01)
+          ? Math.log(Math.expm1(tc30) < 1e-9 ? 1e-9 : Math.expm1(tc30))
+          : -5.0;
+        const directErr = directOut8 - tcLogitTarget;
         const directLoss = scWeight * directErr * directErr;
         totalLoss += feWeight * feError * feError + directLoss;
         totalSamples++;
@@ -3171,9 +3181,9 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         dLdOut[5] = clipGrad(2 * bgError * 0.05);
         dLdOut[6] = clipGrad(2 * dosError * 0.05);
         dLdOut[7] = clipGrad(2 * stabError * 0.05);
-        // out[8] → direct Tc/30: primary Tc path, large gradient (up to ±1 after clip)
-        // d(softplus)/d(x) = sigmoid(x) — smooth, non-zero everywhere (no dead units)
-        dLdOut[8] = clipGrad(scWeight * 2 * directErr * sigmoid(directOut8));
+        // out[8] → logit-space MSE: gradient = scWeight * 2 * (out[8] - logitTarget)
+        // No sigmoid factor — loss is on the logit directly, not on softplus(logit).
+        dLdOut[8] = clipGrad(scWeight * 2 * directErr);
 
         // Uncertainty head (W_mlp2_var) receives no gradient — NLL removed.
         // Uncertainty outputs can be calibrated post-training via isotonic regression.
