@@ -2407,14 +2407,15 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
   // Hard min(LAMBDA_MAX, softplus(x)) had zero derivative when softplus(x) ≥ LAMBDA_MAX,
   // which caused permanent gradient death once training pushed λ to the cap.
   const lambdaRaw = LAMBDA_MAX * sigmoid(sf(out[4] ?? 0));
-  // out[8] → Tc via log1p-normalised sigmoid.
-  // sigmoid maps out[8] to (0,1); inverse log1p maps back to Tc in K.
-  // No arbitrary scale factors — TC_LOG_SCALE = log1p(TC_MAX_K/10) is derived from TC_MAX_K.
-  const predictedTcRaw = 10 * Math.expm1(sigmoid(sf(out[8] ?? 0)) * TC_LOG_SCALE);
+  // Two-stage v10: out[7] → P(SC); out[8] → Tc regression for SC materials only.
+  // predictedTc = P(SC) × 10×expm1(sigmoid(out[8])×TC_LOG_SCALE).
+  // Non-SC materials get predictedTc → 0 automatically via P(SC)→0.
+  const scProb = sigmoid(sf(out[7] ?? 0));
+  const predictedTcRaw = scProb * 10 * Math.expm1(sigmoid(sf(out[8] ?? 0)) * TC_LOG_SCALE);
   const confidenceRaw = sigmoid(sf(out[3] ?? 0));
   const bandgapRaw = sigmoid(sf(out[5] ?? 0)) * 5.0;
   const dosProxyRaw = softplus(sf(out[6] ?? 0));
-  const stabilityProbRaw = sigmoid(sf(out[7] ?? 0));
+  const stabilityProbRaw = scProb;  // out[7] now encodes P(SC)
   const safeLatent = latentEmbedding.map(v => Number.isFinite(v) ? v : 0);
 
   return {
@@ -2586,12 +2587,13 @@ function GNNPredictForTraining(graph: CrystalGraph, weights: GNNWeights): { pred
   const omegaLog = 10 + (OMEGA_LOG_MAX - 10) * sigmoid(omegaLogRaw / 3);
   // out[4] → λ: sigmoid soft map into (0, LAMBDA_MAX) — gradient everywhere.
   const lambdaRaw = LAMBDA_MAX * sigmoid(sf(out[4] ?? 0));
-  // out[8] → Tc via log1p-normalised sigmoid (see GNNPredict for rationale).
-  const predictedTcRaw = 10 * Math.expm1(sigmoid(sf(out[8] ?? 0)) * TC_LOG_SCALE);
+  // Two-stage v10: out[7] → P(SC); out[8] → Tc regression (see GNNPredict for rationale).
+  const scProb = sigmoid(sf(out[7] ?? 0));
+  const predictedTcRaw = scProb * 10 * Math.expm1(sigmoid(sf(out[8] ?? 0)) * TC_LOG_SCALE);
   const confidenceRaw = sigmoid(sf(out[3] ?? 0));
   const bandgapRaw = sigmoid(sf(out[5] ?? 0)) * 5.0;
   const dosProxyRaw = softplus(sf(out[6] ?? 0));
-  const stabilityProbRaw = sigmoid(sf(out[7] ?? 0));
+  const stabilityProbRaw = scProb;  // out[7] now encodes P(SC)
   const safeLatent = latentEmbedding.map(v => Number.isFinite(v) ? v : 0);
 
   const nodeEmbeddings = graph.nodes.map(n => [...n.embedding]);
@@ -2791,6 +2793,10 @@ export interface TrainingSample {
   bandgap?: number;
   /** Phonon stability from DFPT — true if all phonon modes positive; overrides tc>0 heuristic */
   phononStable?: boolean;
+  /** P(SC) from XGBoost binary classifier trained on the same dataset as the GNN.
+   *  Used as soft label for out[7] BCE loss so the GNN starts with an informed
+   *  SC/non-SC prior rather than learning the classification from scratch. */
+  xgbScProb?: number;
 }
 
 function structureHash(structure: any): string {
@@ -3059,30 +3065,41 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         const bgTarget = sample.bandgap ?? null;
         const bgError  = bgTarget != null ? pred.bandgap - bgTarget : 0;
 
-        const feWeight = hasFormationEnergy ? 0.1 : 0.0;
-        // Track Tc predictions in Kelvin for inline R²/RMSE reporting.
-        if (sample.tc > 0) {
-          const predTcK = 10 * Math.expm1(sigmoid(cache.outRaw[8] ?? 0) * TC_LOG_SCALE);
-          const actTcK  = sample.qeDFPTTc ?? sample.tc;
-          tcSumErr2    += (predTcK - actTcK) ** 2;
-          tcSumActual  += actTcK;
-          tcSumActual2 += actTcK * actTcK;
+        const feWeight   = hasFormationEnergy ? 0.1 : 0.0;
+        const actualTcK  = sample.qeDFPTTc ?? sample.tc;
+        const isSC       = actualTcK > 0;
+        const scW        = isSC ? 3.0 : 1.0;  // kept for Allen-Dynes auxiliary below
+        const directOut7 = cache.outRaw[7] ?? 0;
+        const directOut8 = cache.outRaw[8] ?? 0;
+
+        // Track Tc predictions in Kelvin for inline R²/RMSE reporting (two-stage).
+        if (isSC) {
+          const predTcK = sigmoid(directOut7) * 10 * Math.expm1(sigmoid(directOut8) * TC_LOG_SCALE);
+          tcSumErr2    += (predTcK - actualTcK) ** 2;
+          tcSumActual  += actualTcK;
+          tcSumActual2 += actualTcK * actualTcK;
           nTcSamples++;
         }
 
-        const directOut8 = cache.outRaw[8] ?? 0;
-        // Log1p-normalised sigmoid MSE — the only principled loss term for Tc regression.
-        // target = log1p(Tc/10) / TC_LOG_SCALE ∈ [0,1] for Tc ∈ [0, TC_MAX_K].
-        // sigmoid(out[8]) is the prediction in the same [0,1] space.
-        // log1p compresses the Tc range naturally — no need for arbitrary scWeight tiers.
-        // Simple 3× upweight for SC vs non-SC to counteract dataset imbalance.
-        const actualTcK   = sample.qeDFPTTc ?? sample.tc;
-        const directTarget = Math.log1p(actualTcK / 10) / TC_LOG_SCALE;
-        const directPred   = sigmoid(directOut8);
-        const scW          = actualTcK > 0 ? 3.0 : 1.0;
-        const directErr    = directPred - directTarget;
-        const directLoss   = scW * directErr * directErr;
-        totalLoss += feWeight * feError * feError + directLoss;
+        // ── v10 Two-stage loss ─────────────────────────────────────────────────
+        // Stage 1: out[7] → P(SC) via BCE. Applied to ALL samples.
+        //   Soft label from XGBoost binary classifier (or hard 0/1 fallback).
+        //   Gives the GNN an informed classification prior from the start.
+        // Stage 2: out[8] → Tc regression (log1p-normalised). ONLY for SC samples.
+        //   Zero gradient for non-SC — ends the tug-of-war that kept R² < 0 in v6–v9.
+        const scTarget = sample.xgbScProb != null ? sample.xgbScProb : (isSC ? 1.0 : 0.0);
+        const sigOut7  = sigmoid(directOut7);
+        const bceClamp = Math.max(1e-7, Math.min(1 - 1e-7, sigOut7));
+        const bceLoss  = -(scTarget * Math.log(bceClamp) + (1 - scTarget) * Math.log(1 - bceClamp));
+        totalLoss += feWeight * feError * feError + bceLoss;
+        // Tc regression — SC samples only; store intermediates for backward pass.
+        let tcDirectErr = 0, tcSigOut8 = 0;
+        if (isSC) {
+          const directTarget = Math.log1p(actualTcK / 10) / TC_LOG_SCALE;
+          tcSigOut8   = sigmoid(directOut8);
+          tcDirectErr = tcSigOut8 - directTarget;
+          totalLoss  += 3.0 * tcDirectErr * tcDirectErr;
+        }
         totalSamples++;
 
         // ── Allen-Dynes chain-rule gradient setup ───────────────────────────────
@@ -3146,10 +3163,10 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         dLdOut[4] = clipGrad(dLossDAd * dTcdLambda * dLambdadOut4);
         dLdOut[5] = clipGrad(2 * bgError * 0.05);  // bandgap when real data available
         dLdOut[6] = 0;
-        dLdOut[7] = 0;
-        // out[8] → log1p-normalised sigmoid MSE, exact sigmoid derivative.
-        const sigOut8 = sigmoid(directOut8);
-        dLdOut[8] = clipGrad(scW * 2 * directErr * sigOut8 * (1 - sigOut8));
+        // out[7] → P(SC) via BCE gradient: d(BCE)/d(out7) = sigmoid(out7) - scTarget.
+        dLdOut[7] = clipGrad(sigOut7 - scTarget);
+        // out[8] → Tc regression gradient. Only for SC samples; zero for non-SC.
+        dLdOut[8] = isSC ? clipGrad(3.0 * 2 * tcDirectErr * tcSigOut8 * (1 - tcSigOut8)) : 0;
 
         // Uncertainty head (W_mlp2_var) receives no gradient — NLL removed.
         // Uncertainty outputs can be calibrated post-training via isotonic regression.
