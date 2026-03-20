@@ -9,6 +9,9 @@ User=root
 WorkingDirectory=/opt/quantum-alchemy
 EnvironmentFile=/etc/quantum-alchemy.env
 
+# Pull latest code from git before each start so restarts always run HEAD
+ExecStartPre=/usr/bin/git -C /opt/quantum-alchemy pull --ff-only
+
 # tsx runs TypeScript directly — no build step needed
 ExecStart=/usr/bin/npx tsx gcp-worker/index.ts
 
