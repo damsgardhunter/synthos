@@ -4871,7 +4871,7 @@ async function runPhase13_SynthesisReasoning() {
   }
 }
 
-async function runAutonomousDiscoveryCycle(formula: string, opts?: { skipDbDupCheck?: boolean; skipStructurePrediction?: boolean }): Promise<{ passed: boolean; tc: number; reason: string; physicsPred?: PhysicsPrediction }> {
+async function runAutonomousDiscoveryCycle(formula: string, opts?: { skipDbDupCheck?: boolean; skipStructurePrediction?: boolean; suppressLogs?: boolean }): Promise<{ passed: boolean; tc: number; reason: string; physicsPred?: PhysicsPrediction }> {
   try {
     if (typeof formula !== "string") {
       formula = String(formula ?? "");
@@ -4904,12 +4904,16 @@ async function runAutonomousDiscoveryCycle(formula: string, opts?: { skipDbDupCh
     const stabilityScreen = passesStabilityPreFilter(formula);
     if (!stabilityScreen.pass) {
       pipelineStageMetrics.stabilityPrefilterRejects++;
-      emit("log", {
-        phase: "autonomous-loop",
-        event: "Stability pre-filter rejected",
-        detail: `${formula}: ${stabilityScreen.reason}`,
-        dataSource: "Stability Predictor (GNN)",
-      });
+      // suppressLogs: used by SG sweep to prevent flooding the frontend WebSocket
+      // with hundreds of rejection messages per minute. Metrics are still recorded.
+      if (!opts?.suppressLogs) {
+        emit("log", {
+          phase: "autonomous-loop",
+          event: "Stability pre-filter rejected",
+          detail: `${formula}: ${stabilityScreen.reason}`,
+          dataSource: "Stability Predictor (GNN)",
+        });
+      }
       recordRejection(formula, `stability-prefilter: ${stabilityScreen.reason}`, 0);
       return { passed: false, tc: 0, reason: `stability-prefilter: ${stabilityScreen.reason}` };
     }
@@ -8826,15 +8830,25 @@ export async function startEngine() {
             await new Promise(r => setTimeout(r, 500));
           }
           try {
-            await runAutonomousDiscoveryCycle(candidate.formula, { skipDbDupCheck: true });
-            submitted++;
+            // suppressLogs: background sweep — don't flood the frontend WebSocket with
+            // hundreds of per-candidate rejection messages. Summary logged every 50.
+            const result = await runAutonomousDiscoveryCycle(candidate.formula, { skipDbDupCheck: true, suppressLogs: true });
+            if (result.passed) submitted++;
           } catch { /* non-fatal */ }
-          // Yield after every candidate (not just successes) so heartbeat stays alive.
-          // Use 100ms (not 20ms) to leave room for DB keepalive and pool recovery.
+          // Yield after every candidate so heartbeat and API requests stay responsive.
           await new Promise(r => setTimeout(r, 100));
           // Longer pause every 5 to let DB/GCP pollers run and pool recover
           if (sweepIdx % 5 === 0) {
             await new Promise(r => setTimeout(r, 500));
+          }
+          // Emit a single progress summary every 50 candidates — visible but not spammy.
+          if (sweepIdx % 50 === 0) {
+            emit("log", {
+              phase: "autonomous-loop",
+              event: "SG sweep progress",
+              detail: `${sweepIdx}/${candidates.length} screened, ${submitted} passed`,
+              dataSource: "SG Sweep",
+            });
           }
         }
         console.log(`[Engine] SG sweep complete: ${submitted}/${candidates.length} candidates evaluated`);
