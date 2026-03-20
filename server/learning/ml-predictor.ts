@@ -389,6 +389,19 @@ export interface DisorderContext {
 }
 
 export async function extractFeatures(formula: string, mat?: Partial<Material>, physics?: PhysicsContext, crystal?: CrystalContext, dftData?: DFTResolvedFeatures, disorderCtx?: DisorderContext): Promise<MLFeatureVector> {
+  // Cache hit: skip all physics recomputation when no extra context overrides are supplied.
+  // Background tasks (evolveRules, validateOnHeldOut, precomputeFeatureMeans, addBatch,
+  // buildTrainingDataAsync) all call extractFeatures(formula) or extractFeatures(formula, {pressureGpa})
+  // with no physics/crystal/dft/disorder overrides — those are safe to serve from cache.
+  const _noExtraCtx = !physics && !crystal && !dftData && !disorderCtx;
+  const _cacheKey = _noExtraCtx
+    ? `${normalizeFormula(formula)}:${Math.round((mat as any)?.pressureGpa ?? 0)}`
+    : '';
+  if (_noExtraCtx) {
+    const _hit = getCachedFeatures(_cacheKey);
+    if (_hit) return _hit;
+  }
+
   const elements = parseFormula(formula);
   const counts = parseFormulaCounts(formula);
   const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
@@ -714,7 +727,7 @@ export async function extractFeatures(formula: string, mat?: Partial<Material>, 
 
   const anharmonicityScore = Math.min(1.0, phonon.anharmonicityIndex * 2.5);
 
-  return {
+  const _result: MLFeatureVector = {
     avgElectronegativity: avgEN,
     maxAtomicMass: massValues.length > 0 ? Math.max(...massValues) : 0,
     numElements: elements.length,
@@ -867,6 +880,9 @@ export async function extractFeatures(formula: string, mat?: Partial<Material>, 
     familyHeavyFermion,
     _sourceFormula: normalizedFormula,
   };
+  // Write to cache so subsequent callers (evolveRules, validateOnHeldOut, etc.) get a cache hit.
+  if (_noExtraCtx) setCachedFeatures(_cacheKey, _result);
+  return _result;
 }
 
 async function xgboostPredict(features: MLFeatureVector): Promise<{ score: number; tcEstimate: number; tcStd: number; tcCI95: [number, number]; reasoning: string[] }> {
@@ -914,7 +930,11 @@ interface PhysicsContext {
 }
 
 const featureCache = new Map<string, { features: MLFeatureVector; timestamp: number }>();
-const FEATURE_CACHE_TTL_MS = 5 * 60 * 1000;
+// 4-hour TTL: extractFeatures is deterministic for a given formula+pressure.
+// Short TTL (was 5 min) caused all SUPERCON entries to expire by T+600s, forcing
+// evolveRules / validateOnHeldOut / precomputeFeatureMeans / buildTrainingDataAsync
+// to recompute ~500 formulas simultaneously — the root cause of repeated T+600s freezes.
+const FEATURE_CACHE_TTL_MS = 4 * 60 * 60 * 1000;
 
 export function getCachedFeatures(normKey: string): MLFeatureVector | null {
   const entry = featureCache.get(normKey);
@@ -927,14 +947,16 @@ export function getCachedFeatures(normKey: string): MLFeatureVector | null {
 }
 
 function setCachedFeatures(normKey: string, features: MLFeatureVector): void {
-  if (featureCache.size > 500) {
+  // 2000-entry cap covers SUPERCON (~700) + candidates (~1076) with room to spare.
+  // Evict expired entries first; only trim by age if still over the hard limit.
+  if (featureCache.size > 2000) {
     const cutoff = Date.now() - FEATURE_CACHE_TTL_MS;
     for (const [k, v] of featureCache) {
       if (v.timestamp < cutoff) featureCache.delete(k);
     }
-    if (featureCache.size > 500) {
+    if (featureCache.size > 2000) {
       const oldest = [...featureCache.entries()].sort((a, b) => a[1].timestamp - b[1].timestamp);
-      for (let i = 0; i < oldest.length - 400; i++) featureCache.delete(oldest[i][0]);
+      for (let i = 0; i < oldest.length - 1600; i++) featureCache.delete(oldest[i][0]);
     }
   }
   featureCache.set(normKey, { features, timestamp: Date.now() });

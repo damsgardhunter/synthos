@@ -345,14 +345,14 @@ function predictTree(tree: LambdaTreeNode | number, x: number[]): number {
     : predictTree(tree.right, x);
 }
 
-function trainLambdaGBM(
+async function trainLambdaGBM(
   X: number[][],
   y: number[],
   nEstimators: number = 150,
   learningRate: number = 0.08,
   maxDepth: number = 4,
   seed: number = 42
-): LambdaGBModel {
+): Promise<LambdaGBModel> {
   const n = X.length;
   const nFeatures = X[0]?.length ?? 0;
   const rng = seededRng(seed);
@@ -376,6 +376,9 @@ function trainLambdaGBM(
   let staleRounds = 0;
 
   for (let t = 0; t < nEstimators; t++) {
+    // yield every 15 trees so heartbeats and HTTP requests can interleave
+    if (t > 0 && t % 15 === 0) await new Promise<void>(r => setTimeout(r, 0));
+
     const residuals = y.map((yi, i) => yi - predictions[i]);
 
     const tree = buildTree(X, residuals, trainIdx, 0, maxDepth, preSorted);
@@ -459,7 +462,9 @@ async function buildTrainingDataAsync(): Promise<{ X: number[][]; y: number[]; f
     } catch {
       continue;
     }
-    if (++count % 10 === 0) await new Promise<void>(r => setTimeout(r, 20));
+    // yield every entry — each extractLambdaFeatures call blocks ~350ms via physics functions
+    await new Promise<void>(r => setTimeout(r, 0));
+    count++;
   }
 
   const physicsResults = getAllPhysicsResults();
@@ -488,14 +493,15 @@ async function buildTrainingDataAsync(): Promise<{ X: number[][]; y: number[]; f
     } catch {
       continue;
     }
-    if (count % 10 === 0) await new Promise<void>(r => setTimeout(r, 20));
+    // yield every entry for the same reason — physics calls are blocking
+    await new Promise<void>(r => setTimeout(r, 0));
     count++;
   }
 
   return { X, y, formulas };
 }
 
-function computeMetrics(model: LambdaGBModel, X: number[][], y: number[]): { r2: number; mae: number; rmse: number } {
+async function computeMetrics(model: LambdaGBModel, X: number[][], y: number[]): Promise<{ r2: number; mae: number; rmse: number }> {
   if (X.length === 0) return { r2: 0, mae: 0, rmse: 0 };
 
   const meanY = y.reduce((s, v) => s + v, 0) / y.length;
@@ -504,6 +510,7 @@ function computeMetrics(model: LambdaGBModel, X: number[][], y: number[]): { r2:
   let totalAbsErr = 0;
 
   for (let i = 0; i < X.length; i++) {
+    if (i > 0 && i % 100 === 0) await new Promise<void>(r => setTimeout(r, 0));
     const pred = predictWithModel(model, X[i]);
     const residual = y[i] - pred;
     sse += residual ** 2;
@@ -526,12 +533,12 @@ export async function trainLambdaRegressor(): Promise<void> {
   for (let i = 0; i < LAMBDA_ENSEMBLE_SIZE; i++) {
     const rng = seededRng(ENSEMBLE_SEEDS[i] + X.length);
     const { X: bsX, y: bsY } = bootstrapSample(X, y, rng);
-    const model = trainLambdaGBM(bsX, bsY, 80, 0.10, 4, ENSEMBLE_SEEDS[i]);
+    const model = await trainLambdaGBM(bsX, bsY, 80, 0.10, 4, ENSEMBLE_SEEDS[i]);
     models.push(model);
-    await new Promise<void>(r => setTimeout(r, 10));
+    await new Promise<void>(r => setTimeout(r, 0)); // yield between ensemble members
   }
 
-  const metrics = computeMetrics(models[0], X, y);
+  const metrics = await computeMetrics(models[0], X, y);
 
   lambdaEnsemble = {
     models,

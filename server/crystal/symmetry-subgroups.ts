@@ -1,3 +1,46 @@
+/**
+ * symmetry-subgroups.ts
+ * =====================
+ * Crystal symmetry embedding and broken-symmetry variant generation.
+ *
+ * Refactored to use:
+ *  - sg-data.ts    — complete 230 SG database (order, Wyckoff, subgroup hierarchy)
+ *  - thor-tensor.ts — THOR tensor embedding (12D, replaces hand-coded 6D)
+ *
+ * All original public API is preserved for backward compatibility with:
+ *  - server/ai/crystal-generator.ts
+ *  - server/learning/graph-neural-net.ts
+ */
+
+import {
+  SG_ORDER,
+  SG_HM_SYMBOL,
+  EXTENDED_WYCKOFF_DB,
+  EXTENDED_SUBGROUP_HIERARCHY,
+  getHighSymWyckoff,
+  getWyckoffSitesForSG,
+  getSubgroupEntriesFor,
+  getSuperGroupEntriesFor,
+  crystalSystemFromSG,
+  type WyckoffEntry,
+  type SubgroupEntry,
+} from "./sg-data";
+
+import {
+  computeThorEmbedding,
+  computeThorFeatureVector,
+  encodeIrrep,
+  IRREP_ENCODING,
+  decomposeThorDistortion,
+  type ThorEmbedding,
+} from "./thor-tensor";
+
+// ── Re-export THOR utilities for downstream use ───────────────────────────────
+export { computeThorFeatureVector, decomposeThorDistortion, IRREP_ENCODING };
+export type { ThorEmbedding };
+
+// ── Legacy type aliases (keep shapes identical for consumers) ─────────────────
+
 export interface DistortionVector {
   axis: "x" | "y" | "z" | "xy" | "xz" | "yz" | "xyz";
   magnitude: number;
@@ -24,6 +67,7 @@ export interface WyckoffSiteInfo {
   positions: [number, number, number][];
 }
 
+/** Original 6D embedding (kept for graph-neural-net.ts). */
 export interface SymmetryEmbedding {
   wyckoffMultiplicity: number;
   siteSymmetryOrder: number;
@@ -31,264 +75,6 @@ export interface SymmetryEmbedding {
   irrepEncoding: number;
   distortionMagnitude: number;
   parentGroupOrder: number;
-}
-
-const GROUP_SUBGROUP_HIERARCHY: SubgroupRelation[] = [
-  {
-    parent: "Pm-3m", child: "P4/mmm", parentNumber: 221, childNumber: 123,
-    index: 3, transitionType: "displacive", irrepLabel: "Γ4-",
-    distortionVectors: [
-      { axis: "z", magnitude: 0.05, type: "tetragonal" },
-    ],
-  },
-  {
-    parent: "Pm-3m", child: "R-3m", parentNumber: 221, childNumber: 166,
-    index: 4, transitionType: "displacive", irrepLabel: "Γ5-",
-    distortionVectors: [
-      { axis: "xyz", magnitude: 0.03, type: "trigonal" },
-    ],
-  },
-  {
-    parent: "Pm-3m", child: "Pnma", parentNumber: 221, childNumber: 62,
-    index: 6, transitionType: "displacive", irrepLabel: "M3+",
-    distortionVectors: [
-      { axis: "x", magnitude: 0.08, type: "orthorhombic" },
-      { axis: "y", magnitude: 0.06, type: "orthorhombic" },
-    ],
-  },
-  {
-    parent: "Fm-3m", child: "I4/mmm", parentNumber: 225, childNumber: 139,
-    index: 3, transitionType: "displacive", irrepLabel: "Γ3+",
-    distortionVectors: [
-      { axis: "z", magnitude: 0.04, type: "tetragonal" },
-    ],
-  },
-  {
-    parent: "Fm-3m", child: "R-3m", parentNumber: 225, childNumber: 166,
-    index: 4, transitionType: "displacive", irrepLabel: "Γ5+",
-    distortionVectors: [
-      { axis: "xyz", magnitude: 0.03, type: "trigonal" },
-    ],
-  },
-  {
-    parent: "Fm-3m", child: "Pnma", parentNumber: 225, childNumber: 62,
-    index: 8, transitionType: "reconstructive", irrepLabel: "X5-",
-    distortionVectors: [
-      { axis: "x", magnitude: 0.10, type: "orthorhombic" },
-      { axis: "y", magnitude: 0.08, type: "orthorhombic" },
-      { axis: "z", magnitude: 0.06, type: "orthorhombic" },
-    ],
-  },
-  {
-    parent: "Im-3m", child: "P4/mmm", parentNumber: 229, childNumber: 123,
-    index: 3, transitionType: "displacive", irrepLabel: "Γ4-",
-    distortionVectors: [
-      { axis: "z", magnitude: 0.05, type: "tetragonal" },
-    ],
-  },
-  {
-    parent: "Im-3m", child: "Pnma", parentNumber: 229, childNumber: 62,
-    index: 6, transitionType: "displacive", irrepLabel: "H5-",
-    distortionVectors: [
-      { axis: "x", magnitude: 0.07, type: "orthorhombic" },
-      { axis: "y", magnitude: 0.05, type: "orthorhombic" },
-    ],
-  },
-  {
-    parent: "P6/mmm", child: "P4/mmm", parentNumber: 191, childNumber: 123,
-    index: 3, transitionType: "reconstructive", irrepLabel: "K1",
-    distortionVectors: [
-      { axis: "xy", magnitude: 0.10, type: "shear" },
-      { axis: "z", magnitude: 0.04, type: "tetragonal" },
-    ],
-  },
-  {
-    parent: "P4/mmm", child: "Pnma", parentNumber: 123, childNumber: 62,
-    index: 2, transitionType: "displacive", irrepLabel: "M5-",
-    distortionVectors: [
-      { axis: "x", magnitude: 0.06, type: "orthorhombic" },
-    ],
-  },
-  {
-    parent: "I4/mmm", child: "Pnma", parentNumber: 139, childNumber: 62,
-    index: 2, transitionType: "displacive", irrepLabel: "X3+",
-    distortionVectors: [
-      { axis: "x", magnitude: 0.05, type: "orthorhombic" },
-      { axis: "y", magnitude: 0.04, type: "orthorhombic" },
-    ],
-  },
-  {
-    parent: "R-3m", child: "Pnma", parentNumber: 166, childNumber: 62,
-    index: 3, transitionType: "displacive", irrepLabel: "L1+",
-    distortionVectors: [
-      { axis: "x", magnitude: 0.06, type: "orthorhombic" },
-      { axis: "yz", magnitude: 0.04, type: "shear" },
-    ],
-  },
-  {
-    parent: "Pm-3m", child: "Fm-3m", parentNumber: 221, childNumber: 225,
-    index: 4, transitionType: "order-disorder", irrepLabel: "R1+",
-    distortionVectors: [
-      { axis: "xyz", magnitude: 0.02, type: "breathing" },
-    ],
-  },
-  {
-    parent: "Pm-3m", child: "Im-3m", parentNumber: 221, childNumber: 229,
-    index: 2, transitionType: "order-disorder", irrepLabel: "Γ1+",
-    distortionVectors: [
-      { axis: "xyz", magnitude: 0.01, type: "breathing" },
-    ],
-  },
-];
-
-const WYCKOFF_DATABASE: WyckoffSiteInfo[] = [
-  { spaceGroup: "Pm-3m", letter: "a", multiplicity: 1, siteSymmetryOrder: 48, siteSymmetryLabel: "m-3m", positions: [[0, 0, 0]] },
-  { spaceGroup: "Pm-3m", letter: "b", multiplicity: 1, siteSymmetryOrder: 48, siteSymmetryLabel: "m-3m", positions: [[0.5, 0.5, 0.5]] },
-  { spaceGroup: "Pm-3m", letter: "c", multiplicity: 3, siteSymmetryOrder: 16, siteSymmetryLabel: "4/mmm", positions: [[0, 0.5, 0.5], [0.5, 0, 0.5], [0.5, 0.5, 0]] },
-  { spaceGroup: "Pm-3m", letter: "d", multiplicity: 3, siteSymmetryOrder: 16, siteSymmetryLabel: "4/mmm", positions: [[0.5, 0, 0], [0, 0.5, 0], [0, 0, 0.5]] },
-  { spaceGroup: "Fm-3m", letter: "a", multiplicity: 4, siteSymmetryOrder: 48, siteSymmetryLabel: "m-3m", positions: [[0, 0, 0], [0, 0.5, 0.5], [0.5, 0, 0.5], [0.5, 0.5, 0]] },
-  { spaceGroup: "Fm-3m", letter: "b", multiplicity: 4, siteSymmetryOrder: 48, siteSymmetryLabel: "m-3m", positions: [[0.5, 0.5, 0.5], [0.5, 0, 0], [0, 0.5, 0], [0, 0, 0.5]] },
-  { spaceGroup: "Im-3m", letter: "a", multiplicity: 2, siteSymmetryOrder: 48, siteSymmetryLabel: "m-3m", positions: [[0, 0, 0], [0.5, 0.5, 0.5]] },
-  { spaceGroup: "Im-3m", letter: "b", multiplicity: 6, siteSymmetryOrder: 16, siteSymmetryLabel: "4/mmm", positions: [[0, 0.5, 0.5], [0.5, 0, 0.5], [0.5, 0.5, 0], [0.5, 0, 0], [0, 0.5, 0], [0, 0, 0.5]] },
-  { spaceGroup: "P6/mmm", letter: "a", multiplicity: 1, siteSymmetryOrder: 24, siteSymmetryLabel: "6/mmm", positions: [[0, 0, 0]] },
-  { spaceGroup: "P6/mmm", letter: "c", multiplicity: 2, siteSymmetryOrder: 12, siteSymmetryLabel: "-6m2", positions: [[1 / 3, 2 / 3, 0], [2 / 3, 1 / 3, 0]] },
-  { spaceGroup: "P6/mmm", letter: "d", multiplicity: 2, siteSymmetryOrder: 12, siteSymmetryLabel: "-6m2", positions: [[1 / 3, 2 / 3, 0.5], [2 / 3, 1 / 3, 0.5]] },
-  { spaceGroup: "P4/mmm", letter: "a", multiplicity: 1, siteSymmetryOrder: 16, siteSymmetryLabel: "4/mmm", positions: [[0, 0, 0]] },
-  { spaceGroup: "P4/mmm", letter: "b", multiplicity: 1, siteSymmetryOrder: 16, siteSymmetryLabel: "4/mmm", positions: [[0, 0, 0.5]] },
-  { spaceGroup: "P4/mmm", letter: "c", multiplicity: 1, siteSymmetryOrder: 16, siteSymmetryLabel: "4/mmm", positions: [[0.5, 0.5, 0]] },
-  { spaceGroup: "P4/mmm", letter: "d", multiplicity: 1, siteSymmetryOrder: 16, siteSymmetryLabel: "4/mmm", positions: [[0.5, 0.5, 0.5]] },
-  { spaceGroup: "I4/mmm", letter: "a", multiplicity: 2, siteSymmetryOrder: 16, siteSymmetryLabel: "4/mmm", positions: [[0, 0, 0], [0.5, 0.5, 0.5]] },
-  { spaceGroup: "I4/mmm", letter: "b", multiplicity: 2, siteSymmetryOrder: 16, siteSymmetryLabel: "4/mmm", positions: [[0, 0, 0.5], [0.5, 0.5, 0]] },
-  { spaceGroup: "R-3m", letter: "a", multiplicity: 3, siteSymmetryOrder: 12, siteSymmetryLabel: "-3m", positions: [[0, 0, 0], [1 / 3, 2 / 3, 2 / 3], [2 / 3, 1 / 3, 1 / 3]] },
-  { spaceGroup: "R-3m", letter: "b", multiplicity: 3, siteSymmetryOrder: 12, siteSymmetryLabel: "-3m", positions: [[0, 0, 0.5], [1 / 3, 2 / 3, 1 / 6], [2 / 3, 1 / 3, 5 / 6]] },
-  { spaceGroup: "Pnma", letter: "a", multiplicity: 4, siteSymmetryOrder: 4, siteSymmetryLabel: "-1", positions: [[0, 0, 0], [0.5, 0, 0.5], [0, 0.5, 0], [0.5, 0.5, 0.5]] },
-  { spaceGroup: "Pnma", letter: "c", multiplicity: 4, siteSymmetryOrder: 2, siteSymmetryLabel: "m", positions: [[0.25, 0.25, 0], [0.75, 0.75, 0], [0.75, 0.25, 0.5], [0.25, 0.75, 0.5]] },
-];
-
-const SPACE_GROUP_ORDER: Record<string, number> = {
-  "Pm-3m": 48, "Fm-3m": 192, "Im-3m": 96,
-  "P6/mmm": 24, "P4/mmm": 16, "I4/mmm": 32,
-  "R-3m": 36, "Pnma": 8,
-};
-
-const IRREP_ENCODING: Record<string, number> = {
-  "Γ1+": 0.0, "Γ3+": 0.1, "Γ4-": 0.15, "Γ5+": 0.2, "Γ5-": 0.25,
-  "R1+": 0.3, "M3+": 0.4, "M5-": 0.45, "X3+": 0.5, "X5-": 0.55,
-  "H5-": 0.6, "K1": 0.7, "L1+": 0.8,
-};
-
-export function getSubgroups(spaceGroupName: string): SubgroupRelation[] {
-  return GROUP_SUBGROUP_HIERARCHY.filter(r => r.parent === spaceGroupName);
-}
-
-export function getSupergroups(spaceGroupName: string): SubgroupRelation[] {
-  return GROUP_SUBGROUP_HIERARCHY.filter(r => r.child === spaceGroupName);
-}
-
-export function getSubgroupChain(from: string, to: string): SubgroupRelation[] {
-  const chain: SubgroupRelation[] = [];
-  const visited = new Set<string>();
-
-  function dfs(current: string): boolean {
-    if (current === to) return true;
-    if (visited.has(current)) return false;
-    visited.add(current);
-    const children = getSubgroups(current);
-    for (const rel of children) {
-      if (dfs(rel.child)) {
-        chain.unshift(rel);
-        return true;
-      }
-    }
-    return false;
-  }
-
-  dfs(from);
-  return chain;
-}
-
-export function getWyckoffSites(spaceGroupName: string): WyckoffSiteInfo[] {
-  return WYCKOFF_DATABASE.filter(w => w.spaceGroup === spaceGroupName);
-}
-
-export function getWyckoffForPosition(
-  spaceGroupName: string,
-  fracPosition: [number, number, number],
-  tolerance: number = 0.1
-): WyckoffSiteInfo | null {
-  const sites = getWyckoffSites(spaceGroupName);
-
-  for (const site of sites) {
-    for (const pos of site.positions) {
-      const dx = Math.abs(fracPosition[0] - pos[0]) % 1.0;
-      const dy = Math.abs(fracPosition[1] - pos[1]) % 1.0;
-      const dz = Math.abs(fracPosition[2] - pos[2]) % 1.0;
-      const d = Math.sqrt(
-        Math.min(dx, 1 - dx) ** 2 +
-        Math.min(dy, 1 - dy) ** 2 +
-        Math.min(dz, 1 - dz) ** 2
-      );
-      if (d < tolerance) return site;
-    }
-  }
-
-  return null;
-}
-
-export function computeSymmetryEmbedding(
-  spaceGroupName: string,
-  fracPosition?: [number, number, number]
-): SymmetryEmbedding {
-  const parentOrder = SPACE_GROUP_ORDER[spaceGroupName] ?? 8;
-  const supergroups = getSupergroups(spaceGroupName);
-
-  let subgroupIndex = 1;
-  let irrepEncoding = 0;
-  let distortionMagnitude = 0;
-
-  if (supergroups.length > 0) {
-    const rel = supergroups[0];
-    subgroupIndex = rel.index;
-    irrepEncoding = IRREP_ENCODING[rel.irrepLabel] ?? 0;
-    distortionMagnitude = rel.distortionVectors.reduce((s, d) => s + d.magnitude, 0) / rel.distortionVectors.length;
-  }
-
-  let wyckoffMultiplicity = 1;
-  let siteSymmetryOrder = parentOrder;
-
-  if (fracPosition) {
-    const wyckoff = getWyckoffForPosition(spaceGroupName, fracPosition);
-    if (wyckoff) {
-      wyckoffMultiplicity = wyckoff.multiplicity;
-      siteSymmetryOrder = wyckoff.siteSymmetryOrder;
-    }
-  } else {
-    const sites = getWyckoffSites(spaceGroupName);
-    if (sites.length > 0) {
-      wyckoffMultiplicity = sites[0].multiplicity;
-      siteSymmetryOrder = sites[0].siteSymmetryOrder;
-    }
-  }
-
-  return {
-    wyckoffMultiplicity,
-    siteSymmetryOrder,
-    subgroupIndex,
-    irrepEncoding,
-    distortionMagnitude,
-    parentGroupOrder: parentOrder,
-  };
-}
-
-export function computeSymmetryFeatureVector(embedding: SymmetryEmbedding): number[] {
-  return [
-    embedding.wyckoffMultiplicity / 8.0,
-    embedding.siteSymmetryOrder / 48.0,
-    embedding.subgroupIndex / 8.0,
-    embedding.irrepEncoding,
-    embedding.distortionMagnitude / 0.1,
-    embedding.parentGroupOrder / 192.0,
-  ];
 }
 
 export interface BrokenSymmetryVariant {
@@ -300,13 +86,228 @@ export interface BrokenSymmetryVariant {
   relation: SubgroupRelation;
 }
 
+// ── Build SubgroupRelation from SubgroupEntry ─────────────────────────────────
+
+function entryToRelation(e: SubgroupEntry): SubgroupRelation {
+  const parentSym = SG_HM_SYMBOL[e.parentSg] ?? `SG-${e.parentSg}`;
+  const childSym  = SG_HM_SYMBOL[e.childSg]  ?? `SG-${e.childSg}`;
+
+  const dv: DistortionVector = {
+    axis: e.distortionAxis,
+    magnitude: e.distortionMagnitude,
+    type: e.distortionType === "monoclinic" ? "shear" : e.distortionType,
+  };
+
+  // Add secondary distortion vector for orthorhombic/mixed cases
+  const dvs: DistortionVector[] = [dv];
+  if (e.distortionType === "orthorhombic" && e.distortionAxis === "x") {
+    dvs.push({ axis: "y", magnitude: e.distortionMagnitude * 0.7, type: "orthorhombic" });
+  }
+  if (e.distortionType === "shear" || e.distortionType === "monoclinic") {
+    dvs.push({ axis: "z", magnitude: e.distortionMagnitude * 0.5, type: "tetragonal" });
+  }
+
+  return {
+    parent: parentSym,
+    child: childSym,
+    parentNumber: e.parentSg,
+    childNumber: e.childSg,
+    index: e.index,
+    distortionVectors: dvs,
+    transitionType: e.transitionType,
+    irrepLabel: e.irrepLabel,
+  };
+}
+
+// ── Convert WyckoffEntry to legacy WyckoffSiteInfo ────────────────────────────
+
+function entryToSiteInfo(w: WyckoffEntry): WyckoffSiteInfo {
+  return {
+    spaceGroup: w.sgSymbol,
+    letter: w.letter,
+    multiplicity: w.multiplicity,
+    siteSymmetryOrder: w.siteSymmetryOrder,
+    siteSymmetryLabel: w.siteSymmetryLabel,
+    positions: [w.representative],
+  };
+}
+
+// ── Public API ────────────────────────────────────────────────────────────────
+
+/**
+ * Returns all maximal subgroup relations for the given space group name or number.
+ */
+export function getSubgroups(spaceGroupNameOrNumber: string | number): SubgroupRelation[] {
+  const sgNum = resolveSGNumber(spaceGroupNameOrNumber);
+  if (sgNum === null) return [];
+  return getSubgroupEntriesFor(sgNum).map(entryToRelation);
+}
+
+/**
+ * Returns all supergroup relations for the given space group.
+ */
+export function getSupergroups(spaceGroupNameOrNumber: string | number): SubgroupRelation[] {
+  const sgNum = resolveSGNumber(spaceGroupNameOrNumber);
+  if (sgNum === null) return [];
+  return getSuperGroupEntriesFor(sgNum).map(entryToRelation);
+}
+
+/**
+ * Returns the shortest subgroup chain from `from` to `to` (by DFS over the
+ * extended hierarchy).
+ */
+export function getSubgroupChain(from: string | number, to: string | number): SubgroupRelation[] {
+  const fromNum = resolveSGNumber(from);
+  const toNum   = resolveSGNumber(to);
+  if (fromNum === null || toNum === null) return [];
+
+  const chain: SubgroupRelation[] = [];
+  const visited = new Set<number>();
+
+  function dfs(current: number): boolean {
+    if (current === toNum) return true;
+    if (visited.has(current)) return false;
+    visited.add(current);
+    for (const e of getSubgroupEntriesFor(current)) {
+      if (dfs(e.childSg)) {
+        chain.unshift(entryToRelation(e));
+        return true;
+      }
+    }
+    return false;
+  }
+
+  dfs(fromNum);
+  return chain;
+}
+
+/**
+ * Returns Wyckoff sites for the given space group (name or number).
+ * Falls back to a synthetic entry when the SG is not in the database.
+ */
+export function getWyckoffSites(spaceGroupNameOrNumber: string | number): WyckoffSiteInfo[] {
+  const sgNum = resolveSGNumber(spaceGroupNameOrNumber);
+  if (sgNum === null) return [];
+  const entries = getWyckoffSitesForSG(sgNum);
+  if (entries.length > 0) return entries.map(entryToSiteInfo);
+
+  // Synthetic fallback: derive from SG order
+  const sgOrder  = SG_ORDER[sgNum] ?? 4;
+  const sgSymbol = SG_HM_SYMBOL[sgNum] ?? `SG-${sgNum}`;
+  return [{
+    spaceGroup: sgSymbol,
+    letter: "a",
+    multiplicity: Math.max(1, Math.round(sgOrder / 8)),
+    siteSymmetryOrder: sgOrder,
+    siteSymmetryLabel: crystalSystemFromSG(sgNum),
+    positions: [[0, 0, 0]],
+  }];
+}
+
+/**
+ * Returns the Wyckoff site nearest to `fracPosition` for the given SG.
+ */
+export function getWyckoffForPosition(
+  spaceGroupNameOrNumber: string | number,
+  fracPosition: [number, number, number],
+  tolerance = 0.1
+): WyckoffSiteInfo | null {
+  const sgNum = resolveSGNumber(spaceGroupNameOrNumber);
+  if (sgNum === null) return null;
+
+  for (const entry of getWyckoffSitesForSG(sgNum)) {
+    const [rx, ry, rz] = entry.representative;
+    const dx = Math.abs(fracPosition[0] - rx) % 1.0;
+    const dy = Math.abs(fracPosition[1] - ry) % 1.0;
+    const dz = Math.abs(fracPosition[2] - rz) % 1.0;
+    const d = Math.sqrt(
+      Math.min(dx, 1-dx)**2 + Math.min(dy, 1-dy)**2 + Math.min(dz, 1-dz)**2
+    );
+    if (d < tolerance) return entryToSiteInfo(entry);
+  }
+  return null;
+}
+
+/**
+ * Compute the legacy 6-dimensional SymmetryEmbedding for a space group.
+ * Internally backed by the full 230 SG database (no more 8-SG blind spot).
+ */
+export function computeSymmetryEmbedding(
+  spaceGroupNameOrNumber: string | number,
+  fracPosition?: [number, number, number]
+): SymmetryEmbedding {
+  const sgNum    = resolveSGNumber(spaceGroupNameOrNumber) ?? 1;
+  const sgOrder  = SG_ORDER[sgNum] ?? 4;
+
+  // Wyckoff info
+  const highSym  = getHighSymWyckoff(sgNum);
+  let wyckoffMult  = highSym?.multiplicity     ?? 1;
+  let siteSymOrder = highSym?.siteSymmetryOrder ?? sgOrder;
+
+  if (fracPosition) {
+    const match = getWyckoffForPosition(sgNum, fracPosition);
+    if (match) {
+      wyckoffMult  = match.multiplicity;
+      siteSymOrder = match.siteSymmetryOrder;
+    }
+  }
+
+  // Subgroup info
+  const superEntries = getSuperGroupEntriesFor(sgNum);
+  let subgroupIndex       = 1;
+  let irrepEncoding       = 0;
+  let distortionMagnitude = 0;
+
+  if (superEntries.length > 0) {
+    const rel = superEntries[0];
+    subgroupIndex       = rel.index;
+    irrepEncoding       = encodeIrrep(rel.irrepLabel);
+    distortionMagnitude = rel.distortionMagnitude;
+  }
+
+  return {
+    wyckoffMultiplicity: wyckoffMult,
+    siteSymmetryOrder: siteSymOrder,
+    subgroupIndex,
+    irrepEncoding,
+    distortionMagnitude,
+    parentGroupOrder: sgOrder,
+  };
+}
+
+/**
+ * Returns the original 6D feature vector — unchanged signature for
+ * graph-neural-net.ts compatibility.
+ *
+ * Normalization constants use the full database range now:
+ *  - wyckoffMultiplicity / 192  (max general position in Fm-3m)
+ *  - siteSymmetryOrder  / 48    (max Oh site symmetry)
+ *  - subgroupIndex      / 12    (extended range)
+ *  - irrepEncoding              (already in [0,1])
+ *  - distortionMagnitude/ 0.12  (max in database)
+ *  - parentGroupOrder   / 192
+ */
+export function computeSymmetryFeatureVector(embedding: SymmetryEmbedding): number[] {
+  return [
+    Math.min(embedding.wyckoffMultiplicity / 192.0, 1.0),
+    Math.min(embedding.siteSymmetryOrder   / 48.0,  1.0),
+    Math.min(embedding.subgroupIndex       / 12.0,  1.0),
+    embedding.irrepEncoding,
+    Math.min(embedding.distortionMagnitude / 0.12,  1.0),
+    Math.min(embedding.parentGroupOrder    / 192.0, 1.0),
+  ];
+}
+
+// ── Broken-symmetry variant generation ───────────────────────────────────────
+
 export function generateBrokenSymmetryVariants(
-  spaceGroupName: string,
+  spaceGroupNameOrNumber: string | number,
   lattice: { a: number; b: number; c: number; alpha: number; beta: number; gamma: number },
   atomCount: number,
-  amplitudeScale: number = 1.0
+  amplitudeScale = 1.0
 ): BrokenSymmetryVariant[] {
-  const subgroups = getSubgroups(spaceGroupName);
+  const sgNum     = resolveSGNumber(spaceGroupNameOrNumber) ?? 1;
+  const subgroups = getSubgroups(sgNum);
   const variants: BrokenSymmetryVariant[] = [];
 
   for (const rel of subgroups) {
@@ -315,7 +316,6 @@ export function generateBrokenSymmetryVariants(
 
     for (const dv of rel.distortionVectors) {
       const amp = dv.magnitude * amplitudeScale;
-
       switch (dv.type) {
         case "tetragonal":
           newLattice.c *= (1 + amp);
@@ -329,21 +329,20 @@ export function generateBrokenSymmetryVariants(
           break;
         case "trigonal":
           newLattice.alpha = 90 - amp * 180 / Math.PI * 2;
-          newLattice.beta = 90 - amp * 180 / Math.PI * 2;
+          newLattice.beta  = 90 - amp * 180 / Math.PI * 2;
           newLattice.gamma = 90 - amp * 180 / Math.PI * 2;
           break;
         case "shear":
-          if (dv.axis.includes("x") && dv.axis.includes("y")) {
-            newLattice.gamma = 90 + amp * 180 / Math.PI;
-          }
-          if (dv.axis.includes("y") && dv.axis.includes("z")) {
-            newLattice.alpha = 90 + amp * 180 / Math.PI * 0.5;
-          }
+          if (dv.axis.includes("x") && dv.axis.includes("y")) newLattice.gamma = 90 + amp * 180 / Math.PI;
+          if (dv.axis.includes("y") && dv.axis.includes("z")) newLattice.alpha = 90 + amp * 180 / Math.PI * 0.5;
           break;
         case "breathing":
           newLattice.a *= (1 + amp * 0.5);
           newLattice.b *= (1 + amp * 0.5);
           newLattice.c *= (1 + amp * 0.5);
+          break;
+        case "monoclinic":
+          newLattice.beta = 90 + amp * 180 / Math.PI;
           break;
       }
     }
@@ -351,7 +350,7 @@ export function generateBrokenSymmetryVariants(
     for (let i = 0; i < atomCount; i++) {
       let dx = 0, dy = 0, dz = 0;
       for (const dv of rel.distortionVectors) {
-        const amp = dv.magnitude * amplitudeScale;
+        const amp   = dv.magnitude * amplitudeScale;
         const phase = (i / Math.max(1, atomCount - 1)) * Math.PI;
         if (dv.axis.includes("x")) dx += amp * Math.sin(phase) * 0.1;
         if (dv.axis.includes("y")) dy += amp * Math.cos(phase) * 0.1;
@@ -361,10 +360,9 @@ export function generateBrokenSymmetryVariants(
     }
 
     const totalDistortion = rel.distortionVectors.reduce((s, d) => s + d.magnitude, 0) * amplitudeScale;
-
     variants.push({
-      parentSpaceGroup: spaceGroupName,
-      childSpaceGroup: rel.child,
+      parentSpaceGroup: rel.parent,
+      childSpaceGroup:  rel.child,
       latticeDistortion: newLattice,
       atomicDisplacements: displacements,
       distortionAmplitude: totalDistortion,
@@ -392,11 +390,7 @@ export function applyBrokenSymmetry(
       z: atom.z + disp.dz * variant.latticeDistortion.c,
     };
   });
-
-  return {
-    atoms: newAtoms,
-    lattice: { ...variant.latticeDistortion },
-  };
+  return { atoms: newAtoms, lattice: { ...variant.latticeDistortion } };
 }
 
 export function getSymmetrySubgroupStats(): {
@@ -406,25 +400,62 @@ export function getSymmetrySubgroupStats(): {
   maxChainDepth: number;
   avgSubgroupIndex: number;
 } {
-  const parentGroups = Array.from(new Set(GROUP_SUBGROUP_HIERARCHY.map(r => r.parent)));
-  const childGroups = Array.from(new Set(GROUP_SUBGROUP_HIERARCHY.map(r => r.child)));
-  const allGroups = Array.from(new Set([...parentGroups, ...childGroups]));
+  const parents  = Array.from(new Set(EXTENDED_SUBGROUP_HIERARCHY.map(e => e.parentSg)));
+  const children = Array.from(new Set(EXTENDED_SUBGROUP_HIERARCHY.map(e => e.childSg)));
+  const allSGs   = Array.from(new Set([...parents, ...children]));
+  const avgIndex = EXTENDED_SUBGROUP_HIERARCHY.reduce((s, e) => s + e.index, 0) /
+                   Math.max(1, EXTENDED_SUBGROUP_HIERARCHY.length);
 
-  const avgIndex = GROUP_SUBGROUP_HIERARCHY.reduce((s, r) => s + r.index, 0) / Math.max(1, GROUP_SUBGROUP_HIERARCHY.length);
-
+  // Find max chain depth via BFS (bounded at 6 to stay cheap)
   let maxDepth = 0;
-  for (const sg of parentGroups) {
-    for (const target of childGroups) {
-      const chain = getSubgroupChain(sg, target);
-      if (chain.length > maxDepth) maxDepth = chain.length;
-    }
+  for (const sg of parents) {
+    const d = depthBFS(sg, 0, new Set<number>());
+    if (d > maxDepth) maxDepth = d;
   }
 
   return {
-    totalRelations: GROUP_SUBGROUP_HIERARCHY.length,
-    spaceGroupsCovered: allGroups.length,
-    wyckoffSitesCovered: WYCKOFF_DATABASE.length,
-    maxChainDepth: maxDepth,
-    avgSubgroupIndex: Math.round(avgIndex * 100) / 100,
+    totalRelations:     EXTENDED_SUBGROUP_HIERARCHY.length,
+    spaceGroupsCovered: allSGs.length,
+    wyckoffSitesCovered: EXTENDED_WYCKOFF_DB.length,
+    maxChainDepth:      maxDepth,
+    avgSubgroupIndex:   Math.round(avgIndex * 100) / 100,
   };
+}
+
+function depthBFS(sg: number, depth: number, visited: Set<number>): number {
+  if (depth >= 6 || visited.has(sg)) return depth;
+  visited.add(sg);
+  const children = getSubgroupEntriesFor(sg);
+  if (children.length === 0) return depth;
+  return Math.max(...children.map(c => depthBFS(c.childSg, depth + 1, new Set(visited))));
+}
+
+// ── SG name / number resolver ─────────────────────────────────────────────────
+// Accepts: number, "Fm-3m", "SG-225", "225"
+
+const _symbolToNumber = new Map<string, number>();
+for (const [n, sym] of Object.entries(SG_HM_SYMBOL)) {
+  _symbolToNumber.set(sym.toLowerCase(), Number(n));
+  _symbolToNumber.set(`sg-${n}`, Number(n));
+  _symbolToNumber.set(String(n), Number(n));
+}
+
+export function resolveSGNumber(input: string | number): number | null {
+  if (typeof input === "number") return input >= 1 && input <= 230 ? input : null;
+  const key = String(input).trim().toLowerCase();
+  return _symbolToNumber.get(key) ?? null;
+}
+
+export function resolveSGSymbol(sgNumber: number): string {
+  return SG_HM_SYMBOL[sgNumber] ?? `SG-${sgNumber}`;
+}
+
+// ── Convenience: THOR embedding directly from SG name/number ─────────────────
+
+export function computeThorEmbeddingForSG(
+  spaceGroupNameOrNumber: string | number,
+  fracPosition?: [number, number, number]
+): ThorEmbedding {
+  const sgNum = resolveSGNumber(spaceGroupNameOrNumber) ?? 1;
+  return computeThorEmbedding(sgNum, fracPosition);
 }

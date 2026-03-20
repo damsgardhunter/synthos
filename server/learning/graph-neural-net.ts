@@ -3697,7 +3697,9 @@ export function applySerializedWeights(
 }
 
 export function setCachedEnsemble(models: GNNWeights[], trainingData?: { formula: string; tc: number }[]): void {
-  cachedEnsembleModels = models;
+  // Migrate each model's weights before caching — ensures W_mlp1 column count matches
+  // the current GLOBAL_COMP_DIM even if the weights were trained with an older feature set.
+  cachedEnsembleModels = models.map((m, i) => migrateWeights(m, seededRandom(ENSEMBLE_SEEDS[i] ?? 42)));
   modelTrainedAt = Date.now();
   if (trainingData && models.length > 0) {
     const allData = [...trainingData, ...dftTrainingDataset.map(r => ({ formula: r.formula, tc: r.tc }))];

@@ -28,30 +28,34 @@ if (!isMainThread) {
   // require() instead of import() — the worker is loaded via tsx/cjs which
   // hooks require() but does NOT handle ESM dynamic import(). Using import()
   // bypasses the tsx hook and fails with "Cannot find module" for .ts paths.
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { trainSingleEnsembleModel } = require("../server/learning/graph-neural-net");
+  // trainSingleEnsembleModel is async (yields between epochs to keep the event loop
+  // responsive); wrap in an async IIFE so the worker can await it properly.
+  (async () => {
     try {
-      const model = trainSingleEnsembleModel(
-        trainingData,
-        seed,
-        bootstrapRatio,
-        maxPretrainEpochs,
-        label ?? `M${modelIndex}`,
-      );
-      const wallSec = ((Date.now() - startMs) / 1000).toFixed(1);
-      console.log(
-        `[GNN-Worker-${modelIndex}] done in ${wallSec}s — ${trainingData.length} samples, seed=${seed}`,
-      );
-      parentPort!.postMessage({ ok: true, model, modelIndex });
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { trainSingleEnsembleModel } = require("../server/learning/graph-neural-net");
+      try {
+        const model = await trainSingleEnsembleModel(
+          trainingData,
+          seed,
+          bootstrapRatio,
+          maxPretrainEpochs,
+          label ?? `M${modelIndex}`,
+        );
+        const wallSec = ((Date.now() - startMs) / 1000).toFixed(1);
+        console.log(
+          `[GNN-Worker-${modelIndex}] done in ${wallSec}s — ${trainingData.length} samples, seed=${seed}`,
+        );
+        parentPort!.postMessage({ ok: true, model, modelIndex });
+      } catch (err: any) {
+        const msg = err?.message ?? String(err ?? "unknown");
+        console.error(`[GNN-Worker-${modelIndex}] training failed: ${msg}`);
+        parentPort!.postMessage({ ok: false, error: msg, modelIndex });
+      }
     } catch (err: any) {
-      const msg = err?.message ?? String(err ?? "unknown");
-      console.error(`[GNN-Worker-${modelIndex}] training failed: ${msg}`);
-      parentPort!.postMessage({ ok: false, error: msg, modelIndex });
+      const msg = err?.message ?? String(err ?? "require failed");
+      console.error(`[GNN-Worker-${modelIndex}] import failed: ${msg}`);
+      parentPort!.postMessage({ ok: false, error: `Import error: ${msg}`, modelIndex });
     }
-  } catch (err: any) {
-    const msg = err?.message ?? String(err ?? "require failed");
-    console.error(`[GNN-Worker-${modelIndex}] import failed: ${msg}`);
-    parentPort!.postMessage({ ok: false, error: `Import error: ${msg}`, modelIndex });
-  }
+  })();
 }

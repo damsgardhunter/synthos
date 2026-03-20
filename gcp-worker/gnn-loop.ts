@@ -374,17 +374,21 @@ async function loadQEDatasetSamples(existingFormulas: Set<string>): Promise<Trai
 
 async function loadSuperconExternalSamples(existingFormulas: Set<string>, limit = 5000): Promise<TrainingSample[]> {
   try {
-    // raw_data->>'wlog_K' extracts the JARVIS-SuperCon-3D ω_log (already in Kelvin).
-    // raw_data->>'mu_star' extracts μ* if the source stored it (rare, but future-proof).
+    // LEFT JOIN with jarvis-dft3d by shared external_id (JVASP-XXXXX) to pull
+    // formation_energy_per_atom, bandgap_ev, and other DFT properties that are
+    // absent from jarvis-supercon_3d entries. ~907/1058 SC3D entries match.
     const rows = await db.execute(
-      `SELECT formula, tc, lambda, space_group, crystal_system,
-              (raw_data->>'wlog_K')::real                        AS omega_log_k,
-              (raw_data->>'mu_star')::real                       AS raw_mu_star,
-              (raw_data->>'formation_energy_per_atom')::real     AS fe_per_atom,
-              (raw_data->>'formation_energy')::real              AS fe_total
-       FROM supercon_external_entries
-       WHERE is_superconductor = true AND tc > 0
-       ORDER BY tc DESC
+      `SELECT sc.formula, sc.tc, sc.lambda, sc.space_group, sc.crystal_system,
+              (sc.raw_data->>'wlog_K')::real                              AS omega_log_k,
+              (sc.raw_data->>'mu_star')::real                             AS raw_mu_star,
+              sc.raw_data->>'data_confidence'                             AS data_confidence,
+              (dft.raw_data->>'formation_energy_per_atom')::real          AS fe_per_atom,
+              (dft.raw_data->>'bandgap_ev')::real                        AS bandgap_ev
+       FROM supercon_external_entries sc
+       LEFT JOIN supercon_external_entries dft
+         ON dft.external_id = sc.external_id AND dft.source = 'jarvis-dft3d'
+       WHERE sc.is_superconductor = true AND sc.tc > 0
+       ORDER BY sc.tc DESC
        LIMIT ${limit}`
     );
     const items: any[] = (rows as any).rows ?? (Array.isArray(rows) ? rows : []);
@@ -404,15 +408,21 @@ async function loadSuperconExternalSamples(existingFormulas: Set<string>, limit 
         ? muStarRaw : undefined;
       const spaceGroup = row.space_group as string | null;
       const crystalSystem = row.crystal_system as string | null;
-      // Extract formation energy from JARVIS raw_data — prefer per_atom field, fall back to total.
-      const feRaw = row.fe_per_atom != null ? Number(row.fe_per_atom)
-                  : row.fe_total    != null ? Number(row.fe_total) : null;
+      // Formation energy from DFT3D JOIN (per_atom), with sanity bounds
+      const feRaw = row.fe_per_atom != null ? Number(row.fe_per_atom) : null;
       const formationEnergy = feRaw != null && Number.isFinite(feRaw) && feRaw > -20 && feRaw < 5
         ? feRaw : undefined;
+      // Bandgap from DFT3D JOIN
+      const bgRaw = row.bandgap_ev != null ? Number(row.bandgap_ev) : null;
+      const bandgap = bgRaw != null && Number.isFinite(bgRaw) && bgRaw >= 0 ? bgRaw : undefined;
+      // data_confidence from JARVIS SC3D raw_data — "dft-verified" unlocks 5× loss weight
+      const dataConfidence = row.data_confidence === "dft-verified" ? "dft-verified" as const : undefined;
       samples.push({
         formula,
         tc,
         formationEnergy,
+        bandgap,
+        dataConfidence,
         lambda: lambda != null && Number.isFinite(lambda) ? lambda : undefined,
         omegaLog,
         muStar,
@@ -437,7 +447,9 @@ async function loadSuperconExternalSamples(existingFormulas: Set<string>, limit 
 async function loadJarvisDFT3DContrast(existingFormulas: Set<string>, scCount: number): Promise<TrainingSample[]> {
   try {
     const rows = await db.execute(
-      `SELECT formula, space_group, crystal_system
+      `SELECT formula, space_group, crystal_system,
+              (raw_data->>'formation_energy_per_atom')::real  AS fe_per_atom,
+              (raw_data->>'bandgap_ev')::real                 AS bandgap_ev
        FROM supercon_external_entries
        WHERE source IN ('jarvis-dft3d', 'JARVIS-DFT3D-Metallic') AND (tc IS NULL OR tc = 0)
        ORDER BY RANDOM()
@@ -450,9 +462,16 @@ async function loadJarvisDFT3DContrast(existingFormulas: Set<string>, scCount: n
       if (!formula || existingFormulas.has(formula)) continue;
       const spaceGroup = row.space_group as string | null;
       const crystalSystem = row.crystal_system as string | null;
+      const feRaw = row.fe_per_atom != null ? Number(row.fe_per_atom) : null;
+      const formationEnergy = feRaw != null && Number.isFinite(feRaw) && feRaw > -20 && feRaw < 5
+        ? feRaw : undefined;
+      const bgRaw = row.bandgap_ev != null ? Number(row.bandgap_ev) : null;
+      const bandgap = bgRaw != null && Number.isFinite(bgRaw) && bgRaw >= 0 ? bgRaw : undefined;
       samples.push({
         formula,
         tc: 0,
+        formationEnergy,
+        bandgap,
         structure: spaceGroup || crystalSystem
           ? { spaceGroup: spaceGroup ?? undefined, crystalSystem: crystalSystem ?? undefined, dimensionality: undefined }
           : undefined,
@@ -689,7 +708,7 @@ const STARTUP_CKPT_TTL_HOURS = 20; // checkpoints older than this are stale
 // Increment this whenever the GNN forward pass formula changes in a way that
 // makes old weights incompatible with the new code (e.g. hard-cap → sigmoid).
 // When the stored version doesn't match, startup retrains from scratch.
-const GNN_MODEL_VERSION = 4; // v4: removed early-stop (was killing training at epoch 1) (2026-03-20)
+const GNN_MODEL_VERSION = 5; // v5: JARVIS DFT3D JOIN — formation energy + bandgap for SC3D entries (2026-03-20)
 
 // In-process guard: run corpus training exactly once per GCP worker process lifetime.
 let _startupCorpusRan = false;

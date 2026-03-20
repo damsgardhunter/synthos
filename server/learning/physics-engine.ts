@@ -3962,6 +3962,8 @@ export async function runFullPhysicsAnalysis(
   }
 
   const phononSpectrum = computePhononSpectrum(formula, electronicStructure, mpElasticity, mpSummary);
+  // Yield after phonon spectrum (~80ms) so heartbeat timers can fire
+  await new Promise<void>(r => setTimeout(r, 0));
 
   if (dftData) {
     if (dftData.phononFreqMax.value != null && dftData.phononFreqMax.source !== "analytical") {
@@ -4051,6 +4053,8 @@ export async function runFullPhysicsAnalysis(
     detail: `${formula}: integratedLambda=${alpha2FResult.integratedLambda.toFixed(4)}, omegaLog(alpha2F)=${computeOmegaLogFromAlpha2F(alpha2FResult).toFixed(1)} cm⁻¹`,
     dataSource: "Physics Engine",
   });
+  // Yield after coupling + phonon DOS + alpha2F cluster
+  await new Promise<void>(r => setTimeout(r, 0));
 
   if (earlyPhononDispersion.softModeQPoints.length > 0 && phononSpectrum.softModePresent) {
     const softBranches = earlyPhononDispersion.branches.filter(b => b.isSoft);
@@ -4179,6 +4183,8 @@ export async function runFullPhysicsAnalysis(
   }
 
   const criticalFields = computeCriticalFields(eliashberg.predictedTc, coupling, dimensionality, formula, electronicStructure);
+  // Yield after Eliashberg + competing phases + pairing + critical fields cluster
+  await new Promise<void>(r => setTimeout(r, 0));
 
   const suppressingPhases = competingPhases.filter(p => p.suppressesSC);
   let uncertaintyEstimate = 0.3;
@@ -4255,6 +4261,8 @@ export async function runFullPhysicsAnalysis(
       dataSource: "Physics Engine",
     });
   }
+  // Yield after instability proximity + CDW/SDW suppression cluster
+  await new Promise<void>(r => setTimeout(r, 0));
 
   emitDetail("log", {
     phase: "phase-10",
@@ -4335,6 +4343,8 @@ export async function runFullPhysicsAnalysis(
       dataSource: "Physics Engine",
     });
   }
+  // Yield after many-body corrections + nesting + spin susceptibility cluster
+  await new Promise<void>(r => setTimeout(r, 0));
 
   const advancedConstraints = computeAdvancedConstraints(
     formula, electronicStructure, phononSpectrum, coupling,

@@ -1892,13 +1892,18 @@ function FeedbackLoopCard() {
 export default function Dashboard() {
   const ri30 = useStartupSafeInterval(30000);
   const ri60 = useStartupSafeInterval(60000);
-  // Wave-2 queries fire 1.5s after page load to spread DB load across the pool
-  const wave2 = useWave(1500);
+  // Staggered waves to prevent thundering herd against the 5-connection DB pool.
+  // wave2 (3s): band stats + medium-priority ungated queries
+  // wave3 (12s): synthesis discovery, ga-evolution, cross-engine, AL stats
+  // wave4 (22s): heavy analytics — theory-report, reaction-network, retrosynthesis, ml-synth
+  const wave2 = useWave(3_000);
+  const wave3 = useWave(12_000);
+  const wave4 = useWave(22_000);
   const { data: stats, isLoading: statsLoading } = useQuery<Stats>({ queryKey: ["/api/stats"], refetchInterval: ri30 });
   const { data: phases, isLoading: phasesLoading } = useQuery<LearningPhase[]>({ queryKey: ["/api/learning-phases"], refetchInterval: ri30 });
   const { data: logs, isLoading: logsLoading } = useQuery<ResearchLog[]>({ queryKey: ["/api/research-logs"], refetchInterval: ri30 });
-  const { data: milestoneData } = useQuery<{ milestones: any[]; total: number }>({ queryKey: ["/api/milestones"], refetchInterval: ri60 });
-  const { data: dftStatus } = useQuery<{ total: number; dftEnrichedCount: number; breakdown: { high: number; medium: number; analytical: number } }>({ queryKey: ["/api/dft-status"], refetchInterval: ri30 });
+  const { data: milestoneData } = useQuery<{ milestones: any[]; total: number }>({ queryKey: ["/api/milestones"], refetchInterval: ri60, enabled: wave2 });
+  const { data: dftStatus } = useQuery<{ total: number; dftEnrichedCount: number; breakdown: { high: number; medium: number; analytical: number } }>({ queryKey: ["/api/dft-status"], refetchInterval: ri30, enabled: wave2 });
   const { data: bandCalcStats } = useQuery<{
     totalCalcs: number;
     succeeded: number;
@@ -1913,12 +1918,12 @@ export default function Dashboard() {
     withDiracCrossings: number;
     avgPocketCount: number;
   }>({ queryKey: ["/api/dft-band-analysis/stats"], refetchInterval: ri60, enabled: wave2 });
-  const { data: engineMemory } = useQuery<EngineMemory>({ queryKey: ["/api/engine/memory"], refetchInterval: ri60 });
+  const { data: engineMemory } = useQuery<EngineMemory>({ queryKey: ["/api/engine/memory"], refetchInterval: ri60, enabled: wave2 });
   const { data: scData } = useQuery<{ candidates: any[]; total: number }>({ queryKey: ["/api/superconductor-candidates"] });
   const { data: novelInsightData } = useQuery<{
     insights: { id: string; insightText: string; noveltyScore: number | null; category: string | null; phaseName: string; discoveredAt: string }[];
     total: number;
-  }>({ queryKey: ["/api/novel-insights"], refetchInterval: ri30 });
+  }>({ queryKey: ["/api/novel-insights"], refetchInterval: ri30, enabled: wave2 });
   const { data: crossEngineStats } = useQuery<{
     totalFormulas: number;
     totalInsightsRecorded: number;
@@ -1926,7 +1931,7 @@ export default function Dashboard() {
     multiEngineFormulas: number;
     activePatterns: number;
     patternNames: string[];
-  }>({ queryKey: ["/api/cross-engine/stats"], refetchInterval: ri60, enabled: wave2 });
+  }>({ queryKey: ["/api/cross-engine/stats"], refetchInterval: ri60, enabled: wave3 });
   const { data: synthDiscStats } = useQuery<{
     totalDiscoveries: number;
     totalRoutes: number;
@@ -1934,7 +1939,7 @@ export default function Dashboard() {
     bestFitness: number;
     bestFormula: string;
     engineUsage: Record<string, number>;
-  }>({ queryKey: ["/api/synthesis-discovery/stats"], refetchInterval: ri60, enabled: wave2 });
+  }>({ queryKey: ["/api/synthesis-discovery/stats"], refetchInterval: ri60, enabled: wave3 });
   const { data: gaEvoStats } = useQuery<{
     mutationRate: number;
     generationsWithoutImprovement: number;
@@ -1952,35 +1957,35 @@ export default function Dashboard() {
       totalMotifs: number;
       activeMotifs: number;
     };
-  }>({ queryKey: ["/api/synthesis-discovery/ga-evolution"], refetchInterval: ri60, enabled: wave2 });
+  }>({ queryKey: ["/api/synthesis-discovery/ga-evolution"], refetchInterval: ri60, enabled: wave3 });
   const { data: genCompStats } = useQuery<{
     generators: { name: string; weight: number; discoveryRate: number; dftSuccesses: number; dftFailures: number; dftBestTc: number; pipelinePassRate: number }[];
     totalDFTSuccesses: number;
     totalDFTFailures: number;
     rebalanceCount: number;
-  }>({ queryKey: ["/api/generator-competition/stats"], refetchInterval: ri60, enabled: wave2 });
+  }>({ queryKey: ["/api/generator-competition/stats"], refetchInterval: ri60, enabled: wave3 });
   const { data: synthPlannerStats } = useQuery<{
     totalPlans: number;
     totalRoutes: number;
     avgFeasibility: number;
     methodBreakdown: Record<string, number>;
-  }>({ queryKey: ["/api/synthesis-planner/stats"], refetchInterval: ri60, enabled: wave2 });
+  }>({ queryKey: ["/api/synthesis-planner/stats"], refetchInterval: ri60, enabled: wave3 });
   const { data: heuristicStats } = useQuery<{
     totalGenerated: number;
     formulasProcessed: number;
     ruleHits: Record<string, number>;
     totalRules: number;
-  }>({ queryKey: ["/api/heuristic-synthesis/stats"], refetchInterval: ri60, enabled: wave2 });
+  }>({ queryKey: ["/api/heuristic-synthesis/stats"], refetchInterval: ri60, enabled: wave4 });
   const { data: mlSynthStats } = useQuery<{
     trained: boolean;
     trainingSize: number;
     featureImportance: Record<string, number>;
-  }>({ queryKey: ["/api/ml-synthesis/stats"], refetchInterval: ri60, enabled: wave2 });
+  }>({ queryKey: ["/api/ml-synthesis/stats"], refetchInterval: ri60, enabled: wave4 });
   const { data: retroStats } = useQuery<{
     totalAnalyzed: number;
     avgRoutesPerTarget: number;
     topMethods: Record<string, number>;
-  }>({ queryKey: ["/api/retrosynthesis/stats"], refetchInterval: ri60, enabled: wave2 });
+  }>({ queryKey: ["/api/retrosynthesis/stats"], refetchInterval: ri60, enabled: wave4 });
   const { data: synthesisGateStats } = useQuery<{
     totalEvaluated: number;
     totalRejected: number;
@@ -1990,7 +1995,7 @@ export default function Dashboard() {
     classificationCounts: Record<string, number>;
     avgCompositeScore: number;
     recentRejections: Array<{ formula: string; score: number; reasons: string[]; at: number }>;
-  }>({ queryKey: ["/api/synthesis-gate/stats"], refetchInterval: ri60, enabled: wave2 });
+  }>({ queryKey: ["/api/synthesis-gate/stats"], refetchInterval: ri60, enabled: wave4 });
   const { data: reactionNetworkStats } = useQuery<{
     totalNetworksBuilt: number;
     totalNodesCreated: number;
@@ -1998,15 +2003,15 @@ export default function Dashboard() {
     avgPathCost: number;
     methodBreakdown: Record<string, number>;
     familyBreakdown: Record<string, number>;
-  }>({ queryKey: ["/api/synthesis/reaction-network/stats"], refetchInterval: ri60, enabled: wave2 });
+  }>({ queryKey: ["/api/synthesis/reaction-network/stats"], refetchInterval: ri60, enabled: wave4 });
   const { data: alStats } = useQuery<{
     convergence: ActiveLearningStats;
     totalCycles: number;
     recentCycles: any[];
     avgUncertaintyTrend: { cycle: number; before: number; after: number; reductionPct: number }[];
     dftDatasetStats: { totalSize: number; bySource: Record<string, number>; growthHistory: { timestamp: number; size: number; source: string }[] };
-  }>({ queryKey: ["/api/gnn/active-learning-stats"], refetchInterval: ri60, enabled: wave2 });
-  const { data: theoryReport } = useQuery<any>({ queryKey: ["/api/theory-report"], refetchInterval: ri60, enabled: wave2 });
+  }>({ queryKey: ["/api/gnn/active-learning-stats"], refetchInterval: ri60, enabled: wave3 });
+  const { data: theoryReport } = useQuery<any>({ queryKey: ["/api/theory-report"], refetchInterval: ri60, enabled: wave4 });
   const { data: tscData } = useQuery<{
     sessionCandidates: { formula: string; topologicalClass: string; tscScore: number; recordedAt: number }[];
     dbCandidates: {
@@ -2021,7 +2026,7 @@ export default function Dashboard() {
       isInProximityToTI: boolean | null;
     }[];
     stats: { elementFrequency: Record<string, number>; classFrequency: Record<string, number>; total: number };
-  }>({ queryKey: ["/api/tsc-candidates"], refetchInterval: ri30 });
+  }>({ queryKey: ["/api/tsc-candidates"], refetchInterval: ri30, enabled: wave2 });
   const ws = useWebSocket();
 
   const statsHistoryRef = useRef<Record<string, number[]>>({});

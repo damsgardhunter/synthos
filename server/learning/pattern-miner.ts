@@ -340,7 +340,7 @@ export function mineQuantitativeRules(candidates: ScoredCandidate[], precomputed
 
 const INTERACTION_OPERATORS: (">" | "<")[] = [">", "<"];
 
-export function mineInteractionRules(candidates: ScoredCandidate[], precomputed?: PrecomputedData): PatternRule[] {
+export async function mineInteractionRules(candidates: ScoredCandidate[], precomputed?: PrecomputedData): Promise<PatternRule[]> {
   if (candidates.length < 15) return [];
 
   const data = precomputed ?? buildFeatureMatrix(candidates);
@@ -364,6 +364,9 @@ export function mineInteractionRules(candidates: ScoredCandidate[], precomputed?
     const thresholds1 = generateThresholds(featureValues[feat1]);
 
     for (let j = i + 1; j < TOP_FEATURES.length; j++) {
+      // yield between feature pairs — ~45 pairs × ~256 threshold combos × 4 op/consequent
+      // combos = ~46k evaluateRuleMatrix calls per fold; without yields this blocks for seconds
+      await new Promise<void>(r => setTimeout(r, 0));
       const feat2 = TOP_FEATURES[j] as string;
       const thresholds2 = generateThresholds(featureValues[feat2]);
 
@@ -492,6 +495,9 @@ export async function evolveRules(emit: EventEmitter): Promise<PatternRule[]> {
         const existingMl = (c.mlFeatures as Record<string, any>) ?? {};
         const cachedFeatures = existingMl.patternMinerFeatures as MLFeatureVector | undefined;
         const features = cachedFeatures ?? await extractFeatures(c.formula);
+        // yield every entry — extractFeatures blocks ~350ms; without this the event loop
+        // freezes for 175s+ when processing 500 candidates at cycle % 50 (T+550-650s)
+        await new Promise<void>(r => setTimeout(r, 0));
         if (!cachedFeatures && c.id) {
           uncached.push({ id: c.id, features, existingMl });
         }
@@ -549,9 +555,11 @@ export async function evolveRules(emit: EventEmitter): Promise<PatternRule[]> {
     const ruleScoreAccum = new Map<string, { rule: PatternRule; f1Sum: number; precSum: number; recSum: number; foldCount: number }>();
 
     for (const { train: trainSet, test: testSet } of folds) {
+      // yield between folds so HTTP requests can be handled
+      await new Promise<void>(r => setTimeout(r, 0));
       const trainData = buildFeatureMatrix(trainSet);
       const quantRules = mineQuantitativeRules(trainSet, trainData);
-      const interRules = mineInteractionRules(trainSet, trainData);
+      const interRules = await mineInteractionRules(trainSet, trainData);
 
       const globalRules = [...quantRules, ...interRules];
       for (const r of globalRules) r.family = "all";
@@ -566,9 +574,10 @@ export async function evolveRules(emit: EventEmitter): Promise<PatternRule[]> {
 
       for (const [family, members] of familyGroups) {
         if (members.length < MIN_FAMILY_SIZE) continue;
+        await new Promise<void>(r => setTimeout(r, 0)); // yield between family groups
         const famData = buildFeatureMatrix(members);
         const famQuant = mineQuantitativeRules(members, famData);
-        const famInter = mineInteractionRules(members, famData);
+        const famInter = await mineInteractionRules(members, famData);
         for (const r of [...famQuant, ...famInter]) {
           r.family = family;
           familyRules.push(r);

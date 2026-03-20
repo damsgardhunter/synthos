@@ -2,9 +2,9 @@ import { useState, useEffect } from "react";
 
 // Module-level timestamp set once when JS loads. Shared across all pages
 // so they all resume polling at exactly the same time.
-// 30s delay (was 5 min) — enough to let the server finish startup without
+// 60s delay — enough to let the server finish startup without
 // hammering it with polls before the engine is ready.
-export const STARTUP_UNTIL = Date.now() + 30 * 1000;
+export const STARTUP_UNTIL = Date.now() + 60 * 1000;
 
 /**
  * Returns `false` (no auto-poll) for the first 5 minutes after page load,

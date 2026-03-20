@@ -1102,9 +1102,9 @@ class TrainingPool {
   async addBatch(entries: { formula: string; tc: number; pressureGPa?: number; lambda?: number; omegaLog?: number }[]): Promise<number> {
     let added = 0;
     for (let _bi = 0; _bi < entries.length; _bi++) {
-      // Yield every 20 entries — each add() calls extractFeatures (~350ms),
-      // so without yields a large batch starves the event loop / timer callbacks.
-      if (_bi > 0 && _bi % 20 === 0) await new Promise<void>(r => setTimeout(r, 0));
+      // Yield every entry — each add() calls extractFeatures (~350ms synchronous),
+      // so batching 20 creates 7s blocks that starve the event loop / timer callbacks.
+      await new Promise<void>(r => setTimeout(r, 0));
       const e = entries[_bi];
       const known = (e.lambda != null || e.omegaLog != null) ? { lambda: e.lambda, omegaLog: e.omegaLog } : undefined;
       if (await this.add(e.formula, e.tc, e.pressureGPa ?? 0, known)) added++;
@@ -1969,7 +1969,13 @@ export async function retrainXGBoostFromEvaluated(cycleCount?: number): Promise<
       isSuperconductor: entry.tc > 0 && entry.stable,
       pressureGPa: entry.pressureGPa,
     };
-    SUPERCON_TRAINING_DATA.push(newEntry);
+    // Cap at 2000 entries — precomputeFeatureMeans/precomputeCrystalSymTargetEncoding iterate
+    // every entry with extractFeatures calls; an unbounded array degrades over long runtimes.
+    if (SUPERCON_TRAINING_DATA.length < 2000) {
+      SUPERCON_TRAINING_DATA.push(newEntry);
+    }
+    // yield before each add — trainingPool.add calls extractFeatures (~350ms blocking)
+    await new Promise<void>(r => setTimeout(r, 0));
     await trainingPool.add(entry.formula, entry.tc, entry.pressureGPa);
     newFromEval++;
   }

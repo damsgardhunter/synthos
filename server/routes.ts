@@ -3898,7 +3898,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   setTimeout(async () => {
     try { await initLambdaRegressor(); } catch {}
-  }, 600000);
+  }, 900000); // T+15min — clear of the T+600-720s congestion window (evolveRules, phonon, structure-predictor)
 
   setTimeout(() => {
     try { initPhononSurrogate(); } catch {}
