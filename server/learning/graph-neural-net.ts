@@ -2799,7 +2799,7 @@ function _gnnBar(epoch: number, total: number, width = 22): string {
   return '[' + '█'.repeat(filled) + '░'.repeat(width - filled) + ']';
 }
 
-export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights?: GNNWeights, maxPretrainEpochs = 15, label?: string): GNNWeights {
+export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights?: GNNWeights, maxPretrainEpochs = 15, label?: string): Promise<GNNWeights> {
   const rng = seededRandom(42);
   const weights = migrateWeights(preInitWeights ?? initWeights(rng), rng);
 
@@ -2956,6 +2956,8 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
         // Invalidate flat matrix caches after in-place weight mutations
         invalidateFlatCache(weights.W_mlp2);
       }
+      // yield after each pretrain epoch so heartbeat timers can fire
+      await new Promise<void>(r => setTimeout(r, 0));
     }
     console.log(`[GNN] FE pretraining complete — starting Tc fine-tuning`);
   }
@@ -3072,16 +3074,14 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
         const stabTarget = sample.tc > 0 ? 0.8 : 0.3;
         const stabError = pred.stabilityProbability - stabTarget;
 
-        const tcVarNorm = Math.max(1e-8, softplus(cache.logVarOutRaw[2] ?? 0));
-        const lambdaVarNorm = Math.max(1e-8, softplus(cache.logVarOutRaw[4] ?? 0));
-        const heteroLossTc = (tcError * tcError) / tcVarNorm + Math.log(tcVarNorm);
-        const heteroLossLambda = (lambdaError * lambdaError) / lambdaVarNorm + Math.log(lambdaVarNorm);
-
         const feWeight = hasFormationEnergy ? 0.1 : 0.0;
-        // Keep hetero weights small so the model can't "win" by collapsing σ² (which drives
-        // training loss negative while Tc predictions remain garbage). The MSE term tcError²
-        // must dominate so the model improves predictions rather than just tuning variance.
-        const loss = scWeight * (tcError * tcError + 0.02 * heteroLossTc) + feWeight * feError * feError + 0.01 * heteroLossLambda;
+        // Pure MSE loss — no heteroscedastic NLL.
+        // NLL = tcError²/σ² + log(σ²) goes negative when |tcError| < e^(-0.5) ≈ 0.6 in
+        // normalized units (÷300). Since most Tc < 180K → tcTarget < 0.6, the model can
+        // minimize loss by fitting σ² = tcError² without improving predictions at all.
+        // All workers converge to the same degenerate σ²-collapse minimum, giving identical
+        // (catastrophic) R². Remove NLL entirely; add calibrated uncertainty post-training.
+        const loss = scWeight * tcError * tcError + feWeight * feError * feError;
         totalLoss += loss;
         totalSamples++;
 
@@ -3138,8 +3138,8 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
           }
         }
 
-        // d(loss)/d(predictedTc) — hetero coefficient matches the 0.02 weight in the loss above
-        const dLossDTcK = scWeight * (2 * tcError / 300 + 0.02 * 2 * tcError / 300 / tcVarNorm);
+        // d(loss)/d(predictedTc): pure MSE gradient (loss = scWeight * tcError²)
+        const dLossDTcK = scWeight * 2 * tcError / 300;
 
         const dLdOut = new Array(OUTPUT_DIM).fill(0);
         dLdOut[0] = hasFormationEnergy ? clipGrad(2 * feError * 0.1) : 0;
@@ -3147,26 +3147,18 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
         // out[2] → ω_log: Tc chain rule + direct ω_log supervision
         dLdOut[2] = clipGrad((dLossDTcK * dTcdOmegaLog + omegaLogGradBoost) * dOmegaLogdOut2);
         dLdOut[3] = clipGrad(2 * confError * 0.05);
-        // out[4] → λ: Tc chain rule through Allen-Dynes + direct λ supervision
-        // hetero coefficient matches the 0.01 weight in the loss above
+        // out[4] → λ: Tc chain rule through Allen-Dynes + direct λ supervision (pure MSE)
         dLdOut[4] = clipGrad(
-          (dLossDTcK * dTcdLambda + (2 * lambdaError * 0.1 + 0.01 * 2 * lambdaError / lambdaVarNorm))
+          (dLossDTcK * dTcdLambda + 2 * lambdaError * 0.1)
           * dLambdadOut4
         );
         dLdOut[5] = clipGrad(2 * bgError * 0.05);
         dLdOut[6] = clipGrad(2 * dosError * 0.05);
         dLdOut[7] = clipGrad(2 * stabError * 0.05);
 
-        const tcVarLogRaw = cache.logVarOutRaw[2] ?? 0;
-        const lambdaVarLogRaw = cache.logVarOutRaw[4] ?? 0;
-        const spGradTc = sigmoid(tcVarLogRaw);
-        const spGradLambda = sigmoid(lambdaVarLogRaw);
-        const dLdTcVarNorm = -(tcError * tcError) / (tcVarNorm * tcVarNorm) + 1.0 / tcVarNorm;
-        const dLdLambdaVarNorm = -(lambdaError * lambdaError) / (lambdaVarNorm * lambdaVarNorm) + 1.0 / lambdaVarNorm;
-
+        // Uncertainty head (W_mlp2_var) receives no gradient — NLL removed.
+        // Uncertainty outputs can be calibrated post-training via isotonic regression.
         const dLdLogVarOut = new Array(OUTPUT_DIM).fill(0);
-        dLdLogVarOut[2] = clipGrad(0.02 * dLdTcVarNorm * spGradTc);
-        dLdLogVarOut[4] = clipGrad(0.01 * dLdLambdaVarNorm * spGradLambda);
 
         for (let i = 0; i < weights.W_mlp2.length; i++) {
           for (let j = 0; j < weights.W_mlp2[i].length; j++) {
@@ -3509,6 +3501,8 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
       console.log(`${pfx} ${bar} ${String(pct).padStart(3)}% | Epoch ${epoch + 1}/${epochs} | loss=${avgLoss.toFixed(4)} | lr=${lr.toExponential(2)}`);
     }
 
+    // yield after each training epoch so heartbeat timers and HTTP requests can proceed
+    await new Promise<void>(r => setTimeout(r, 0));
     if (avgLoss > 0 && avgLoss < 0.01) break;
   }
 
@@ -3613,7 +3607,7 @@ function bootstrapSample(data: TrainingSample[], ratio: number, rng: () => numbe
   return sampled;
 }
 
-export function trainEnsemble(trainingData: TrainingSample[]): GNNWeights[] {
+export async function trainEnsemble(trainingData: TrainingSample[]): Promise<GNNWeights[]> {
   const { train, validation } = splitTrainValidation(trainingData);
   heldOutValidationSet = validation;
 
@@ -3623,7 +3617,7 @@ export function trainEnsemble(trainingData: TrainingSample[]): GNNWeights[] {
     const w = initWeights(rng);
     const bootstrapRng = seededRandom(ENSEMBLE_SEEDS[i] + 31);
     const bootstrapped = bootstrapSample(train, BOOTSTRAP_RATIOS[i], bootstrapRng);
-    const trained = trainGNNSurrogate(bootstrapped, w);
+    const trained = await trainGNNSurrogate(bootstrapped, w);
     models.push(trained);
   }
 
@@ -3649,9 +3643,9 @@ export async function trainEnsembleAsync(
     const w = initWeights(rng);
     const bootstrapRng = seededRandom(ENSEMBLE_SEEDS[i] + 31);
     const bootstrapped = bootstrapSample(train, BOOTSTRAP_RATIOS[i], bootstrapRng);
-    const trained = trainGNNSurrogate(bootstrapped, w, maxPretrainEpochs);
+    const trained = await trainGNNSurrogate(bootstrapped, w, maxPretrainEpochs);
     models.push(trained);
-    await new Promise(resolve => setImmediate(resolve));
+    await new Promise<void>(r => setTimeout(r, 0));
   }
 
   if (validation.length > 0) {
@@ -3666,13 +3660,13 @@ export async function trainEnsembleAsync(
  * Called by gnn-worker-thread.ts so each of the 5 ensemble models can train
  * in a separate worker thread on the dedicated GNN GCP instance.
  */
-export function trainSingleEnsembleModel(
+export async function trainSingleEnsembleModel(
   trainingData: TrainingSample[],
   seed: number,
   bootstrapRatio: number,
   maxPretrainEpochs = 15,
   label?: string,
-): GNNWeights {
+): Promise<GNNWeights> {
   const rng = seededRandom(seed);
   const w = initWeights(rng);
   const bootstrapRng = seededRandom(seed + 31);

@@ -660,7 +660,7 @@ const STARTUP_CKPT_TTL_HOURS = 20; // checkpoints older than this are stale
 // Increment this whenever the GNN forward pass formula changes in a way that
 // makes old weights incompatible with the new code (e.g. hard-cap → sigmoid).
 // When the stored version doesn't match, startup retrains from scratch.
-const GNN_MODEL_VERSION = 2; // v2: sigmoid soft caps for ω_log and λ (2026-03-19)
+const GNN_MODEL_VERSION = 3; // v3: pure MSE loss — removed heteroscedastic NLL (2026-03-19)
 
 // In-process guard: run corpus training exactly once per GCP worker process lifetime.
 let _startupCorpusRan = false;
