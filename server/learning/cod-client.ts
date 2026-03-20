@@ -26,8 +26,26 @@ import { eq, inArray, and } from "drizzle-orm";
 const COD_API = "https://www.crystallography.net/cod/result";
 const COD_CIF_BASE = "https://www.crystallography.net/cod";
 const REQUEST_DELAY_MS = 1100;   // ~1 req/s — COD fair-use limit
-const FETCH_TIMEOUT_MS = 20_000;
+const FETCH_TIMEOUT_MS = 8_000;  // 8s — fail fast if COD is unreachable
 const PAGE_SIZE = 50;            // results per API page
+
+// ── Circuit breaker ────────────────────────────────────────────────────────────
+// Opens after a full SG probe fails completely (all element probes returned errors).
+// Stays open for 1 hour so transient outages don't spam thousands of log lines.
+// Resets automatically when the cooldown expires.
+let _codCircuitOpenUntil = 0;
+function _codCircuitIsOpen(): boolean {
+  if (_codCircuitOpenUntil === 0) return false;
+  if (Date.now() >= _codCircuitOpenUntil) {
+    _codCircuitOpenUntil = 0;  // reset after cooldown
+    return false;
+  }
+  return true;
+}
+function _codCircuitTrip(): void {
+  _codCircuitOpenUntil = Date.now() + 60 * 60 * 1000;  // 1 hour cooldown
+  console.warn("[COD] Circuit breaker opened — COD appears unreachable. Pausing all probes for 1 hour.");
+}
 
 // COD API quirk: bare sgNumber= / el= queries return [] regardless of value.
 // Only formula=SYMBOL queries consistently return data (e.g. formula=Cu works,
@@ -213,6 +231,9 @@ export async function fetchCODBySpaceGroup(
     }));
   }
 
+  // Circuit breaker: skip all probes if COD was recently unreachable.
+  if (_codCircuitIsOpen()) return [];
+
   // COD API does not support bare sgNumber= queries — it only returns results when
   // a formula= filter is present (e.g. formula=Cu&sgNumber=225 works; sgNumber=225
   // alone returns []). Work around this by probing each element in COD_PROBE_ELEMENTS
@@ -221,12 +242,14 @@ export async function fetchCODBySpaceGroup(
   // fewer hits but will still populate the cache with representative data.
   const results: CODEntry[] = [];
   const seenIds = new Set<number>();
+  let consecutiveFailures = 0;
 
   for (const element of COD_PROBE_ELEMENTS) {
     if (results.length >= maxResults) break;
     const url = `${COD_API}?format=json&formula=${element}&sgNumber=${spaceGroupNumber}&limit=${PAGE_SIZE}`;
     try {
       const response = await rateLimitedFetch(url);
+      consecutiveFailures = 0;  // reset on any successful connection
       if (!response.ok) continue;
       const rows: CODApiRow[] = await response.json();
       if (!Array.isArray(rows) || rows.length === 0) continue;
@@ -241,11 +264,25 @@ export async function fetchCODBySpaceGroup(
       results.push(...fresh);
       if (fresh.length > 0) await cacheEntries(fresh);
     } catch (err: any) {
-      console.warn(`[COD] SG ${spaceGroupNumber} probe(${element}) failed: ${err.message?.slice(0, 60)}`);
+      consecutiveFailures++;
+      // Only log the first failure per SG to avoid log spam
+      if (consecutiveFailures === 1) {
+        console.warn(`[COD] SG ${spaceGroupNumber} probe(${element}) failed: ${err.message?.slice(0, 60)}`);
+      }
+      // Abort after 3 consecutive failures — COD is likely unreachable
+      if (consecutiveFailures >= 3) {
+        console.warn(`[COD] SG ${spaceGroupNumber}: aborting after 3 consecutive failures`);
+        break;
+      }
     }
   }
 
-  console.log(`[COD] SG ${spaceGroupNumber}: fetched ${results.length} entries`);
+  // If we got nothing at all, trip the circuit breaker to avoid hammering more SGs
+  if (results.length === 0 && consecutiveFailures >= 3) {
+    _codCircuitTrip();
+  } else {
+    console.log(`[COD] SG ${spaceGroupNumber}: fetched ${results.length} entries`);
+  }
   return results.slice(0, maxResults);
 }
 
@@ -278,16 +315,20 @@ export async function fetchCODByElements(
     }
   } catch { /* DB may not have the table yet — fallback to API */ }
 
+  if (_codCircuitIsOpen()) return [];
+
   // COD API: el= queries return [] (API quirk). Instead, probe each element in the
   // target set using formula=X and collect any results that contain ALL target elements.
   const results: CODEntry[] = [];
   const seenIds = new Set<number>();
+  let consecutiveFailures = 0;
 
   for (const element of sorted) {
     if (results.length >= maxResults) break;
     const url = `${COD_API}?format=json&formula=${element}&limit=${Math.min(maxResults, PAGE_SIZE)}`;
     try {
       const response = await rateLimitedFetch(url);
+      consecutiveFailures = 0;
       if (!response.ok) continue;
       const rows: CODApiRow[] = await response.json();
       const entries = (Array.isArray(rows) ? rows : []).map(parseCODRow).filter(Boolean) as CODEntry[];
@@ -299,7 +340,11 @@ export async function fetchCODByElements(
       results.push(...relevant);
       if (relevant.length > 0) await cacheEntries(relevant);
     } catch (err: any) {
-      console.warn(`[COD] fetchCODByElements probe(${element}) failed: ${err.message?.slice(0, 60)}`);
+      consecutiveFailures++;
+      if (consecutiveFailures === 1) {
+        console.warn(`[COD] fetchCODByElements probe(${element}) failed: ${err.message?.slice(0, 60)}`);
+      }
+      if (consecutiveFailures >= 3) { _codCircuitTrip(); break; }
     }
   }
   return results.slice(0, maxResults);
