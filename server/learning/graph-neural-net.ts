@@ -2402,13 +2402,12 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
   // Hard min(LAMBDA_MAX, softplus(x)) had zero derivative when softplus(x) ≥ LAMBDA_MAX,
   // which caused permanent gradient death once training pushed λ to the cap.
   const lambdaRaw = LAMBDA_MAX * sigmoid(sf(out[4] ?? 0));
-  // Tc = 70% direct output (out[8] predicts tc/30) + 30% Allen-Dynes physics.
-  // The direct path gives 2000× stronger gradients during training (no chain-rule attenuation),
-  // so the model learns to discriminate materials via out[8] while Allen-Dynes anchors
-  // the auxiliary λ/ω_log outputs to physical values.
-  const allenDynesTcRawK = allenDynesTcRaw(lambdaRaw, omegaLog / 1.4388, FIXED_MU_STAR);
-  const directTcK = Math.max(0, sf(out[8] ?? 0)) * 30;
-  const predictedTcRaw = 0.3 * allenDynesTcRawK + 0.7 * directTcK;
+  // out[8] → direct Tc prediction via softplus. No Allen-Dynes blend.
+  // Allen-Dynes with saturated λ≈5.5 gives ~228K constant — blending it in poisons
+  // every prediction with a 68K bias regardless of material (R²≈-99 observed in v6).
+  // softplus ensures gradient is non-zero everywhere: d(softplus)/dx = sigmoid(x).
+  const directTcK = softplus(sf(out[8] ?? 0)) * 30;
+  const predictedTcRaw = directTcK;
   const confidenceRaw = sigmoid(sf(out[3] ?? 0));
   const bandgapRaw = sigmoid(sf(out[5] ?? 0)) * 5.0;
   const dosProxyRaw = softplus(sf(out[6] ?? 0));
@@ -2584,10 +2583,9 @@ function GNNPredictForTraining(graph: CrystalGraph, weights: GNNWeights): { pred
   const omegaLog = 10 + (OMEGA_LOG_MAX - 10) * sigmoid(omegaLogRaw / 3);
   // out[4] → λ: sigmoid soft map into (0, LAMBDA_MAX) — gradient everywhere.
   const lambdaRaw = LAMBDA_MAX * sigmoid(sf(out[4] ?? 0));
-  // 70% direct output + 30% Allen-Dynes blend — see GNNPredict for rationale.
-  const allenDynesTcRawK = allenDynesTcRaw(lambdaRaw, omegaLog / 1.4388, FIXED_MU_STAR);
-  const directTcK = Math.max(0, sf(out[8] ?? 0)) * 30;
-  const predictedTcRaw = 0.3 * allenDynesTcRawK + 0.7 * directTcK;
+  // out[8] → direct Tc via softplus (no Allen-Dynes blend — see GNNPredict for rationale).
+  const directTcK = softplus(sf(out[8] ?? 0)) * 30;
+  const predictedTcRaw = directTcK;
   const confidenceRaw = sigmoid(sf(out[3] ?? 0));
   const bandgapRaw = sigmoid(sf(out[5] ?? 0)) * 5.0;
   const dosProxyRaw = softplus(sf(out[6] ?? 0));
@@ -3094,7 +3092,8 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         // Allen-Dynes path is retained as physics constraint (λ/ω_log stay calibrated).
         // Direct path loss is added to totalLoss here; Allen-Dynes loss added after adTc.
         const directOut8 = cache.outRaw[8] ?? 0;
-        const directErr = Math.max(0, directOut8) - tcTarget * 10;  // tcTarget*10 = tc/30
+        const directPred30 = softplus(directOut8);                   // always positive, smooth
+        const directErr = directPred30 - tcTarget * 10;              // tcTarget*10 = tc/30
         const directLoss = scWeight * directErr * directErr;
         totalLoss += feWeight * feError * feError + directLoss;
         totalSamples++;
@@ -3173,8 +3172,8 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         dLdOut[6] = clipGrad(2 * dosError * 0.05);
         dLdOut[7] = clipGrad(2 * stabError * 0.05);
         // out[8] → direct Tc/30: primary Tc path, large gradient (up to ±1 after clip)
-        // Leaky ReLU backward: slope=1.0 if out[8]>0, slope=0.01 otherwise (no dead units)
-        dLdOut[8] = clipGrad(scWeight * 2 * directErr * (directOut8 > 0 ? 1.0 : 0.01));
+        // d(softplus)/d(x) = sigmoid(x) — smooth, non-zero everywhere (no dead units)
+        dLdOut[8] = clipGrad(scWeight * 2 * directErr * sigmoid(directOut8));
 
         // Uncertainty head (W_mlp2_var) receives no gradient — NLL removed.
         // Uncertainty outputs can be calibrated post-training via isotonic regression.

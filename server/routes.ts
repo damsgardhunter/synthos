@@ -538,11 +538,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const rawLim = Number(req.query.limit);
       const limit = Math.min(Number.isFinite(rawLim) && rawLim > 0 ? rawLim : 200, 1000);
       const cacheKey = `${CACHE_KEYS.CANDIDATES}:${limit}`;
-      const result = await cache.getOrSet(cacheKey, TTL.CANDIDATES, async () => {
-        const [candidates, total] = await Promise.all([
-          storage.getSuperconductorCandidates(limit),
-          storage.getSuperconductorCount(),
-        ]);
+      const result = await cache.getOrSetStale(cacheKey, TTL.CANDIDATES, async () => {
+        const candidates = await storage.getSuperconductorCandidates(limit);
+        const total = await storage.getSuperconductorCount();
         return { candidates, total };
       });
       res.json(result);
@@ -783,16 +781,19 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     try {
       const limit = Math.min(Number(req.query.limit) || 20, 100);
       const cacheKey = `${CACHE_KEYS.MILESTONES}:${limit}`;
-      const result = await cache.getOrSet(cacheKey, TTL.MILESTONES, async () => {
-        const [ms, total] = await Promise.all([
-          storage.getMilestones(limit),
-          storage.getMilestoneCount(),
-        ]);
+      // getOrSetStale: serves cached data immediately on repeat polls; only blocks on first-ever fetch.
+      // Milestones change infrequently — stale-while-revalidate is fine and avoids pool exhaustion
+      // when many queries fire simultaneously at startup.
+      const result = await cache.getOrSetStale(cacheKey, TTL.MILESTONES, async () => {
+        // Sequential to use only 1 pool slot at a time under constrained pool (max: 5)
+        const ms = await storage.getMilestones(limit);
+        const total = await storage.getMilestoneCount();
         return { milestones: ms, total };
       });
       res.json(result);
-    } catch (e) {
-      res.status(500).json({ error: "Failed to fetch milestones" });
+    } catch (e: any) {
+      console.error("[milestones] 500 error:", e?.message ?? e);
+      res.status(500).json({ error: "Failed to fetch milestones", detail: e?.message });
     }
   });
 
@@ -845,7 +846,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   // Alias used by some dashboard queries
   app.get("/api/novel-insights/recent", async (_req, res) => {
     try {
-      const result = await cache.getOrSet(
+      const result = await cache.getOrSetStale(
         `${CACHE_KEYS.NOVEL_INSIGHTS}:recent`,
         TTL.NOVEL_INSIGHTS,
         async () => {
