@@ -2402,10 +2402,13 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
   // Hard min(LAMBDA_MAX, softplus(x)) had zero derivative when softplus(x) ≥ LAMBDA_MAX,
   // which caused permanent gradient death once training pushed λ to the cap.
   const lambdaRaw = LAMBDA_MAX * sigmoid(sf(out[4] ?? 0));
-  // Tc computed via Allen-Dynes formula: Tc = (ω_log/1.2)*exp(-1.04(1+λ)/(λ-μ*(1+0.62λ)))
-  // omegaLog is already in Kelvin; allenDynesTcRaw expects cm⁻¹ and multiplies by 1.4388 internally,
-  // so we divide here to undo that spurious conversion.
-  const predictedTcRaw = allenDynesTcRaw(lambdaRaw, omegaLog / 1.4388, FIXED_MU_STAR);
+  // Tc = 70% direct output (out[8] predicts tc/30) + 30% Allen-Dynes physics.
+  // The direct path gives 2000× stronger gradients during training (no chain-rule attenuation),
+  // so the model learns to discriminate materials via out[8] while Allen-Dynes anchors
+  // the auxiliary λ/ω_log outputs to physical values.
+  const allenDynesTcRawK = allenDynesTcRaw(lambdaRaw, omegaLog / 1.4388, FIXED_MU_STAR);
+  const directTcK = Math.max(0, sf(out[8] ?? 0)) * 30;
+  const predictedTcRaw = 0.3 * allenDynesTcRawK + 0.7 * directTcK;
   const confidenceRaw = sigmoid(sf(out[3] ?? 0));
   const bandgapRaw = sigmoid(sf(out[5] ?? 0)) * 5.0;
   const dosProxyRaw = softplus(sf(out[6] ?? 0));
@@ -2581,8 +2584,10 @@ function GNNPredictForTraining(graph: CrystalGraph, weights: GNNWeights): { pred
   const omegaLog = 10 + (OMEGA_LOG_MAX - 10) * sigmoid(omegaLogRaw / 3);
   // out[4] → λ: sigmoid soft map into (0, LAMBDA_MAX) — gradient everywhere.
   const lambdaRaw = LAMBDA_MAX * sigmoid(sf(out[4] ?? 0));
-  // omegaLog is in Kelvin; divide by 1.4388 to undo the cm⁻¹→K conversion inside allenDynesTcRaw
-  const predictedTcRaw = allenDynesTcRaw(lambdaRaw, omegaLog / 1.4388, FIXED_MU_STAR);
+  // 70% direct output + 30% Allen-Dynes blend — see GNNPredict for rationale.
+  const allenDynesTcRawK = allenDynesTcRaw(lambdaRaw, omegaLog / 1.4388, FIXED_MU_STAR);
+  const directTcK = Math.max(0, sf(out[8] ?? 0)) * 30;
+  const predictedTcRaw = 0.3 * allenDynesTcRawK + 0.7 * directTcK;
   const confidenceRaw = sigmoid(sf(out[3] ?? 0));
   const bandgapRaw = sigmoid(sf(out[5] ?? 0)) * 5.0;
   const dosProxyRaw = softplus(sf(out[6] ?? 0));
@@ -2667,7 +2672,10 @@ function initWeights(rng: () => number): GNNWeights {
     W_graph_adapt: initMatrix(GRAPH_FEAT_DIM, GRAPH_FEAT_DIM, rng, 0.01),
     // GLFN-TC: Dense Residual scalar gate — sigmoid(-2) ≈ 0.12 (tiny initial skip).
     dense_skip_gate: -2.0,
-    W_mlp2: initMatrix(OUTPUT_DIM, HIDDEN_DIM, rng, 0.01),
+    // Scale 0.05 (was 0.01) so gradients propagate meaningfully to the message-passing layers.
+    // With 0.01: dLdH1 ≈ 0.01 × grad_out = ~0.0004 — effectively zero at graph layers.
+    // With 0.05: dLdH1 ≈ 0.05 × grad_out = ~0.002 — 5× better, sufficient for Adam to update.
+    W_mlp2: initMatrix(OUTPUT_DIM, HIDDEN_DIM, rng, 0.05),
     b_mlp2: (() => {
       const b = initVector(OUTPUT_DIM);
       // out[2] → ω_log via sigmoid(x/3): bias -4.0 → sigmoid(-4/3)≈0.21 → ω_log≈320K (physical BCS range)
@@ -2676,6 +2684,10 @@ function initWeights(rng: () => number): GNNWeights {
       // out[4] → λ via sigmoid(x): bias -1.5 → sigmoid(-1.5)≈0.18 → λ≈1.0 (typical phonon-mediated SC)
       // Without this, sigmoid(0)=0.5 → λ=2.75, immediately predicting Tc≈90K for all materials.
       b[4] = -1.5;
+      // out[8] → direct Tc/30 prediction. Bias=0 → initial prediction=0K for all materials.
+      // For SC samples (tc>0), directErr = 0 - tc/30 gives a strong negative gradient (push up).
+      // For non-SC samples (tc=0), directErr = 0 → no gradient (already correct). Ideal init.
+      b[8] = 0.0;
       return b;
     })(),
     W_mlp2_var: initMatrix(OUTPUT_DIM, HIDDEN_DIM, rng, 0.05),
@@ -2810,9 +2822,10 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
   }
 
   const LR_INIT = 0.001;
-  // Scale epochs so smaller datasets (~100 samples) still get enough gradient steps.
-  // Target ~1200 gradient steps: N=100→80, N=440→27, N=800→15, N=1200→10 (min).
-  const epochs = Math.max(15, Math.min(60, Math.ceil(12000 / trainingData.length)));
+  // Scale epochs so all dataset sizes get enough gradient steps.
+  // N=6500→30, N=1200→50, N=500→100, N=100→150 (cap). Direct Tc path needs more steps
+  // than Allen-Dynes alone since it learns from scratch without physics priors.
+  const epochs = Math.max(30, Math.min(150, Math.ceil(60000 / trainingData.length)));
   const batchSize = Math.min(64, trainingData.length);
 
   // Adam state for MLP head weights and graph layer weights.
@@ -3047,7 +3060,6 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         const tcForWeight = sample.qeDFPTTc ?? sample.tc;
         const hasFormationEnergy = sample.formationEnergy != null;
         const feTarget = hasFormationEnergy ? sample.formationEnergy! : 0;
-        const tcError = pred.predictedTc / 300 - tcTarget;
         // Weighted loss: high-Tc (discovery targets) are rare so up-weight them.
         // >100K: 4× (room-T SCs), 40-100K: 3×, >0: 2× (counteract contrast imbalance), =0: 1×
         // DFT-verified labels carry 5× the base weight — they are the ground truth.
@@ -3075,14 +3087,16 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         const stabError = pred.stabilityProbability - stabTarget;
 
         const feWeight = hasFormationEnergy ? 0.1 : 0.0;
-        // Pure MSE loss — no heteroscedastic NLL.
-        // NLL = tcError²/σ² + log(σ²) goes negative when |tcError| < e^(-0.5) ≈ 0.6 in
-        // normalized units (÷300). Since most Tc < 180K → tcTarget < 0.6, the model can
-        // minimize loss by fitting σ² = tcError² without improving predictions at all.
-        // All workers converge to the same degenerate σ²-collapse minimum, giving identical
-        // (catastrophic) R². Remove NLL entirely; add calibrated uncertainty post-training.
-        const loss = scWeight * tcError * tcError + feWeight * feError * feError;
-        totalLoss += loss;
+        // Dual-path Tc loss: Allen-Dynes (0.3×) + Direct out[8] (1.0×).
+        // Direct path: out[8] predicts tc/30. Gradient magnitude = scWeight*2*directErr
+        //   = up to ±2 (clipped to ±1) → 2000× larger than Allen-Dynes chain (≈0.0004).
+        // This ensures message-passing layers receive meaningful gradient every step.
+        // Allen-Dynes path is retained as physics constraint (λ/ω_log stay calibrated).
+        // Direct path loss is added to totalLoss here; Allen-Dynes loss added after adTc.
+        const directOut8 = cache.outRaw[8] ?? 0;
+        const directErr = Math.max(0, directOut8) - tcTarget * 10;  // tcTarget*10 = tc/30
+        const directLoss = scWeight * directErr * directErr;
+        totalLoss += feWeight * feError * feError + directLoss;
         totalSamples++;
 
         // ── Allen-Dynes chain-rule gradient setup ───────────────────────────────
@@ -3098,6 +3112,9 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         const adLambda       = LAMBDA_MAX * adLambdaSig;
         // omegaLog is in Kelvin; divide by 1.4388 to match the forward-pass unit fix
         const adTc           = allenDynesTcRaw(adLambda, adOmegaLog / 1.4388, FIXED_MU_STAR);
+        // Allen-Dynes path loss (0.3× weight): physics constraint on λ/ω_log
+        const allenDynesError = adTc / 300 - tcTarget;
+        totalLoss += 0.3 * scWeight * allenDynesError * allenDynesError;
         // Use material-specific μ* from DFPT (JARVIS/QE) when available; fall back to 0.10.
         // Improves gradient accuracy for cuprates (μ*~0.15) and hydrides (μ*~0.08).
         const sampleMuStar = (sample.muStar != null && Number.isFinite(sample.muStar) && sample.muStar > 0)
@@ -3138,23 +3155,26 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
           }
         }
 
-        // d(loss)/d(predictedTc): pure MSE gradient (loss = scWeight * tcError²)
-        const dLossDTcK = scWeight * 2 * tcError / 300;
+        // Allen-Dynes gradient (0.3× weight — auxiliary physics path)
+        const dLossDAd = 0.3 * scWeight * 2 * allenDynesError / 300;
 
         const dLdOut = new Array(OUTPUT_DIM).fill(0);
         dLdOut[0] = hasFormationEnergy ? clipGrad(2 * feError * 0.1) : 0;
         dLdOut[1] = clipGrad(2 * phononError * 0.05);
-        // out[2] → ω_log: Tc chain rule + direct ω_log supervision
-        dLdOut[2] = clipGrad((dLossDTcK * dTcdOmegaLog + omegaLogGradBoost) * dOmegaLogdOut2);
+        // out[2] → ω_log: Allen-Dynes chain (0.3×) + direct ω_log supervision
+        dLdOut[2] = clipGrad((dLossDAd * dTcdOmegaLog + omegaLogGradBoost) * dOmegaLogdOut2);
         dLdOut[3] = clipGrad(2 * confError * 0.05);
-        // out[4] → λ: Tc chain rule through Allen-Dynes + direct λ supervision (pure MSE)
+        // out[4] → λ: Allen-Dynes chain (0.3×) + direct λ supervision (MSE)
         dLdOut[4] = clipGrad(
-          (dLossDTcK * dTcdLambda + 2 * lambdaError * 0.1)
+          (dLossDAd * dTcdLambda + 2 * lambdaError * 0.1)
           * dLambdadOut4
         );
         dLdOut[5] = clipGrad(2 * bgError * 0.05);
         dLdOut[6] = clipGrad(2 * dosError * 0.05);
         dLdOut[7] = clipGrad(2 * stabError * 0.05);
+        // out[8] → direct Tc/30: primary Tc path, large gradient (up to ±1 after clip)
+        // Leaky ReLU backward: slope=1.0 if out[8]>0, slope=0.01 otherwise (no dead units)
+        dLdOut[8] = clipGrad(scWeight * 2 * directErr * (directOut8 > 0 ? 1.0 : 0.01));
 
         // Uncertainty head (W_mlp2_var) receives no gradient — NLL removed.
         // Uncertainty outputs can be calibrated post-training via isotonic regression.
@@ -3429,9 +3449,9 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
       adamUpdateVec(weights.b_mlp2_var, gradB2v, adamB2v, weights.b_mlp2_var.length);
       adamUpdate(weights.W_mlp1, gradW1, adamW1, HIDDEN_DIM, pooledLen);
       adamUpdateVec(weights.b_mlp1, gradB1, adamB1, HIDDEN_DIM);
-      // Graph layer AdamW — lr * 0.3 keeps graph weights conservative relative
-      // to the MLP head, preventing early over-fitting on small datasets.
-      const graphLR = lr * 0.3;
+      // Graph layer AdamW — lr * 0.5 (was 0.3). Direct Tc path delivers strong gradients
+      // to the graph layers so they need a higher LR to update meaningfully.
+      const graphLR = lr * 0.5;
       const adamUpdateGraph = (
         w: number[][], g: number[][], am: { m: number[][]; v: number[][] }
       ) => {
