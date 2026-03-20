@@ -238,7 +238,7 @@ const HIDDEN_DIM = 48;
 const N_GAUSSIAN_BASIS = 40;             // expanded from 20 — denser RBF gives finer distance discrimination
 const EDGE_DIM = N_GAUSSIAN_BASIS + 4;   // derived: 40 RBF + bond order, EN diff, ionic char, radius sum
 const OUTPUT_DIM = 16;
-const GLOBAL_COMP_DIM = 19;
+const GLOBAL_COMP_DIM = 23;
 // Coulomb pseudopotential μ* — fixed at conventional BCS value.
 // Typical range: 0.10 (metals), 0.12-0.13 (hydrides, higher Coulomb screening).
 const FIXED_MU_STAR = 0.10;
@@ -1097,7 +1097,7 @@ export function buildPrototypeGraph(formula: string, prototype: string, pressure
   }
 
   const edgeIndex = buildEdgeIndex(nodes, edges);
-  const globalFeatures = computeGlobalCompositionFeatures(rawCounts, hints);
+  const globalFeatures = computeGlobalCompositionFeatures(rawCounts, hints, pressureGpa);
   const threeBodyFeatures = compute3BodyFeatures({ nodes, edges, threeBodyFeatures: [], adjacency, edgeIndex, formula, prototype, globalFeatures });
   return { nodes, edges, threeBodyFeatures, adjacency, edgeIndex, formula, prototype, pressureGpa, globalFeatures };
 }
@@ -1300,10 +1300,11 @@ function computeAtomicMismatch(counts: Record<string, number>): number {
   return Math.sqrt(Math.max(0, delta2));
 }
 
-// Computes GLOBAL_COMP_DIM (19) composition-level features injected at the MLP head.
-// 13 composition features + 6 physics features from PhysicsFeatureHints (λ, logω, DOS, FE, class flags).
+// Computes GLOBAL_COMP_DIM (23) composition-level features injected at the MLP head.
+// 13 composition features + 6 physics features from PhysicsFeatureHints (λ, logω, DOS, FE, class flags)
+// + 4 engineered features (pressure, MgB2-type, heavy-fermion hint, mean TM d-count).
 // Hints contain measured/estimated physics — not model outputs — so there is no training leakage.
-function computeGlobalCompositionFeatures(counts: Record<string, number>, hints?: PhysicsFeatureHints): number[] {
+function computeGlobalCompositionFeatures(counts: Record<string, number>, hints?: PhysicsFeatureHints, pressureGpa?: number): number[] {
   const els = Object.entries(counts);
   if (els.length === 0) return new Array(GLOBAL_COMP_DIM).fill(0);
   const total = els.reduce((s, [, n]) => s + n, 0);
@@ -1386,6 +1387,32 @@ function computeGlobalCompositionFeatures(counts: Record<string, number>, hints?
   const IRON_SC_ANIONS = new Set(["As", "P", "Se", "Te", "S"]);
   const isIronBased = (counts["Fe"] != null && Object.keys(counts).some(el => IRON_SC_ANIONS.has(el))) ? 1.0 : 0.0;
 
+  // --- 4 engineered features ---
+
+  // [19] pressure (log scale) — critical for high-P hydride SCs (H3S@150GPa, LaH10@170GPa)
+  // log(1 + P/10) / log(1 + 200) normalises to ~0-1 over 0-2000 GPa
+  const pressureFeat = pressureGpa != null && pressureGpa > 0
+    ? Math.min(1.0, Math.log1p(pressureGpa / 10) / Math.log1p(200))
+    : 0.0;
+
+  // [20] MgB2-type flag — Mg:B ≈ 1:2; two-band phonon SC mechanism; Tc~39K at ambient P
+  const mgCount = counts["Mg"] ?? 0;
+  const bCount  = counts["B"]  ?? 0;
+  const isMgB2Type = (mgCount > 0 && bCount > 0 && Math.abs(bCount / mgCount - 2) < 0.6) ? 1.0 : 0.0;
+
+  // [21] heavy-fermion / f-electron hint — Ce, U, Yb, Pr, Sm → unconventional Kondo-lattice SC
+  const HEAVY_FERMION_ELS = new Set(["Ce", "U", "Yb", "Pr", "Sm"]);
+  const hfWeight = els.reduce((s, [el, n]) => s + (HEAVY_FERMION_ELS.has(el) ? n / total : 0), 0);
+  const heavyFermionFeat = Math.min(1.0, hfWeight * 4.0);  // boosted — even trace amounts are diagnostic
+
+  // [22] mean d-electron count per TM atom — finer-grained than d-orbital filling average
+  // More directly related to Stoner criterion and density of states at E_F.
+  const tmEls = els.filter(([el]) => isTransitionMetal(el));
+  const tmCount = tmEls.reduce((s, [, n]) => s + n, 0);
+  const meanTMdCount = tmCount > 0
+    ? tmEls.reduce((s, [el, n]) => s + (n / tmCount) * getDOrbitalOccupancy(getElementData(el)?.atomicNumber ?? 1), 0)
+    : 0.0;
+
   return [
     meanEN / 4.0,                           // [0] mean Pauling EN — ionicity proxy
     meanD,                                  // [1] mean d-orbital filling — BCS coupling proxy
@@ -1406,6 +1433,10 @@ function computeGlobalCompositionFeatures(counts: Record<string, number>, hints?
     feFeat,                                 // [16] formation energy signal — thermodynamic viability
     isCuprate,                              // [17] cuprate flag — d-wave/unconventional class
     isIronBased,                            // [18] iron-based flag — s± pairing class
+    pressureFeat,                           // [19] pressure (log-normalised) — high-P hydride class
+    isMgB2Type,                             // [20] MgB2-type flag — two-band phonon SC
+    heavyFermionFeat,                       // [21] heavy-fermion/f-electron hint — Kondo-lattice SC
+    meanTMdCount,                           // [22] mean d-count per TM — Stoner criterion / DOS proxy
   ];
 }
 
@@ -1599,7 +1630,7 @@ export function buildCrystalGraph(formula: string, structure?: any, pressureGpa?
   }
 
   const edgeIndex = buildEdgeIndex(nodes, edges);
-  const globalFeatures = computeGlobalCompositionFeatures(rawCounts, enrichedHints);
+  const globalFeatures = computeGlobalCompositionFeatures(rawCounts, enrichedHints, pressureGpa);
   const partialGraph: CrystalGraph = { nodes, edges, threeBodyFeatures: [], adjacency, edgeIndex, formula, pressureGpa, globalFeatures };
   partialGraph.threeBodyFeatures = compute3BodyFeatures(partialGraph);
   return partialGraph;
@@ -2713,6 +2744,16 @@ function migrateWeights(w: GNNWeights, rng: () => number): GNNWeights {
   if (typeof w.dense_skip_gate !== 'number' || !Number.isFinite(w.dense_skip_gate)) {
     w.dense_skip_gate = -2.0;
   }
+  // If W_mlp1 was saved with old GLOBAL_COMP_DIM, zero-pad the new composition feature columns
+  // so old checkpoints are forward-compatible. New features contribute 0 until training updates them.
+  const expectedCols = HIDDEN_DIM * 2 + GLOBAL_COMP_DIM;
+  if (w.W_mlp1 && w.W_mlp1[0] && w.W_mlp1[0].length < expectedCols) {
+    const pad = expectedCols - w.W_mlp1[0].length;
+    for (const row of w.W_mlp1) {
+      for (let i = 0; i < pad; i++) row.push(0);
+    }
+    invalidateFlatCache(w.W_mlp1);
+  }
   return w;
 }
 
@@ -2735,6 +2776,10 @@ export interface TrainingSample {
   dataConfidence?: string;
   /** DFPT-derived Tc (Allen-Dynes from QE λ) — overrides `tc` as primary training target when present */
   qeDFPTTc?: number;
+  /** Band gap in eV from DFT/MP — used as direct supervision for out[5]; 0 for metals */
+  bandgap?: number;
+  /** Phonon stability from DFPT — true if all phonon modes positive; overrides tc>0 heuristic */
+  phononStable?: boolean;
 }
 
 function structureHash(structure: any): string {
@@ -3008,7 +3053,8 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
         const scWeight = dftMult * (tcForWeight >= 100 ? 4.0 : tcForWeight >= 40 ? 3.0 : tcForWeight > 0 ? 2.0 : 1.0);
         const feError = hasFormationEnergy ? pred.formationEnergy - feTarget : 0;
 
-        const phononTarget = (sample.tc > 0) ? 1.0 : 0.0;
+        // Prefer DFT-calculated phonon stability when available; fall back to Tc>0 heuristic.
+        const phononTarget = sample.phononStable != null ? (sample.phononStable ? 1.0 : 0.0) : (sample.tc > 0 ? 1.0 : 0.0);
         const phononPred = pred.phononStability ? 1.0 : 0.0;
         const phononError = phononPred - phononTarget;
 
@@ -3019,7 +3065,7 @@ export function trainGNNSurrogate(trainingData: TrainingSample[], preInitWeights
           : (sample.tc > 0 ? Math.min(4.0, 0.3 + Math.sqrt(sample.tc / 40)) : 0.1);
         const lambdaError = pred.lambda - lambdaTarget;
 
-        const bgTarget = (sample as any).bandgap ?? (sample.tc > 0 ? 0 : 1.5);
+        const bgTarget = sample.bandgap ?? (sample.tc > 0 ? 0 : 1.5);
         const bgError = pred.bandgap - bgTarget;
         const dosTarget = sample.tc > 0 ? Math.min(5.0, sample.tc / 30) : 0.3;
         const dosError = pred.dosProxy - dosTarget;
@@ -4200,7 +4246,13 @@ if (isMainThread) setTimeout(async () => {
       for (const rec of dftTrainingDataset) {
         if (extra.length >= maxContrast) break;
         if (seen.has(rec.formula) || superconFormulas.has(rec.formula)) continue;
-        extra.push({ formula: rec.formula, tc: Math.max(0, rec.tc ?? 0), formationEnergy: rec.formationEnergy ?? undefined });
+        extra.push({
+          formula: rec.formula,
+          tc: Math.max(0, rec.tc ?? 0),
+          formationEnergy: rec.formationEnergy ?? undefined,
+          bandgap: rec.bandGap ?? undefined,
+          phononStable: rec.phononStable,
+        });
         seen.add(rec.formula);
       }
       return { merged: [...base, ...extra], seeded };
