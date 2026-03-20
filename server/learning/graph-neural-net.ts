@@ -3503,7 +3503,6 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
 
     // yield after each training epoch so heartbeat timers and HTTP requests can proceed
     await new Promise<void>(r => setTimeout(r, 0));
-    if (avgLoss > 0 && avgLoss < 0.01) break;
   }
 
   const scrubMatrix = (m: number[][]) => { for (let i = 0; i < m.length; i++) for (let j = 0; j < m[i].length; j++) if (!Number.isFinite(m[i][j])) m[i][j] = 0; };

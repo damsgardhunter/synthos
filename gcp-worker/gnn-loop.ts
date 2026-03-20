@@ -240,6 +240,24 @@ function computeMetrics(
   const r2 = ssTot > 0 ? 1 - ssRes / ssTot : 0;
   const mae = sumAbs / counted;
   const rmse = Math.sqrt(sumSq / counted);
+  // Diagnostic: log prediction range so we can detect collapsed/saturated outputs
+  if (evalData.length > 0) {
+    const allPreds: number[] = [];
+    for (const sample of evalData.slice(0, 20)) {
+      try {
+        const graph = buildCrystalGraph(sample.formula, sample.structure);
+        const p = models.map(m => GNNPredict(graph, m).predictedTc);
+        allPreds.push(p.reduce((a, b) => a + b, 0) / p.length);
+      } catch { /* skip */ }
+    }
+    if (allPreds.length > 0) {
+      const predMin = Math.min(...allPreds).toFixed(1);
+      const predMax = Math.max(...allPreds).toFixed(1);
+      const predMean = (allPreds.reduce((a,b)=>a+b,0)/allPreds.length).toFixed(1);
+      const actualMean = meanActual.toFixed(1);
+      console.log(`[GNN-diag] sample preds(n=${allPreds.length}): min=${predMin}K max=${predMax}K mean=${predMean}K | actualMean=${actualMean}K`);
+    }
+  }
   return { r2, mae, rmse, n: counted };
 }
 
@@ -660,7 +678,7 @@ const STARTUP_CKPT_TTL_HOURS = 20; // checkpoints older than this are stale
 // Increment this whenever the GNN forward pass formula changes in a way that
 // makes old weights incompatible with the new code (e.g. hard-cap → sigmoid).
 // When the stored version doesn't match, startup retrains from scratch.
-const GNN_MODEL_VERSION = 3; // v3: pure MSE loss — removed heteroscedastic NLL (2026-03-19)
+const GNN_MODEL_VERSION = 4; // v4: removed early-stop (was killing training at epoch 1) (2026-03-20)
 
 // In-process guard: run corpus training exactly once per GCP worker process lifetime.
 let _startupCorpusRan = false;
