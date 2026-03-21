@@ -3103,7 +3103,9 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         // TcGated = sigmoid(out[7]) × sigmoid(out[8])  in normalised [0,1] space.
         // For non-SC (target=0): gated loss pushes gate toward 0 directly.
         // For SC: gate must stay open or Tc loss explodes — forces classification.
-        const scTarget = sample.xgbScProb != null ? sample.xgbScProb : (isSC ? 1.0 : 0.0);
+        // Hard labels only — XGBoost soft labels (xgbScProb) were ≈0.5 for all
+        // samples, making BCE gradient ~0 for both classes and preventing divergence.
+        const scTarget = isSC ? 1.0 : 0.0;
         const sigOut7  = sigmoid(directOut7);
         const bceClamp = Math.max(1e-7, Math.min(1 - 1e-7, sigOut7));
         const bceLoss  = -(scTarget * Math.log(bceClamp) + (1 - scTarget) * Math.log(1 - bceClamp));
