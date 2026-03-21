@@ -968,6 +968,18 @@ async function runStartupFullCorpusTraining(): Promise<void> {
   } catch { /* non-fatal */ }
   // Per-model checkpoints are superseded by the full job stored above.
   await clearStartupModelCheckpoints();
+
+  // Clear any queued dispatched jobs — they were created before startup ran and would
+  // train from scratch, overwriting the startup result with a worse random-init model.
+  try {
+    const deleted = await db.execute(
+      `DELETE FROM gnn_training_jobs WHERE status = 'queued' RETURNING id`
+    );
+    const deletedIds = ((deleted as any).rows ?? (Array.isArray(deleted) ? deleted : [])).map((r: any) => r.id);
+    if (deletedIds.length > 0) {
+      console.log(`[GNN-GCP] Cleared ${deletedIds.length} stale queued job(s) after startup — startup weights preserved`);
+    }
+  } catch { /* non-fatal */ }
 }
 
 // ── Main loop ─────────────────────────────────────────────────────────────────

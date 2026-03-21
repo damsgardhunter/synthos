@@ -24,6 +24,7 @@ export const DFT_GNN_CONCURRENT = parseInt(process.env.DFT_GNN_CONCURRENT ?? "2"
 // 5 worker threads simultaneously (which would pin all 32 vCPUs and slow both).
 
 let _gnnTrainingSlotTaken = false;
+let _gnnSlotBusyLastLogMs = 0;
 
 /**
  * Try to acquire the exclusive GNN training slot.
@@ -32,7 +33,11 @@ let _gnnTrainingSlotTaken = false;
  */
 export function acquireGNNTrainingSlot(label: string): boolean {
   if (_gnnTrainingSlotTaken) {
-    console.log(`[Priority] GNN training slot busy — ${label} will skip this cycle`);
+    const now = Date.now();
+    if (now - _gnnSlotBusyLastLogMs >= 5 * 60 * 1000) {
+      console.log(`[Priority] GNN training slot busy — ${label} will skip this cycle`);
+      _gnnSlotBusyLastLogMs = now;
+    }
     return false;
   }
   _gnnTrainingSlotTaken = true;
