@@ -709,7 +709,7 @@ const STARTUP_CKPT_TTL_HOURS = 20; // checkpoints older than this are stale
 // Increment this whenever the GNN forward pass formula changes in a way that
 // makes old weights incompatible with the new code (e.g. hard-cap → sigmoid).
 // When the stored version doesn't match, startup retrains from scratch.
-const GNN_MODEL_VERSION = 15; // v15: dedicated classification head — out[7] gets own W_cls1/hCls/W_cls2 pathway (2026-03-21)
+const GNN_MODEL_VERSION = 14; // v14: hard BCE labels + v15 dedicated cls head (migrateWeights handles new fields — no retrain needed)
 
 // In-process guard: run corpus training exactly once per GCP worker process lifetime.
 let _startupCorpusRan = false;
