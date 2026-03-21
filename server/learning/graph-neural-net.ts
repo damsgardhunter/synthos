@@ -3167,6 +3167,46 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         // Not used for Tc prediction (no blend), only keeps λ and ω_log physically calibrated.
         const dLossDAd = 0.1 * scW * 2 * allenDynesError / 300;
 
+        // ── Reward / Punishment system ────────────────────────────────────────
+        // Per-sample gradient multipliers applied to out[7] (P(SC) BCE) and
+        // out[8] (Tc regression). The base loss values are unchanged — only
+        // the gradient flowing back is rescaled, which IS the training signal.
+        //
+        // 1. False positive punishment (3×)
+        //    Non-SC sample predicted as SC (pSC > 0.5). Amplifies the BCE
+        //    gradient pushing out[7] toward 0. Clips to ±1 via clipGrad,
+        //    so even with 3× the gradient is capped at max ±1.
+        const isFalsePositive = !isSC && pSC > 0.5;
+        const fpMult = isFalsePositive ? 3.0 : 1.0;
+
+        // 2. RMSE > 10K punishment (up to 4×, SC samples only)
+        //    Scales the Tc regression gradient proportionally above a 10K
+        //    error threshold. Every 25K above 10K adds another 1× multiplier,
+        //    capped at 4× to prevent gradient instability.
+        //    tcErrorK=10K→1×  |  35K→2×  |  60K→3×  |  85K+→4×
+        const predTcKRew  = isSC ? 10 * Math.expm1(tcSigOut8 * TC_LOG_SCALE) : 0;
+        const tcErrorKRew = isSC ? Math.abs(predTcKRew - actualTcK) : 0;
+        const rmsePenalty = (isSC && tcErrorKRew > 10)
+          ? Math.min(4.0, 1.0 + (tcErrorKRew - 10) / 25)
+          : 1.0;
+
+        // 3. Correct prediction reward (0.5×)
+        //    Halves the gradient when the model is already right. Focuses
+        //    optimizer effort on hard/wrong samples — the same principle as
+        //    focal loss in object detection.
+        //    Correct SC: classified as SC AND Tc error < 10K.
+        //    Correct non-SC: classified as non-SC (pSC ≤ 0.5) AND actually non-SC.
+        const isCorrectSC    = isSC  && pSC > 0.5 && tcErrorKRew < 10;
+        const isCorrectNonSC = !isSC && pSC <= 0.5;
+        const rewardMult = (isCorrectSC || isCorrectNonSC) ? 0.5 : 1.0;
+
+        // Combined per-head multipliers:
+        //   bceMult applies to out[7] (P(SC) classification gradient)
+        //   tcMult  applies to out[8] (Tc regression gradient)
+        const bceMult = fpMult * (isCorrectNonSC ? rewardMult : 1.0);
+        const tcMult  = rmsePenalty * (isCorrectSC  ? rewardMult : 1.0);
+        // ─────────────────────────────────────────────────────────────────────
+
         const dLdOut = new Array(OUTPUT_DIM).fill(0);
         // out[0] → formation energy: real DFT target when available.
         dLdOut[0] = hasFormationEnergy ? clipGrad(2 * feError * 0.1) : 0;
@@ -3180,10 +3220,14 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         dLdOut[4] = clipGrad(dLossDAd * dTcdLambda * dLambdadOut4);
         dLdOut[5] = clipGrad(2 * bgError * 0.05);  // bandgap when real data available
         dLdOut[6] = 0;
-        // out[7] → P(SC) via BCE gradient: d(BCE)/d(out7) = sigmoid(out7) - scTarget.
-        dLdOut[7] = clipGrad(sigOut7 - scTarget);
+        // out[7] → P(SC) via BCE gradient, scaled by reward/punishment multiplier.
+        //   bceMult > 1: false positive — push harder toward non-SC.
+        //   bceMult < 1: already correct non-SC — ease off, focus on harder cases.
+        dLdOut[7] = clipGrad((sigOut7 - scTarget) * bceMult);
         // out[8] → Tc regression gradient. Only for SC samples; zero for non-SC.
-        dLdOut[8] = isSC ? clipGrad(3.0 * 2 * tcDirectErr * tcSigOut8 * (1 - tcSigOut8)) : 0;
+        //   tcMult > 1: RMSE > 10K — push harder toward correct Tc.
+        //   tcMult < 1: already within 10K AND classified correctly — ease off.
+        dLdOut[8] = isSC ? clipGrad(3.0 * 2 * tcDirectErr * tcSigOut8 * (1 - tcSigOut8) * tcMult) : 0;
 
         // Uncertainty head (W_mlp2_var) receives no gradient — NLL removed.
         // Uncertainty outputs can be calibrated post-training via isotonic regression.
