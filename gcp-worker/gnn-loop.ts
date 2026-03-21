@@ -22,7 +22,6 @@ import {
 import type { TrainingSample } from "../server/learning/graph-neural-net";
 import type { GNNWeights } from "../server/learning/graph-neural-net";
 import { fetchMPBatchFromAPI } from "../server/learning/materials-project-client";
-import { trainGradientBoosting, gbPredictFromModel } from "../server/learning/gradient-boost";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const WORKER_SCRIPT = path.join(__dirname, "gnn-worker-thread.ts");
@@ -116,50 +115,6 @@ async function trainEnsembleParallel(
   }
 
   return models;
-}
-
-// ── XGBoost SC binary classifier ─────────────────────────────────────────────
-// Trains a GBM on the 23-dim global composition features with binary SC target
-// (1 = superconductor, 0 = contrast). Predictions are attached as xgbScProb
-// soft labels to each trainSet sample before passing to the GNN workers.
-// This gives out[7] (P(SC)) a warm start — the GNN no longer has to learn the
-// classification boundary purely from Tc=0 vs Tc>0 gradient signals.
-
-async function attachXGBScProb(trainSet: TrainingSample[]): Promise<void> {
-  const xgbX: number[][] = [];
-  const xgbY: number[] = [];
-  const validIdx: number[] = [];
-
-  for (let i = 0; i < trainSet.length; i++) {
-    try {
-      const graph = buildCrystalGraph(trainSet[i].formula, trainSet[i].structure);
-      if (graph.globalFeatures && graph.globalFeatures.length > 0) {
-        xgbX.push(graph.globalFeatures);
-        xgbY.push(trainSet[i].tc > 0 ? 1.0 : 0.0);
-        validIdx.push(i);
-      }
-    } catch { /* skip malformed formulas */ }
-  }
-
-  if (xgbX.length < 20) return;
-
-  console.log(`[GNN-GCP] Training XGB SC binary classifier on ${xgbX.length} samples...`);
-  // featureSubsampleRatio=1.0 (no masking): gbPredictFromModel doesn't apply featureMask,
-  // so masked models produce corrupted predictions. Use all 23 features directly.
-  const clf = await trainGradientBoosting(xgbX, xgbY, 60, 0.1, 4, 1.0);
-
-  let sumProbSC = 0, nSC = 0, sumProbNonSC = 0, nNonSC = 0;
-  for (let k = 0; k < validIdx.length; k++) {
-    const raw = gbPredictFromModel(clf as any, xgbX[k]);
-    // GBM trained on 0/1 targets: raw output ≈ probability; clamp to (0.01, 0.99).
-    const prob = Math.max(0.01, Math.min(0.99, raw));
-    trainSet[validIdx[k]].xgbScProb = prob;
-    if (xgbY[k] > 0.5) { sumProbSC += prob; nSC++; }
-    else               { sumProbNonSC += prob; nNonSC++; }
-  }
-  const avgSC    = nSC    > 0 ? (sumProbSC    / nSC).toFixed(3)    : 'n/a';
-  const avgNonSC = nNonSC > 0 ? (sumProbNonSC / nNonSC).toFixed(3) : 'n/a';
-  console.log(`[GNN-GCP] XGB SC classifier: avg P(SC|SC)=${avgSC} avg P(SC|non-SC)=${avgNonSC}`);
 }
 
 const POLL_INTERVAL_MS = 10_000;
@@ -648,8 +603,6 @@ async function processNextGnnJob(): Promise<boolean> {
   const trainSet = [...scTrain, ...cappedNonSc];
   const valSet   = scVal; // held-out SC samples only — these are the discovery targets
 
-  // Attach XGBoost P(SC) soft labels so out[7] BCE has an informed prior.
-  await attachXGBScProb(trainSet);
 
   console.log(
     `[GNN-GCP] Starting training job #${jobId} — ${datasetSize} seed + ${externalSCSamples.length} NIMS+JARVIS + ${qeSamples.length} QE + ${jarvisContrast.length + mpContrast.length} contrast (capped ${cappedNonSc.length})` +
@@ -924,8 +877,6 @@ async function runStartupFullCorpusTraining(): Promise<void> {
   const trainSet = [...scTrain, ...cappedNonSc];
   const valSet = scVal;
 
-  // Attach XGBoost P(SC) soft labels so out[7] BCE has an informed prior.
-  await attachXGBScProb(trainSet);
 
   console.log(`[GNN-GCP]  Dataset: ${scSamples.length} SC + ${cappedNonSc.length} contrast | train=${trainSet.length} val=${valSet.length}`);
   console.log(`[GNN-GCP]  Starting 5-model parallel ensemble training...`);
