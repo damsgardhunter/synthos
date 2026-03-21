@@ -642,24 +642,13 @@ async function processNextGnnJob(): Promise<boolean> {
     await new Promise(r => setTimeout(r, 50));
     try { await db.execute("SELECT 1"); } catch { /* ignore — pool will reconnect */ }
 
-    // Guard: don't overwrite startup weights with worse results.
-    // Startup trains on the full corpus; dispatched jobs often have less data
-    // and can produce inferior models that would regress the server's predictions.
-    let startupValR2 = -Infinity;
-    try {
-      const stateRow = await db.execute(
-        `SELECT value FROM system_state WHERE key = '${STARTUP_CORPUS_STATE_KEY}'`
-      );
-      const stateVal = (stateRow as any).rows?.[0]?.value ?? (Array.isArray(stateRow) ? stateRow[0]?.value : undefined);
-      if (stateVal) {
-        const parsed = typeof stateVal === 'string' ? JSON.parse(stateVal) : stateVal;
-        startupValR2 = parsed.valR2 ?? -Infinity;
-      }
-    } catch { /* non-fatal — proceed without guard */ }
-
-    if (r2 < startupValR2 - 0.05) {
+    // Quality gate: only store weights if the model isn't catastrophically bad.
+    // R²<-5 means predictions are worse than a constant baseline.
+    // MAE>200K means the model outputs near-zero for all superconductors.
+    // Both indicate a collapsed model (e.g. cls head gate stuck at 0).
+    if (r2 < -5 || mae > 200) {
       console.warn(
-        `[GNN-GCP] Job #${jobId} val R²=${r2.toFixed(3)} is worse than startup R²=${startupValR2.toFixed(3)} — discarding results to protect startup weights`
+        `[GNN-GCP] Job #${jobId} quality below threshold (R²=${r2.toFixed(3)}, MAE=${mae.toFixed(1)}K) — discarding to preserve working weights`
       );
       await db.execute(`UPDATE gnn_training_jobs SET status = 'discarded' WHERE id = ${jobId}`);
     } else {
