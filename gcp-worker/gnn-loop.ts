@@ -644,17 +644,39 @@ async function processNextGnnJob(): Promise<boolean> {
     await new Promise(r => setTimeout(r, 50));
     try { await db.execute("SELECT 1"); } catch { /* ignore — pool will reconnect */ }
 
-    await storage.updateGnnTrainingJob(jobId, {
-      status: "done",
-      weights: models as any,
-      r2,                           // validation R²  (honest — 20% held-out SC)
-      mae,                          // validation MAE (K)
-      rmse,                         // validation RMSE (K)
-      trainR2: trainMetrics.r2,     // training R² — compare to val R² for overfitting
-      trainMae: trainMetrics.mae,
-      valN,                         // held-out sample count
-      completedAt: new Date(),
-    } as any);
+    // Guard: don't overwrite startup weights with worse results.
+    // Startup trains on the full corpus; dispatched jobs often have less data
+    // and can produce inferior models that would regress the server's predictions.
+    let startupValR2 = -Infinity;
+    try {
+      const stateRow = await db.execute(
+        `SELECT value FROM system_state WHERE key = '${STARTUP_CORPUS_STATE_KEY}'`
+      );
+      const stateVal = (stateRow as any).rows?.[0]?.value ?? (Array.isArray(stateRow) ? stateRow[0]?.value : undefined);
+      if (stateVal) {
+        const parsed = typeof stateVal === 'string' ? JSON.parse(stateVal) : stateVal;
+        startupValR2 = parsed.valR2 ?? -Infinity;
+      }
+    } catch { /* non-fatal — proceed without guard */ }
+
+    if (r2 < startupValR2 - 0.05) {
+      console.warn(
+        `[GNN-GCP] Job #${jobId} val R²=${r2.toFixed(3)} is worse than startup R²=${startupValR2.toFixed(3)} — discarding results to protect startup weights`
+      );
+      await db.execute(`UPDATE gnn_training_jobs SET status = 'discarded' WHERE id = ${jobId}`);
+    } else {
+      await storage.updateGnnTrainingJob(jobId, {
+        status: "done",
+        weights: models as any,
+        r2,
+        mae,
+        rmse,
+        trainR2: trainMetrics.r2,
+        trainMae: trainMetrics.mae,
+        valN,
+        completedAt: new Date(),
+      } as any);
+    }
 
     const coverageStr = calibration.n > 0
       ? `CI95-cov=${(calibration.coverage * 100).toFixed(1)}% width=${calibration.meanWidth.toFixed(1)}K`
