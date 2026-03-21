@@ -6347,7 +6347,9 @@ async function runAutonomousFastPath() {
         filteredCandidates.slice(_bi, _bi + SCREENING_BATCH_SIZE).map(async (_f) => {
           if (!markFormulaInFlight(_f)) return;
           try {
-            const _r = await runAutonomousDiscoveryCycle(_f, { skipDbDupCheck: true, skipStructurePrediction: true });
+            // suppressLogs: fast-path runs every cycle — emitting per-candidate rejections
+            // floods the frontend WebSocket with thousands of messages per hour.
+            const _r = await runAutonomousDiscoveryCycle(_f, { skipDbDupCheck: true, skipStructurePrediction: true, suppressLogs: true });
             _discoveryResults.set(_f, _r);
           } finally {
             releaseFormulaInFlight(_f);

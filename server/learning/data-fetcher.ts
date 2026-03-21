@@ -114,18 +114,31 @@ async function crossValidateWithMP(
     }
 
     if (mpData.bandGap !== undefined && mpData.bandGap !== null) {
-      if (corrected.bandGap === null || corrected.bandGap === undefined ||
-          Math.abs(corrected.bandGap - mpData.bandGap) > 0.5) {
-        corrections.push(`bandGap: ${corrected.bandGap} -> ${mpData.bandGap} (MP)`);
-        corrected.bandGap = mpData.bandGap;
+      // Don't zero-out a known insulator/semiconductor band gap — MP returning 0 likely
+      // means it matched a metallic polymorph or an incorrect phase. Only accept MP's
+      // band gap if it's non-zero, or if the existing value is already near zero.
+      const existingBgIsReasonable = corrected.bandGap != null && corrected.bandGap > 0.5;
+      const mpBgIsZero = mpData.bandGap === 0;
+      if (!(mpBgIsZero && existingBgIsReasonable)) {
+        if (corrected.bandGap === null || corrected.bandGap === undefined ||
+            Math.abs(corrected.bandGap - mpData.bandGap) > 0.5) {
+          corrections.push(`bandGap: ${corrected.bandGap} -> ${mpData.bandGap} (MP)`);
+          corrected.bandGap = mpData.bandGap;
+        }
       }
     }
 
     if (mpData.formationEnergyPerAtom !== undefined && mpData.formationEnergyPerAtom !== null) {
-      if (corrected.formationEnergy === null || corrected.formationEnergy === undefined ||
-          Math.abs(corrected.formationEnergy - mpData.formationEnergyPerAtom) > 0.3) {
-        corrections.push(`formationEnergy: ${corrected.formationEnergy} -> ${mpData.formationEnergyPerAtom} (MP)`);
-        corrected.formationEnergy = mpData.formationEnergyPerAtom;
+      // Don't overwrite a non-zero formation energy with 0 — MP returning 0 likely means
+      // a failed lookup or wrong phase match, not a genuinely zero-energy compound.
+      const existingFeIsReasonable = corrected.formationEnergy != null && Math.abs(corrected.formationEnergy) > 0.3;
+      const mpFeIsZero = mpData.formationEnergyPerAtom === 0;
+      if (!(mpFeIsZero && existingFeIsReasonable)) {
+        if (corrected.formationEnergy === null || corrected.formationEnergy === undefined ||
+            Math.abs(corrected.formationEnergy - mpData.formationEnergyPerAtom) > 0.3) {
+          corrections.push(`formationEnergy: ${corrected.formationEnergy} -> ${mpData.formationEnergyPerAtom} (MP)`);
+          corrected.formationEnergy = mpData.formationEnergyPerAtom;
+        }
       }
     }
 
