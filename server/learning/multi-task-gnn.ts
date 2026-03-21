@@ -2,6 +2,14 @@ import { getElementData, isTransitionMetal } from "./elemental-data";
 import { buildCrystalGraph, GNNPredict, getGNNModel, type CrystalGraph } from "./graph-neural-net";
 import { computeElectronicStructure, computePhononSpectrum, computeElectronPhononCoupling } from "./physics-engine";
 import { extractFeatures } from "./ml-predictor";
+import {
+  classifyFamily,
+  familyTcPredict,
+  inferFamilyLabel,
+  trainFamilyClassifierStep,
+  type FamilyLabel,
+  type FamilyClassification,
+} from "./family-classifier";
 
 export interface MultiTaskPrediction {
   formationEnergy: number;
@@ -23,6 +31,14 @@ export interface MultiTaskPrediction {
   metallicity: number;
   topologicalIndex: number;
   propertyVector: number[];
+  /** Classified superconductor family (e.g. "cuprate", "hydride", "conventional_bcs"). */
+  familyLabel: FamilyLabel;
+  /** Soft probability over all family classes (sums to 1). */
+  familyProbabilities: Record<FamilyLabel, number>;
+  /** Confidence in the family classification (max probability). */
+  familyConfidence: number;
+  /** Physics formula used to compute predictedTc for this family. */
+  familyTcFormula: string;
 }
 
 interface MultiTaskWeights {
@@ -219,11 +235,12 @@ function multiTaskCore(formula: string) {
   const phononOut = vecAdd(matVecMul(mtWeights.W_phonon_detail, pooled), mtWeights.b_phonon_detail);
   const topoOut = vecAdd(matVecMul(mtWeights.W_topology, pooled), mtWeights.b_topology);
 
-  return { basePred, bandOut, dosOut, elasticOut, magneticOut, phononOut, topoOut };
+  // pooled is returned so callers (e.g. family classifier) can reuse it without re-building the graph.
+  return { basePred, pooled, bandOut, dosOut, elasticOut, magneticOut, phononOut, topoOut };
 }
 
 export async function multiTaskPredict(formula: string, opts?: MultiTaskOptions): Promise<MultiTaskPrediction> {
-  const { basePred, bandOut, dosOut, elasticOut, magneticOut, phononOut, topoOut } = multiTaskCore(formula);
+  const { basePred, pooled: pooledForFamily, bandOut, dosOut, elasticOut, magneticOut, phononOut, topoOut } = multiTaskCore(formula);
 
   let electronic: any = null;
   let phonon: any = null;
@@ -301,18 +318,43 @@ export async function multiTaskPredict(formula: string, opts?: MultiTaskOptions)
 
   const topologicalIndex = sigmoid(topoOut[3] ?? 0) * 0.3;
 
-  // Physics-informed Tc: blend McMillan/Allen-Dynes with GNN direct prediction.
-  // When λ is in the phonon-mediated regime (0.2–4.0), the McMillan formula
-  // captures electron-phonon coupling physics that the raw GNN may miss at low data volume.
+  // ── Step 1: Classify material family ────────────────────────────────────────
+  // pooledForFamily is the 28-dim mean+max graph embedding returned by multiTaskCore above.
+  // classifyFamily blends it with composition-rule logits via its learned MLP.
+  const familyResult: FamilyClassification = classifyFamily(formula, pooledForFamily);
+
+  // ── Step 2: Family-specific Tc regression ───────────────────────────────────
+  // For cuprates/nickelates: doping-parabola formula.
+  // For hydrides/conventional BCS: full Allen-Dynes (f1/f2 strong-coupling).
+  // For iron-based: modified AD with s± interband factor.
+  // For borides: two-band σ-channel AD.
+  // For kagome: AD with van Hove singularity enhancement.
+  // For others: blended GNN fallback.
+  const familyTcResult = familyTcPredict(familyResult.label, {
+    lambda:     basePred.lambda,
+    omegaLog,
+    muStar,
+    dosAtFermi,
+    formula,
+    gnnTc:      basePred.predictedTc,
+  });
+
+  // ── Step 3: Blend family Tc with legacy McMillan for smooth transition ───────
+  // While the family classifier is still bootstrapping (low nSamples / high confidence)
+  // we keep a small McMillan correction for conventional phonon families so we don't
+  // lose the existing physics signal before the neural head is fully trained.
   const tcMcMillan = mcMillanTc(basePred.lambda, omegaLog, muStar);
-  const lambdaValid = basePred.lambda > 0.2 && basePred.lambda < 4.0 && tcMcMillan > 0;
-  // N(Ef) boost: high DOS at Fermi level correlates with stronger e-ph coupling
-  const dosFactor = dosAtFermi > 3 ? Math.min(1.2, 1 + (dosAtFermi - 3) / 15) : 1.0;
-  // Weight McMillan more heavily when λ is in valid range and DOS is high
-  const mcMillanWeight = lambdaValid ? Math.min(0.55, 0.3 + basePred.confidence * 0.25) : 0;
-  const predictedTc = mcMillanWeight > 0
-    ? (mcMillanWeight * tcMcMillan * dosFactor + (1 - mcMillanWeight) * basePred.predictedTc)
-    : basePred.predictedTc;
+  const isPhononFamily = (
+    familyResult.label === "conventional_bcs" ||
+    familyResult.label === "hydride" ||
+    familyResult.label === "boride"
+  );
+  const legacyBlendWeight = isPhononFamily
+    ? Math.max(0, 0.15 - familyResult.confidence * 0.10)  // fades as classifier gets confident
+    : 0;
+  const predictedTc   = legacyBlendWeight > 0 && tcMcMillan > 0
+    ? legacyBlendWeight * tcMcMillan + (1 - legacyBlendWeight) * familyTcResult.tc
+    : familyTcResult.tc;
 
   updatePropertyNormStats({
     predictedTc, bandGap, dosAtFermi,
@@ -358,6 +400,10 @@ export async function multiTaskPredict(formula: string, opts?: MultiTaskOptions)
     metallicity: Math.round(metallicity * 1000) / 1000,
     topologicalIndex: Math.round(topologicalIndex * 1000) / 1000,
     propertyVector,
+    familyLabel:         familyResult.label,
+    familyProbabilities: familyResult.probabilities,
+    familyConfidence:    familyResult.confidence,
+    familyTcFormula:     familyTcResult.formulaUsed,
   };
 }
 
@@ -522,3 +568,19 @@ export function trackMultiTaskPrediction(pred: MultiTaskPrediction): void {
 export function getMultiTaskStats() {
   return { ...multiTaskStats };
 }
+
+// Re-export family classifier helpers so callers (e.g. engine.ts) can use them
+// from a single import without knowing the internal file structure.
+export {
+  trainFamilyClassifierStep,
+  inferFamilyLabel,
+  getFamilyClassifierWeights,
+  setFamilyClassifierWeights,
+  serializeFamilyWeights,
+  deserializeFamilyWeights,
+  ruleBasedFamily,
+  FAMILY_LABELS,
+  type FamilyLabel,
+  type FamilyClassification,
+  type FamilyClassifierWeights,
+} from "./family-classifier";
