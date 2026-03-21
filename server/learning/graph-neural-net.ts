@@ -2407,15 +2407,16 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
   // Hard min(LAMBDA_MAX, softplus(x)) had zero derivative when softplus(x) ≥ LAMBDA_MAX,
   // which caused permanent gradient death once training pushed λ to the cap.
   const lambdaRaw = LAMBDA_MAX * sigmoid(sf(out[4] ?? 0));
-  // Two-stage v10: out[7] → P(SC); out[8] → Tc regression for SC materials only.
-  // predictedTc = P(SC) × 10×expm1(sigmoid(out[8])×TC_LOG_SCALE).
-  // Non-SC materials get predictedTc → 0 automatically via P(SC)→0.
+  // out[7] → P(SC) (BCE-trained, for downstream filtering — not multiplied into Tc).
+  // out[8] → Tc in K via log1p-normalised sigmoid (trained on SC samples only).
+  // Separating Tc prediction from the P(SC) gate avoids attenuating predictions while
+  // the classification head is still converging.
   const scProb = sigmoid(sf(out[7] ?? 0));
-  const predictedTcRaw = scProb * 10 * Math.expm1(sigmoid(sf(out[8] ?? 0)) * TC_LOG_SCALE);
+  const predictedTcRaw = 10 * Math.expm1(sigmoid(sf(out[8] ?? 0)) * TC_LOG_SCALE);
   const confidenceRaw = sigmoid(sf(out[3] ?? 0));
   const bandgapRaw = sigmoid(sf(out[5] ?? 0)) * 5.0;
   const dosProxyRaw = softplus(sf(out[6] ?? 0));
-  const stabilityProbRaw = scProb;  // out[7] now encodes P(SC)
+  const stabilityProbRaw = scProb;  // out[7] encodes P(SC), returned as stabilityProbability
   const safeLatent = latentEmbedding.map(v => Number.isFinite(v) ? v : 0);
 
   return {
@@ -2587,13 +2588,13 @@ function GNNPredictForTraining(graph: CrystalGraph, weights: GNNWeights): { pred
   const omegaLog = 10 + (OMEGA_LOG_MAX - 10) * sigmoid(omegaLogRaw / 3);
   // out[4] → λ: sigmoid soft map into (0, LAMBDA_MAX) — gradient everywhere.
   const lambdaRaw = LAMBDA_MAX * sigmoid(sf(out[4] ?? 0));
-  // Two-stage v10: out[7] → P(SC); out[8] → Tc regression (see GNNPredict for rationale).
+  // out[7] → P(SC) via BCE (see GNNPredict); out[8] → Tc, not gated by P(SC).
   const scProb = sigmoid(sf(out[7] ?? 0));
-  const predictedTcRaw = scProb * 10 * Math.expm1(sigmoid(sf(out[8] ?? 0)) * TC_LOG_SCALE);
+  const predictedTcRaw = 10 * Math.expm1(sigmoid(sf(out[8] ?? 0)) * TC_LOG_SCALE);
   const confidenceRaw = sigmoid(sf(out[3] ?? 0));
   const bandgapRaw = sigmoid(sf(out[5] ?? 0)) * 5.0;
   const dosProxyRaw = softplus(sf(out[6] ?? 0));
-  const stabilityProbRaw = scProb;  // out[7] now encodes P(SC)
+  const stabilityProbRaw = scProb;  // out[7] encodes P(SC)
   const safeLatent = latentEmbedding.map(v => Number.isFinite(v) ? v : 0);
 
   const nodeEmbeddings = graph.nodes.map(n => [...n.embedding]);
@@ -3077,10 +3078,11 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         const directOut7 = cache.outRaw[7] ?? 0;
         const directOut8 = cache.outRaw[8] ?? 0;
 
-        // Track Tc predictions in Kelvin for inline R²/RMSE reporting (two-stage).
+        // Track Tc predictions in Kelvin for inline R²/RMSE reporting.
+        // Uses out[8]-only prediction (no P(SC) gate) to reflect actual regression quality.
         const pSC = sigmoid(directOut7);
         if (isSC) {
-          const predTcK = pSC * 10 * Math.expm1(sigmoid(directOut8) * TC_LOG_SCALE);
+          const predTcK = 10 * Math.expm1(sigmoid(directOut8) * TC_LOG_SCALE);
           tcSumErr2    += (predTcK - actualTcK) ** 2;
           tcSumActual  += actualTcK;
           tcSumActual2 += actualTcK * actualTcK;
