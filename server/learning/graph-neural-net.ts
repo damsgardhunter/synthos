@@ -2978,6 +2978,11 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
     let tcSumActual = 0;  // sum of actualTcK — for R² SS_tot
     let tcSumActual2 = 0; // sum of actualTcK² — for R² SS_tot
     let nTcSamples = 0;   // count of SC samples seen
+    // v10 diagnostics: track P(SC) convergence and out[8]-only R² to distinguish
+    // the classification gate from the Tc regression head during training.
+    let sumScProbSC = 0, nScProbSC = 0;      // avg P(SC) for true SC samples
+    let sumScProbNonSC = 0, nScProbNonSC = 0; // avg P(SC) for non-SC samples
+    let out8SumErr2 = 0, out8SumActual = 0, out8SumActual2 = 0, nOut8 = 0; // out[8]-only R²
 
     // Stratified shuffle: interleave high-Tc samples so every batch sees them.
     // Shuffle each bucket independently, then interleave high-Tc evenly through others.
@@ -3073,13 +3078,23 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         const directOut8 = cache.outRaw[8] ?? 0;
 
         // Track Tc predictions in Kelvin for inline R²/RMSE reporting (two-stage).
+        const pSC = sigmoid(directOut7);
         if (isSC) {
-          const predTcK = sigmoid(directOut7) * 10 * Math.expm1(sigmoid(directOut8) * TC_LOG_SCALE);
+          const predTcK = pSC * 10 * Math.expm1(sigmoid(directOut8) * TC_LOG_SCALE);
           tcSumErr2    += (predTcK - actualTcK) ** 2;
           tcSumActual  += actualTcK;
           tcSumActual2 += actualTcK * actualTcK;
           nTcSamples++;
+          // out[8]-only R²: shows if Tc regression head is learning, independent of P(SC) gate.
+          const out8Pred = 10 * Math.expm1(sigmoid(directOut8) * TC_LOG_SCALE);
+          out8SumErr2    += (out8Pred - actualTcK) ** 2;
+          out8SumActual  += actualTcK;
+          out8SumActual2 += actualTcK * actualTcK;
+          nOut8++;
         }
+        // P(SC) convergence tracking.
+        if (isSC) { sumScProbSC += pSC; nScProbSC++; }
+        else       { sumScProbNonSC += pSC; nScProbNonSC++; }
 
         // ── v10 Two-stage loss ─────────────────────────────────────────────────
         // Stage 1: out[7] → P(SC) via BCE. Applied to ALL samples.
@@ -3518,7 +3533,16 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         r2Str   = r2.toFixed(3);
         rmseStr = `${rmse.toFixed(1)}K`;
       }
-      console.log(`${pfx} ${bar} ${String(pct).padStart(3)}% | Epoch ${epoch + 1}/${epochs} | loss=${avgLoss.toFixed(4)} | R²=${r2Str} RMSE=${rmseStr} | lr=${lr.toExponential(2)}`);
+      // P(SC) gate diagnostics — shows whether classification is converging.
+      const avgPscSC    = nScProbSC    > 0 ? (sumScProbSC    / nScProbSC).toFixed(2)    : '?.??';
+      const avgPscNonSC = nScProbNonSC > 0 ? (sumScProbNonSC / nScProbNonSC).toFixed(2) : '?.??';
+      // out[8]-only R² — shows Tc regression quality independent of P(SC) gate.
+      let out8R2Str = '?.???';
+      if (nOut8 > 1) {
+        const ssTot8 = out8SumActual2 - (out8SumActual * out8SumActual) / nOut8;
+        out8R2Str = (ssTot8 > 0 ? 1 - out8SumErr2 / ssTot8 : 0).toFixed(3);
+      }
+      console.log(`${pfx} ${bar} ${String(pct).padStart(3)}% | Epoch ${epoch + 1}/${epochs} | loss=${avgLoss.toFixed(4)} | R²=${r2Str} RMSE=${rmseStr} | P(SC|SC)=${avgPscSC} P(SC|¬SC)=${avgPscNonSC} | reg-R²=${out8R2Str} | lr=${lr.toExponential(2)}`);
     }
 
     // yield after each training epoch so heartbeat timers and HTTP requests can proceed
