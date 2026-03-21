@@ -2407,12 +2407,11 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
   // Hard min(LAMBDA_MAX, softplus(x)) had zero derivative when softplus(x) ≥ LAMBDA_MAX,
   // which caused permanent gradient death once training pushed λ to the cap.
   const lambdaRaw = LAMBDA_MAX * sigmoid(sf(out[4] ?? 0));
-  // out[7] → P(SC) (BCE-trained, for downstream filtering — not multiplied into Tc).
-  // out[8] → Tc in K via log1p-normalised sigmoid (trained on SC samples only).
-  // Separating Tc prediction from the P(SC) gate avoids attenuating predictions while
-  // the classification head is still converging.
+  // out[7] → P(SC) gate: multiplied into Tc so classifier must learn to open/close.
+  // out[8] → Tc magnitude via log1p-normalised sigmoid.
+  // TcFinal = P(SC) × tcRaw — non-SC forces gate to close; SC forces gate to stay open.
   const scProb = sigmoid(sf(out[7] ?? 0));
-  const predictedTcRaw = 10 * Math.expm1(sigmoid(sf(out[8] ?? 0)) * TC_LOG_SCALE);
+  const predictedTcRaw = scProb * 10 * Math.expm1(sigmoid(sf(out[8] ?? 0)) * TC_LOG_SCALE);
   const confidenceRaw = sigmoid(sf(out[3] ?? 0));
   const bandgapRaw = sigmoid(sf(out[5] ?? 0)) * 5.0;
   const dosProxyRaw = softplus(sf(out[6] ?? 0));
@@ -2588,9 +2587,9 @@ function GNNPredictForTraining(graph: CrystalGraph, weights: GNNWeights): { pred
   const omegaLog = 10 + (OMEGA_LOG_MAX - 10) * sigmoid(omegaLogRaw / 3);
   // out[4] → λ: sigmoid soft map into (0, LAMBDA_MAX) — gradient everywhere.
   const lambdaRaw = LAMBDA_MAX * sigmoid(sf(out[4] ?? 0));
-  // out[7] → P(SC) via BCE (see GNNPredict); out[8] → Tc, not gated by P(SC).
+  // out[7] → P(SC) gate × out[8] → Tc magnitude (see GNNPredict).
   const scProb = sigmoid(sf(out[7] ?? 0));
-  const predictedTcRaw = 10 * Math.expm1(sigmoid(sf(out[8] ?? 0)) * TC_LOG_SCALE);
+  const predictedTcRaw = scProb * 10 * Math.expm1(sigmoid(sf(out[8] ?? 0)) * TC_LOG_SCALE);
   const confidenceRaw = sigmoid(sf(out[3] ?? 0));
   const bandgapRaw = sigmoid(sf(out[5] ?? 0)) * 5.0;
   const dosProxyRaw = softplus(sf(out[6] ?? 0));
@@ -3079,16 +3078,17 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         const directOut8 = cache.outRaw[8] ?? 0;
 
         // Track Tc predictions in Kelvin for inline R²/RMSE reporting.
-        // Uses out[8]-only prediction (no P(SC) gate) to reflect actual regression quality.
-        const pSC = sigmoid(directOut7);
+        const pSC      = sigmoid(directOut7);
+        const _diagS8  = sigmoid(directOut8);
         if (isSC) {
-          const predTcK = 10 * Math.expm1(sigmoid(directOut8) * TC_LOG_SCALE);
+          // Gated prediction: what the model actually outputs at inference.
+          const predTcK = pSC * 10 * Math.expm1(_diagS8 * TC_LOG_SCALE);
           tcSumErr2    += (predTcK - actualTcK) ** 2;
           tcSumActual  += actualTcK;
           tcSumActual2 += actualTcK * actualTcK;
           nTcSamples++;
-          // out[8]-only R²: shows if Tc regression head is learning, independent of P(SC) gate.
-          const out8Pred = 10 * Math.expm1(sigmoid(directOut8) * TC_LOG_SCALE);
+          // out[8]-only R²: raw magnitude head quality independent of gate.
+          const out8Pred = 10 * Math.expm1(_diagS8 * TC_LOG_SCALE);
           out8SumErr2    += (out8Pred - actualTcK) ** 2;
           out8SumActual  += actualTcK;
           out8SumActual2 += actualTcK * actualTcK;
@@ -3098,25 +3098,23 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         if (isSC) { sumScProbSC += pSC; nScProbSC++; }
         else       { sumScProbNonSC += pSC; nScProbNonSC++; }
 
-        // ── v10 Two-stage loss ─────────────────────────────────────────────────
-        // Stage 1: out[7] → P(SC) via BCE. Applied to ALL samples.
-        //   Soft label from XGBoost binary classifier (or hard 0/1 fallback).
-        //   Gives the GNN an informed classification prior from the start.
-        // Stage 2: out[8] → Tc regression (log1p-normalised). ONLY for SC samples.
-        //   Zero gradient for non-SC — ends the tug-of-war that kept R² < 0 in v6–v9.
+        // ── v13 Gated loss ─────────────────────────────────────────────────────
+        // BCE on out[7] (all samples) + gated Tc loss (all samples).
+        // TcGated = sigmoid(out[7]) × sigmoid(out[8])  in normalised [0,1] space.
+        // For non-SC (target=0): gated loss pushes gate toward 0 directly.
+        // For SC: gate must stay open or Tc loss explodes — forces classification.
         const scTarget = sample.xgbScProb != null ? sample.xgbScProb : (isSC ? 1.0 : 0.0);
         const sigOut7  = sigmoid(directOut7);
         const bceClamp = Math.max(1e-7, Math.min(1 - 1e-7, sigOut7));
         const bceLoss  = -(scTarget * Math.log(bceClamp) + (1 - scTarget) * Math.log(1 - bceClamp));
         totalLoss += feWeight * feError * feError + bceLoss;
-        // Tc regression — SC samples only; store intermediates for backward pass.
-        let tcDirectErr = 0, tcSigOut8 = 0;
-        if (isSC) {
-          const directTarget = Math.log1p(actualTcK / 10) / TC_LOG_SCALE;
-          tcSigOut8   = sigmoid(directOut8);
-          tcDirectErr = tcSigOut8 - directTarget;
-          totalLoss  += 3.0 * tcDirectErr * tcDirectErr;
-        }
+        // Gated Tc regression — applies to ALL samples.
+        let tcSigOut8 = 0, tcGatedErr = 0;
+        tcSigOut8 = sigmoid(directOut8);
+        const tcNormTarget = isSC ? Math.log1p(actualTcK / 10) / TC_LOG_SCALE : 0;
+        const tcGatedNorm  = sigOut7 * tcSigOut8;
+        tcGatedErr = tcGatedNorm - tcNormTarget;
+        totalLoss += 3.0 * tcGatedErr * tcGatedErr;
         totalSamples++;
 
         // ── Allen-Dynes chain-rule gradient setup ───────────────────────────────
@@ -3184,7 +3182,7 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         //    error threshold. Every 25K above 10K adds another 1× multiplier,
         //    capped at 4× to prevent gradient instability.
         //    tcErrorK=10K→1×  |  35K→2×  |  60K→3×  |  85K+→4×
-        const predTcKRew  = isSC ? 10 * Math.expm1(tcSigOut8 * TC_LOG_SCALE) : 0;
+        const predTcKRew  = isSC ? sigOut7 * 10 * Math.expm1(tcSigOut8 * TC_LOG_SCALE) : 0;
         const tcErrorKRew = isSC ? Math.abs(predTcKRew - actualTcK) : 0;
         const rmsePenalty = (isSC && tcErrorKRew > 10)
           ? Math.min(4.0, 1.0 + (tcErrorKRew - 10) / 25)
@@ -3220,14 +3218,16 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         dLdOut[4] = clipGrad(dLossDAd * dTcdLambda * dLambdadOut4);
         dLdOut[5] = clipGrad(2 * bgError * 0.05);  // bandgap when real data available
         dLdOut[6] = 0;
-        // out[7] → P(SC) via BCE gradient, scaled by reward/punishment multiplier.
-        //   bceMult > 1: false positive — push harder toward non-SC.
-        //   bceMult < 1: already correct non-SC — ease off, focus on harder cases.
-        dLdOut[7] = clipGrad((sigOut7 - scTarget) * bceMult);
-        // out[8] → Tc regression gradient. Only for SC samples; zero for non-SC.
-        //   tcMult > 1: RMSE > 10K — push harder toward correct Tc.
-        //   tcMult < 1: already within 10K AND classified correctly — ease off.
-        dLdOut[8] = isSC ? clipGrad(3.0 * 2 * tcDirectErr * tcSigOut8 * (1 - tcSigOut8) * tcMult) : 0;
+        // out[7] → BCE gradient + gate gradient from gated Tc loss.
+        //   Gate gradient: dL/dout[7] = 6 * tcGatedErr * tcSigOut8 * sigOut7*(1-sigOut7)
+        //   Non-SC: tcGatedErr = scGate*tcSigOut8 > 0 → pushes gate toward 0.
+        //   SC (under-pred): tcGatedErr < 0 → pushes gate up → opens gate.
+        const gateGrad = 6.0 * tcGatedErr * tcSigOut8 * sigOut7 * (1 - sigOut7) * tcMult;
+        dLdOut[7] = clipGrad((sigOut7 - scTarget) * bceMult + gateGrad);
+        // out[8] → gated Tc regression gradient. Only for SC; non-SC gate gradient
+        //   already flows through out[7] above.
+        //   dL/dout[8] = 6 * tcGatedErr * sigOut7 * tcSigOut8*(1-tcSigOut8)
+        dLdOut[8] = isSC ? clipGrad(6.0 * tcGatedErr * sigOut7 * tcSigOut8 * (1 - tcSigOut8) * tcMult) : 0;
 
         // Uncertainty head (W_mlp2_var) receives no gradient — NLL removed.
         // Uncertainty outputs can be calibrated post-training via isotonic regression.
