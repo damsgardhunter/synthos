@@ -913,6 +913,19 @@ async function runStartupFullCorpusTraining(): Promise<void> {
         models = allIndices.map(i => modelMap.get(i)).filter((m): m is GNNWeights => !!m);
       }
     } finally {
+      // Delete queued jobs WHILE holding the slot so the job poller cannot
+      // mark one as 'running' between the slot release and the delete query.
+      // This eliminates the race condition that let dispatched jobs overwrite
+      // startup results even after we added the post-completion cleanup.
+      try {
+        const deleted = await db.execute(
+          `DELETE FROM gnn_training_jobs WHERE status IN ('queued', 'running') RETURNING id`
+        );
+        const deletedIds = ((deleted as any).rows ?? (Array.isArray(deleted) ? deleted : [])).map((r: any) => r.id);
+        if (deletedIds.length > 0) {
+          console.log(`[GNN-GCP] Cleared ${deletedIds.length} stale job(s) before slot release — startup weights preserved`);
+        }
+      } catch { /* non-fatal — slot must still be released */ }
       releaseGNNTrainingSlot('STARTUP');
     }
   } catch (err: any) {
@@ -968,18 +981,6 @@ async function runStartupFullCorpusTraining(): Promise<void> {
   } catch { /* non-fatal */ }
   // Per-model checkpoints are superseded by the full job stored above.
   await clearStartupModelCheckpoints();
-
-  // Clear any queued dispatched jobs — they were created before startup ran and would
-  // train from scratch, overwriting the startup result with a worse random-init model.
-  try {
-    const deleted = await db.execute(
-      `DELETE FROM gnn_training_jobs WHERE status = 'queued' RETURNING id`
-    );
-    const deletedIds = ((deleted as any).rows ?? (Array.isArray(deleted) ? deleted : [])).map((r: any) => r.id);
-    if (deletedIds.length > 0) {
-      console.log(`[GNN-GCP] Cleared ${deletedIds.length} stale queued job(s) after startup — startup weights preserved`);
-    }
-  } catch { /* non-fatal */ }
 }
 
 // ── Main loop ─────────────────────────────────────────────────────────────────
