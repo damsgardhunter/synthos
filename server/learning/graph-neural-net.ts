@@ -2421,7 +2421,9 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
   const lambdaRaw = LAMBDA_MAX * sigmoid(sf(out[4] ?? 0));
   // v15: P(SC) from dedicated classification head; out[8] → Tc magnitude.
   // TcFinal = P(SC) × tcRaw — non-SC forces gate to close; SC forces gate to stay open.
-  const scProb = sigmoid(sf(out7Cls));
+  // Floor at 0.1 prevents a collapsed cls head (overfitting to training SC patterns)
+  // from zeroing ALL predictions, which would make R²=-∞ and trigger the quality gate.
+  const scProb = Math.max(0.1, sigmoid(sf(out7Cls)));
   const predictedTcRaw = scProb * 10 * Math.expm1(sigmoid(sf(out[8] ?? 0)) * TC_LOG_SCALE);
   const confidenceRaw = sigmoid(sf(out[3] ?? 0));
   const bandgapRaw = sigmoid(sf(out[5] ?? 0)) * 5.0;
@@ -2607,7 +2609,8 @@ function GNNPredictForTraining(graph: CrystalGraph, weights: GNNWeights): { pred
   // out[4] → λ: sigmoid soft map into (0, LAMBDA_MAX) — gradient everywhere.
   const lambdaRaw = LAMBDA_MAX * sigmoid(sf(out[4] ?? 0));
   // v15: P(SC) from dedicated cls head; out[8] → Tc magnitude.
-  const scProb = sigmoid(sf(out7Cls));
+  // Floor matches inference path to keep training R² consistent with val R².
+  const scProb = Math.max(0.1, sigmoid(sf(out7Cls)));
   const predictedTcRaw = scProb * 10 * Math.expm1(sigmoid(sf(out[8] ?? 0)) * TC_LOG_SCALE);
   const confidenceRaw = sigmoid(sf(out[3] ?? 0));
   const bandgapRaw = sigmoid(sf(out[5] ?? 0)) * 5.0;

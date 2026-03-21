@@ -936,6 +936,12 @@ function broadcastImmediate(type: string, data: any) {
 const recentLogCache = new Set<string>();
 const RECENT_LOG_CACHE_MAX = 100;
 
+// Circuit breaker for research log writes — backs off when the DB is under pressure.
+let _logWriteFailures = 0;
+let _logWriteBackoffUntil = 0;
+const LOG_WRITE_FAIL_THRESHOLD = 5;   // open circuit after N consecutive failures
+const LOG_WRITE_BACKOFF_MS = 30_000;  // stay open for 30 s
+
 const DEDUP_EVENT_PATTERNS = [
   "started", "discovery started", "fetch started", "import started",
   "analysis started", "Prediction patterns discovered",
@@ -963,12 +969,28 @@ const emit: EventEmitter = (type: string, data: any) => {
   broadcast(type, data);
 
   if (type === "log" && data.event && data.phase) {
-    storage.insertResearchLog({
-      phase: data.phase,
-      event: data.event,
-      detail: data.detail || null,
-      dataSource: data.dataSource || null,
-    }).catch((e: any) => { console.error(`[Engine] Research log write failed: ${e?.message?.slice(0, 120) ?? "unknown"}`); });
+    const now = Date.now();
+    if (now < _logWriteBackoffUntil) {
+      // Circuit open — skip write silently to avoid pool saturation
+    } else {
+      storage.insertResearchLog({
+        phase: data.phase,
+        event: data.event,
+        detail: data.detail || null,
+        dataSource: data.dataSource || null,
+      }).then(() => {
+        _logWriteFailures = 0; // reset on success
+      }).catch((e: any) => {
+        _logWriteFailures++;
+        if (_logWriteFailures >= LOG_WRITE_FAIL_THRESHOLD) {
+          _logWriteBackoffUntil = Date.now() + LOG_WRITE_BACKOFF_MS;
+          console.error(`[Engine] Research log circuit open for ${LOG_WRITE_BACKOFF_MS / 1000}s after ${_logWriteFailures} failures`);
+          _logWriteFailures = 0;
+        } else {
+          console.error(`[Engine] Research log write failed: ${e?.message?.slice(0, 120) ?? "unknown"}`);
+        }
+      });
+    }
     if (data.event === "Novel insight discovered") {
       const detail = data.detail || "";
       const insightText = detail.replace(/^\[NOVEL \d+%\]\s*/, "");
@@ -7617,6 +7639,18 @@ async function runLearningCycle() {
             dataSource: "Active Learning",
           });
         }
+      }
+
+      // ── Periodic DB trim: keep high-volume tables from growing unbounded ────
+      if (state === "running" && cycleCount % 30 === 0 && cycleCount > 0) {
+        storage.trimOldData().then(result => {
+          const total = result.logsDeleted + result.computationsDeleted + result.synthesisDeleted + result.reactionsDeleted;
+          if (total > 0) {
+            console.log(`[Engine] DB trim: removed ${result.logsDeleted} logs, ${result.computationsDeleted} computations, ${result.synthesisDeleted} synthesis, ${result.reactionsDeleted} reactions`);
+          }
+        }).catch((e: any) => {
+          console.error(`[Engine] DB trim failed: ${e?.message?.slice(0, 80) ?? "unknown"}`);
+        });
       }
 
       // ── Reference benchmark: GNN + XGBoost + Ensemble every 10 cycles ──────

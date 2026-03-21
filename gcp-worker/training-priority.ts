@@ -56,6 +56,15 @@ export function isGNNMajorTrainingActive(): boolean {
   return _gnnMajorTrainingActive;
 }
 
+/**
+ * Read-only slot check — does NOT acquire or log anything.
+ * Use this to skip expensive work when the slot is already held by
+ * startup or another dispatched job, without causing log spam.
+ */
+export function isGNNTrainingSlotFree(): boolean {
+  return !_gnnTrainingSlotTaken;
+}
+
 // ── XGB active flag ───────────────────────────────────────────────────────────
 
 export function setXGBTrainingActive(active: boolean): void {

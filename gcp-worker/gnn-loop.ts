@@ -10,7 +10,7 @@
  */
 import { db, isConnectionError } from "../server/db";
 import { storage } from "../server/storage";
-import { acquireGNNTrainingSlot, releaseGNNTrainingSlot, waitForXGBIdle } from "./training-priority";
+import { acquireGNNTrainingSlot, releaseGNNTrainingSlot, waitForXGBIdle, isGNNTrainingSlotFree } from "./training-priority";
 import { Worker } from "worker_threads";
 import { fileURLToPath } from "url";
 import path from "path";
@@ -516,13 +516,11 @@ async function loadMPContrastSamples(existingFormulas: Set<string>, scCount: num
 // ── Job processing ────────────────────────────────────────────────────────────
 
 async function processNextGnnJob(): Promise<boolean> {
-  // Check slot availability before touching the DB — avoids the claim→augment→requeue loop.
-  if (!acquireGNNTrainingSlot('dispatched-peek')) {
+  // Silent slot check — avoids the claim→augment→requeue loop without spamming
+  // acquire/release log messages every poll cycle when the slot is free but idle.
+  if (!isGNNTrainingSlotFree()) {
     return false; // startup training holds the slot; try again next poll cycle
   }
-  // Release immediately — we'll re-acquire properly after loading training data.
-  // This peek just prevents wasted augmentation queries when slot is busy.
-  releaseGNNTrainingSlot('dispatched-peek');
 
   const rows = await db.execute(
     `UPDATE gnn_training_jobs
@@ -966,30 +964,39 @@ async function runStartupFullCorpusTraining(): Promise<void> {
   console.log(`[GNN-GCP]  TRAIN(sample): R²=${trainMetrics.r2.toFixed(3)}  MAE=${trainMetrics.mae.toFixed(1)}K  overfit-gap=${(trainMetrics.r2 - r2).toFixed(3)}`);
   console.log('[GNN-GCP] ════════════════════════════════════════════════════════');
 
-  // Store the trained weights as a completed job so the local server's GCP
-  // weight poller picks them up and applies them.
-  try {
-    await db.execute("SELECT 1"); // warm pool before large write
-    const insertedJob = await storage.insertGnnTrainingJob({
-      status: "queued" as any,
-      trainingData: [] as any, // payload stored on GCP side — not needed by local server
-      datasetSize: trainSet.length,
-      dftSamples: qeSamples.length,
-    });
-    await storage.updateGnnTrainingJob(insertedJob.id, {
-      status: "done",
-      weights: models as any,
-      r2,
-      mae,
-      rmse,
-      trainR2: trainMetrics.r2,
-      trainMae: trainMetrics.mae,
-      valN,
-      completedAt: new Date(),
-    } as any);
-    console.log(`[GNN-GCP] Startup weights stored as job #${insertedJob.id} — local server poller will apply them`);
-  } catch (err: any) {
-    console.warn(`[GNN-GCP] Failed to store startup weights in DB: ${err.message?.slice(0, 120)}`);
+  // Quality gate: only store weights if the model is not catastrophically bad.
+  // R²<-5 or MAE>200K means predictions collapsed (e.g. all-zero gate), which
+  // would overwrite the current working model with useless weights on the local server.
+  const MIN_STORE_R2 = -5;
+  const MAX_STORE_MAE = 200;
+  if (r2 < MIN_STORE_R2 || mae > MAX_STORE_MAE) {
+    console.warn(`[GNN-GCP] Startup weights NOT stored — model quality below threshold (R²=${r2.toFixed(3)}, MAE=${mae.toFixed(1)}K). Existing weights on local server preserved.`);
+  } else {
+    // Store the trained weights as a completed job so the local server's GCP
+    // weight poller picks them up and applies them.
+    try {
+      await db.execute("SELECT 1"); // warm pool before large write
+      const insertedJob = await storage.insertGnnTrainingJob({
+        status: "queued" as any,
+        trainingData: [] as any, // payload stored on GCP side — not needed by local server
+        datasetSize: trainSet.length,
+        dftSamples: qeSamples.length,
+      });
+      await storage.updateGnnTrainingJob(insertedJob.id, {
+        status: "done",
+        weights: models as any,
+        r2,
+        mae,
+        rmse,
+        trainR2: trainMetrics.r2,
+        trainMae: trainMetrics.mae,
+        valN,
+        completedAt: new Date(),
+      } as any);
+      console.log(`[GNN-GCP] Startup weights stored as job #${insertedJob.id} — local server poller will apply them`);
+    } catch (err: any) {
+      console.warn(`[GNN-GCP] Failed to store startup weights in DB: ${err.message?.slice(0, 120)}`);
+    }
   }
 
   // Mark startup complete in system_state and clear per-model checkpoints

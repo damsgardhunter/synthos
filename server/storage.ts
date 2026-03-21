@@ -166,6 +166,8 @@ export interface IStorage {
   getDftJobStats(): Promise<{ queued: number; running: number; completed: number; failed: number }>;
   getDftStaleCleanupCount(): Promise<number>;
   getRecentDftJobs(limit?: number): Promise<DftJob[]>;
+
+  trimOldData(opts?: { keepLogs?: number; keepComputations?: number; keepSynthesis?: number; keepReactions?: number }): Promise<{ logsDeleted: number; computationsDeleted: number; synthesisDeleted: number; reactionsDeleted: number }>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -279,44 +281,43 @@ export class DatabaseStorage implements IStorage {
     return Number(count);
   }
 
-  // Hull sanity guard: exclude any candidate whose real MP ConvexHull analysis
-  // recorded eAboveHull > 0.5 eV/atom in the notes field.  These are physically
-  // impossible structures that should never appear in the UI.
-  private readonly HULL_GUARD_SQL = sql`
-    NOT (notes ~ 'eAboveHull=[0-9]'
-         AND (regexp_match(notes, 'eAboveHull=([0-9]+\.?[0-9]*)'))[1]::float > 0.5)
-  `;
+  // Hull sanity guard applied in JS (post-fetch) to avoid regex WHERE clauses
+  // that prevent index use on predicted_tc/ensemble_score and cause full table scans.
+  private hullGuardOk(c: SuperconductorCandidate): boolean {
+    const notes = c.notes ?? "";
+    const m = notes.match(/eAboveHull=([0-9]+(?:\.[0-9]*)?)/);
+    return !m || parseFloat(m[1]) <= 0.5;
+  }
 
   async getSuperconductorCandidates(limit = 50): Promise<SuperconductorCandidate[]> {
-    return db.select().from(superconductorCandidates)
-      .where(this.HULL_GUARD_SQL)
+    // Fetch with index-friendly query, then apply hull guard in memory.
+    // Over-fetch by 20% to account for filtered rows (hull violations are rare).
+    const rows = await db.select().from(superconductorCandidates)
       .orderBy(desc(superconductorCandidates.predictedTc))
-      .limit(limit);
+      .limit(Math.ceil(limit * 1.2));
+    return rows.filter(c => this.hullGuardOk(c)).slice(0, limit);
   }
 
   async getSuperconductorCandidatesByTc(limit = 10): Promise<SuperconductorCandidate[]> {
-    return db.select().from(superconductorCandidates)
-      .where(this.HULL_GUARD_SQL)
+    const rows = await db.select().from(superconductorCandidates)
       .orderBy(desc(superconductorCandidates.predictedTc))
-      .limit(limit);
+      .limit(Math.ceil(limit * 1.2));
+    return rows.filter(c => this.hullGuardOk(c)).slice(0, limit);
   }
 
   async getTopCandidatesMerged(scoreLimit = 50, tcLimit = 10): Promise<SuperconductorCandidate[]> {
     const rows = await db.execute(sql`
       SELECT DISTINCT ON (formula) * FROM (
         (SELECT * FROM superconductor_candidates
-          WHERE NOT (notes ~ 'eAboveHull=[0-9]'
-            AND (regexp_match(notes, 'eAboveHull=([0-9]+\.?[0-9]*)'))[1]::float > 0.5)
           ORDER BY ensemble_score DESC NULLS LAST LIMIT ${scoreLimit})
         UNION
         (SELECT * FROM superconductor_candidates
-          WHERE NOT (notes ~ 'eAboveHull=[0-9]'
-            AND (regexp_match(notes, 'eAboveHull=([0-9]+\.?[0-9]*)'))[1]::float > 0.5)
           ORDER BY predicted_tc DESC NULLS LAST LIMIT ${tcLimit})
       ) merged
       ORDER BY formula, predicted_tc DESC NULLS LAST
     `);
-    return rows.rows as unknown as SuperconductorCandidate[];
+    const all = rows.rows as unknown as SuperconductorCandidate[];
+    return all.filter(c => this.hullGuardOk(c));
   }
 
   async getUnscoredCandidates(limit = 200): Promise<SuperconductorCandidate[]> {
@@ -1036,6 +1037,48 @@ export class DatabaseStorage implements IStorage {
         eq(mlTrainingJobs.taskType, taskType),
         or(eq(mlTrainingJobs.status, "queued"), eq(mlTrainingJobs.status, "running")),
       ));
+  }
+
+  async trimOldData(opts: { keepLogs?: number; keepComputations?: number; keepSynthesis?: number; keepReactions?: number } = {}): Promise<{ logsDeleted: number; computationsDeleted: number; synthesisDeleted: number; reactionsDeleted: number }> {
+    const keepLogs = opts.keepLogs ?? 5_000;
+    const keepComputations = opts.keepComputations ?? 2_000;
+    const keepSynthesis = opts.keepSynthesis ?? 1_500;
+    const keepReactions = opts.keepReactions ?? 2_000;
+
+    const [logResult, compResult, synthResult, rxnResult] = await Promise.all([
+      db.execute(sql`
+        DELETE FROM research_logs
+        WHERE id NOT IN (
+          SELECT id FROM research_logs ORDER BY id DESC LIMIT ${keepLogs}
+        )
+      `),
+      db.execute(sql`
+        DELETE FROM computational_results
+        WHERE id NOT IN (
+          SELECT id FROM computational_results ORDER BY computed_at DESC LIMIT ${keepComputations}
+        )
+      `),
+      db.execute(sql`
+        DELETE FROM synthesis_processes
+        WHERE id NOT IN (
+          SELECT id FROM synthesis_processes ORDER BY discovered_at DESC LIMIT ${keepSynthesis}
+        )
+      `),
+      db.execute(sql`
+        DELETE FROM chemical_reactions
+        WHERE id NOT IN (
+          SELECT id FROM chemical_reactions ORDER BY discovered_at DESC LIMIT ${keepReactions}
+        )
+      `),
+    ]);
+
+    const count = (r: any) => Number((r as any).rowCount ?? (r as any).rows?.length ?? 0);
+    return {
+      logsDeleted: count(logResult),
+      computationsDeleted: count(compResult),
+      synthesisDeleted: count(synthResult),
+      reactionsDeleted: count(rxnResult),
+    };
   }
 }
 

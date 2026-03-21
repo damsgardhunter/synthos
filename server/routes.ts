@@ -506,6 +506,21 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
+  app.post("/api/engine/trim-db", engineLimiter, async (req, res) => {
+    try {
+      const result = await storage.trimOldData({
+        keepLogs: req.body?.keepLogs ?? 5_000,
+        keepComputations: req.body?.keepComputations ?? 2_000,
+        keepSynthesis: req.body?.keepSynthesis ?? 1_500,
+        keepReactions: req.body?.keepReactions ?? 2_000,
+      });
+      console.log(`[Engine] Manual DB trim: removed ${result.logsDeleted} logs, ${result.computationsDeleted} computations, ${result.synthesisDeleted} synthesis, ${result.reactionsDeleted} reactions`);
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: "Trim failed", detail: e?.message });
+    }
+  });
+
   app.post("/api/engine/pause", engineLimiter, async (_req, res) => {
     try {
       const status = pauseEngine();
@@ -1227,7 +1242,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       }[] = [];
 
       try {
-        const candidates = await storage.getSuperconductorCandidates(500);
+        const timeout = new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("tsc db timeout")), 5_000)
+        );
+        const candidates = await Promise.race([storage.getSuperconductorCandidates(500), timeout]);
         for (const c of candidates) {
           const ml = (c.mlFeatures as Record<string, any>) ?? {};
           const inv = ml.topologicalInvariants as Record<string, any> | undefined;

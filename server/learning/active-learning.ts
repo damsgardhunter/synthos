@@ -2244,11 +2244,20 @@ export function startGCPWeightPoller(): void {
       if (latestId && latestId > lastAppliedJobId) {
         const job = await storage.getLatestCompletedGnnJob();
         if (job && job.id > lastAppliedJobId && job.weights) {
-          lastAppliedJobId = job.id;
-          const td = (job.trainingData as any[]) ?? [];
-          applySerializedWeights(job.weights as any, td.map((t: any) => ({ formula: t.formula, tc: t.tc })));
-          logGNNVersion("gcp-retrain", job.datasetSize ?? td.length, job.dftSamples ?? 0, 0);
-          console.log(`[GCP-Poller] Applied GNN weights from job #${job.id} — R²=${job.r2?.toFixed(3) ?? "?"}`);
+          // Quality gate: refuse weights that indicate a collapsed model (all-zero predictions).
+          // R²<-5 means the model predicts worse than a constant, MAE>200K means all predictions ≈ 0.
+          const jobR2 = typeof job.r2 === "number" ? job.r2 : 0;
+          const jobMae = typeof (job as any).mae === "number" ? (job as any).mae : 0;
+          if (jobR2 < -5 || jobMae > 200) {
+            lastAppliedJobId = job.id; // mark as seen so we don't re-check it
+            console.warn(`[GCP-Poller] Rejected GNN weights from job #${job.id} — quality below threshold (R²=${jobR2.toFixed(3)}, MAE=${jobMae.toFixed(1)}K). Current model preserved.`);
+          } else {
+            lastAppliedJobId = job.id;
+            const td = (job.trainingData as any[]) ?? [];
+            applySerializedWeights(job.weights as any, td.map((t: any) => ({ formula: t.formula, tc: t.tc })));
+            logGNNVersion("gcp-retrain", job.datasetSize ?? td.length, job.dftSamples ?? 0, 0);
+            console.log(`[GCP-Poller] Applied GNN weights from job #${job.id} — R²=${job.r2?.toFixed(3) ?? "?"}`);
+          }
         }
       }
     } catch { /* silent */ }
