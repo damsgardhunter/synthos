@@ -116,6 +116,13 @@ interface GNNWeights {
   b_mlp2: number[];
   W_mlp2_var: number[][];
   b_mlp2_var: number[];
+  // ── v15: Dedicated classification head ───────────────────────────────────
+  /** CLS_DIM × pooledLen — dedicated P(SC) pathway independent of Tc regression. */
+  W_cls1: number[][];
+  b_cls1: number[];
+  /** CLS_DIM → scalar logit for P(SC). */
+  W_cls2: number[];
+  b_cls2: number;
   // ── GLFN-TC: Graph Learning Module weights ───────────────────────────────
   /** 119 × GRAPH_FEAT_DIM — one learnable feature vector per element (atomic number 0–118). */
   W_elem_feat: number[][];
@@ -188,6 +195,9 @@ interface GNNForwardCache {
   /** GLFN-TC Dense Residual: H0 embeddings saved after input projection.
    *  Used in backward to route the dense-skip gradient back to input_proj. */
   denseH0?: number[][];
+  /** v15: Classification head pre- and post-activation. */
+  zCls: number[];
+  hCls: number[];
 }
 
 export interface UncertaintyBreakdown {
@@ -251,6 +261,9 @@ const TC_MAX_K = 300;
 //   inverse = 10 * expm1(sigmoid(out[8]) * TC_LOG_SCALE) → Tc in K
 // Compresses the 0–300 K range logarithmically; no arbitrary scale factor needed.
 const TC_LOG_SCALE = Math.log1p(TC_MAX_K / 10);  // log1p(30) ≈ 3.434
+// Dedicated classification head hidden dimension — large enough to learn P(SC)
+// without competing with Tc regression in the shared h1 representation.
+const CLS_DIM = 24;
 // Absolute ceiling on ω_log — even high-pressure hydrides (H₃S, LaH₁₀) have ω_log < 1500 K.
 const OMEGA_LOG_MAX = 1500;              // 6 composition + 7 XGBoost-inspired composition + 6 physics (λ, logω, DOS, FE, isCuprate, isIronBased)
 const CGCNN_CONCAT_DIM = HIDDEN_DIM * 2 + EDGE_DIM;
@@ -2387,6 +2400,10 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
   }
   const latentEmbedding = [...h1];
   const out = vecAdd(matVecMul(weights.W_mlp2, h1), weights.b_mlp2);
+  // v15: P(SC) from dedicated classification head — independent of Tc regression h1.
+  const zClsInf = vecAdd(matVecMul(weights.W_cls1, pooledWithComp), weights.b_cls1);
+  const hClsInf = zClsInf.map(v => v >= 0 ? v : 0.01 * v);
+  const out7Cls = dotProduct(weights.W_cls2, hClsInf) + (weights.b_cls2 ?? 0);
 
   const logVarOut = vecAdd(matVecMul(weights.W_mlp2_var, h1), weights.b_mlp2_var);
   const feVarNorm = softplus(logVarOut[0] ?? 0);
@@ -2398,19 +2415,13 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
   const formationEnergy = sf(out[0] ?? 0);
   const phononStabilityRaw = sigmoid(sf(out[1] ?? 0));
   // out[2] → ω_log (K): sigmoid-based soft map into (10, OMEGA_LOG_MAX).
-  // sigmoid(x/3) keeps gradient non-zero everywhere — hard min() kills gradients at the cap,
-  // trapping the model in a state where ω_log is pinned at max and predictions never improve.
   const omegaLogRaw = sf(out[2] ?? 0);
   const omegaLog = 10 + (OMEGA_LOG_MAX - 10) * sigmoid(omegaLogRaw / 3);
   // out[4] → λ via sigmoid soft cap into (0, LAMBDA_MAX).
-  // sigmoid ensures λ ∈ (0, LAMBDA_MAX) with non-zero gradient everywhere.
-  // Hard min(LAMBDA_MAX, softplus(x)) had zero derivative when softplus(x) ≥ LAMBDA_MAX,
-  // which caused permanent gradient death once training pushed λ to the cap.
   const lambdaRaw = LAMBDA_MAX * sigmoid(sf(out[4] ?? 0));
-  // out[7] → P(SC) gate: multiplied into Tc so classifier must learn to open/close.
-  // out[8] → Tc magnitude via log1p-normalised sigmoid.
+  // v15: P(SC) from dedicated classification head; out[8] → Tc magnitude.
   // TcFinal = P(SC) × tcRaw — non-SC forces gate to close; SC forces gate to stay open.
-  const scProb = sigmoid(sf(out[7] ?? 0));
+  const scProb = sigmoid(sf(out7Cls));
   const predictedTcRaw = scProb * 10 * Math.expm1(sigmoid(sf(out[8] ?? 0)) * TC_LOG_SCALE);
   const confidenceRaw = sigmoid(sf(out[3] ?? 0));
   const bandgapRaw = sigmoid(sf(out[5] ?? 0)) * 5.0;
@@ -2572,6 +2583,14 @@ function GNNPredictForTraining(graph: CrystalGraph, weights: GNNWeights): { pred
   const h1 = z1.map(v => v >= 0 ? v : 0.01 * v);
   const latentEmbedding = [...h1];
   const out = vecAdd(matVecMul(weights.W_mlp2, h1), weights.b_mlp2);
+  // v15: Dedicated classification head — P(SC) gets its own pathway.
+  const zCls = vecAdd(matVecMul(weights.W_cls1, pooledWithComp), weights.b_cls1);
+  const hCls = zCls.map(v => v >= 0 ? v : 0.01 * v);
+  const out7Cls = dotProduct(weights.W_cls2, hCls) + (weights.b_cls2 ?? 0);
+  // Override out[7] with cls head logit so backward pass reads it via cache.outRaw[7].
+  const outRawWithCls = [...out];
+  outRawWithCls[7] = out7Cls;
+
   const logVarOut = vecAdd(matVecMul(weights.W_mlp2_var, h1), weights.b_mlp2_var);
 
   const feVarNorm = softplus(logVarOut[0] ?? 0);
@@ -2587,13 +2606,13 @@ function GNNPredictForTraining(graph: CrystalGraph, weights: GNNWeights): { pred
   const omegaLog = 10 + (OMEGA_LOG_MAX - 10) * sigmoid(omegaLogRaw / 3);
   // out[4] → λ: sigmoid soft map into (0, LAMBDA_MAX) — gradient everywhere.
   const lambdaRaw = LAMBDA_MAX * sigmoid(sf(out[4] ?? 0));
-  // out[7] → P(SC) gate × out[8] → Tc magnitude (see GNNPredict).
-  const scProb = sigmoid(sf(out[7] ?? 0));
+  // v15: P(SC) from dedicated cls head; out[8] → Tc magnitude.
+  const scProb = sigmoid(sf(out7Cls));
   const predictedTcRaw = scProb * 10 * Math.expm1(sigmoid(sf(out[8] ?? 0)) * TC_LOG_SCALE);
   const confidenceRaw = sigmoid(sf(out[3] ?? 0));
   const bandgapRaw = sigmoid(sf(out[5] ?? 0)) * 5.0;
   const dosProxyRaw = softplus(sf(out[6] ?? 0));
-  const stabilityProbRaw = scProb;  // out[7] encodes P(SC)
+  const stabilityProbRaw = scProb;
   const safeLatent = latentEmbedding.map(v => Number.isFinite(v) ? v : 0);
 
   const nodeEmbeddings = graph.nodes.map(n => [...n.embedding]);
@@ -2620,7 +2639,7 @@ function GNNPredictForTraining(graph: CrystalGraph, weights: GNNWeights): { pred
     pooled: [...pooledWithComp], // includes comp features so gradW1 is computed correctly
     z1: [...z1],
     h1: [...h1],
-    outRaw: [...out],
+    outRaw: outRawWithCls,  // out[7] = cls head logit; others from W_mlp2
     logVarOutRaw: [...logVarOut],
     nodeEmbeddings,
     nodeMultiplicities,
@@ -2632,6 +2651,8 @@ function GNNPredictForTraining(graph: CrystalGraph, weights: GNNWeights): { pred
     maxPoolArgmax,
     attnPoolWeights,
     denseH0,  // GLFN-TC: saved for dense-skip gradient in backward pass
+    zCls: [...zCls],
+    hCls: [...hCls],
   };
 
   return { pred, cache };
@@ -2677,6 +2698,11 @@ function initWeights(rng: () => number): GNNWeights {
     // Scale 0.05 (was 0.01) so gradients propagate meaningfully to the message-passing layers.
     // With 0.01: dLdH1 ≈ 0.01 × grad_out = ~0.0004 — effectively zero at graph layers.
     // With 0.05: dLdH1 ≈ 0.05 × grad_out = ~0.002 — 5× better, sufficient for Adam to update.
+    // v15: Dedicated classification head — He init for W_cls1, small for W_cls2.
+    W_cls1: initMatrix(CLS_DIM, HIDDEN_DIM * 2 + GLOBAL_COMP_DIM, rng, Math.sqrt(2.0 / (HIDDEN_DIM * 2 + GLOBAL_COMP_DIM))),
+    b_cls1: initVector(CLS_DIM),
+    W_cls2: Array.from({ length: CLS_DIM }, () => (rng() - 0.5) * 0.1),
+    b_cls2: 0.0,
     W_mlp2: initMatrix(OUTPUT_DIM, HIDDEN_DIM, rng, 0.05),
     b_mlp2: (() => {
       const b = initVector(OUTPUT_DIM);
@@ -2732,6 +2758,10 @@ function cloneWeights(w: GNNWeights): GNNWeights {
     W_elem_feat: w.W_elem_feat.map(r => [...r]),
     W_graph_adapt: w.W_graph_adapt.map(r => [...r]),
     dense_skip_gate: w.dense_skip_gate,
+    W_cls1: w.W_cls1.map(r => [...r]),
+    b_cls1: [...w.b_cls1],
+    W_cls2: [...w.W_cls2],
+    b_cls2: w.b_cls2,
     W_mlp2: w.W_mlp2.map(r => [...r]),
     b_mlp2: [...w.b_mlp2],
     W_mlp2_var: w.W_mlp2_var.map(r => [...r]),
@@ -2756,6 +2786,20 @@ function migrateWeights(w: GNNWeights, rng: () => number): GNNWeights {
   }
   if (typeof w.dense_skip_gate !== 'number' || !Number.isFinite(w.dense_skip_gate)) {
     w.dense_skip_gate = -2.0;
+  }
+  // v15: Dedicated classification head — initialize if absent (old checkpoints start near-zero).
+  const expectedClsCols = HIDDEN_DIM * 2 + GLOBAL_COMP_DIM;
+  if (!w.W_cls1 || w.W_cls1.length !== CLS_DIM || w.W_cls1[0]?.length !== expectedClsCols) {
+    w.W_cls1 = initMatrix(CLS_DIM, expectedClsCols, rng, Math.sqrt(2.0 / expectedClsCols));
+  }
+  if (!w.b_cls1 || w.b_cls1.length !== CLS_DIM) {
+    w.b_cls1 = initVector(CLS_DIM);
+  }
+  if (!w.W_cls2 || w.W_cls2.length !== CLS_DIM) {
+    w.W_cls2 = Array.from({ length: CLS_DIM }, () => (rng() - 0.5) * 0.1);
+  }
+  if (typeof w.b_cls2 !== 'number' || !Number.isFinite(w.b_cls2)) {
+    w.b_cls2 = 0.0;
   }
   // If W_mlp1 was saved with old GLOBAL_COMP_DIM, zero-pad the new composition feature columns
   // so old checkpoints are forward-compatible. New features contribute 0 until training updates them.
@@ -2847,6 +2891,11 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
   const adamB2  = mkAdamVec(OUTPUT_DIM);
   const adamW2v = mkAdam(OUTPUT_DIM, HIDDEN_DIM);
   const adamB2v = mkAdamVec(OUTPUT_DIM);
+  // v15: Adam state for dedicated classification head.
+  const adamWcls1 = mkAdam(CLS_DIM, HIDDEN_DIM * 2 + GLOBAL_COMP_DIM);
+  const adamBcls1 = mkAdamVec(CLS_DIM);
+  const adamWcls2 = mkAdamVec(CLS_DIM);
+  const adamBcls2 = mkAdamVec(1);
   // Adam state for graph layer weights — replaces plain SGD (lr*0.3) for better
   // convergence on the dedicated GCP GNN instance.  Each matrix entry gets its
   // own adaptive moment estimates, yielding faster convergence and less sensitivity
@@ -3027,6 +3076,11 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
       const gradW1 = weights.W_mlp1.map(r => new Array(r.length).fill(0));
       const gradB1 = new Array(weights.b_mlp1.length).fill(0);
       const gradPressure = new Array(weights.W_pressure.length).fill(0);
+      // v15: Dedicated classification head accumulators.
+      const gradWcls1 = weights.W_cls1.map(r => new Array(r.length).fill(0));
+      const gradBcls1 = new Array(CLS_DIM).fill(0);
+      const gradWcls2 = new Array(CLS_DIM).fill(0);
+      let gradBcls2 = 0;
 
       const zeroMat = (m: number[][]) => m.map(r => new Array(r.length).fill(0));
       const graphGrads = {
@@ -3235,7 +3289,9 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         // Uncertainty outputs can be calibrated post-training via isotonic regression.
         const dLdLogVarOut = new Array(OUTPUT_DIM).fill(0);
 
+        // v15: i=7 is handled by cls head — skip in W_mlp2 gradient loops.
         for (let i = 0; i < weights.W_mlp2.length; i++) {
+          if (i === 7) continue;
           for (let j = 0; j < weights.W_mlp2[i].length; j++) {
             gradW2[i][j] += dLdOut[i] * cache.h1[j];
           }
@@ -3251,12 +3307,35 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
           }
         }
 
+        // v15: dLdH1 excludes i=7 (cls head) so Tc regression doesn't pollute P(SC).
         const dLdH1 = new Array(HIDDEN_DIM).fill(0);
         for (let j = 0; j < HIDDEN_DIM; j++) {
           for (let i = 0; i < OUTPUT_DIM; i++) {
+            if (i === 7) continue;
             dLdH1[j] += dLdOut[i] * (weights.W_mlp2[i]?.[j] ?? 0);
             dLdH1[j] += dLdLogVarOut[i] * (weights.W_mlp2_var[i]?.[j] ?? 0);
           }
+        }
+
+        // v15: Classification head backward — out[7] → W_cls2 → hCls → W_cls1 → pooledWithComp.
+        const dOut7 = dLdOut[7];
+        for (let j = 0; j < CLS_DIM; j++) {
+          gradWcls2[j] += dOut7 * cache.hCls[j];
+        }
+        gradBcls2 += dOut7;
+        const dLdHcls = new Array(CLS_DIM).fill(0);
+        for (let j = 0; j < CLS_DIM; j++) {
+          dLdHcls[j] = dOut7 * (weights.W_cls2[j] ?? 0);
+        }
+        const dLdZcls = new Array(CLS_DIM);
+        for (let j = 0; j < CLS_DIM; j++) {
+          dLdZcls[j] = dLdHcls[j] * (cache.zCls[j] >= 0 ? 1.0 : 0.01);
+        }
+        for (let i = 0; i < CLS_DIM; i++) {
+          for (let j = 0; j < pooledLen; j++) {
+            gradWcls1[i][j] += clipGrad(dLdZcls[i] * cache.pooled[j]);
+          }
+          gradBcls1[i] += clipGrad(dLdZcls[i]);
         }
 
         const dLdZ1 = new Array(HIDDEN_DIM);
@@ -3275,6 +3354,10 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         for (let j = 0; j < pooledLen; j++) {
           for (let i = 0; i < HIDDEN_DIM; i++) {
             dLdPooled[j] += dLdZ1[i] * (weights.W_mlp1[i][j] ?? 0);
+          }
+          // v15: add cls head contribution so backbone learns from P(SC) signal.
+          for (let i = 0; i < CLS_DIM; i++) {
+            dLdPooled[j] += dLdZcls[i] * (weights.W_cls1[i][j] ?? 0);
           }
           dLdPooled[j] = clipGrad(dLdPooled[j]);
         }
@@ -3504,6 +3587,17 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
       adamUpdateVec(weights.b_mlp2_var, gradB2v, adamB2v, weights.b_mlp2_var.length);
       adamUpdate(weights.W_mlp1, gradW1, adamW1, HIDDEN_DIM, pooledLen);
       adamUpdateVec(weights.b_mlp1, gradB1, adamB1, HIDDEN_DIM);
+      // v15: Classification head Adam updates.
+      adamUpdate(weights.W_cls1, gradWcls1, adamWcls1, CLS_DIM, pooledLen);
+      adamUpdateVec(weights.b_cls1, gradBcls1, adamBcls1, CLS_DIM);
+      adamUpdateVec(weights.W_cls2, gradWcls2, adamWcls2, CLS_DIM);
+      {
+        const gb2 = gradBcls2 * invN;
+        adamBcls2.m[0] = adamBeta1 * adamBcls2.m[0] + (1 - adamBeta1) * gb2;
+        adamBcls2.v[0] = adamBeta2 * adamBcls2.v[0] + (1 - adamBeta2) * gb2 * gb2;
+        weights.b_cls2 -= lr * (adamBcls2.m[0] / bc1) / (Math.sqrt(adamBcls2.v[0] / bc2) + adamEps);
+        weights.b_cls2 *= (1 - lr * WEIGHT_DECAY);
+      }
       // Graph layer AdamW — lr * 0.5 (was 0.3). Direct Tc path delivers strong gradients
       // to the graph layers so they need a higher LR to update meaningfully.
       const graphLR = lr * 0.5;
