@@ -709,7 +709,7 @@ const STARTUP_CKPT_TTL_HOURS = 20; // checkpoints older than this are stale
 // Increment this whenever the GNN forward pass formula changes in a way that
 // makes old weights incompatible with the new code (e.g. hard-cap → sigmoid).
 // When the stored version doesn't match, startup retrains from scratch.
-const GNN_MODEL_VERSION = 11; // v11: separate P(SC) BCE + Tc regression, no gate attenuation (2026-03-21)
+const GNN_MODEL_VERSION = 12; // v12: THOR 12D symmetry embedding replaces 6D (2026-03-21)
 
 // In-process guard: run corpus training exactly once per GCP worker process lifetime.
 let _startupCorpusRan = false;

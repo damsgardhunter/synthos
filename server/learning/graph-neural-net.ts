@@ -4,7 +4,7 @@ import { ELEMENTAL_DATA, getElementData, isTransitionMetal } from "./elemental-d
 import { extractFeatures } from "./ml-predictor";
 import { SUPERCON_TRAINING_DATA } from "./supercon-dataset";
 import { storage } from "../storage";
-import { computeSymmetryEmbedding, computeSymmetryFeatureVector } from "../crystal/symmetry-subgroups";
+import { computeThorFeatureVector, resolveSGNumber } from "../crystal/symmetry-subgroups";
 import { predictLambda } from "./lambda-regressor";
 import { allenDynesTcRaw } from "./physics-engine";
 import { normalizeSpaceGroup, matchPrototype } from "./structure-predictor";
@@ -1273,10 +1273,10 @@ function buildEnhancedEmbedding(el: string, data: ReturnType<typeof getElementDa
 }
 
 function getSymmetryAwareFeatures(spaceGroupName?: string, fracPosition?: [number, number, number]): number[] {
-  if (!spaceGroupName) return [0, 0, 0, 0, 0, 0];
+  if (!spaceGroupName) return new Array(12).fill(0);
   const normalized = normalizeSpaceGroup(spaceGroupName);
-  const embedding = computeSymmetryEmbedding(normalized, fracPosition);
-  return computeSymmetryFeatureVector(embedding);
+  const sgNum = resolveSGNumber(normalized) ?? 1;
+  return computeThorFeatureVector(sgNum, fracPosition);
 }
 
 // ── Global composition feature helpers ───────────────────────────────────────
