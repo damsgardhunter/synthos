@@ -1037,9 +1037,24 @@ export async function startGNNLoop(): Promise<void> {
   await new Promise(r => setTimeout(r, 35_000));
   console.log("[GNN-GCP] Job polling starting — startup training should hold the slot");
 
+  let pollCount = 0;
+  let lastHeartbeatMs = Date.now();
+  const HEARTBEAT_INTERVAL_MS = 5 * 60_000; // log alive every 5 minutes
+
   while (running) {
     try {
       const processed = await processNextGnnJob();
+      pollCount++;
+      if (!processed) {
+        const now = Date.now();
+        if (now - lastHeartbeatMs >= HEARTBEAT_INTERVAL_MS) {
+          console.log(`[GNN-GCP] Polling — no queued jobs found (${pollCount} polls since start). Waiting for local server to dispatch.`);
+          lastHeartbeatMs = now;
+        }
+      } else {
+        pollCount = 0;
+        lastHeartbeatMs = Date.now();
+      }
       await new Promise(r => setTimeout(r, processed ? 1000 : POLL_INTERVAL_MS));
     } catch (err: any) {
       const msg = err instanceof Error
