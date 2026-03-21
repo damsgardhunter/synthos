@@ -144,7 +144,9 @@ async function attachXGBScProb(trainSet: TrainingSample[]): Promise<void> {
   if (xgbX.length < 20) return;
 
   console.log(`[GNN-GCP] Training XGB SC binary classifier on ${xgbX.length} samples...`);
-  const clf = await trainGradientBoosting(xgbX, xgbY, 60, 0.1, 4, 0.8);
+  // featureSubsampleRatio=1.0 (no masking): gbPredictFromModel doesn't apply featureMask,
+  // so masked models produce corrupted predictions. Use all 23 features directly.
+  const clf = await trainGradientBoosting(xgbX, xgbY, 60, 0.1, 4, 1.0);
 
   let sumProbSC = 0, nSC = 0, sumProbNonSC = 0, nNonSC = 0;
   for (let k = 0; k < validIdx.length; k++) {
