@@ -642,13 +642,31 @@ async function processNextGnnJob(): Promise<boolean> {
     await new Promise(r => setTimeout(r, 50));
     try { await db.execute("SELECT 1"); } catch { /* ignore — pool will reconnect */ }
 
-    // Quality gate: only store weights if the model isn't catastrophically bad.
-    // R²<-5 means predictions are worse than a constant baseline.
-    // MAE>200K means the model outputs near-zero for all superconductors.
-    // Both indicate a collapsed model (e.g. cls head gate stuck at 0).
+    // Quality gate 1: reject catastrophically collapsed models.
+    // R²<-5 means worse than a constant baseline; MAE>200K means all predictions ≈ 0.
+    // Quality gate 2: don't overwrite startup weights with worse dispatched results.
+    // Startup trains on the full corpus (~15k); dispatched jobs use a smaller payload
+    // and naturally produce lower R². Only store if the dispatched job beats startup.
+    let startupValR2 = -Infinity;
+    try {
+      const stateRow = await db.execute(
+        `SELECT value FROM system_state WHERE key = '${STARTUP_CORPUS_STATE_KEY}'`
+      );
+      const stateVal = (stateRow as any).rows?.[0]?.value ?? (Array.isArray(stateRow) ? stateRow[0]?.value : undefined);
+      if (stateVal) {
+        const parsed = typeof stateVal === 'string' ? JSON.parse(stateVal) : stateVal;
+        startupValR2 = parsed.valR2 ?? -Infinity;
+      }
+    } catch { /* non-fatal — proceed without guard */ }
+
     if (r2 < -5 || mae > 200) {
       console.warn(
         `[GNN-GCP] Job #${jobId} quality below threshold (R²=${r2.toFixed(3)}, MAE=${mae.toFixed(1)}K) — discarding to preserve working weights`
+      );
+      await db.execute(`UPDATE gnn_training_jobs SET status = 'discarded' WHERE id = ${jobId}`);
+    } else if (Number.isFinite(startupValR2) && r2 < startupValR2 - 0.05) {
+      console.warn(
+        `[GNN-GCP] Job #${jobId} val R²=${r2.toFixed(3)} is worse than startup R²=${startupValR2.toFixed(3)} — discarding to keep startup weights`
       );
       await db.execute(`UPDATE gnn_training_jobs SET status = 'discarded' WHERE id = ${jobId}`);
     } else {
@@ -826,17 +844,12 @@ async function runStartupFullCorpusTraining(): Promise<void> {
   }
   _startupCorpusRan = true;
 
-  // ── Check if startup training completed recently ──────────────────────────
-  // If the VM was restarted after a successful training run, skip retraining
-  // and restore the saved weights instead of running again from scratch.
-  const recentWeights = await checkStartupCompletedRecently();
-  if (recentWeights) {
-    setCachedEnsemble(recentWeights);
-    console.log('[GNN-GCP] Startup training skipped — restored recent weights from DB');
-    return;
-  }
-
   // ── Load partial checkpoints from a previous interrupted run ─────────────
+  // Always run startup training on every GCP restart — the full corpus
+  // training is the most reliable baseline and must not be skipped.
+  // Checkpoints handle interrupted training; the "skip if recent" guard was
+  // removed because it caused startup to skip when the GCP worker was
+  // restarted after a code deployment.
   const checkpointedModels = await loadStartupModelCheckpoints();
   const allIndices = Array.from({ length: Math.min(ENSEMBLE_SIZE, ENSEMBLE_SEEDS.length) }, (_, i) => i);
   const indicesToTrain = allIndices.filter(i => !checkpointedModels.has(i));
