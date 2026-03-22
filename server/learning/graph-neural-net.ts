@@ -293,7 +293,7 @@ const WEIGHT_DECAY = 1e-4;        // AdamW L2 regularization
 // Graph Learning Module: learnable per-element feature vectors that compute an
 // adaptive adjacency score, modulating the CGCNN gate to discover latent chemical
 // pair compatibility beyond fixed bond-distance geometry (paper §2.2).
-const GRAPH_FEAT_DIM = 12;        // dimension of per-element learnable feature vector
+const GRAPH_FEAT_DIM = 32;        // = NODE_DIM: W_elem_feat is the primary learned node embedding
 // Densely Connected Residual Module: a learnable skip gate passes H0 (post-input-
 // projection embeddings) forward to the layer-2 attention input, so later layers
 // can access the original node representations without over-smoothing (paper §2.4).
@@ -655,35 +655,6 @@ function getGroup(atomicNumber: number): number {
   return groupMap[atomicNumber] ?? 0;
 }
 
-function getBlockEncoding(atomicNumber: number): number {
-  if (atomicNumber <= 2) return 0;
-  if ([3, 4, 11, 12, 19, 20, 37, 38, 55, 56, 87, 88].includes(atomicNumber)) return 0;
-  if (atomicNumber >= 57 && atomicNumber <= 71) return 0.75;
-  if (atomicNumber >= 89 && atomicNumber <= 103) return 0.75;
-  if ((atomicNumber >= 21 && atomicNumber <= 30) || (atomicNumber >= 39 && atomicNumber <= 48) || (atomicNumber >= 72 && atomicNumber <= 80)) return 0.5;
-  if ((atomicNumber >= 5 && atomicNumber <= 10) || (atomicNumber >= 13 && atomicNumber <= 18) || (atomicNumber >= 31 && atomicNumber <= 36) || (atomicNumber >= 49 && atomicNumber <= 54) || (atomicNumber >= 81 && atomicNumber <= 86)) return 0.25;
-  return 0;
-}
-
-function getSOrbitalOccupancy(atomicNumber: number): number {
-  if (atomicNumber <= 2) return atomicNumber / 2;
-  if (atomicNumber <= 10) return 1.0;
-  if (atomicNumber <= 18) return 1.0;
-  if (atomicNumber <= 36) return 1.0;
-  if (atomicNumber <= 54) return 1.0;
-  return 1.0;
-}
-
-function getPOrbitalOccupancy(atomicNumber: number): number {
-  if (atomicNumber <= 4) return 0;
-  if (atomicNumber >= 5 && atomicNumber <= 10) return Math.min((atomicNumber - 4) / 6, 1.0);
-  if (atomicNumber >= 13 && atomicNumber <= 18) return Math.min((atomicNumber - 12) / 6, 1.0);
-  if (atomicNumber >= 31 && atomicNumber <= 36) return Math.min((atomicNumber - 30) / 6, 1.0);
-  if (atomicNumber >= 49 && atomicNumber <= 54) return Math.min((atomicNumber - 48) / 6, 1.0);
-  if (atomicNumber >= 81 && atomicNumber <= 86) return Math.min((atomicNumber - 80) / 6, 1.0);
-  return 0;
-}
-
 function getDOrbitalOccupancy(atomicNumber: number): number {
   if (atomicNumber >= 21 && atomicNumber <= 30) return Math.min((atomicNumber - 20) / 10, 1.0);
   if (atomicNumber >= 39 && atomicNumber <= 48) return Math.min((atomicNumber - 38) / 10, 1.0);
@@ -691,54 +662,6 @@ function getDOrbitalOccupancy(atomicNumber: number): number {
   if (atomicNumber >= 57 && atomicNumber <= 71) return 0.1;
   if (atomicNumber >= 89 && atomicNumber <= 103) return 0.1;
   return 0;
-}
-
-function getFOrbitalOccupancy(atomicNumber: number): number {
-  if (atomicNumber >= 57 && atomicNumber <= 71) return Math.min((atomicNumber - 56) / 14, 1.0);
-  if (atomicNumber >= 89 && atomicNumber <= 103) return Math.min((atomicNumber - 88) / 14, 1.0);
-  return 0;
-}
-
-function computeMagneticMomentProxy(atomicNumber: number): number {
-  const unpairedElectrons: Record<number, number> = {
-    24: 6, 25: 5, 26: 4, 27: 3, 28: 2, 29: 1,
-    42: 6, 43: 5, 44: 4, 45: 3, 46: 0, 47: 1,
-    74: 4, 75: 5, 76: 4, 77: 3, 78: 2, 79: 1,
-    57: 1, 58: 2, 59: 3, 60: 4, 61: 5, 62: 6, 63: 7,
-    64: 7, 65: 6, 66: 5, 67: 4, 68: 3, 69: 2, 70: 1, 71: 0,
-  };
-  const n = unpairedElectrons[atomicNumber] ?? 0;
-  return Math.min(1.0, Math.sqrt(n * (n + 2)) / 8.0);
-}
-
-function getOrbitalBlock(atomicNumber: number): number {
-  if (atomicNumber <= 0) return 0;
-  const sBlock = new Set([1, 2, 3, 4, 11, 12, 19, 20, 37, 38, 55, 56, 87, 88]);
-  const fBlock = new Set([
-    57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,
-    89,90,91,92,93,94,95,96,97,98,99,100,101,102,103
-  ]);
-  if (sBlock.has(atomicNumber)) return 0.0;
-  if (fBlock.has(atomicNumber)) return 1.0;
-  if (atomicNumber <= 2) return 0.0;
-  const dBlockRanges = [[21,30],[39,48],[72,80],[104,112]];
-  for (const [lo, hi] of dBlockRanges) {
-    if (atomicNumber >= lo && atomicNumber <= hi) return 0.667;
-  }
-  return 0.333;
-}
-
-function computeValenceShellEncoding(atomicNumber: number, valenceElectrons: number): number {
-  const blockFeature = getOrbitalBlock(atomicNumber);
-
-  let maxOccupancy: number;
-  if (blockFeature < 0.1) maxOccupancy = 2;
-  else if (blockFeature < 0.4) maxOccupancy = 6;
-  else if (blockFeature < 0.8) maxOccupancy = 10;
-  else maxOccupancy = 14;
-
-  const shellFill = Math.min(1.0, valenceElectrons / maxOccupancy);
-  return shellFill * 0.5 + blockFeature * 0.5;
 }
 
 function pressureAwareBondOrder(enDiff: number, atomicNumberI: number, atomicNumberJ: number, pressureGpa: number): number {
@@ -767,34 +690,6 @@ function pressureDistanceScale(pressureGpa: number): number {
   return Math.cbrt(volumeRatio);
 }
 
-function getCovalentRadius(atomicNumber: number, atomicRadius: number): number {
-  const covalentRadii: Record<number, number> = {
-    1: 31, 2: 28, 3: 128, 4: 96, 5: 84, 6: 76, 7: 71, 8: 66, 9: 57, 10: 58,
-    11: 166, 12: 141, 13: 121, 14: 111, 15: 107, 16: 105, 17: 102, 18: 106,
-    19: 203, 20: 176, 21: 170, 22: 160, 23: 153, 24: 139, 25: 150, 26: 142,
-    27: 138, 28: 124, 29: 132, 30: 122, 31: 122, 32: 120, 33: 119, 34: 120,
-    35: 120, 36: 116, 37: 220, 38: 195, 39: 190, 40: 175, 41: 164, 42: 154,
-    43: 147, 44: 146, 45: 142, 46: 139, 47: 145, 48: 144, 49: 142, 50: 139,
-    51: 139, 52: 138, 53: 139, 54: 140, 55: 244, 56: 215, 57: 207, 72: 175,
-    73: 170, 74: 162, 75: 151, 76: 144, 77: 141, 78: 136, 79: 136, 80: 132,
-    81: 145, 82: 146, 83: 148, 90: 206, 92: 196,
-  };
-  return covalentRadii[atomicNumber] ?? (atomicRadius * 0.85);
-}
-
-function getMendeleevNumber(atomicNumber: number): number {
-  const mendeleevMap: Record<number, number> = {
-    1: 92, 2: 98, 3: 1, 4: 67, 5: 72, 6: 77, 7: 82, 8: 87, 9: 93, 10: 99,
-    11: 2, 12: 68, 13: 73, 14: 78, 15: 83, 16: 88, 17: 94, 18: 100, 19: 3,
-    20: 7, 21: 11, 22: 43, 23: 44, 24: 45, 25: 46, 26: 47, 27: 48, 28: 49,
-    29: 50, 30: 69, 31: 74, 32: 79, 33: 84, 34: 89, 35: 95, 36: 101, 37: 4,
-    38: 8, 39: 12, 40: 51, 41: 52, 42: 53, 43: 54, 44: 55, 45: 56, 46: 57,
-    47: 58, 48: 70, 49: 75, 50: 80, 51: 85, 52: 90, 53: 96, 54: 102, 55: 5,
-    56: 9, 57: 13, 72: 59, 73: 60, 74: 61, 75: 62, 76: 63, 77: 64, 78: 65,
-    79: 66, 80: 71, 81: 76, 82: 81, 83: 86, 90: 16, 92: 17,
-  };
-  return mendeleevMap[atomicNumber] ?? atomicNumber;
-}
 
 interface PrototypeCoordination {
   siteLabels: string[];
@@ -1180,26 +1075,6 @@ export function buildPrototypeGraph(formula: string, prototype: string, pressure
   return { nodes, edges, threeBodyFeatures, adjacency, edgeIndex, formula, prototype, pressureGpa, globalFeatures };
 }
 
-function computeStressDescriptor(atomicNumber: number, bulkModulus: number, mass: number): number {
-  if (bulkModulus <= 0 || mass <= 0) return 0.3;
-  return Math.min(1.0, Math.sqrt(bulkModulus / mass) / 10.0);
-}
-
-function computeForceDescriptor(electronegativity: number, atomicRadius: number): number {
-  return Math.min(1.0, (electronegativity * 100) / Math.max(atomicRadius, 50));
-}
-
-function computeSpinOrbitCoupling(atomicNumber: number): number {
-  if (atomicNumber < 10) return 0;
-  if (atomicNumber < 20) return 0.02 * (atomicNumber - 10) / 10;
-  if (atomicNumber < 30) return 0.05 + 0.05 * (atomicNumber - 20) / 10;
-  if (atomicNumber < 40) return 0.10 + 0.10 * (atomicNumber - 30) / 10;
-  if (atomicNumber < 48) return 0.20 + 0.15 * (atomicNumber - 40) / 8;
-  if (atomicNumber < 57) return 0.35 + 0.05 * (atomicNumber - 48) / 9;
-  if (atomicNumber < 72) return 0.40 + 0.20 * (atomicNumber - 57) / 15;
-  if (atomicNumber < 80) return 0.60 + 0.20 * (atomicNumber - 72) / 8;
-  return Math.min(1.0, 0.80 + 0.02 * (atomicNumber - 80));
-}
 
 function canonicalEdgeKey(a: number, b: number): number {
   return a < b ? a * 65536 + b : b * 65536 + a;
@@ -1290,59 +1165,29 @@ function threeBodyInteractionLayer(
   return newEmbeddings;
 }
 
-function buildEnhancedEmbedding(el: string, data: ReturnType<typeof getElementData>, atomicNumber: number): number[] {
+function buildEnhancedEmbedding(_el: string, data: ReturnType<typeof getElementData>, atomicNumber: number): number[] {
   const en = data?.paulingElectronegativity ?? 1.5;
   const radius = data?.atomicRadius ?? 130;
   const valence = data?.valenceElectrons ?? 2;
   const mass = data?.atomicMass ?? 50;
-  const covalentR = getCovalentRadius(atomicNumber, radius);
-  const electronAff = data?.electronAffinity ?? 0;
-  const mendeleev = getMendeleevNumber(atomicNumber);
-  const sOcc = getSOrbitalOccupancy(atomicNumber);
-  const pOcc = getPOrbitalOccupancy(atomicNumber);
-  const dOcc = getDOrbitalOccupancy(atomicNumber);
-  const fOcc = getFOrbitalOccupancy(atomicNumber);
-  const bulkMod = data?.bulkModulus ?? 50;
-
   const period = getPeriod(atomicNumber);
   const group = getGroup(atomicNumber);
-  const block = getBlockEncoding(atomicNumber);
-
-  return [
-    atomicNumber / 100,
+  const feat = [
+    atomicNumber / 118,
+    period / 7.0,
+    group / 18.0,
     en / 4.0,
     radius / 250,
     valence / 8,
     mass / 250,
     (data?.debyeTemperature ?? 300) / 2000,
-    bulkMod / 500,
     (data?.firstIonizationEnergy ?? 7) / 25,
-    mendeleev / 103,
-    Math.max(0, electronAff) / 4.0,
-    covalentR / 250,
-    sOcc,
-    pOcc,
-    dOcc,
-    fOcc,
-    computeStressDescriptor(atomicNumber, bulkMod, mass),
-    computeForceDescriptor(en, radius),
-    computeSpinOrbitCoupling(atomicNumber),
-    computeMagneticMomentProxy(atomicNumber),
-    computeValenceShellEncoding(atomicNumber, valence),
-    period / 7.0,
-    group / 18.0,
-    block,
+    Math.max(0, data?.electronAffinity ?? 0) / 4.0,
     Math.min(1.0, (data?.meltingPoint ?? 1000) / 4000),
     Math.min(1.0, (data?.density ?? 5) / 25),
-    // λ_proxy: peaks for half-filled d-shells (BCS SCs) — replaces thermalConductivity (redundant with Debye)
-    dOcc > 0 ? dOcc * (1 - Math.abs(dOcc - 0.5)) * Math.min(1.0, (data?.debyeTemperature ?? 300) / 800) : 0,
-    Math.min(1.0, Math.abs(data?.electronAffinity ?? 0) / 4.0),
-    Math.min(1.0, (data?.atomicVolume ?? 15) / 80),
-    en > 2.0 ? 1.0 : en > 1.5 ? 0.5 : 0.0,
-    atomicNumber <= 20 ? 0.0 : atomicNumber <= 30 ? 0.5 : 1.0,
-    Math.min(1.0, valence * en / 16.0),
-    Math.min(1.0, covalentR * dOcc / 100),
   ];
+  while (feat.length < NODE_DIM) feat.push(0);
+  return feat.slice(0, NODE_DIM);
 }
 
 function getSymmetryAwareFeatures(spaceGroupName?: string, fracPosition?: [number, number, number]): number[] {
@@ -1772,10 +1617,11 @@ export function cgcnnConvolutionLayer(
       }
 
       const hj = embeddings[j];
+      const multJ = graph.nodes[j].multiplicity ?? 1;
       for (let k = 0; k < HIDDEN_DIM; k++) {
-        aggUpdate[k] += (h_ij[k] ?? 0) * (hj[k] ?? 0) * cw;
+        aggUpdate[k] += (h_ij[k] ?? 0) * (hj[k] ?? 0) * cw * multJ;
       }
-      totalWeight += cw;
+      totalWeight += cw * multJ;
     }
 
     if (totalWeight > 0) {
@@ -1843,7 +1689,8 @@ export function attentionMessagePassingLayer(
         }
       }
 
-      attentionScores.push(score);
+      // Bias attention by log(multiplicity): higher-multiplicity neighbors aggregate more
+      attentionScores.push(score + Math.log(graph.nodes[j].multiplicity ?? 1));
       messages.push(matVecMul(W_message, embeddings[j]));
     }
 
@@ -1889,11 +1736,14 @@ export function messagePassingLayer(
     }
 
     const aggMessage = initVector(HIDDEN_DIM);
-    const nCount = Math.max(1, neighbors.length);
+    let totalMult = 0;
+    for (const j of neighbors) totalMult += (graph.nodes[j].multiplicity ?? 1);
+    const denom = Math.max(1, totalMult);
     for (const j of neighbors) {
       const msg = matVecMul(W_message, embeddings[j]);
+      const mw = (graph.nodes[j].multiplicity ?? 1) / denom;
       for (let k = 0; k < HIDDEN_DIM; k++) {
-        aggMessage[k] += msg[k] / nCount;
+        aggMessage[k] += msg[k] * mw;
       }
     }
 
@@ -1970,7 +1820,8 @@ function attnMessagePassCached(
           score += (edgeFeats[ef] ?? 0) * (query[ef] ?? 0) * 0.1;
         }
       }
-      attentionScores.push(score);
+      // Bias attention by log(multiplicity): higher-multiplicity neighbors aggregate more
+      attentionScores.push(score + Math.log(graph.nodes[j].multiplicity ?? 1));
       messages.push(matVecMul(W_message, inputEmbs[j]));
     }
 
@@ -2075,6 +1926,7 @@ function cgcnnConvCached(
 
       const adaptLogit = adaptiveLogits?.[i]?.[nIdx] ?? 0;
       const hj = inputEmbs[j];
+      const multJ = graph.nodes[j].multiplicity ?? 1;
 
       nodeFilterPreActs.push([...z_ij]);
       nodeFilterH1s.push([...h1_ij]);
@@ -2082,9 +1934,9 @@ function cgcnnConvCached(
       nodeRbfs.push([...rbf_ij]);
 
       for (let k = 0; k < HIDDEN_DIM; k++) {
-        aggUpdate[k] += (h_ij[k] + adaptLogit) * (hj[k] ?? 0) * cw;
+        aggUpdate[k] += (h_ij[k] + adaptLogit) * (hj[k] ?? 0) * cw * multJ;
       }
-      totalWeight += cw;
+      totalWeight += cw * multJ;
     }
 
     filterPreActs.push(nodeFilterPreActs);
