@@ -2428,12 +2428,12 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
   // TcFinal = P(SC) × tcRaw — non-SC forces gate to close; SC forces gate to stay open.
   // Floor at 0.1 prevents a collapsed cls head (overfitting to training SC patterns)
   // from zeroing ALL predictions, which would make R²=-∞ and trigger the quality gate.
-  const scProb = Math.max(0.1, sigmoid(sf(out7Cls)));
-  const predictedTcRaw = scProb * 10 * Math.expm1(sigmoid(sf(out[8] ?? 0)) * TC_LOG_SCALE / TC_NORM_CLAMP);
+  const scProb = sigmoid(sf(out7Cls));
+  const predictedTcRaw = 10 * Math.expm1(sigmoid(sf(out[8] ?? 0)) * TC_LOG_SCALE / TC_NORM_CLAMP);
   const confidenceRaw = sigmoid(sf(out[3] ?? 0));
   const bandgapRaw = sigmoid(sf(out[5] ?? 0)) * 5.0;
   const dosProxyRaw = softplus(sf(out[6] ?? 0));
-  const stabilityProbRaw = scProb;  // out[7] encodes P(SC), returned as stabilityProbability
+  const stabilityProbRaw = scProb;
   const safeLatent = latentEmbedding.map(v => Number.isFinite(v) ? v : 0);
 
   return {
@@ -2615,8 +2615,8 @@ function GNNPredictForTraining(graph: CrystalGraph, weights: GNNWeights): { pred
   const lambdaRaw = LAMBDA_MAX * sigmoid(sf(out[4] ?? 0));
   // v15: P(SC) from dedicated cls head; out[8] → Tc magnitude.
   // Floor matches inference path to keep training R² consistent with val R².
-  const scProb = Math.max(0.1, sigmoid(sf(out7Cls)));
-  const predictedTcRaw = scProb * 10 * Math.expm1(sigmoid(sf(out[8] ?? 0)) * TC_LOG_SCALE / TC_NORM_CLAMP);
+  const scProb = sigmoid(sf(out7Cls));
+  const predictedTcRaw = 10 * Math.expm1(sigmoid(sf(out[8] ?? 0)) * TC_LOG_SCALE / TC_NORM_CLAMP);
   const confidenceRaw = sigmoid(sf(out[3] ?? 0));
   const bandgapRaw = sigmoid(sf(out[5] ?? 0)) * 5.0;
   const dosProxyRaw = softplus(sf(out[6] ?? 0));
@@ -3140,13 +3140,10 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         const directOut8 = cache.outRaw[8] ?? 0;
 
         // Track Tc predictions in Kelvin for inline R²/RMSE reporting.
-        // Apply Math.max(0.1, ...) floor on pSC to match the inference formula exactly,
-        // so training R² and validation R² are computed on the same output distribution.
-        const pSC      = Math.max(0.1, sigmoid(directOut7));
+        const pSC      = sigmoid(directOut7);
         const _diagS8  = sigmoid(directOut8);
         if (isSC) {
-          // Gated prediction: what the model actually outputs at inference.
-          const predTcK = pSC * 10 * Math.expm1(_diagS8 * TC_LOG_SCALE / TC_NORM_CLAMP);
+          const predTcK = 10 * Math.expm1(_diagS8 * TC_LOG_SCALE / TC_NORM_CLAMP);
           tcSumErr2    += (predTcK - actualTcK) ** 2;
           tcSumActual  += actualTcK;
           tcSumActual2 += actualTcK * actualTcK;
@@ -3370,71 +3367,19 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         // Gradient of family physics loss w.r.t. out[2] (ωlog) and out[4] (λ)
         const _dLossDFamily = isSC ? (_familyLossW * 2 * _familyPhysErr / 300) : 0;
 
-        // ── Reward / Punishment system ────────────────────────────────────────
-        // Per-sample gradient multipliers applied to out[7] (P(SC) BCE) and
-        // out[8] (Tc regression). The base loss values are unchanged — only
-        // the gradient flowing back is rescaled, which IS the training signal.
-        //
-        // 1. False positive punishment (3×)
-        //    Non-SC sample predicted as SC (pSC > 0.5). Amplifies the BCE
-        //    gradient pushing out[7] toward 0. Clips to ±1 via clipGrad,
-        //    so even with 3× the gradient is capped at max ±1.
-        const isFalsePositive = !isSC && pSC > 0.5;
-        const fpMult = isFalsePositive ? 3.0 : 1.0;
-
-        // 2. RMSE > 10K punishment (up to 4×, SC samples only)
-        //    Scales the Tc regression gradient proportionally above a 10K
-        //    error threshold. Every 25K above 10K adds another 1× multiplier,
-        //    capped at 4× to prevent gradient instability.
-        //    tcErrorK=10K→1×  |  35K→2×  |  60K→3×  |  85K+→4×
-        // Use floored pSC (matching inference) to compute reward-system error.
-        const predTcKRew  = isSC ? pSC * 10 * Math.expm1(tcSigOut8 * TC_LOG_SCALE / TC_NORM_CLAMP) : 0;
-        const tcErrorKRew = isSC ? Math.abs(predTcKRew - actualTcK) : 0;
-        const rmsePenalty = (isSC && tcErrorKRew > 10)
-          ? Math.min(4.0, 1.0 + (tcErrorKRew - 10) / 25)
-          : 1.0;
-
-        // 3. Correct prediction reward (0.5×)
-        //    Halves the gradient when the model is already right. Focuses
-        //    optimizer effort on hard/wrong samples — the same principle as
-        //    focal loss in object detection.
-        //    Correct SC: classified as SC AND Tc error < 10K.
-        //    Correct non-SC: classified as non-SC (pSC ≤ 0.5) AND actually non-SC.
-        const isCorrectSC    = isSC  && pSC > 0.5 && tcErrorKRew < 10;
-        const isCorrectNonSC = !isSC && pSC <= 0.5;
-        const rewardMult = (isCorrectSC || isCorrectNonSC) ? 0.5 : 1.0;
-
-        // Combined per-head multipliers:
-        //   bceMult applies to out[7] (P(SC) classification gradient)
-        //   tcMult  applies to out[8] (Tc regression gradient)
-        const bceMult = fpMult * (isCorrectNonSC ? rewardMult : 1.0);
-        const tcMult  = rmsePenalty * (isCorrectSC  ? rewardMult : 1.0);
-        // ─────────────────────────────────────────────────────────────────────
-
         const dLdOut = new Array(OUTPUT_DIM).fill(0);
-        // out[0] → formation energy: real DFT target when available.
         dLdOut[0] = hasFormationEnergy ? clipGrad(2 * feError * 0.1) : 0;
-        // out[1], [3], [6], [7]: phonon/confidence/DOS/stability — heuristic boolean targets
-        // derived from tc>0 flag, not real measurements. Removed to reduce noise.
         dLdOut[1] = 0;
-        // out[2] → ω_log via Allen-Dynes chain + direct DFPT supervision if available.
         dLdOut[2] = clipGrad(((dLossDAd * dTcdOmegaLog) + (_dLossDFamily * _dFamilyTcdOmegaLog) + omegaLogGradBoost) * dOmegaLogdOut2);
         dLdOut[3] = 0;
-        // out[4] → λ via Allen-Dynes chain + family-specific physics gradient.
         dLdOut[4] = clipGrad((dLossDAd * dTcdLambda + _dLossDFamily * _dFamilyTcdLambda) * dLambdadOut4);
-        // out[5] → bandgap via sigmoid(out[5]) * 5.0; chain rule includes sigmoid derivative.
-        // dL/d(out[5]) = 2 * bgError * 0.05 * 5.0 * sigmoid'(out[5])
         const bgSig5 = sigmoid(cache.outRaw[5] ?? 0);
         dLdOut[5] = bgTarget != null ? clipGrad(2 * bgError * 0.05 * 5.0 * bgSig5 * (1 - bgSig5)) : 0;
         dLdOut[6] = 0;
-        // out[7] → pure BCE gradient (gate gradient removed with gated loss).
-        dLdOut[7] = clipGrad((sigOut7 - scTarget) * bceMult);
-        // out[8] → direct Tc regression gradient (SC only).
-        //   dL/d(out[8]) = 12 * tcDirectErr * tcSigOut8*(1-tcSigOut8) * tcMult
-        //   (12 = 2 × 6.0 loss weight; tcMult = RMSE-penalty × reward multiplier)
-        dLdOut[8] = isSC ? clipGrad(
-          12.0 * tcDirectErr * tcSigOut8 * (1 - tcSigOut8) * tcMult
-        ) : 0;
+        // out[7]: standard BCE gradient
+        dLdOut[7] = clipGrad(sigOut7 - scTarget);
+        // out[8]: direct Tc MSE gradient (SC only); dL/d(out[8]) = 2*6*tcDirectErr * sigmoid'
+        dLdOut[8] = isSC ? clipGrad(12.0 * tcDirectErr * tcSigOut8 * (1 - tcSigOut8)) : 0;
 
         // Uncertainty head (W_mlp2_var) receives no gradient — NLL removed.
         // Uncertainty outputs can be calibrated post-training via isotonic regression.
