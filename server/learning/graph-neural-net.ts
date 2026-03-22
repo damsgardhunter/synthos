@@ -134,6 +134,14 @@ interface GNNWeights {
   /** CLS_DIM → scalar logit for P(SC). */
   W_cls2: number[];
   b_cls2: number;
+  // ── v16: True multitask learning — cross-task conditioning + uncertainty weighting ──
+  /** Scalar α: Tc head conditioned on λ.  out8 += α × sigmoid(out[4]).
+   *  Encodes Tc ∝ f(λ, ω_log) (Allen-Dynes). Init 0 = no coupling. */
+  alpha_lambda_to_tc: number;
+  /** Learned log-task-noise (Kendall & Gal 2017).
+   *  [0]=Tc, [1]=family physics (AD/hydride), [2]=formation energy.
+   *  L_i_uw = exp(-2·s_i)·L_i_raw + s_i — model learns task emphasis. */
+  log_sigma_tasks: number[];
   // ── GLFN-TC: Graph Learning Module weights ───────────────────────────────
   /** 119 × GRAPH_FEAT_DIM — one learnable feature vector per element (atomic number 0–118). */
   W_elem_feat: number[][];
@@ -210,6 +218,8 @@ interface GNNForwardCache {
   /** v15: Classification head pre- and post-activation. */
   zCls: number[];
   hCls: number[];
+  /** v16: sigmoid(out[4]) saved for cross-task (λ→Tc) backward pass. */
+  lambdaSigForTc: number;
 }
 
 export interface UncertaintyBreakdown {
@@ -258,7 +268,7 @@ export interface GNNPredictionWithUncertainty {
 const NODE_DIM = 32;
 const HIDDEN_DIM = 48;
 const N_GAUSSIAN_BASIS = 40;             // expanded from 20 — denser RBF gives finer distance discrimination
-const EDGE_DIM = N_GAUSSIAN_BASIS + 4;   // derived: 40 RBF + bond order, EN diff, ionic char, radius sum
+const EDGE_DIM = N_GAUSSIAN_BASIS;       // pure RBF(distance) — let model learn bond character from node features
 const OUTPUT_DIM = 16;
 const GLOBAL_COMP_DIM = 23;
 // Coulomb pseudopotential μ* — fixed at conventional BCS value.
@@ -285,8 +295,39 @@ const CLS_DIM = 24;
 const OMEGA_LOG_MAX = 1500;              // 6 composition + 7 XGBoost-inspired composition + 6 physics (λ, logω, DOS, FE, isCuprate, isIronBased)
 // CGCNN_CONCAT_DIM removed - replaced by SchNet filter MLP (W_filter1/W_filter2)
 export const ENSEMBLE_SIZE = 5;
+
+// ── Feature normalisation statistics (mean / std over Z=1–94 periodic table) ─
+// All physical features are z-scored: znorm(x) = (x − mean) / std.
+// Stats derived from published element data; defaults match the mean to give
+// zero imputed value (the least harmful assumption).
+const FEAT_NORM = {
+  atomicNumber:   { m: 47.5,  s: 27.2  },
+  en:             { m: 1.84,  s: 0.73  },  // Pauling electronegativity
+  radius:         { m: 145.0, s: 50.0  },  // atomic radius (pm)
+  valence:        { m: 4.0,   s: 2.4   },  // valence electrons
+  mass:           { m: 100.0, s: 72.0  },  // atomic mass (u)
+  debye:          { m: 360.0, s: 285.0 },  // Debye temperature (K)
+  fie:            { m: 8.3,   s: 3.5   },  // first ionization energy (eV)
+  electronAff:    { m: 0.65,  s: 0.85  },  // electron affinity (eV)
+  meltingPoint:   { m: 1400.0,s: 900.0 },  // melting point (K)
+  density:        { m: 6.0,   s: 5.5   },  // density (g/cm³)
+  period:         { m: 4.0,   s: 2.0   },  // period (1–7)
+  group:          { m: 9.5,   s: 5.4   },  // group (1–18)
+  // Composition features
+  vec:            { m: 4.0,   s: 2.4   },  // valence electron concentration
+  mismatch:       { m: 0.06,  s: 0.05  },  // atomic size mismatch δ
+  nElements:      { m: 2.5,   s: 1.5   },
+  stdEN:          { m: 0.40,  s: 0.35  },
+  maxENdiff:      { m: 0.9,   s: 0.65  },
+  meanMass:       { m: 100.0, s: 72.0  },
+  stdRadius:      { m: 15.0,  s: 18.0  },
+} as const;
+
+/** Z-score normalise a scalar feature. */
+function znorm(x: number, m: number, s: number): number { return (x - m) / s; }
 const MC_DROPOUT_PASSES = 10;
 const MC_DROPOUT_RATE = 0.25;
+const MSG_DROPOUT_RATE = 0.10;  // message-level dropout during training (more effective than node dropout for GNNs)
 const GNN_MSG_LAYERS = 2;         // active message-passing layers (2 = less overfit for small datasets)
 const WEIGHT_DECAY = 1e-4;        // AdamW L2 regularization
 // ── GLFN-TC inspired modules ──────────────────────────────────────────────────
@@ -591,37 +632,23 @@ function softmax(values: number[]): number[] {
   return result;
 }
 
-const _gaussianBuffer = new Float64Array(N_GAUSSIAN_BASIS);
 const _invTwoSigmaSq = 1 / (2 * GAUSSIAN_WIDTH * GAUSSIAN_WIDTH);
-const EDGE_FEAT_DIM = N_GAUSSIAN_BASIS + 4;
-const _edgeFeatBuffer = new Float64Array(EDGE_FEAT_DIM);
+const _edgeFeatBuffer = new Float64Array(N_GAUSSIAN_BASIS);
 
-function gaussianDistanceExpansion(distance: number): number[] {
-  for (let i = 0; i < N_GAUSSIAN_BASIS; i++) {
-    const diff = distance - (GAUSSIAN_START + i * GAUSSIAN_STEP);
-    _gaussianBuffer[i] = Math.exp(-(diff * diff) * _invTwoSigmaSq);
-  }
-  return Array.from(_gaussianBuffer);
-}
-
-function buildEdgeFeatures(distance: number, bondOrder: number, enDiff: number, ionicCharacter: number, radiusSum: number): number[] {
+function buildEdgeFeatures(distance: number): number[] {
   for (let i = 0; i < N_GAUSSIAN_BASIS; i++) {
     const diff = distance - (GAUSSIAN_START + i * GAUSSIAN_STEP);
     _edgeFeatBuffer[i] = Math.exp(-(diff * diff) * _invTwoSigmaSq);
   }
-  _edgeFeatBuffer[N_GAUSSIAN_BASIS] = bondOrder / 2.0;
-  _edgeFeatBuffer[N_GAUSSIAN_BASIS + 1] = enDiff / 3.0;
-  _edgeFeatBuffer[N_GAUSSIAN_BASIS + 2] = ionicCharacter;
-  _edgeFeatBuffer[N_GAUSSIAN_BASIS + 3] = radiusSum;
   return Array.from(_edgeFeatBuffer);
 }
 
 function buildDefaultEdgeFeatures(): number[] {
-  return buildEdgeFeatures(2.5, 1.0, 0.9, 0.3, 0.5);
+  return buildEdgeFeatures(2.5);
 }
 
-function applyDropout(vec: number[], rate: number, rng: () => number): number[] {
-  if (rate <= 0) return vec;
+function applyDropout(vec: number[], rate: number, rng: () => number, isTraining: boolean): number[] {
+  if (!isTraining || rate <= 0) return vec;
   const n = vec.length;
   const scale = 1.0 / (1.0 - rate);
   const out = acquireBuffer(n);
@@ -1030,10 +1057,8 @@ export function buildPrototypeGraph(formula: string, prototype: string, pressure
 
             const enDiff = Math.abs(nodes[i].electronegativity - nodes[j].electronegativity);
             const bondOrder = pressureAwareBondOrder(enDiff, nodes[i].atomicNumber, nodes[j].atomicNumber, pressureGpa ?? 0);
-            const radiusSum = (nodes[i].atomicRadius + nodes[j].atomicRadius) / 500;
-            const ionicCharacter = Math.min(1.0, enDiff / 2.5);
 
-            const edgeFeats = buildEdgeFeatures(distance, bondOrder, enDiff, ionicCharacter, radiusSum);
+            const edgeFeats = buildEdgeFeatures(distance);
 
             edges.push({ source: i, target: j, distance, bondOrderEstimate: bondOrder, features: edgeFeats });
             edges.push({ source: j, target: i, distance, bondOrderEstimate: bondOrder, features: edgeFeats });
@@ -1055,9 +1080,7 @@ export function buildPrototypeGraph(formula: string, prototype: string, pressure
         const distance = (ri + rj) * 1.1;
         const enDiff = Math.abs(nodes[i].electronegativity - nodes[j].electronegativity);
         const bondOrder = pressureAwareBondOrder(enDiff, nodes[i].atomicNumber, nodes[j].atomicNumber, pressureGpa ?? 0);
-        const radiusSum = (nodes[i].atomicRadius + nodes[j].atomicRadius) / 500;
-        const ionicCharacter = Math.min(1.0, enDiff / 2.5);
-        const edgeFeats = buildEdgeFeatures(distance, bondOrder, enDiff, ionicCharacter, radiusSum);
+        const edgeFeats = buildEdgeFeatures(distance);
         edges.push({ source: i, target: j, distance, bondOrderEstimate: bondOrder, features: edgeFeats });
         edges.push({ source: j, target: i, distance, bondOrderEstimate: bondOrder, features: edgeFeats });
         adjacency[i].push(j);
@@ -1173,18 +1196,18 @@ function buildEnhancedEmbedding(_el: string, data: ReturnType<typeof getElementD
   const period = getPeriod(atomicNumber);
   const group = getGroup(atomicNumber);
   const feat = [
-    atomicNumber / 118,
-    period / 7.0,
-    group / 18.0,
-    en / 4.0,
-    radius / 250,
-    valence / 8,
-    mass / 250,
-    (data?.debyeTemperature ?? 300) / 2000,
-    (data?.firstIonizationEnergy ?? 7) / 25,
-    Math.max(0, data?.electronAffinity ?? 0) / 4.0,
-    Math.min(1.0, (data?.meltingPoint ?? 1000) / 4000),
-    Math.min(1.0, (data?.density ?? 5) / 25),
+    znorm(atomicNumber,                           47.5,  27.2),   // atomic number
+    znorm(period,                                  4.0,   2.0),   // period (1–7)
+    znorm(group,                                   9.5,   5.4),   // group (1–18)
+    znorm(en,                                      1.84,  0.73),  // Pauling EN
+    znorm(radius,                                145.0,  50.0),   // atomic radius (pm)
+    znorm(valence,                                 4.0,   2.4),   // valence electrons
+    znorm(mass,                                  100.0,  72.0),   // atomic mass (u)
+    znorm(data?.debyeTemperature ?? 360,         360.0, 285.0),   // Debye temperature (K)
+    znorm(data?.firstIonizationEnergy ?? 8.3,      8.3,   3.5),   // first IE (eV)
+    znorm(data?.electronAffinity ?? 0.65,          0.65,  0.85),  // electron affinity (eV)
+    znorm(data?.meltingPoint ?? 1400,           1400.0, 900.0),   // melting point (K)
+    znorm(data?.density ?? 6.0,                    6.0,   5.5),   // density (g/cm³)
   ];
   while (feat.length < NODE_DIM) feat.push(0);
   return feat.slice(0, NODE_DIM);
@@ -1338,19 +1361,19 @@ function computeGlobalCompositionFeatures(counts: Record<string, number>, hints?
     : 0.0;
 
   return [
-    meanEN / 4.0,                           // [0] mean Pauling EN — ionicity proxy
-    meanD,                                  // [1] mean d-orbital filling — BCS coupling proxy
-    vec / 8.0,                              // [2] valence electron concentration — strongest empirical SC predictor
-    Math.min(1.0, meanDebye / 2000),        // [3] mean Debye temperature — phonon frequency proxy
-    Math.min(1.0, mismatch * 5),            // [4] atomic size mismatch δ — lattice distortion (suppresses Tc)
-    Math.min(1.0, nElements / 5.0),         // [5] compound complexity
-    Math.min(1.0, stdEN / 2.0),             // [6] EN heterogeneity — cuprate/hydride indicator
-    hasHydrogen,                            // [7] hydrogen flag — hydride SC class separator
-    transitionMetalFraction,               // [8] TM fraction — d-electron BCS coupling density
-    Math.min(1.0, cfgEntropy),              // [9] configurational entropy — HEA/entropy alloy signal
-    Math.min(1.0, maxENdiff / 3.5),         // [10] max EN spread — ionicity extremes
-    Math.min(1.0, meanMass / 200),          // [11] mean atomic mass — phonon mass scale
-    Math.min(1.0, stdRadius / 80),          // [12] radius std — lattice strain heterogeneity
+    znorm(meanEN,    FEAT_NORM.en.m,       FEAT_NORM.en.s),       // [0] mean Pauling EN — ionicity proxy
+    meanD,                                                         // [1] mean d-orbital filling — BCS coupling proxy
+    znorm(vec,       FEAT_NORM.vec.m,      FEAT_NORM.vec.s),      // [2] valence electron concentration — strongest empirical SC predictor
+    znorm(meanDebye, FEAT_NORM.debye.m,    FEAT_NORM.debye.s),    // [3] mean Debye temperature — phonon frequency proxy
+    znorm(mismatch,  FEAT_NORM.mismatch.m, FEAT_NORM.mismatch.s), // [4] atomic size mismatch δ — lattice distortion (suppresses Tc)
+    znorm(nElements, FEAT_NORM.nElements.m,FEAT_NORM.nElements.s),// [5] compound complexity
+    znorm(stdEN,     FEAT_NORM.stdEN.m,    FEAT_NORM.stdEN.s),    // [6] EN heterogeneity — cuprate/hydride indicator
+    hasHydrogen,                                                    // [7] hydrogen flag — hydride SC class separator
+    transitionMetalFraction,                                       // [8] TM fraction — d-electron BCS coupling density
+    Math.min(1.0, cfgEntropy),                                     // [9] configurational entropy — HEA/entropy alloy signal
+    znorm(maxENdiff, FEAT_NORM.maxENdiff.m,FEAT_NORM.maxENdiff.s),// [10] max EN spread — ionicity extremes
+    znorm(meanMass,  FEAT_NORM.meanMass.m, FEAT_NORM.meanMass.s), // [11] mean atomic mass — phonon mass scale
+    znorm(stdRadius, FEAT_NORM.stdRadius.m,FEAT_NORM.stdRadius.s),// [12] radius std — lattice strain heterogeneity
     lambdaFeat,                             // [13] electron-phonon λ — core BCS coupling constant
     logPhononFeat,                          // [14] log phonon frequency — phonon energy scale
     dosFeat,                                // [15] DOS at E_F — electronic density at Fermi level
@@ -1461,9 +1484,7 @@ export function buildCrystalGraph(formula: string, structure?: any, pressureGpa?
 
               const enDiff = Math.abs(nodes[i].electronegativity - nodes[j].electronegativity);
               const bondOrder = pressureAwareBondOrder(enDiff, nodes[i].atomicNumber, nodes[j].atomicNumber, pressureGpa ?? 0);
-              const radiusSum = (nodes[i].atomicRadius + nodes[j].atomicRadius) / 500;
-              const ionicCharacter = Math.min(1.0, enDiff / 2.5);
-              const edgeFeats = buildEdgeFeatures(distance, bondOrder, enDiff, ionicCharacter, radiusSum);
+              const edgeFeats = buildEdgeFeatures(distance);
 
               edges.push({ source: i, target: j, distance, bondOrderEstimate: bondOrder, features: edgeFeats });
               edges.push({ source: j, target: i, distance, bondOrderEstimate: bondOrder, features: edgeFeats });
@@ -1499,10 +1520,8 @@ export function buildCrystalGraph(formula: string, structure?: any, pressureGpa?
           const enDiff = Math.abs(nodes[i].electronegativity - nodes[j].electronegativity);
           const bondOrder = pressureAwareBondOrder(enDiff, nodes[i].atomicNumber, nodes[j].atomicNumber, pressureGpa ?? 0);
 
-          const radiusSum = (nodes[i].atomicRadius + nodes[j].atomicRadius) / 500;
-          const ionicCharacter = Math.min(1.0, enDiff / 2.5);
 
-          const edgeFeats = buildEdgeFeatures(distance, bondOrder, enDiff, ionicCharacter, radiusSum);
+          const edgeFeats = buildEdgeFeatures(distance);
 
           edges.push({ source: i, target: j, distance, bondOrderEstimate: bondOrder, features: edgeFeats });
           edges.push({ source: j, target: i, distance, bondOrderEstimate: bondOrder, features: edgeFeats });
@@ -1523,9 +1542,7 @@ export function buildCrystalGraph(formula: string, structure?: any, pressureGpa?
         const distance = (ri + rj) * 1.1 * pScale;
         const enDiff = Math.abs(nodes[i].electronegativity - nodes[j].electronegativity);
         const bondOrder = pressureAwareBondOrder(enDiff, nodes[i].atomicNumber, nodes[j].atomicNumber, pressureGpa ?? 0);
-        const radiusSum = (nodes[i].atomicRadius + nodes[j].atomicRadius) / 500;
-        const ionicCharacter = Math.min(1.0, enDiff / 2.5);
-        const edgeFeats = buildEdgeFeatures(distance, bondOrder, enDiff, ionicCharacter, radiusSum);
+        const edgeFeats = buildEdgeFeatures(distance);
         edges.push({ source: i, target: j, distance, bondOrderEstimate: bondOrder, features: edgeFeats });
         edges.push({ source: j, target: i, distance, bondOrderEstimate: bondOrder, features: edgeFeats });
         adjacency[i].push(j);
@@ -2060,7 +2077,7 @@ function attnLayerBackward(
 
   return { dW_update, dW_message, dLdInput };
 }
-
+
 function cgcnnLayerBackward(
   cache: CGCNNLayerCache,
   dLdOutput: number[][],
@@ -2174,7 +2191,9 @@ function computeAdaptiveLogits(
 
 export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?: () => number): GNNPrediction {
   for (let i = 0; i < graph.nodes.length; i++) {
-    const raw = graph.nodes[i].embedding;
+    const atomZ = graph.nodes[i].atomicNumber;
+    const learned = weights.W_elem_feat?.[atomZ];
+    const raw = (learned && learned.length >= NODE_DIM) ? learned : graph.nodes[i].embedding;
     const input = raw.length >= NODE_DIM ? raw.slice(0, NODE_DIM) : [...raw, ...new Array(NODE_DIM - raw.length).fill(0)];
     const projected = fusedMatVecAddLeakyRelu(weights.W_input_proj, input, weights.b_input_proj);
     graph.nodes[i].embedding = projected;
@@ -2323,6 +2342,8 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
   const zClsInf = vecAdd(matVecMul(weights.W_cls1, pooledWithComp), weights.b_cls1);
   const hClsInf = zClsInf.map(v => v >= 0 ? v : 0.01 * v);
   const out7Cls = dotProduct(weights.W_cls2, hClsInf) + (weights.b_cls2 ?? 0);
+  // v16: Cross-task conditioning — Tc conditioned on λ (inference path).
+  out[8] += (weights.alpha_lambda_to_tc ?? 0) * sigmoid(out[4]);
 
   const logVarOut = vecAdd(matVecMul(weights.W_mlp2_var, h1), weights.b_mlp2_var);
   const feVarNorm = softplus(logVarOut[0] ?? 0);
@@ -2372,7 +2393,9 @@ function GNNPredictForTraining(graph: CrystalGraph, weights: GNNWeights): { pred
   const inputProjInputs: number[][] = [];
   const inputProjPreActs: number[][] = [];
   for (let i = 0; i < nNodes; i++) {
-    const raw = graph.nodes[i].embedding;
+    const atomZ = graph.nodes[i].atomicNumber;
+    const learned = weights.W_elem_feat?.[atomZ];
+    const raw = (learned && learned.length >= NODE_DIM) ? learned : graph.nodes[i].embedding;
     const input = raw.length >= NODE_DIM ? raw.slice(0, NODE_DIM) : [...raw, ...new Array(NODE_DIM - raw.length).fill(0)];
     inputProjInputs.push([...input]);
     const pre = vecAdd(matVecMul(weights.W_input_proj, input), weights.b_input_proj);
@@ -2507,6 +2530,10 @@ function GNNPredictForTraining(graph: CrystalGraph, weights: GNNWeights): { pred
   const zCls = vecAdd(matVecMul(weights.W_cls1, pooledWithComp), weights.b_cls1);
   const hCls = zCls.map(v => v >= 0 ? v : 0.01 * v);
   const out7Cls = dotProduct(weights.W_cls2, hCls) + (weights.b_cls2 ?? 0);
+  // v16: Cross-task conditioning — Tc conditioned on λ (Tc ∝ f(λ,ω_log) Allen-Dynes).
+  // in-place before outRawWithCls copy so cache.outRaw[8] = conditioned value.
+  const lambdaSigForTc = sigmoid(out[4]);
+  out[8] += (weights.alpha_lambda_to_tc ?? 0) * lambdaSigForTc;
   // Override out[7] with cls head logit so backward pass reads it via cache.outRaw[7].
   const outRawWithCls = [...out];
   outRawWithCls[7] = out7Cls;
@@ -2574,6 +2601,7 @@ function GNNPredictForTraining(graph: CrystalGraph, weights: GNNWeights): { pred
     denseH0,  // GLFN-TC: saved for dense-skip gradient in backward pass
     zCls: [...zCls],
     hCls: [...hCls],
+    lambdaSigForTc,  // v16: sigmoid(out[4]) for cross-task (λ→Tc) backward
   };
 
   return { pred, cache };
@@ -2612,7 +2640,7 @@ function initWeights(rng: () => number): GNNWeights {
     b_mlp1: initVector(HIDDEN_DIM),
     // GLFN-TC: Graph Learning Module weights — initialised very small so
     // adaptive logits start near 0 and the model begins identical to baseline.
-    W_elem_feat: initMatrix(119, GRAPH_FEAT_DIM, rng, 0.01),
+    W_elem_feat: initMatrix(119, GRAPH_FEAT_DIM, rng, Math.sqrt(2.0 / GRAPH_FEAT_DIM)),
     W_graph_adapt: initMatrix(GRAPH_FEAT_DIM, GRAPH_FEAT_DIM, rng, 0.01),
     // GLFN-TC: Dense Residual scalar gate — sigmoid(-2) ≈ 0.12 (tiny initial skip).
     dense_skip_gate: -2.0,
@@ -2642,6 +2670,10 @@ function initWeights(rng: () => number): GNNWeights {
     })(),
     W_mlp2_var: initMatrix(OUTPUT_DIM, HIDDEN_DIM, rng, 0.05),
     b_mlp2_var: initVector(OUTPUT_DIM, -2.0),
+    // v16: Cross-task conditioning scalar — 0 = no coupling at init.
+    alpha_lambda_to_tc: 0.0,
+    // v16: Log-task-noise for uncertainty weighting — 0 → σ=1 (equal weight at init).
+    log_sigma_tasks: [0.0, 0.0, 0.0],
     trainedAt: 0,
     nSamples: 0,
   };
@@ -2689,6 +2721,8 @@ function cloneWeights(w: GNNWeights): GNNWeights {
     b_mlp2: [...w.b_mlp2],
     W_mlp2_var: w.W_mlp2_var.map(r => [...r]),
     b_mlp2_var: [...w.b_mlp2_var],
+    alpha_lambda_to_tc: w.alpha_lambda_to_tc ?? 0.0,
+    log_sigma_tasks: [...(w.log_sigma_tasks ?? [0.0, 0.0, 0.0])],
     trainedAt: w.trainedAt,
     nSamples: w.nSamples,
   };
@@ -2717,9 +2751,15 @@ function migrateWeights(w: GNNWeights, rng: () => number): GNNWeights {
   }
   if (!w.b_filter2 || w.b_filter2.length !== HIDDEN_DIM) w.b_filter2 = initVector(HIDDEN_DIM);
   if (!w.W_elem_feat || w.W_elem_feat.length !== 119) {
-    w.W_elem_feat = initMatrix(119, GRAPH_FEAT_DIM, rng, 0.01);
+    w.W_elem_feat = initMatrix(119, GRAPH_FEAT_DIM, rng, Math.sqrt(2.0 / GRAPH_FEAT_DIM));
+  } else if ((w.W_elem_feat[0]?.length ?? 0) < GRAPH_FEAT_DIM) {
+    const pad = GRAPH_FEAT_DIM - (w.W_elem_feat[0]?.length ?? 0);
+    const scale = Math.sqrt(2.0 / GRAPH_FEAT_DIM);
+    for (const row of w.W_elem_feat) {
+      for (let i = 0; i < pad; i++) row.push((rng() - 0.5) * 2 * scale);
+    }
   }
-  if (!w.W_graph_adapt || w.W_graph_adapt.length !== GRAPH_FEAT_DIM) {
+  if (!w.W_graph_adapt || w.W_graph_adapt.length !== GRAPH_FEAT_DIM || w.W_graph_adapt[0]?.length !== GRAPH_FEAT_DIM) {
     w.W_graph_adapt = initMatrix(GRAPH_FEAT_DIM, GRAPH_FEAT_DIM, rng, 0.01);
   }
   if (typeof w.dense_skip_gate !== 'number' || !Number.isFinite(w.dense_skip_gate)) {
@@ -2767,6 +2807,13 @@ function migrateWeights(w: GNNWeights, rng: () => number): GNNWeights {
       }
       invalidateFlatCache(w.W_mlp1);
     }
+  }
+  // v16: Cross-task conditioning + uncertainty weighting — init if absent.
+  if (typeof (w as any).alpha_lambda_to_tc !== 'number' || !Number.isFinite((w as any).alpha_lambda_to_tc)) {
+    (w as any).alpha_lambda_to_tc = 0.0;
+  }
+  if (!w.log_sigma_tasks || w.log_sigma_tasks.length < 3) {
+    w.log_sigma_tasks = [0.0, 0.0, 0.0];
   }
   return w;
 }
@@ -2857,6 +2904,9 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
   const adamBcls1 = mkAdamVec(CLS_DIM);
   const adamWcls2 = mkAdamVec(CLS_DIM);
   const adamBcls2 = mkAdamVec(1);
+  // v16: Adam state for cross-task α and uncertainty log-sigmas.
+  const adamAlphaLambdaToTc = mkAdamVec(1);
+  const adamLogSigma = mkAdamVec(3);
   // Adam state for graph layer weights — replaces plain SGD (lr*0.3) for better
   // convergence on the dedicated GCP GNN instance.  Each matrix entry gets its
   // own adaptive moment estimates, yielding faster convergence and less sensitivity
@@ -3048,6 +3098,9 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
       const gradBcls1 = new Array(CLS_DIM).fill(0);
       const gradWcls2 = new Array(CLS_DIM).fill(0);
       let gradBcls2 = 0;
+      // v16: Cross-task conditioning + uncertainty weighting accumulators.
+      let gradAlphaLambdaToTc = 0;
+      const gradLogSigma = [0, 0, 0]; // [Tc, family-physics, FE]
 
       const zeroMat = (m: number[][]) => m.map(r => new Array(r.length).fill(0));
       const graphGrads = {
@@ -3622,11 +3675,21 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
           for (let ni = 0; ni < nN; ni++) {
             const pre = cache.inputProjPreActs[ni];
             const inp = cache.inputProjInputs[ni];
+            const atomZ = Math.min(Math.max(graph.nodes[ni].atomicNumber, 0), 118);
+            const dActVec = new Array(HIDDEN_DIM);
             for (let k = 0; k < HIDDEN_DIM; k++) {
-              const dAct = dLdPreProj[ni][k] * (pre[k] >= 0 ? 1.0 : 0.01);
-              graphGrads.db_input_proj[k] += clipGrad(dAct);
+              dActVec[k] = dLdPreProj[ni][k] * (pre[k] >= 0 ? 1.0 : 0.01);
+              graphGrads.db_input_proj[k] += clipGrad(dActVec[k]);
               for (let c = 0; c < NODE_DIM; c++) {
-                graphGrads.dW_input_proj[k][c] += clipGrad(dAct * (inp[c] ?? 0));
+                graphGrads.dW_input_proj[k][c] += clipGrad(dActVec[k] * (inp[c] ?? 0));
+              }
+            }
+            // Propagate gradient back through W_elem_feat lookup
+            if (graphGrads.dW_elem_feat[atomZ]) {
+              for (let c = 0; c < NODE_DIM; c++) {
+                let grad = 0;
+                for (let k = 0; k < HIDDEN_DIM; k++) grad += dActVec[k] * (weights.W_input_proj[k]?.[c] ?? 0);
+                graphGrads.dW_elem_feat[atomZ][c] += clipGrad(grad);
               }
             }
           }
@@ -3738,6 +3801,16 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         // from either fully vanishing or drowning the gated-residual path.
         weights.dense_skip_gate = Math.max(-4.6, Math.min(4.6, weights.dense_skip_gate));
       }
+      // Invalidate flat matrix caches after Adam in-place mutations.
+      // adamUpdate mutates w[i][j] in-place so the WeakMap-cached Float32Array goes stale;
+      // without invalidation every forward pass from batch 2 onward reads pre-update weights.
+      for (const wMat of [
+        weights.W_mlp2, weights.W_mlp2_var, weights.W_mlp1, weights.W_cls1,
+        weights.W_message,  weights.W_update,  weights.W_message2, weights.W_update2,
+        weights.W_message3, weights.W_update3, weights.W_message4, weights.W_update4,
+        weights.W_filter1, weights.W_filter2, weights.W_input_proj,
+        weights.W_elem_feat, weights.W_graph_adapt,
+      ]) { invalidateFlatCache(wMat); }
     }
 
     // Progress bar — log every ~20% of epochs, always log first and last.
