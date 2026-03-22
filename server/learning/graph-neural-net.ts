@@ -1800,11 +1800,12 @@ export function attentionMessagePassingLayer(
 
     const combined = [...embeddings[i], ...aggMessage];
     const updated = fusedUpdate(W_update, combined);
-    // Layer-norm the updated embedding to prevent cascading amplification across
-    // the 4 attention message-passing layers. Without this, weight drift during
-    // training on large datasets (12k+ samples) causes exponential activation growth
-    // through the 4-layer stack, producing predictions of 10^10+ K.
-    newEmbeddings.push(layerNorm(updated));
+    // No layerNorm here — the training path (attnMessagePassCached) does not apply
+    // layerNorm, so applying it at inference would create a train/inference mismatch
+    // that causes validation R² to be far worse than training R².
+    // Activation explosion is prevented by the W_update He-initialization and the
+    // residual gates (sigmoid-gated skip connections) that bound the norm growth.
+    newEmbeddings.push(updated);
   }
 
   for (let i = 0; i < nNodes; i++) {
@@ -3135,7 +3136,9 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         const directOut8 = cache.outRaw[8] ?? 0;
 
         // Track Tc predictions in Kelvin for inline R²/RMSE reporting.
-        const pSC      = sigmoid(directOut7);
+        // Apply Math.max(0.1, ...) floor on pSC to match the inference formula exactly,
+        // so training R² and validation R² are computed on the same output distribution.
+        const pSC      = Math.max(0.1, sigmoid(directOut7));
         const _diagS8  = sigmoid(directOut8);
         if (isSC) {
           // Gated prediction: what the model actually outputs at inference.
@@ -3247,7 +3250,8 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         //    error threshold. Every 25K above 10K adds another 1× multiplier,
         //    capped at 4× to prevent gradient instability.
         //    tcErrorK=10K→1×  |  35K→2×  |  60K→3×  |  85K+→4×
-        const predTcKRew  = isSC ? sigOut7 * 10 * Math.expm1(tcSigOut8 * TC_LOG_SCALE) : 0;
+        // Use floored pSC (matching inference) to compute reward-system error.
+        const predTcKRew  = isSC ? pSC * 10 * Math.expm1(tcSigOut8 * TC_LOG_SCALE) : 0;
         const tcErrorKRew = isSC ? Math.abs(predTcKRew - actualTcK) : 0;
         const rmsePenalty = (isSC && tcErrorKRew > 10)
           ? Math.min(4.0, 1.0 + (tcErrorKRew - 10) / 25)
@@ -3281,7 +3285,10 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         dLdOut[3] = 0;
         // out[4] → λ via Allen-Dynes chain only (removed heuristic lambda MSE target).
         dLdOut[4] = clipGrad(dLossDAd * dTcdLambda * dLambdadOut4);
-        dLdOut[5] = clipGrad(2 * bgError * 0.05);  // bandgap when real data available
+        // out[5] → bandgap via sigmoid(out[5]) * 5.0; chain rule includes sigmoid derivative.
+        // dL/d(out[5]) = 2 * bgError * 0.05 * 5.0 * sigmoid'(out[5])
+        const bgSig5 = sigmoid(cache.outRaw[5] ?? 0);
+        dLdOut[5] = bgTarget != null ? clipGrad(2 * bgError * 0.05 * 5.0 * bgSig5 * (1 - bgSig5)) : 0;
         dLdOut[6] = 0;
         // out[7] → BCE gradient + gate gradient from gated Tc loss.
         //   Gate gradient: dL/dout[7] = 6 * tcGatedErr * tcSigOut8 * sigOut7*(1-sigOut7)
@@ -3714,11 +3721,13 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
     weights.W_conv_gate, weights.W_conv_value, weights.W_input_proj, weights.W_3body, weights.W_3body_update,
     weights.W_mlp1, weights.W_mlp2, weights.W_mlp2_var, weights.W_attn_pool,
     weights.W_elem_feat, weights.W_graph_adapt,
+    weights.W_cls1,  // v15: cls head — must scrub or NaN in cls head poisons all predictions
   ]) { scrubMatrix(wMat); }
-  for (const bVec of [weights.b_mlp1, weights.b_mlp2, weights.b_mlp2_var, weights.b_conv_gate, weights.b_conv_value, weights.b_input_proj, weights.W_pressure, weights.residual_gates]) {
+  for (const bVec of [weights.b_mlp1, weights.b_mlp2, weights.b_mlp2_var, weights.b_conv_gate, weights.b_conv_value, weights.b_input_proj, weights.W_pressure, weights.residual_gates, weights.b_cls1, weights.W_cls2]) {
     scrubVector(bVec);
   }
   if (!Number.isFinite(weights.dense_skip_gate)) weights.dense_skip_gate = -2.0;
+  if (!Number.isFinite(weights.b_cls2)) weights.b_cls2 = 0.0;
 
   for (const wMat of [
     weights.W_message, weights.W_update, weights.W_message2, weights.W_update2,
@@ -3728,6 +3737,7 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
     weights.W_conv_gate, weights.W_conv_value, weights.W_input_proj, weights.W_3body, weights.W_3body_update,
     weights.W_mlp1, weights.W_mlp2, weights.W_mlp2_var, weights.W_attn_pool,
     weights.W_elem_feat, weights.W_graph_adapt,
+    weights.W_cls1,  // v15: cls head flat cache
   ]) { invalidateFlatCache(wMat); }
 
   weights.trainedAt = Date.now();
