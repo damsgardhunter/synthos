@@ -3162,31 +3162,30 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         if (isSC) { sumScProbSC += pSC; nScProbSC++; }
         else       { sumScProbNonSC += pSC; nScProbNonSC++; }
 
-        // ── v13 Gated loss ─────────────────────────────────────────────────────
-        // BCE on out[7] (all samples) + gated Tc loss (all samples).
-        // TcGated = sigmoid(out[7]) × sigmoid(out[8])  in normalised [0,1] space.
-        // For non-SC (target=0): gated loss pushes gate toward 0 directly.
-        // For SC: gate must stay open or Tc loss explodes — forces classification.
-        // Hard labels only — XGBoost soft labels (xgbScProb) were ≈0.5 for all
-        // samples, making BCE gradient ~0 for both classes and preventing divergence.
+        // ── Loss: BCE classification + direct Tc regression ────────────────────
+        // The previous "gated" Tc loss  3*(sigOut7*tcSigOut8 - target)²  was
+        // removed because it created irreconcilable gradient conflicts:
+        //   • It pulled tcSigOut8 → target/sigOut7 while the direct loss pulled
+        //     tcSigOut8 → target.  With sigOut7 ≈ 0.7 these equilibria differ by
+        //     ~0.26 in sigmoid space, causing out[8] to oscillate and never converge.
+        //   • Its gate-gradient component (gateGrad) in dLdOut[7] opposed BCE,
+        //     preventing W_cls2/W_cls1 from learning. Only b_cls2 adapted, giving
+        //     a constant scProb = sigmoid(b_cls2) ≈ 0.775 for every input.
+        //     Result: all 5 workers collapsed to 0.775 × 57.3 K = 44.4 K constant.
+        // Fix: BCE trains classification cleanly; direct MSE trains regression cleanly.
         const scTarget = isSC ? 1.0 : 0.0;
         const sigOut7  = sigmoid(directOut7);
         const bceClamp = Math.max(1e-7, Math.min(1 - 1e-7, sigOut7));
         const bceLoss  = -(scTarget * Math.log(bceClamp) + (1 - scTarget) * Math.log(1 - bceClamp));
         totalLoss += feWeight * feError * feError + bceLoss;
-        // Gated Tc regression — applies to ALL samples.
-        let tcSigOut8 = 0, tcGatedErr = 0;
-        tcSigOut8 = sigmoid(directOut8);
+        // Direct Tc regression (SC samples only). Weight 6.0 replaces the removed
+        // gated loss (3.0) + old direct loss (1.5) combined = 4.5, rounded up to
+        // 6.0 to maintain sufficient gradient magnitude to out[8].
+        const tcSigOut8 = sigmoid(directOut8);
         const tcNormTarget = isSC ? Math.log1p(actualTcK / 10) / TC_LOG_SCALE * TC_NORM_CLAMP : 0;
-        const tcGatedNorm  = sigOut7 * tcSigOut8;
-        tcGatedErr = tcGatedNorm - tcNormTarget;
-        totalLoss += 3.0 * tcGatedErr * tcGatedErr;
-        // Direct (ungated) regression loss for SC samples — ensures out[8] receives
-        // clean gradient independent of sigOut7. Without this, the gate suppresses
-        // out[8] gradient early in training (when sigOut7 ≈ 0.5), causing the
-        // regression head to collapse to a constant while classification succeeds.
+
         const tcDirectErr = isSC ? (tcSigOut8 - tcNormTarget) : 0;
-        if (isSC) totalLoss += 1.5 * tcDirectErr * tcDirectErr;
+        if (isSC) totalLoss += 6.0 * tcDirectErr * tcDirectErr;
         totalSamples++;
 
         // ── Allen-Dynes chain-rule gradient setup ───────────────────────────────
@@ -3428,19 +3427,13 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         const bgSig5 = sigmoid(cache.outRaw[5] ?? 0);
         dLdOut[5] = bgTarget != null ? clipGrad(2 * bgError * 0.05 * 5.0 * bgSig5 * (1 - bgSig5)) : 0;
         dLdOut[6] = 0;
-        // out[7] → BCE gradient + gate gradient from gated Tc loss.
-        //   Gate gradient: dL/dout[7] = 6 * tcGatedErr * tcSigOut8 * sigOut7*(1-sigOut7)
-        //   Non-SC: tcGatedErr = scGate*tcSigOut8 > 0 → pushes gate toward 0.
-        //   SC (under-pred): tcGatedErr < 0 → pushes gate up → opens gate.
-        const gateGrad = 6.0 * tcGatedErr * tcSigOut8 * sigOut7 * (1 - sigOut7) * tcMult;
-        dLdOut[7] = clipGrad((sigOut7 - scTarget) * bceMult + gateGrad);
-        // out[8] → gated Tc regression gradient + direct ungated gradient (SC only).
-        //   Gated:  dL/dout[8] = 6 * tcGatedErr * sigOut7 * tcSigOut8*(1-tcSigOut8)
-        //   Direct: dL/dout[8] += 3 * tcDirectErr * tcSigOut8*(1-tcSigOut8)
-        // The direct term ensures out[8] trains even when sigOut7 is small early in training.
+        // out[7] → pure BCE gradient (gate gradient removed with gated loss).
+        dLdOut[7] = clipGrad((sigOut7 - scTarget) * bceMult);
+        // out[8] → direct Tc regression gradient (SC only).
+        //   dL/d(out[8]) = 12 * tcDirectErr * tcSigOut8*(1-tcSigOut8) * tcMult
+        //   (12 = 2 × 6.0 loss weight; tcMult = RMSE-penalty × reward multiplier)
         dLdOut[8] = isSC ? clipGrad(
-          6.0 * tcGatedErr * sigOut7 * tcSigOut8 * (1 - tcSigOut8) * tcMult
-          + 3.0 * tcDirectErr * tcSigOut8 * (1 - tcSigOut8)
+          12.0 * tcDirectErr * tcSigOut8 * (1 - tcSigOut8) * tcMult
         ) : 0;
 
         // Uncertainty head (W_mlp2_var) receives no gradient — NLL removed.
