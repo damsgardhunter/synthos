@@ -25,7 +25,7 @@ export interface EdgeFeature {
   source: number;
   target: number;
   distance: number;
-  bondOrderEstimate: number;
+  bondOrderEstimate?: number;
   features: number[];
 }
 
@@ -270,7 +270,9 @@ const HIDDEN_DIM = 48;
 const N_GAUSSIAN_BASIS = 40;             // expanded from 20 — denser RBF gives finer distance discrimination
 const EDGE_DIM = N_GAUSSIAN_BASIS;       // pure RBF(distance) — let model learn bond character from node features
 const OUTPUT_DIM = 16;
-const GLOBAL_COMP_DIM = 23;
+// Reduced from 23: only physics hints + VEC + hasH + pressure survive.
+// Composition structure (EN, Debye, mismatch, class flags, etc.) is learned by the graph.
+const GLOBAL_COMP_DIM = 7;
 // Coulomb pseudopotential μ* — fixed at conventional BCS value.
 // Typical range: 0.10 (metals), 0.12-0.13 (hydrides, higher Coulomb screening).
 const FIXED_MU_STAR = 0.10;
@@ -321,6 +323,15 @@ const FEAT_NORM = {
   maxENdiff:      { m: 0.9,   s: 0.65  },
   meanMass:       { m: 100.0, s: 72.0  },
   stdRadius:      { m: 15.0,  s: 18.0  },
+  // Physics hint features (composition-level)
+  lambda:         { m: 0.70,  s: 0.50  },  // electron-phonon coupling λ
+  logPhonon:      { m: 5.50,  s: 0.80  },  // ln(Debye temp / 1 K); ln(300)≈5.7, ln(2000)≈7.6
+  dos:            { m: 1.50,  s: 1.00  },  // DOS at E_F (states/eV/atom)
+  negFe:          { m: 0.50,  s: 0.80  },  // −(formation energy); more negative fe = more stable
+  negHd:          { m: -0.10, s: 0.12  },  // −(hull distance); 0 = on hull, positive = unstable
+  logPressure:    { m: 0.20,  s: 0.60  },  // ln(1 + P/10); 0→0, 10GPa→0.69, 200GPa→3.04
+  hfWeight:       { m: 0.03,  s: 0.10  },  // heavy-fermion element fraction
+  cfgEntropy:     { m: 0.70,  s: 0.60  },  // Shannon configurational entropy (nats)
 } as const;
 
 /** Z-score normalise a scalar feature. */
@@ -351,36 +362,64 @@ let modelTrainedAt = 0;
 const MODEL_STALE_MS = 6 * 60 * 60 * 1000;
 
 const LATENT_REF_MAX = 200;
-let trainingLatentEmbeddings: number[][] = [];
+// Per-dimension statistics of training latent embeddings for Mahalanobis distance.
+// Mean and variance are computed once in updateTrainingEmbeddings and reused at inference.
+let trainingLatentMean: number[] = [];
+let trainingLatentVar: number[]  = [];
 
+/**
+ * Diagonal Mahalanobis distance from a latent embedding to the training distribution.
+ *
+ * d_M(x) = sqrt( sum_k (x_k - μ_k)² / σ_k² ) / sqrt(D)
+ *
+ * Dividing by sqrt(D) (the expected chi value) puts in-distribution inputs at ≈ 1.0
+ * and out-of-distribution inputs well above 1.0. Cosine similarity ignored magnitude
+ * and assumed isotropic geometry; diagonal Mahalanobis corrects both by using the
+ * empirical per-dimension spread of the training embeddings.
+ */
 function computeLatentDistance(embedding: number[]): number {
-  if (trainingLatentEmbeddings.length === 0) return 1.0;
-  const norm = Math.sqrt(embedding.reduce((s, v) => s + v * v, 0)) || 1;
-  let minDist = Infinity;
-  for (const ref of trainingLatentEmbeddings) {
-    const refNorm = Math.sqrt(ref.reduce((s, v) => s + v * v, 0)) || 1;
-    let dotProduct = 0;
-    for (let i = 0; i < Math.min(embedding.length, ref.length); i++) {
-      dotProduct += embedding[i] * ref[i];
-    }
-    const cosineSim = dotProduct / (norm * refNorm);
-    const dist = 1.0 - Math.max(-1, Math.min(1, cosineSim));
-    if (dist < minDist) minDist = dist;
+  const D = trainingLatentMean.length;
+  if (D === 0) return 1.0;
+  let sum = 0;
+  for (let k = 0; k < D; k++) {
+    const diff = (embedding[k] ?? 0) - trainingLatentMean[k];
+    sum += (diff * diff) / trainingLatentVar[k];
   }
-  return Math.min(1.0, minDist);
+  return Math.sqrt(sum / D);
 }
 
 function updateTrainingEmbeddings(trainingData: { formula: string; tc: number }[], weights: GNNWeights): void {
-  trainingLatentEmbeddings = [];
-  const sampleCount = Math.min(LATENT_REF_MAX, trainingData.length);
-  const step = Math.max(1, Math.floor(trainingData.length / sampleCount));
-  for (let i = 0; i < trainingData.length && trainingLatentEmbeddings.length < LATENT_REF_MAX; i += step) {
+  // Collect a uniform subsample of training latent embeddings.
+  const collected: number[][] = [];
+  const step = Math.max(1, Math.floor(trainingData.length / LATENT_REF_MAX));
+  for (let i = 0; i < trainingData.length && collected.length < LATENT_REF_MAX; i += step) {
     try {
       const graph = buildCrystalGraph(trainingData[i].formula);
       const pred = GNNPredict(graph, weights);
-      trainingLatentEmbeddings.push(pred.latentEmbedding);
+      collected.push(pred.latentEmbedding);
     } catch { /* skip invalid formulas */ }
   }
+
+  const n = collected.length;
+  if (n === 0) { trainingLatentMean = []; trainingLatentVar = []; return; }
+
+  const D = collected[0].length;
+  // Per-dimension mean.
+  trainingLatentMean = new Array<number>(D).fill(0);
+  for (const emb of collected)
+    for (let k = 0; k < D; k++) trainingLatentMean[k] += (emb[k] ?? 0) / n;
+
+  // Per-dimension variance with a small regularisation floor to keep the
+  // precision matrix well-conditioned even in nearly-constant dimensions.
+  trainingLatentVar = new Array<number>(D).fill(0);
+  for (const emb of collected) {
+    for (let k = 0; k < D; k++) {
+      const d = (emb[k] ?? 0) - trainingLatentMean[k];
+      trainingLatentVar[k] += (d * d) / n;
+    }
+  }
+  const VAR_FLOOR = 1e-6;
+  for (let k = 0; k < D; k++) trainingLatentVar[k] = Math.max(trainingLatentVar[k], VAR_FLOOR);
 }
 
 function parseFormulaCounts(formula: string): Record<string, number> {
@@ -691,22 +730,6 @@ function getDOrbitalOccupancy(atomicNumber: number): number {
   return 0;
 }
 
-function pressureAwareBondOrder(enDiff: number, atomicNumberI: number, atomicNumberJ: number, pressureGpa: number): number {
-  let bondOrder = enDiff > 1.5 ? 0.5 : enDiff > 0.5 ? 1.0 : 1.5;
-
-  if (pressureGpa > 100) {
-    const isLightI = atomicNumberI <= 10;
-    const isLightJ = atomicNumberJ <= 10;
-    if (isLightI && isLightJ) {
-      const pressureFactor = Math.min((pressureGpa - 100) / 200, 1.0);
-      bondOrder += pressureFactor * 1.5;
-    } else if (isLightI || isLightJ) {
-      const pressureFactor = Math.min((pressureGpa - 100) / 300, 1.0);
-      bondOrder += pressureFactor * 0.8;
-    }
-  }
-  return bondOrder;
-}
 
 function pressureDistanceScale(pressureGpa: number): number {
   if (pressureGpa <= 0) return 1.0;
@@ -1055,13 +1078,10 @@ export function buildPrototypeGraph(formula: string, prototype: string, pressure
             const pScale = pressureDistanceScale(pressureGpa ?? 0);
             const distance = (ri + rj) * 0.9 * pScale;
 
-            const enDiff = Math.abs(nodes[i].electronegativity - nodes[j].electronegativity);
-            const bondOrder = pressureAwareBondOrder(enDiff, nodes[i].atomicNumber, nodes[j].atomicNumber, pressureGpa ?? 0);
-
             const edgeFeats = buildEdgeFeatures(distance);
 
-            edges.push({ source: i, target: j, distance, bondOrderEstimate: bondOrder, features: edgeFeats });
-            edges.push({ source: j, target: i, distance, bondOrderEstimate: bondOrder, features: edgeFeats });
+            edges.push({ source: i, target: j, distance, features: edgeFeats });
+            edges.push({ source: j, target: i, distance, features: edgeFeats });
             adjacencySets[i].add(j);
             adjacencySets[j].add(i);
             adjacency[i].push(j);
@@ -1078,11 +1098,9 @@ export function buildPrototypeGraph(formula: string, prototype: string, pressure
         const ri = nodes[i].atomicRadius / 100;
         const rj = nodes[j].atomicRadius / 100;
         const distance = (ri + rj) * 1.1;
-        const enDiff = Math.abs(nodes[i].electronegativity - nodes[j].electronegativity);
-        const bondOrder = pressureAwareBondOrder(enDiff, nodes[i].atomicNumber, nodes[j].atomicNumber, pressureGpa ?? 0);
         const edgeFeats = buildEdgeFeatures(distance);
-        edges.push({ source: i, target: j, distance, bondOrderEstimate: bondOrder, features: edgeFeats });
-        edges.push({ source: j, target: i, distance, bondOrderEstimate: bondOrder, features: edgeFeats });
+        edges.push({ source: i, target: j, distance, features: edgeFeats });
+        edges.push({ source: j, target: i, distance, features: edgeFeats });
         adjacency[i].push(j);
         adjacency[j].push(i);
       }
@@ -1301,31 +1319,36 @@ function computeGlobalCompositionFeatures(counts: Record<string, number>, hints?
   // --- 6 physics features from hints (no leakage: these are physics estimates, not model outputs) ---
 
   // [13] electron-phonon coupling λ — the central BCS scalar
-  // Range 0–3: weak coupling ~0.4, strong ~1.5+; normalise by 3.
   const lambda = hints?.electronPhononLambda;
-  const lambdaFeat = lambda != null && lambda >= 0 ? Math.min(1.0, lambda / 3.0) : meanD * transitionMetalFraction;
+  const lambdaFeat = lambda != null && lambda >= 0
+    ? znorm(lambda, FEAT_NORM.lambda.m, FEAT_NORM.lambda.s)
+    : znorm(meanD * transitionMetalFraction, FEAT_NORM.lambda.m, FEAT_NORM.lambda.s);
 
   // [14] log phonon frequency proxy — phonon energy scale; high → higher Tc ceiling
-  // Use provided logPhononFreq, or fall back to log(Debye) normalised to ~0–1 over 1–2000 K range.
+  // Hint is ln(ω_log / 1K); fallback is ln(mean Debye temperature).
   const logPhononFreqHint = hints?.logPhononFreq;
-  const logPhononFeat = logPhononFreqHint != null
-    ? Math.min(1.0, Math.max(0, logPhononFreqHint / 8.0))
-    : Math.min(1.0, Math.log(Math.max(1, meanDebye)) / 7.6);
+  const logPhononFeat = znorm(
+    logPhononFreqHint != null ? logPhononFreqHint : Math.log(Math.max(1, meanDebye)),
+    FEAT_NORM.logPhonon.m, FEAT_NORM.logPhonon.s,
+  );
 
   // [15] density of states at E_F proxy — high DOS → strong coupling per BCS N(0)V
-  // Unit: states/eV/atom; typical range 0–5; fallback: d-orbital filling heuristic.
+  // Unit: states/eV/atom; fallback: d-orbital filling heuristic scaled to same range.
   const dosHint = hints?.dosAtEF;
-  const dosFeat = dosHint != null && dosHint >= 0 ? Math.min(1.0, dosHint / 5.0) : Math.min(1.0, meanD * 2.0);
+  const dosFeat = znorm(
+    dosHint != null && dosHint >= 0 ? dosHint : meanD * 2.0,
+    FEAT_NORM.dos.m, FEAT_NORM.dos.s,
+  );
 
-  // [16] formation energy signal — more negative = more thermodynamically stable
-  // Maps -3→1, -1→0.67, 0→0.33, +1→0 eV/atom. When unknown (null), use neutral prior 0.5.
+  // [16] formation energy signal — more negative fe = more thermodynamically stable → higher z-score.
+  // Use −fe so that stability is positively correlated with the feature value.
   const fe = hints?.formationEnergy;
   const hd = hints?.hullDistance;
   const feFeat = fe != null
-    ? Math.max(0, Math.min(1.0, (-fe + 1.0) / 4.0))
+    ? znorm(-fe, FEAT_NORM.negFe.m, FEAT_NORM.negFe.s)
     : hd != null
-      ? Math.max(0, Math.min(1.0, 1.0 - hd / 0.5))   // hull distance 0→1 (stable), 0.5+→0 (unstable)
-      : 0.5;                                           // neutral prior
+      ? znorm(-hd, FEAT_NORM.negHd.m, FEAT_NORM.negHd.s)  // −hull distance: 0 = on hull (best)
+      : 0.0;                                                // unknown → neutral (distribution mean)
 
   // [17] cuprate class flag — Cu + O compound → d-wave unconventional SC regime
   const isCuprate = (counts["Cu"] != null && counts["O"] != null) ? 1.0 : 0.0;
@@ -1336,10 +1359,10 @@ function computeGlobalCompositionFeatures(counts: Record<string, number>, hints?
 
   // --- 4 engineered features ---
 
-  // [19] pressure (log scale) — critical for high-P hydride SCs (H3S@150GPa, LaH10@170GPa)
-  // log(1 + P/10) / log(1 + 200) normalises to ~0-1 over 0-2000 GPa
+  // [19] pressure — critical for high-P hydride SCs (H3S@150GPa, LaH10@170GPa).
+  // Log transform first (compresses 0-200 GPa range), then z-score.
   const pressureFeat = pressureGpa != null && pressureGpa > 0
-    ? Math.min(1.0, Math.log1p(pressureGpa / 10) / Math.log1p(200))
+    ? znorm(Math.log1p(pressureGpa / 10), FEAT_NORM.logPressure.m, FEAT_NORM.logPressure.s)
     : 0.0;
 
   // [20] MgB2-type flag — Mg:B ≈ 1:2; two-band phonon SC mechanism; Tc~39K at ambient P
@@ -1350,7 +1373,7 @@ function computeGlobalCompositionFeatures(counts: Record<string, number>, hints?
   // [21] heavy-fermion / f-electron hint — Ce, U, Yb, Pr, Sm → unconventional Kondo-lattice SC
   const HEAVY_FERMION_ELS = new Set(["Ce", "U", "Yb", "Pr", "Sm"]);
   const hfWeight = els.reduce((s, [el, n]) => s + (HEAVY_FERMION_ELS.has(el) ? n / total : 0), 0);
-  const heavyFermionFeat = Math.min(1.0, hfWeight * 4.0);  // boosted — even trace amounts are diagnostic
+  const heavyFermionFeat = znorm(hfWeight, FEAT_NORM.hfWeight.m, FEAT_NORM.hfWeight.s);
 
   // [22] mean d-electron count per TM atom — finer-grained than d-orbital filling average
   // More directly related to Stoner criterion and density of states at E_F.
@@ -1370,7 +1393,7 @@ function computeGlobalCompositionFeatures(counts: Record<string, number>, hints?
     znorm(stdEN,     FEAT_NORM.stdEN.m,    FEAT_NORM.stdEN.s),    // [6] EN heterogeneity — cuprate/hydride indicator
     hasHydrogen,                                                    // [7] hydrogen flag — hydride SC class separator
     transitionMetalFraction,                                       // [8] TM fraction — d-electron BCS coupling density
-    Math.min(1.0, cfgEntropy),                                     // [9] configurational entropy — HEA/entropy alloy signal
+    znorm(cfgEntropy, FEAT_NORM.cfgEntropy.m, FEAT_NORM.cfgEntropy.s), // [9] configurational entropy — HEA/entropy alloy signal
     znorm(maxENdiff, FEAT_NORM.maxENdiff.m,FEAT_NORM.maxENdiff.s),// [10] max EN spread — ionicity extremes
     znorm(meanMass,  FEAT_NORM.meanMass.m, FEAT_NORM.meanMass.s), // [11] mean atomic mass — phonon mass scale
     znorm(stdRadius, FEAT_NORM.stdRadius.m,FEAT_NORM.stdRadius.s),// [12] radius std — lattice strain heterogeneity
@@ -1482,12 +1505,10 @@ export function buildCrystalGraph(formula: string, structure?: any, pressureGpa?
               const distance = Math.sqrt(ddx * ddx + ddy * ddy + ddz * ddz);
               if (distance >= cutoff) continue;
 
-              const enDiff = Math.abs(nodes[i].electronegativity - nodes[j].electronegativity);
-              const bondOrder = pressureAwareBondOrder(enDiff, nodes[i].atomicNumber, nodes[j].atomicNumber, pressureGpa ?? 0);
               const edgeFeats = buildEdgeFeatures(distance);
 
-              edges.push({ source: i, target: j, distance, bondOrderEstimate: bondOrder, features: edgeFeats });
-              edges.push({ source: j, target: i, distance, bondOrderEstimate: bondOrder, features: edgeFeats });
+              edges.push({ source: i, target: j, distance, features: edgeFeats });
+              edges.push({ source: j, target: i, distance, features: edgeFeats });
               adjacency[i].push(j);
               adjacency[j].push(i);
             }
@@ -1517,14 +1538,10 @@ export function buildCrystalGraph(formula: string, structure?: any, pressureGpa?
         }
 
         if (distance < cutoff || nodes.length <= 8) {
-          const enDiff = Math.abs(nodes[i].electronegativity - nodes[j].electronegativity);
-          const bondOrder = pressureAwareBondOrder(enDiff, nodes[i].atomicNumber, nodes[j].atomicNumber, pressureGpa ?? 0);
-
-
           const edgeFeats = buildEdgeFeatures(distance);
 
-          edges.push({ source: i, target: j, distance, bondOrderEstimate: bondOrder, features: edgeFeats });
-          edges.push({ source: j, target: i, distance, bondOrderEstimate: bondOrder, features: edgeFeats });
+          edges.push({ source: i, target: j, distance, features: edgeFeats });
+          edges.push({ source: j, target: i, distance, features: edgeFeats });
 
           adjacency[i].push(j);
           adjacency[j].push(i);
@@ -1540,11 +1557,9 @@ export function buildCrystalGraph(formula: string, structure?: any, pressureGpa?
         const rj = nodes[j].atomicRadius / 100;
         const pScale = pressureDistanceScale(pressureGpa ?? 0);
         const distance = (ri + rj) * 1.1 * pScale;
-        const enDiff = Math.abs(nodes[i].electronegativity - nodes[j].electronegativity);
-        const bondOrder = pressureAwareBondOrder(enDiff, nodes[i].atomicNumber, nodes[j].atomicNumber, pressureGpa ?? 0);
         const edgeFeats = buildEdgeFeatures(distance);
-        edges.push({ source: i, target: j, distance, bondOrderEstimate: bondOrder, features: edgeFeats });
-        edges.push({ source: j, target: i, distance, bondOrderEstimate: bondOrder, features: edgeFeats });
+        edges.push({ source: i, target: j, distance, features: edgeFeats });
+        edges.push({ source: j, target: i, distance, features: edgeFeats });
         adjacency[i].push(j);
         adjacency[j].push(i);
       }
@@ -1580,232 +1595,29 @@ export function buildCrystalGraph(formula: string, structure?: any, pressureGpa?
   return partialGraph;
 }
 
+
 /**
- * SchNet continuous filter convolution (inference, non-cached).
- * h_ij = W_filter2 @ silu(W_filter1 @ rbf_ij + b_filter1) + b_filter2
- * message = h_ij * h_j (element-wise);  h_i' = h_i + mean_j(message * cutoff)
+ * Unified attention message-passing layer.
+ * mode='train': deep-copies embeddings, populates cache for backward pass.
+ * mode='infer': references embeddings directly, returns cache:null.
+ * Dropout (msgRng) is applied in both modes — training uses it for
+ * regularisation; inference uses it for MC-dropout uncertainty estimation.
  */
-/**
- * SchNet continuous filter convolution (inference, non-cached).
- * h_ij = W_filter2 @ silu(W_filter1 @ rbf_ij + b_filter1) + b_filter2
- * message = h_ij * h_j (element-wise);  h_i' = h_i + mean_j(message * cutoff)
- */
-export function cgcnnConvolutionLayer(
-  graph: CrystalGraph,
-  W_filter1: number[][],
-  b_filter1: number[],
-  W_filter2: number[][],
-  b_filter2: number[],
-  adaptiveLogits?: number[][],
-): number[][] {
-  const nNodes = graph.nodes.length;
-  const embeddings = graph.nodes.map(n => n.embedding);
-  const newEmbeddings: number[][] = [];
-
-  for (let i = 0; i < nNodes; i++) {
-    const neighbors = graph.adjacency[i];
-    if (!neighbors || neighbors.length === 0) {
-      newEmbeddings.push([...embeddings[i]]);
-      continue;
-    }
-
-    const aggUpdate = initVector(HIDDEN_DIM);
-    let totalWeight = 0;
-
-    for (let nIdx = 0; nIdx < neighbors.length; nIdx++) {
-      const j = neighbors[nIdx];
-      const edgeFeat = getEdgeFromIndex(graph.edgeIndex, nNodes, i, j);
-      const distance = edgeFeat?.distance ?? 2.5;
-      const cw = cosineCutoff(distance);
-      if (cw <= 0) continue;
-
-      const edgeVec = edgeFeat?.features ?? initVector(EDGE_DIM);
-      const rbf_ij: number[] = new Array(N_GAUSSIAN_BASIS);
-      for (let k = 0; k < N_GAUSSIAN_BASIS; k++) rbf_ij[k] = edgeVec[k] ?? 0;
-
-      const z_ij = vecAdd(matVecMul(W_filter1, rbf_ij), b_filter1);
-      const h1_ij: number[] = new Array(HIDDEN_DIM);
-      for (let k = 0; k < HIDDEN_DIM; k++) h1_ij[k] = silu(z_ij[k] ?? 0);
-      const h_ij = vecAdd(matVecMul(W_filter2, h1_ij), b_filter2);
-
-      const adaptLogit = adaptiveLogits?.[i]?.[nIdx] ?? 0;
-      if (adaptLogit !== 0) {
-        for (let k = 0; k < HIDDEN_DIM; k++) h_ij[k] += adaptLogit;
-      }
-
-      const hj = embeddings[j];
-      const multJ = graph.nodes[j].multiplicity ?? 1;
-      for (let k = 0; k < HIDDEN_DIM; k++) {
-        aggUpdate[k] += (h_ij[k] ?? 0) * (hj[k] ?? 0) * cw * multJ;
-      }
-      totalWeight += cw * multJ;
-    }
-
-    if (totalWeight > 0) {
-      for (let k = 0; k < HIDDEN_DIM; k++) aggUpdate[k] /= totalWeight;
-    }
-
-    const updated: number[] = new Array(HIDDEN_DIM);
-    for (let k = 0; k < HIDDEN_DIM; k++) {
-      updated[k] = (embeddings[i][k] ?? 0) + aggUpdate[k];
-    }
-    newEmbeddings.push(updated);
-  }
-
-  for (let i = 0; i < nNodes; i++) graph.nodes[i].embedding = newEmbeddings[i];
-  return newEmbeddings;
-}
-
-export function attentionMessagePassingLayer(
-  graph: CrystalGraph,
-  W_message: number[][],
-  W_update: number[][],
-  W_query: number[][],
-  W_key: number[][],
-  useLeakyMsg: boolean = false,
-): number[][] {
-  const nNodes = graph.nodes.length;
-  const embeddings = graph.nodes.map(n => n.embedding);
-
-  const newEmbeddings: number[][] = [];
-  const fusedUpdate = useLeakyMsg
-    ? (mat: number[][], vec: number[]) => fusedMatVecLeakyRelu(mat, vec)
-    : (mat: number[][], vec: number[]) => {
-        const rows = mat.length;
-        const result = new Array(rows);
-        for (let i = 0; i < rows; i++) {
-          const row = mat[i];
-          let sum = 0;
-          for (let j = 0; j < vec.length; j++) sum += row[j] * vec[j];
-          result[i] = sum > 0 ? sum : 0;
-        }
-        return result;
-      };
-
-  for (let i = 0; i < nNodes; i++) {
-    const neighbors = graph.adjacency[i];
-    if (neighbors.length === 0) {
-      newEmbeddings.push([...embeddings[i]]);
-      continue;
-    }
-
-    const query = layerNorm(matVecMul(W_query, embeddings[i]));
-
-    const attentionScores: number[] = [];
-    const messages: number[][] = [];
-
-    for (const j of neighbors) {
-      const key = layerNorm(matVecMul(W_key, embeddings[j]));
-      let score = dotProduct(query, key);
-
-      const edge = getEdgeFromIndex(graph.edgeIndex, nNodes, i, j);
-      if (edge) {
-        const edgeFeats = edge.features;
-        for (let ef = 0; ef < edgeFeats.length && ef < HIDDEN_DIM; ef++) {
-          score += (edgeFeats[ef] ?? 0) * (query[ef] ?? 0) * 0.1;
-        }
-      }
-
-      // Bias attention by log(multiplicity): higher-multiplicity neighbors aggregate more
-      attentionScores.push(score + Math.log(graph.nodes[j].multiplicity ?? 1));
-      messages.push(matVecMul(W_message, embeddings[j]));
-    }
-
-    const attentionWeights = softmax(attentionScores);
-
-    const aggMessage = initVector(HIDDEN_DIM);
-    for (let n = 0; n < neighbors.length; n++) {
-      const w = attentionWeights[n];
-      for (let k = 0; k < HIDDEN_DIM; k++) {
-        aggMessage[k] += (messages[n][k] ?? 0) * w;
-      }
-    }
-
-    const combined = [...embeddings[i], ...aggMessage];
-    const hUpd = fusedUpdate(W_update, combined);
-    // Residual + LayerNorm — consistent with training path (attnMessagePassCached).
-    const hRes = embeddings[i].map((v, k) => v + (hUpd[k] ?? 0));
-    newEmbeddings.push(layerNorm(hRes));
-  }
-
-  for (let i = 0; i < nNodes; i++) {
-    graph.nodes[i].embedding = newEmbeddings[i];
-  }
-
-  return newEmbeddings;
-}
-
-export function messagePassingLayer(
-  graph: CrystalGraph,
-  W_message: number[][],
-  W_update: number[][]
-): number[][] {
-  const nNodes = graph.nodes.length;
-  const embeddings = graph.nodes.map(n => n.embedding);
-
-  const newEmbeddings: number[][] = [];
-
-  for (let i = 0; i < nNodes; i++) {
-    const neighbors = graph.adjacency[i];
-    if (!neighbors || neighbors.length === 0) {
-      newEmbeddings.push([...embeddings[i]]);
-      continue;
-    }
-
-    const aggMessage = initVector(HIDDEN_DIM);
-    let totalMult = 0;
-    for (const j of neighbors) totalMult += (graph.nodes[j].multiplicity ?? 1);
-    const denom = Math.max(1, totalMult);
-    for (const j of neighbors) {
-      const msg = matVecMul(W_message, embeddings[j]);
-      const mw = (graph.nodes[j].multiplicity ?? 1) / denom;
-      for (let k = 0; k < HIDDEN_DIM; k++) {
-        aggMessage[k] += msg[k] * mw;
-      }
-    }
-
-    const combined = [...embeddings[i], ...aggMessage];
-    const updated = fusedMatVecLeakyRelu(W_update, combined);
-    newEmbeddings.push(updated);
-  }
-
-  for (let i = 0; i < nNodes; i++) {
-    graph.nodes[i].embedding = newEmbeddings[i];
-  }
-
-  return newEmbeddings;
-}
-
-function attentionPooling(graph: CrystalGraph, W_pool: number[][]): number[] {
-  const nNodes = graph.nodes.length;
-  if (nNodes === 0) return initVector(HIDDEN_DIM);
-
-  const scores: number[] = [];
-  for (const node of graph.nodes) {
-    const attnVec = matVecMul(W_pool, node.embedding);
-    const rawScore = attnVec.reduce((s, v) => s + v, 0);
-    scores.push(rawScore + Math.log(node.multiplicity ?? 1));
-  }
-
-  const attnWeights = softmax(scores);
-  const pooled = initVector(HIDDEN_DIM);
-  for (let n = 0; n < nNodes; n++) {
-    const e = graph.nodes[n].embedding;
-    for (let k = 0; k < HIDDEN_DIM; k++) {
-      pooled[k] += (e[k] ?? 0) * attnWeights[n];
-    }
-  }
-  return pooled;
-}
-
-function attnMessagePassCached(
+function attnMessagePass(
   graph: CrystalGraph,
   W_message: number[][], W_update: number[][],
   W_query: number[][], W_key: number[][],
-  useLeakyMsg: boolean = false,
-): { embeddings: number[][]; cache: AttnLayerCache } {
+  useLeakyMsg: boolean,
+  mode: 'train' | 'infer',
+  msgRng?: () => number,
+): { embeddings: number[][]; cache: AttnLayerCache | null } {
   const nNodes = graph.nodes.length;
-  const inputEmbs = graph.nodes.map(n => [...n.embedding]);
+  // Deep-copy in train mode so backward pass has original pre-update inputs.
+  const inputEmbs = mode === 'train'
+    ? graph.nodes.map(n => [...n.embedding])
+    : graph.nodes.map(n => n.embedding);
+
+  // Cache arrays — only populated in train mode.
   const preActs: number[][] = [];
   const preNormActs: number[][] = [];
   const attnWts: number[][] = [];
@@ -1814,12 +1626,14 @@ function attnMessagePassCached(
 
   for (let i = 0; i < nNodes; i++) {
     const neighbors = graph.adjacency[i];
-    neighborLists.push([...neighbors]);
+    if (mode === 'train') neighborLists.push([...neighbors]);
     if (neighbors.length === 0) {
       newEmbeddings.push([...inputEmbs[i]]);
-      preActs.push([...inputEmbs[i]]);
-      preNormActs.push([...inputEmbs[i]]);
-      attnWts.push([]);
+      if (mode === 'train') {
+        preActs.push([...inputEmbs[i]]);
+        preNormActs.push([...inputEmbs[i]]);
+        attnWts.push([]);
+      }
       continue;
     }
 
@@ -1829,21 +1643,25 @@ function attnMessagePassCached(
 
     for (const j of neighbors) {
       const key = layerNorm(matVecMul(W_key, inputEmbs[j]));
-      let score = dotProduct(query, key);
-      const edge = getEdgeFromIndex(graph.edgeIndex, nNodes, i, j);
-      if (edge) {
-        const edgeFeats = edge.features;
-        for (let ef = 0; ef < edgeFeats.length && ef < HIDDEN_DIM; ef++) {
-          score += (edgeFeats[ef] ?? 0) * (query[ef] ?? 0) * 0.1;
-        }
-      }
-      // Bias attention by log(multiplicity): higher-multiplicity neighbors aggregate more
+      const score = dotProduct(query, key);
       attentionScores.push(score + Math.log(graph.nodes[j].multiplicity ?? 1));
       messages.push(matVecMul(W_message, inputEmbs[j]));
     }
 
+    // Message dropout (inverted-dropout scaling keeps expected value constant).
+    if (msgRng) {
+      const msgScale = 1.0 / (1.0 - MSG_DROPOUT_RATE);
+      for (let n = 0; n < messages.length; n++) {
+        if (msgRng() < MSG_DROPOUT_RATE) {
+          messages[n] = new Array(HIDDEN_DIM).fill(0);
+        } else {
+          for (let k = 0; k < HIDDEN_DIM; k++) messages[n][k] *= msgScale;
+        }
+      }
+    }
+
     const aw = softmax(attentionScores);
-    attnWts.push(aw);
+    if (mode === 'train') attnWts.push(aw);
 
     const aggMessage = initVector(HIDDEN_DIM);
     for (let n = 0; n < neighbors.length; n++) {
@@ -1855,14 +1673,12 @@ function attnMessagePassCached(
 
     const combined = [...inputEmbs[i], ...aggMessage];
     const pre = matVecMul(W_update, combined);
-    preActs.push([...pre]);
+    if (mode === 'train') preActs.push([...pre]);
     const hUpd = useLeakyMsg
       ? pre.map(v => v >= 0 ? v : 0.01 * v)
       : pre.map(v => v >= 0 ? v : 0);
-    // Residual: h = input + activation(update)
     const hRes = inputEmbs[i].map((v, k) => v + (hUpd[k] ?? 0));
-    preNormActs.push(hRes);
-    // LayerNorm after residual
+    if (mode === 'train') preNormActs.push(hRes);
     newEmbeddings.push(layerNorm(hRes));
   }
 
@@ -1870,23 +1686,34 @@ function attnMessagePassCached(
     graph.nodes[i].embedding = newEmbeddings[i];
   }
 
-  return { embeddings: newEmbeddings, cache: { inputEmbs, preActs, preNormActs, attnWts, neighborLists } };
+  const cache = mode === 'train'
+    ? { inputEmbs, preActs, preNormActs, attnWts, neighborLists }
+    : null;
+  return { embeddings: newEmbeddings, cache };
 }
 
 /**
- * SchNet continuous filter convolution (cached, training).
+ * Unified SchNet-style continuous-filter convolution layer.
+ * h_ij = W_filter2 @ silu(W_filter1 @ rbf_ij + b_filter1) + b_filter2
+ * message = h_ij ⊙ h_j;  h_i' = layerNorm(h_i + mean_j(message * cutoff * mult_j))
+ *
+ * mode='train': deep-copies embeddings, populates cache for backward pass.
+ * mode='infer': references embeddings directly, returns cache:null.
  */
-/**
- * SchNet continuous filter convolution (cached, training).
- */
-function cgcnnConvCached(
+function cgcnnConv(
   graph: CrystalGraph,
   W_filter1: number[][], b_filter1: number[],
   W_filter2: number[][], b_filter2: number[],
-  adaptiveLogits?: number[][],
-): { embeddings: number[][]; cache: CGCNNLayerCache } {
+  adaptiveLogits: number[][] | undefined,
+  mode: 'train' | 'infer',
+): { embeddings: number[][]; cache: CGCNNLayerCache | null } {
   const nNodes = graph.nodes.length;
-  const inputEmbs = graph.nodes.map(n => [...n.embedding]);
+  // Deep-copy in train mode so backward pass has original pre-update inputs.
+  const inputEmbs = mode === 'train'
+    ? graph.nodes.map(n => [...n.embedding])
+    : graph.nodes.map(n => n.embedding);
+
+  // Cache arrays — only populated in train mode.
   const filterPreActs: number[][][] = [];
   const filterH1s: number[][][] = [];
   const filterOuts: number[][][] = [];
@@ -1906,13 +1733,15 @@ function cgcnnConvCached(
 
     if (!neighbors || neighbors.length === 0) {
       newEmbeddings.push([...inputEmbs[i]]);
-      preNormActs.push([...inputEmbs[i]]);
-      filterPreActs.push(nodeFilterPreActs);
-      filterH1s.push(nodeFilterH1s);
-      filterOuts.push(nodeFilterOuts);
-      rbfs.push(nodeRbfs);
-      cutoffWts.push(nodeCutoffs);
-      totalWeights.push(0);
+      if (mode === 'train') {
+        preNormActs.push([...inputEmbs[i]]);
+        filterPreActs.push(nodeFilterPreActs);
+        filterH1s.push(nodeFilterH1s);
+        filterOuts.push(nodeFilterOuts);
+        rbfs.push(nodeRbfs);
+        cutoffWts.push(nodeCutoffs);
+        totalWeights.push(0);
+      }
       continue;
     }
 
@@ -1924,12 +1753,14 @@ function cgcnnConvCached(
       const edgeFeat = getEdgeFromIndex(graph.edgeIndex, nNodes, i, j);
       const distance = edgeFeat?.distance ?? 2.5;
       const cw = cosineCutoff(distance);
-      nodeCutoffs.push(cw);
+      if (mode === 'train') nodeCutoffs.push(cw);
       if (cw <= 0) {
-        nodeFilterPreActs.push([]);
-        nodeFilterH1s.push([]);
-        nodeFilterOuts.push([]);
-        nodeRbfs.push([]);
+        if (mode === 'train') {
+          nodeFilterPreActs.push([]);
+          nodeFilterH1s.push([]);
+          nodeFilterOuts.push([]);
+          nodeRbfs.push([]);
+        }
         continue;
       }
 
@@ -1938,17 +1769,20 @@ function cgcnnConvCached(
       for (let k = 0; k < N_GAUSSIAN_BASIS; k++) rbf_ij[k] = edgeVec[k] ?? 0;
 
       const z_ij = vecAdd(matVecMul(W_filter1, rbf_ij), b_filter1);
-      const h1_ij = z_ij.map(v => { const s = 1 / (1 + Math.exp(-v)); return v * s; });  // silu
+      const h1_ij: number[] = new Array(HIDDEN_DIM);
+      for (let k = 0; k < HIDDEN_DIM; k++) h1_ij[k] = silu(z_ij[k] ?? 0);
       const h_ij = vecAdd(matVecMul(W_filter2, h1_ij), b_filter2);
 
       const adaptLogit = adaptiveLogits?.[i]?.[nIdx] ?? 0;
       const hj = inputEmbs[j];
       const multJ = graph.nodes[j].multiplicity ?? 1;
 
-      nodeFilterPreActs.push([...z_ij]);
-      nodeFilterH1s.push([...h1_ij]);
-      nodeFilterOuts.push([...h_ij]);
-      nodeRbfs.push([...rbf_ij]);
+      if (mode === 'train') {
+        nodeFilterPreActs.push([...z_ij]);
+        nodeFilterH1s.push([...h1_ij]);
+        nodeFilterOuts.push([...h_ij]);
+        nodeRbfs.push([...rbf_ij]);
+      }
 
       for (let k = 0; k < HIDDEN_DIM; k++) {
         aggUpdate[k] += (h_ij[k] + adaptLogit) * (hj[k] ?? 0) * cw * multJ;
@@ -1956,12 +1790,14 @@ function cgcnnConvCached(
       totalWeight += cw * multJ;
     }
 
-    filterPreActs.push(nodeFilterPreActs);
-    filterH1s.push(nodeFilterH1s);
-    filterOuts.push(nodeFilterOuts);
-    rbfs.push(nodeRbfs);
-    cutoffWts.push(nodeCutoffs);
-    totalWeights.push(totalWeight);
+    if (mode === 'train') {
+      filterPreActs.push(nodeFilterPreActs);
+      filterH1s.push(nodeFilterH1s);
+      filterOuts.push(nodeFilterOuts);
+      rbfs.push(nodeRbfs);
+      cutoffWts.push(nodeCutoffs);
+      totalWeights.push(totalWeight);
+    }
 
     if (totalWeight > 0) {
       for (let k = 0; k < HIDDEN_DIM; k++) aggUpdate[k] /= totalWeight;
@@ -1971,16 +1807,17 @@ function cgcnnConvCached(
     for (let k = 0; k < HIDDEN_DIM; k++) {
       hRes[k] = (inputEmbs[i][k] ?? 0) + aggUpdate[k];
     }
-    preNormActs.push(hRes);
-    newEmbeddings.push(hRes);
+    if (mode === 'train') preNormActs.push(hRes);
+    // LayerNorm after residual — same in both modes (fixes prior train/infer mismatch).
+    newEmbeddings.push(layerNorm(hRes));
   }
 
   for (let i = 0; i < nNodes; i++) graph.nodes[i].embedding = newEmbeddings[i];
 
-  return {
-    embeddings: newEmbeddings,
-    cache: { inputEmbs, filterPreActs, filterH1s, filterOuts, rbfs, preNormActs, cutoffWts, totalWeights, adaptiveLogits },
-  };
+  const cache = mode === 'train'
+    ? { inputEmbs, filterPreActs, filterH1s, filterOuts, rbfs, preNormActs, cutoffWts, totalWeights, adaptiveLogits }
+    : null;
+  return { embeddings: newEmbeddings, cache };
 }
 
 function attnLayerBackward(
@@ -2213,17 +2050,17 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
 
   const residual0 = saveResidual(graph.nodes);
 
-  attentionMessagePassingLayer(graph, weights.W_message, weights.W_update, weights.W_attn_query, weights.W_attn_key, true);
+  attnMessagePass(graph, weights.W_message, weights.W_update, weights.W_attn_query, weights.W_attn_key, true, 'infer', dropoutRng);
   if (dropoutRng) {
     for (const node of graph.nodes) {
-      node.embedding = applyDropout(node.embedding, MC_DROPOUT_RATE, dropoutRng);
+      node.embedding = applyDropout(node.embedding, MC_DROPOUT_RATE, dropoutRng, true);
     }
   }
 
-  cgcnnConvolutionLayer(graph, weights.W_filter1, weights.b_filter1, weights.W_filter2, weights.b_filter2, adaptLogits);
+  cgcnnConv(graph, weights.W_filter1, weights.b_filter1, weights.W_filter2, weights.b_filter2, adaptLogits, 'infer');
   if (dropoutRng) {
     for (const node of graph.nodes) {
-      node.embedding = applyDropout(node.embedding, MC_DROPOUT_RATE, dropoutRng);
+      node.embedding = applyDropout(node.embedding, MC_DROPOUT_RATE, dropoutRng, true);
     }
   }
 
@@ -2251,10 +2088,10 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
   }
 
   const residual1 = saveResidual(graph.nodes);
-  attentionMessagePassingLayer(graph, weights.W_message2, weights.W_update2, weights.W_attn_query2, weights.W_attn_key2);
+  attnMessagePass(graph, weights.W_message2, weights.W_update2, weights.W_attn_query2, weights.W_attn_key2, false, 'infer', dropoutRng);
   if (dropoutRng) {
     for (const node of graph.nodes) {
-      node.embedding = applyDropout(node.embedding, MC_DROPOUT_RATE, dropoutRng);
+      node.embedding = applyDropout(node.embedding, MC_DROPOUT_RATE, dropoutRng, true);
     }
   }
 
@@ -2267,10 +2104,10 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
 
   if (GNN_MSG_LAYERS >= 3) {
     const residual2 = saveResidual(graph.nodes);
-    attentionMessagePassingLayer(graph, weights.W_message3, weights.W_update3, weights.W_attn_query3, weights.W_attn_key3);
+    attnMessagePass(graph, weights.W_message3, weights.W_update3, weights.W_attn_query3, weights.W_attn_key3, false, 'infer', dropoutRng);
     if (dropoutRng) {
       for (const node of graph.nodes) {
-        node.embedding = applyDropout(node.embedding, MC_DROPOUT_RATE, dropoutRng);
+        node.embedding = applyDropout(node.embedding, MC_DROPOUT_RATE, dropoutRng, true);
       }
     }
     const g2 = sigmoid(gates[2] ?? 0);
@@ -2283,10 +2120,10 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
 
   if (GNN_MSG_LAYERS >= 4) {
     const residual3 = saveResidual(graph.nodes);
-    attentionMessagePassingLayer(graph, weights.W_message4, weights.W_update4, weights.W_attn_query4, weights.W_attn_key4);
+    attnMessagePass(graph, weights.W_message4, weights.W_update4, weights.W_attn_query4, weights.W_attn_key4, false, 'infer', dropoutRng);
     if (dropoutRng) {
       for (const node of graph.nodes) {
-        node.embedding = applyDropout(node.embedding, MC_DROPOUT_RATE, dropoutRng);
+        node.embedding = applyDropout(node.embedding, MC_DROPOUT_RATE, dropoutRng, true);
       }
     }
     const g3 = sigmoid(gates[3] ?? 0);
@@ -2333,7 +2170,7 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
   const z1 = vecAdd(matVecMul(weights.W_mlp1, pooledWithComp), weights.b_mlp1);
   const h1 = z1.map(v => v >= 0 ? v : 0.01 * v);
   if (dropoutRng) {
-    const dropped = applyDropout(h1, MC_DROPOUT_RATE, dropoutRng);
+    const dropped = applyDropout(h1, MC_DROPOUT_RATE, dropoutRng, true);
     for (let i = 0; i < h1.length; i++) h1[i] = dropped[i];
   }
   const latentEmbedding = [...h1];
@@ -2388,7 +2225,7 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
   };
 }
 
-function GNNPredictForTraining(graph: CrystalGraph, weights: GNNWeights): { pred: GNNPrediction; cache: GNNForwardCache } {
+function GNNPredictForTraining(graph: CrystalGraph, weights: GNNWeights, msgRng?: () => number): { pred: GNNPrediction; cache: GNNForwardCache } {
   const nNodes = graph.nodes.length;
   const inputProjInputs: number[][] = [];
   const inputProjPreActs: number[][] = [];
@@ -2417,10 +2254,10 @@ function GNNPredictForTraining(graph: CrystalGraph, weights: GNNWeights): { pred
     : undefined;
 
   const residual0 = saveResidual(graph.nodes);
-  const { cache: ac0 } = attnMessagePassCached(graph, weights.W_message, weights.W_update, weights.W_attn_query, weights.W_attn_key, true);
+  const { cache: ac0 } = attnMessagePass(graph, weights.W_message, weights.W_update, weights.W_attn_query, weights.W_attn_key, true, 'train', msgRng) as { embeddings: number[][]; cache: AttnLayerCache };
   attnCaches.push(ac0);
 
-  const { cache: cgcnnC } = cgcnnConvCached(graph, weights.W_filter1, weights.b_filter1, weights.W_filter2, weights.b_filter2, adaptLogits);
+  const { cache: cgcnnC } = cgcnnConv(graph, weights.W_filter1, weights.b_filter1, weights.W_filter2, weights.b_filter2, adaptLogits, 'train') as { embeddings: number[][]; cache: CGCNNLayerCache };
 
   if (graph.threeBodyFeatures.length > 0) {
     threeBodyInteractionLayer(graph, weights.W_3body, weights.W_3body_update);
@@ -2444,7 +2281,7 @@ function GNNPredictForTraining(graph: CrystalGraph, weights: GNNWeights): { pred
   }
 
   const residual1 = saveResidual(graph.nodes);
-  const { cache: ac1 } = attnMessagePassCached(graph, weights.W_message2, weights.W_update2, weights.W_attn_query2, weights.W_attn_key2);
+  const { cache: ac1 } = attnMessagePass(graph, weights.W_message2, weights.W_update2, weights.W_attn_query2, weights.W_attn_key2, false, 'train', msgRng) as { embeddings: number[][]; cache: AttnLayerCache };
   attnCaches.push(ac1);
   const g1 = sigmoid(gates[1] ?? 0);
   for (let i = 0; i < nNodes; i++) {
@@ -2455,7 +2292,7 @@ function GNNPredictForTraining(graph: CrystalGraph, weights: GNNWeights): { pred
 
   if (GNN_MSG_LAYERS >= 3) {
     const residual2 = saveResidual(graph.nodes);
-    const { cache: ac2 } = attnMessagePassCached(graph, weights.W_message3, weights.W_update3, weights.W_attn_query3, weights.W_attn_key3);
+    const { cache: ac2 } = attnMessagePass(graph, weights.W_message3, weights.W_update3, weights.W_attn_query3, weights.W_attn_key3, false, 'train', msgRng) as { embeddings: number[][]; cache: AttnLayerCache };
     attnCaches.push(ac2);
     const g2 = sigmoid(gates[2] ?? 0);
     for (let i = 0; i < nNodes; i++) {
@@ -2467,7 +2304,7 @@ function GNNPredictForTraining(graph: CrystalGraph, weights: GNNWeights): { pred
 
   if (GNN_MSG_LAYERS >= 4) {
     const residual3 = saveResidual(graph.nodes);
-    const { cache: ac3 } = attnMessagePassCached(graph, weights.W_message4, weights.W_update4, weights.W_attn_query4, weights.W_attn_key4);
+    const { cache: ac3 } = attnMessagePass(graph, weights.W_message4, weights.W_update4, weights.W_attn_query4, weights.W_attn_key4, false, 'train', msgRng) as { embeddings: number[][]; cache: AttnLayerCache };
     attnCaches.push(ac3);
     const g3 = sigmoid(gates[3] ?? 0);
     for (let i = 0; i < nNodes; i++) {
@@ -2961,9 +2798,45 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
 
   // Pre-bucket indices by Tc for stratified sampling.
   // high-Tc (≥40K) are the discovery targets — guarantee they appear in every batch.
-  const hiTcBucket  = Array.from({ length: trainingData.length }, (_, i) => i).filter(i => trainingData[i].tc >= 40);
-  const loTcBucket  = Array.from({ length: trainingData.length }, (_, i) => i).filter(i => trainingData[i].tc > 0 && trainingData[i].tc < 40);
-  const nonScBucket = Array.from({ length: trainingData.length }, (_, i) => i).filter(i => trainingData[i].tc === 0);
+  // ── Curriculum Learning: pre-compute per-sample difficulty ────────────────────
+  // difficulty ∈ [0,1] = weighted combination of:
+  //   0.3 × composition complexity (# elements + entropy)
+  //   0.2 × structural complexity (nodes + edges)
+  //   0.5 × target extremeness (Tc / 150K)
+  // Low difficulty = easy (few elements, low Tc) → model sees these first.
+  const sampleDifficulty = new Float64Array(trainingData.length);
+  for (let si = 0; si < trainingData.length; si++) {
+    const sample = trainingData[si];
+    const ckey = graphCacheKey(sample.formula, sample.prototype, sample.structure);
+    const g = graphCache.get(ckey);
+    // Composition complexity: nElements / 5 + normalised Shannon entropy
+    const counts = parseFormulaCounts(sample.formula);
+    const elems = Object.values(counts) as number[];
+    const nEl = elems.length;
+    const total = elems.reduce((a, b) => a + b, 0);
+    let entropy = 0;
+    for (const c of elems) { const p = c / total; if (p > 0) entropy -= p * Math.log(p); }
+    const compComp = nEl / 5 + (nEl > 1 ? entropy / Math.log(nEl) : 0);
+    // Structural complexity
+    const structComp = g ? (g.nodes.length / 20 + g.edges.length / 50) : 0.1;
+    // Tc extremeness: 0 for non-SC, scales to 1 at 150K
+    const actualTcK = sample.qeDFPTTc ?? sample.tc;
+    const tcDiff = actualTcK > 0 ? Math.min(1, actualTcK / 150) : 0;
+    sampleDifficulty[si] = Math.min(1,
+      0.3 * Math.min(1, compComp) +
+      0.2 * Math.min(1, structComp) +
+      0.5 * tcDiff
+    );
+  }
+
+  // Per-sample absolute prediction error — updated after each epoch for hard mining.
+  // Initialised to 0; first epoch sees static difficulty only.
+  const sampleLastError = new Float64Array(trainingData.length).fill(0);
+
+  // ── Adaptive effective difficulty: blends static base + normalised model error ──
+  // After each epoch: effectiveDiff[i] = 0.5 * baseDiff[i] + 0.5 * norm(|pred-true|)
+  // Makes the curriculum react to where the model currently struggles most.
+  const sampleEffectiveDifficulty = new Float64Array(sampleDifficulty);
 
   const indices = Array.from({ length: trainingData.length }, (_, i) => i);
 
@@ -2998,7 +2871,7 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
           const g = graphCache.get(cKey)!;
           const orig = origEmbeddings.get(cKey)!;
           for (let ni = 0; ni < g.nodes.length; ni++) g.nodes[ni].embedding = [...orig[ni]];
-          const { pred: prePred, cache: preCache } = GNNPredictForTraining(g, weights);
+          const { pred: prePred, cache: preCache } = GNNPredictForTraining(g, weights, rng);
           const feErr = prePred.formationEnergy - s.formationEnergy!;
           // Only FE loss — zero gradient on all other outputs.
           const preDLdOut = new Array(OUTPUT_DIM).fill(0);
@@ -3050,31 +2923,77 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
     let sumScProbNonSC = 0, nScProbNonSC = 0; // avg P(SC) for non-SC samples
     let out8SumErr2 = 0, out8SumActual = 0, out8SumActual2 = 0, nOut8 = 0; // out[8]-only R²
 
-    // Stratified shuffle: interleave high-Tc samples so every batch sees them.
-    // Shuffle each bucket independently, then interleave high-Tc evenly through others.
+    // ── Curriculum Learning: difficulty-gated stratified sampling ────────────────
+    // Phase 1 (progress < 0.25): only easy samples (difficulty ≤ 0.30) — model
+    //   learns basic bonding / non-SC discrimination before seeing hard cases.
+    // Phase 2 (progress 0.25-1.0): threshold opens linearly to 1.0, admitting
+    //   all samples.  Hard samples still admitted stochastically below threshold.
+    // Hard example mining (progress > 0.4): samples whose last-epoch absolute
+    //   error exceeds the mean are oversampled up to 5× to close the worst gaps.
+    const progress = epoch / Math.max(1, epochs);
+    // Threshold: opens from 0.30 at epoch 0 → 1.0 by epoch 75%
+    const curriculumThreshold = Math.min(1.0, 0.30 + progress * 0.93);
+    // Compute mean absolute error for hard-mining normalisation (SC samples only)
+    let meanHardError = 0, nHardErr = 0;
+    if (progress > 0.4) {
+      for (let si = 0; si < trainingData.length; si++) {
+        if ((trainingData[si].qeDFPTTc ?? trainingData[si].tc) > 0) {
+          meanHardError += sampleLastError[si];
+          nHardErr++;
+        }
+      }
+      if (nHardErr > 0) meanHardError /= nHardErr;
+    }
+    // Build curriculum-eligible index list with probabilistic hard-sample inclusion.
+    // Each sample is included once; hard-mined samples are duplicated up to 4 extra times.
+    const curriculumPool: number[] = [];
+    for (let si = 0; si < trainingData.length; si++) {
+      const diff = sampleEffectiveDifficulty[si];
+      // Soft gate: always include easy samples; admit hard ones with decaying prob.
+      const excess = Math.max(0, diff - curriculumThreshold);
+      const inclusionProb = Math.exp(-3.5 * excess);
+      if (rng() > inclusionProb) continue;
+      curriculumPool.push(si);
+      // Hard example mining: oversample high-error samples (up to 4 extra copies)
+      if (progress > 0.4 && meanHardError > 0) {
+        const sample = trainingData[si];
+        const isSCi = (sample.qeDFPTTc ?? sample.tc) > 0;
+        if (isSCi) {
+          const normErr = sampleLastError[si] / (meanHardError + 1e-6);
+          // 1 extra copy per full mean-error above threshold 1.0, capped at 4
+          const extraCopies = Math.min(4, Math.floor(Math.max(0, normErr - 1.0)));
+          for (let c = 0; c < extraCopies; c++) curriculumPool.push(si);
+        }
+      }
+    }
+    // Shuffle the curriculum pool, then interleave high-Tc evenly so every batch sees them.
     const shuf = (arr: number[]) => {
       for (let i = arr.length - 1; i > 0; i--) {
         const j = Math.floor(rng() * (i + 1));
         [arr[i], arr[j]] = [arr[j], arr[i]];
       }
     };
-    shuf(hiTcBucket); shuf(loTcBucket); shuf(nonScBucket);
-    // Merge low-Tc and non-SC into one stream, then interleave high-Tc evenly
-    const mainstream = [...loTcBucket, ...nonScBucket];
-    shuf(mainstream);
-    if (hiTcBucket.length === 0) {
-      for (let i = 0; i < indices.length; i++) indices[i] = mainstream[i] ?? i;
+    // Re-bucket within the curriculum pool
+    const curHiTc  = curriculumPool.filter(i => trainingData[i].tc >= 40);
+    const curOther = curriculumPool.filter(i => trainingData[i].tc <  40);
+    shuf(curHiTc); shuf(curOther);
+    // Ensure indices array is large enough; pad/trim to trainingData.length
+    const poolSize = Math.max(trainingData.length, curriculumPool.length);
+    if (curHiTc.length === 0) {
+      for (let i = 0; i < indices.length; i++) indices[i] = curOther[i % Math.max(1, curOther.length)];
     } else {
-      // Place one high-Tc sample every `step` mainstream samples
-      const step = Math.max(1, Math.floor(mainstream.length / (hiTcBucket.length + 1)));
+      const step = Math.max(1, Math.floor(curOther.length / (curHiTc.length + 1)));
       let hi = 0, lo = 0, out = 0;
       while (out < indices.length) {
-        for (let s = 0; s < step && lo < mainstream.length && out < indices.length; s++) indices[out++] = mainstream[lo++];
-        if (hi < hiTcBucket.length && out < indices.length) indices[out++] = hiTcBucket[hi++];
+        for (let s = 0; s < step && lo < curOther.length && out < indices.length; s++) indices[out++] = curOther[lo++];
+        if (hi < curHiTc.length && out < indices.length) indices[out++] = curHiTc[hi++];
       }
-      while (lo < mainstream.length && out < indices.length) indices[out++] = mainstream[lo++];
-      while (hi < hiTcBucket.length && out < indices.length) indices[out++] = hiTcBucket[hi++];
+      while (lo < curOther.length  && out < indices.length) indices[out++] = curOther[lo++];
+      while (hi < curHiTc.length   && out < indices.length) indices[out++] = curHiTc[hi++];
+      // Fill any remaining slots (pool smaller than trainingData.length in early curriculum)
+      while (out < indices.length) indices[out] = curriculumPool[out % Math.max(1, curriculumPool.length)], out++;
     }
+    void poolSize; // used implicitly via indices fill above
 
     const numBatches = Math.ceil(trainingData.length / batchSize);
 
@@ -3129,7 +3048,7 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         for (let ni = 0; ni < graph.nodes.length; ni++) {
           graph.nodes[ni].embedding = [...orig[ni]];
         }
-        const { pred, cache } = GNNPredictForTraining(graph, weights);
+        const { pred, cache } = GNNPredictForTraining(graph, weights, rng);
         const nN = graph.nodes.length;
 
         // Prefer DFPT-derived Tc (from real QE λ) over the ML-estimated value when available.
@@ -3175,6 +3094,8 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
           out8SumActual  += actualTcK;
           out8SumActual2 += actualTcK * actualTcK;
           nOut8++;
+          // Record absolute error for hard-example mining in the next epoch.
+          sampleLastError[idx] = Math.abs(predTcK - actualTcK);
         }
         // P(SC) convergence tracking.
         if (isSC) { sumScProbSC += pSC; nScProbSC++; }
@@ -3197,13 +3118,24 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         const bceLoss  = -(scTarget * Math.log(bceClamp) + (1 - scTarget) * Math.log(1 - bceClamp));
         // BCE loss is weighted by sampleW so DFT-verified and high-Tc samples
         // push the classifier harder than low-confidence experimental entries.
-        totalLoss += feWeight * feError * feError + sampleW * bceLoss;
+        // v16: Uncertainty-weighted losses (Kendall & Gal 2017).
+        // Precision precX = exp(-2·sX), clamp sX ∈ [-2,2] → precX ∈ [0.018, 55].
+        const sTc  = Math.max(-2, Math.min(2, weights.log_sigma_tasks?.[0] ?? 0));
+        const sAD  = Math.max(-2, Math.min(2, weights.log_sigma_tasks?.[1] ?? 0));
+        const sFE  = Math.max(-2, Math.min(2, weights.log_sigma_tasks?.[2] ?? 0));
+        const precTc = Math.exp(-2 * sTc);
+        const precAD = Math.exp(-2 * sAD);
+        const precFE = Math.exp(-2 * sFE);
+        const feLossRaw = feWeight * feError * feError;
+        totalLoss += (hasFormationEnergy ? precFE * feLossRaw + sFE : 0) + sampleW * bceLoss;
+        if (hasFormationEnergy) gradLogSigma[2] += -2 * precFE * feLossRaw + 1;
         // Direct Tc regression (SC samples only). Base coefficient 6.0 × sampleW.
         // out[8] is trained as a real number targeting log1p(Tc/10)/TC_LOG_SCALE ∈ [0,1].
         // No sigmoid activation — gradient = 12*(out8 - target), never vanishes.
         const tcNormTarget = isSC ? Math.log1p(actualTcK / 10) / TC_LOG_SCALE : 0;
         const tcDirectErr = isSC ? (directOut8 - tcNormTarget) : 0;
-        if (isSC) totalLoss += sampleW * 6.0 * tcDirectErr * tcDirectErr;
+        const tcLossRaw = sampleW * 6.0 * tcDirectErr * tcDirectErr;
+        if (isSC) { totalLoss += precTc * tcLossRaw + sTc; gradLogSigma[0] += -2 * precTc * tcLossRaw + 1; }
         totalSamples++;
 
         // ── Allen-Dynes chain-rule gradient setup ───────────────────────────────
@@ -3220,8 +3152,11 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         // omegaLog is in Kelvin; divide by 1.4388 to match the forward-pass unit fix
         const adTc           = allenDynesTcRaw(adLambda, adOmegaLog / 1.4388, FIXED_MU_STAR);
         // Allen-Dynes auxiliary loss (0.1× weight): soft physics prior keeping λ/ω_log calibrated.
+        // v16: Scaled by precAD (uncertainty weight for the physics / AD task).
         const allenDynesError = adTc / 300 - tcTarget;
-        totalLoss += 0.1 * scW * allenDynesError * allenDynesError;
+        const adLossRaw = 0.1 * scW * allenDynesError * allenDynesError;
+        totalLoss += precAD * adLossRaw + (isSC ? sAD : 0);
+        if (isSC) gradLogSigma[1] += -2 * precAD * adLossRaw + 1;
         // Use material-specific μ* from DFPT (JARVIS/QE) when available; fall back to 0.10.
         // Improves gradient accuracy for cuprates (μ*~0.15) and hydrides (μ*~0.08).
         const sampleMuStar = (sample.muStar != null && Number.isFinite(sample.muStar) && sample.muStar > 0)
@@ -3401,12 +3336,15 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         // iron_based, nickelate: _physLossW = 0 — no reliable formula, data-driven only.
 
         const _physErr = _physLossW > 0 ? (_physAdTc / 300 - tcTarget) : 0;
-        if (_physLossW > 0) totalLoss += _physLossW * scW * _physErr * _physErr;
-        const _dLossDAd = _physLossW > 0 ? (_physLossW * scW * 2 * _physErr / 300) : 0;
+        // v16: Family physics loss also scaled by precAD (same task as Allen-Dynes).
+        if (_physLossW > 0) totalLoss += precAD * (_physLossW * scW * _physErr * _physErr);
+        const _dLossDAd = _physLossW > 0 ? (precAD * _physLossW * scW * 2 * _physErr / 300) : 0;
 
         const dLdOut = new Array(OUTPUT_DIM).fill(0);
-        dLdOut[0] = hasFormationEnergy ? clipGrad(2 * feError * 0.1) : 0;
+        // v16: Scale FE gradient by precFE (uncertainty weighting).
+        dLdOut[0] = hasFormationEnergy ? clipGrad(precFE * 2 * feError * 0.1) : 0;
         dLdOut[1] = 0;
+        // v16: Allen-Dynes / physics gradients scaled by precAD (included in _dLossDAd above).
         dLdOut[2] = clipGrad((_dLossDAd * _dPhysTcdOmegaLog + omegaLogGradBoost) * dOmegaLogdOut2);
         dLdOut[3] = 0;
         dLdOut[4] = clipGrad(_dLossDAd * _dPhysTcdLambda * dLambdadOut4);
@@ -3416,8 +3354,33 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         // out[7]: standard BCE gradient
         // dL/d(out[7]) = sampleW * (σ(out7) - target): BCE gradient scaled by sample weight
         dLdOut[7] = clipGrad(sampleW * (sigOut7 - scTarget));
-        // dL/d(out[8]) = sampleW * 2*6 * tcDirectErr  (no sigmoid → no vanishing gradient)
-        dLdOut[8] = isSC ? clipGrad(sampleW * 12.0 * tcDirectErr) : 0;
+        // v16: dL/d(out[8]) scaled by precTc (uncertainty weighting for Tc task).
+        dLdOut[8] = isSC ? clipGrad(precTc * sampleW * 12.0 * tcDirectErr) : 0;
+        // v16: Cross-task backward — Tc loss flows back to λ (out[4]) via α·sigmoid'(out[4]).
+        const alphaCross = weights.alpha_lambda_to_tc ?? 0;
+        gradAlphaLambdaToTc += dLdOut[8] * (cache.lambdaSigForTc ?? 0);
+        if (alphaCross !== 0) {
+          const lSig = cache.lambdaSigForTc ?? 0;
+          dLdOut[4] += clipGrad(dLdOut[8] * alphaCross * lSig * (1 - lSig));
+        }
+
+        // v16: Physics constraint penalties — prevent unphysical λ/ω_log for SC materials.
+        // Outputs are sigmoid-clamped so "< 0" manifests as near-zero values.
+        // Penalty fires when adLambda < 0.1 or adOmegaLog < 50 K for SC materials.
+        if (isSC) {
+          const lambdaPenalty = 0.5 * Math.max(0, 0.1 - adLambda);
+          if (lambdaPenalty > 0) {
+            totalLoss += lambdaPenalty * lambdaPenalty;
+            // d(penalty)/d(out[4]) = -2 * penalty * dLambda/d(out[4])
+            dLdOut[4] += clipGrad(-2 * lambdaPenalty * dLambdadOut4);
+          }
+          const omegaPenalty = 0.5 * Math.max(0, 50 - adOmegaLog);
+          if (omegaPenalty > 0) {
+            totalLoss += omegaPenalty * omegaPenalty;
+            // d(penalty)/d(out[2]) = -2 * penalty * dOmegaLog/d(out[2])
+            dLdOut[2] += clipGrad(-2 * omegaPenalty * dOmegaLogdOut2);
+          }
+        }
 
         // Uncertainty head (W_mlp2_var) receives no gradient — NLL removed.
         // Uncertainty outputs can be calibrated post-training via isotonic regression.
@@ -3742,6 +3705,21 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         weights.b_cls2 -= lr * (adamBcls2.m[0] / bc1) / (Math.sqrt(adamBcls2.v[0] / bc2) + adamEps);
         weights.b_cls2 *= (1 - lr * WEIGHT_DECAY);
       }
+      // v16: Adam update for cross-task coupling scalar α (no weight decay — it's a coupling, not a weight).
+      {
+        const gAlpha = gradAlphaLambdaToTc * invN;
+        adamAlphaLambdaToTc.m[0] = adamBeta1 * adamAlphaLambdaToTc.m[0] + (1 - adamBeta1) * gAlpha;
+        adamAlphaLambdaToTc.v[0] = adamBeta2 * adamAlphaLambdaToTc.v[0] + (1 - adamBeta2) * gAlpha * gAlpha;
+        weights.alpha_lambda_to_tc -= lr * (adamAlphaLambdaToTc.m[0] / bc1) / (Math.sqrt(adamAlphaLambdaToTc.v[0] / bc2) + adamEps);
+      }
+      // v16: Adam update for log-sigma uncertainty weights (no weight decay — regularized by the +s_i term).
+      for (let i = 0; i < 3; i++) {
+        const gS = gradLogSigma[i] * invN;
+        adamLogSigma.m[i] = adamBeta1 * adamLogSigma.m[i] + (1 - adamBeta1) * gS;
+        adamLogSigma.v[i] = adamBeta2 * adamLogSigma.v[i] + (1 - adamBeta2) * gS * gS;
+        weights.log_sigma_tasks[i] -= lr * (adamLogSigma.m[i] / bc1) / (Math.sqrt(adamLogSigma.v[i] / bc2) + adamEps);
+        weights.log_sigma_tasks[i] = Math.max(-2, Math.min(2, weights.log_sigma_tasks[i]));
+      }
       // Graph layer AdamW — lr * 0.5 (was 0.3). Direct Tc path delivers strong gradients
       // to the graph layers so they need a higher LR to update meaningfully.
       const graphLR = lr * 0.5;
@@ -3813,6 +3791,23 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
       ]) { invalidateFlatCache(wMat); }
     }
 
+    // ── Adaptive difficulty update (end of epoch) ────────────────────────────────
+    // Blend static base difficulty with normalised model error so the curriculum
+    // reacts to where the model currently struggles, not just dataset statistics.
+    // Normalise by 4×meanError: average-error SC sample → ~0.25, 4×-mean → 1.0.
+    // Non-SC samples keep sampleLastError=0 — their difficulty is base-only (correct).
+    {
+      let errSum = 0, errN = 0;
+      for (let si = 0; si < trainingData.length; si++) {
+        if (sampleLastError[si] > 0) { errSum += sampleLastError[si]; errN++; }
+      }
+      const errNorm = errN > 0 ? 4.0 * (errSum / errN) : 1.0;
+      for (let si = 0; si < trainingData.length; si++) {
+        const normErr = Math.min(1.0, sampleLastError[si] / (errNorm + 1e-6));
+        sampleEffectiveDifficulty[si] = 0.5 * sampleDifficulty[si] + 0.5 * normErr;
+      }
+    }
+
     // Progress bar — log every ~20% of epochs, always log first and last.
     const logInterval = Math.max(1, Math.ceil(epochs / 5));
     const isLast = epoch === epochs - 1;
@@ -3838,7 +3833,9 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         const ssTot8 = out8SumActual2 - (out8SumActual * out8SumActual) / nOut8;
         out8R2Str = (ssTot8 > 0 ? 1 - out8SumErr2 / ssTot8 : 0).toFixed(3);
       }
-      console.log(`${pfx} ${bar} ${String(pct).padStart(3)}% | Epoch ${epoch + 1}/${epochs} | loss=${avgLoss.toFixed(4)} | R²=${r2Str} RMSE=${rmseStr} | P(SC|SC)=${avgPscSC} P(SC|¬SC)=${avgPscNonSC} | reg-R²=${out8R2Str} | lr=${lr.toExponential(2)}`);
+      const curThr = Math.min(1.0, 0.30 + progress * 0.93);
+      const poolPct = Math.round(100 * curriculumPool.length / Math.max(1, trainingData.length));
+      console.log(`${pfx} ${bar} ${String(pct).padStart(3)}% | Epoch ${epoch + 1}/${epochs} | loss=${avgLoss.toFixed(4)} | R²=${r2Str} RMSE=${rmseStr} | P(SC|SC)=${avgPscSC} P(SC|¬SC)=${avgPscNonSC} | reg-R²=${out8R2Str} | lr=${lr.toExponential(2)} | curr=${curThr.toFixed(2)} pool=${poolPct}%`);
     }
 
     // yield after each training epoch so heartbeat timers and HTTP requests can proceed
@@ -3862,6 +3859,15 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
   }
   if (!Number.isFinite(weights.dense_skip_gate)) weights.dense_skip_gate = -2.0;
   if (!Number.isFinite(weights.b_cls2)) weights.b_cls2 = 0.0;
+  // v16: Scrub cross-task coupling + uncertainty weights.
+  if (!Number.isFinite(weights.alpha_lambda_to_tc)) weights.alpha_lambda_to_tc = 0.0;
+  if (!weights.log_sigma_tasks || weights.log_sigma_tasks.length < 3) {
+    weights.log_sigma_tasks = [0.0, 0.0, 0.0];
+  } else {
+    for (let i = 0; i < 3; i++) {
+      if (!Number.isFinite(weights.log_sigma_tasks[i])) weights.log_sigma_tasks[i] = 0.0;
+    }
+  }
 
   for (const wMat of [
     weights.W_message, weights.W_update, weights.W_message2, weights.W_update2,
@@ -4623,7 +4629,7 @@ if (isMainThread) setTimeout(async () => {
     }
 
     // Yield so other event loop work (HTTP, DFT, etc.) can proceed between phases
-    await new Promise(resolve => setTimeout(resolve, 300));
+    await new Promise<void>(resolve => setTimeout(resolve, 0));
 
     // =====================================================================
     // Phase 2: Pull MP batch 1 (DB cache + up to 500 from API) if R² ≤ 0
@@ -4640,14 +4646,14 @@ if (isMainThread) setTimeout(async () => {
         console.warn(`[GNN] Phase 2 MP fetch failed: ${mpErr?.message?.slice(0, 100)}`);
       }
 
-      await new Promise(resolve => setTimeout(resolve, 300));
+      await new Promise<void>(resolve => setTimeout(resolve, 0));
       ensembleModels = await trainEnsembleAsync(currentTrainingData);
       invalidateGNNModel();
       setCachedEnsemble(ensembleModels, currentTrainingData.map(t => ({ formula: t.formula, tc: t.tc })));
       const v2 = logGNNVersion("startup-mp-batch1", currentTrainingData.length, dftTrainingDataset.length, mpSeeded1);
       console.log(`[GNN] Phase 2 (MP batch1 +${mpSeeded1}, N=${currentTrainingData.length}): R²=${v2.r2}`);
 
-      await new Promise(resolve => setTimeout(resolve, 300));
+      await new Promise<void>(resolve => setTimeout(resolve, 0));
 
       // ==================================================================
       // Phase 3: Fetch next MP batch (skip=1000) if R² still ≤ 0
@@ -4669,7 +4675,7 @@ if (isMainThread) setTimeout(async () => {
         }
 
         if (currentTrainingData.length > prevN) {
-          await new Promise(resolve => setTimeout(resolve, 300));
+          await new Promise<void>(resolve => setTimeout(resolve, 0));
           ensembleModels = await trainEnsembleAsync(currentTrainingData);
           invalidateGNNModel();
           setCachedEnsemble(ensembleModels, currentTrainingData.map(t => ({ formula: t.formula, tc: t.tc })));
