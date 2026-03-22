@@ -467,7 +467,7 @@ async function loadJarvisDFT3DContrast(existingFormulas: Set<string>, scCount: n
        FROM supercon_external_entries
        WHERE source IN ('jarvis-dft3d', 'JARVIS-DFT3D-Metallic') AND (tc IS NULL OR tc = 0)
        ORDER BY RANDOM()
-       LIMIT ${Math.min(scCount, 2000)}`
+       LIMIT ${Math.min(scCount, 20000)}`
     );
     const items: any[] = (rows as any).rows ?? (Array.isArray(rows) ? rows : []);
     const samples: TrainingSample[] = [];
@@ -505,10 +505,10 @@ async function loadJarvisDFT3DContrast(existingFormulas: Set<string>, scCount: n
 async function loadMPContrastSamples(existingFormulas: Set<string>, scCount: number): Promise<TrainingSample[]> {
   try {
     const rows = await db.execute(
-      `SELECT formula, data FROM mp_material_cache WHERE data_type = 'summary' LIMIT 2000`
+      `SELECT formula, data FROM mp_material_cache WHERE data_type = 'summary' LIMIT 10000`
     );
     const items: any[] = (rows as any).rows ?? (Array.isArray(rows) ? rows : []);
-    const maxContrast = scCount;  // 1:1 cap — avoids 60/40 Tc=0 majority diluting SC signal
+    const maxContrast = scCount;  // 1:1 cap — avoids Tc=0 majority diluting SC signal
     const samples: TrainingSample[] = [];
     for (const row of items) {
       if (samples.length >= maxContrast) break;

@@ -47,7 +47,7 @@ export interface CrystalGraph {
   formula: string;
   prototype?: string;
   pressureGpa?: number;
-  globalFeatures?: number[]; // 32-dim: 23 composition/physics + 3 data-availability bits + 6 source one-hot
+  globalFeatures?: number[]; // 23-dim: 13 composition + 6 physics hints + 4 engineered features
 }
 
 /**
@@ -257,7 +257,7 @@ const HIDDEN_DIM = 48;
 const N_GAUSSIAN_BASIS = 40;             // expanded from 20 — denser RBF gives finer distance discrimination
 const EDGE_DIM = N_GAUSSIAN_BASIS + 4;   // derived: 40 RBF + bond order, EN diff, ionic char, radius sum
 const OUTPUT_DIM = 16;
-const GLOBAL_COMP_DIM = 32; // 23 composition/physics + 3 data-availability bits + 6 source one-hot
+const GLOBAL_COMP_DIM = 23;
 // Coulomb pseudopotential μ* — fixed at conventional BCS value.
 // Typical range: 0.10 (metals), 0.12-0.13 (hydrides, higher Coulomb screening).
 const FIXED_MU_STAR = 0.10;
@@ -1331,12 +1331,10 @@ function computeAtomicMismatch(counts: Record<string, number>): number {
   return Math.sqrt(Math.max(0, delta2));
 }
 
-// Computes GLOBAL_COMP_DIM (32) composition-level features injected at the MLP head.
+// Computes GLOBAL_COMP_DIM (23) composition-level features injected at the MLP head.
 // [0-12]  13 composition features (EN, d-occ, VEC, Debye, mismatch, nEl, stdEN, H-flag, TM frac, entropy, ENdiff, mass, radius-std)
 // [13-18]  6 physics features from PhysicsFeatureHints (λ, logω, DOS, FE, isCuprate, isIronBased)
 // [19-22]  4 engineered features (pressure, MgB2-type, heavy-fermion, mean TM d-count)
-// [23-25]  3 data-availability bits (hasLambda, hasOmegaLog, hasFE) — tells GNN which fields are measured vs proxy
-// [26-31]  6 source one-hot (qe-dft, hamidieh, jarvis-sc, 3dsc-mp, contrast-jarvis, contrast-mp)
 // Hints contain measured/estimated physics — not model outputs — so there is no training leakage.
 function computeGlobalCompositionFeatures(counts: Record<string, number>, hints?: PhysicsFeatureHints, pressureGpa?: number): number[] {
   const els = Object.entries(counts);
@@ -1447,27 +1445,6 @@ function computeGlobalCompositionFeatures(counts: Record<string, number>, hints?
     ? tmEls.reduce((s, [el, n]) => s + (n / tmCount) * getDOrbitalOccupancy(getElementData(el)?.atomicNumber ?? 1), 0)
     : 0.0;
 
-  // ── Data availability mask [23-25] ──────────────────────────────────────────
-  // Tells the GNN which physics features are real measurements vs proxy fallbacks.
-  // Without this, a NIMS sample (no lambda measured) and a QE sample (lambda from DFPT)
-  // look identical to the network — it can't weight the physics features appropriately.
-  const hasLambdaMeasured  = hints?.hasLambdaMeasured  ? 1.0 : 0.0;
-  const hasOmegaLogMeasured = hints?.hasOmegaLogMeasured ? 1.0 : 0.0;
-  const hasFEMeasured      = hints?.hasFEMeasured      ? 1.0 : 0.0;
-
-  // ── Source one-hot [26-31] ────────────────────────────────────────────────────
-  // Lets the GNN learn source-specific biases (e.g. 3DSC has different Tc distribution
-  // than hamidieh; contrast samples from MP have no physics at all).
-  // At inference time all six bits are 0 (source unknown) — the model falls back to
-  // composition/physics features alone, which is correct behaviour.
-  const src = hints?.sourceTag ?? '';
-  const srcQE            = src === 'qe-dft'           ? 1.0 : 0.0;  // [26]
-  const srcHamidieh      = src === 'hamidieh'          ? 1.0 : 0.0;  // [27]
-  const srcJarvisSC      = src.startsWith('jarvis-supercon') ? 1.0 : 0.0; // [28]
-  const src3DSC          = src === '3dsc-mp'           ? 1.0 : 0.0;  // [29]
-  const srcContrastJarvis = src === 'contrast-jarvis'  ? 1.0 : 0.0;  // [30]
-  const srcContrastMP    = src === 'contrast-mp'       ? 1.0 : 0.0;  // [31]
-
   return [
     meanEN / 4.0,                           // [0] mean Pauling EN — ionicity proxy
     meanD,                                  // [1] mean d-orbital filling — BCS coupling proxy
@@ -1492,17 +1469,6 @@ function computeGlobalCompositionFeatures(counts: Record<string, number>, hints?
     isMgB2Type,                             // [20] MgB2-type flag — two-band phonon SC
     heavyFermionFeat,                       // [21] heavy-fermion/f-electron hint — Kondo-lattice SC
     meanTMdCount,                           // [22] mean d-count per TM — Stoner criterion / DOS proxy
-    // ── Data availability mask ───────────────────────────────────────────────
-    hasLambdaMeasured,                      // [23] 1 if λ is a real DFPT measurement, 0 if proxy
-    hasOmegaLogMeasured,                    // [24] 1 if ω_log is a real DFPT measurement
-    hasFEMeasured,                          // [25] 1 if formation energy was measured
-    // ── Source one-hot ───────────────────────────────────────────────────────
-    srcQE,                                  // [26] quantum_engine_dataset (DFT+phonons)
-    srcHamidieh,                            // [27] NIMS SuperCon (experimental Tc, often no λ)
-    srcJarvisSC,                            // [28] JARVIS SuperCon-Chem/3D/2D
-    src3DSC,                                // [29] 3DSC-MP (MP-matched, structural data, no λ)
-    srcContrastJarvis,                      // [30] JARVIS DFT3D metallic negatives (Tc=0)
-    srcContrastMP,                          // [31] MP metallic contrast samples (Tc=0)
   ];
 }
 
@@ -2839,15 +2805,19 @@ function migrateWeights(w: GNNWeights, rng: () => number): GNNWeights {
   if (typeof w.dense_skip_gate !== 'number' || !Number.isFinite(w.dense_skip_gate)) {
     w.dense_skip_gate = -2.0;
   }
-  // v15: Dedicated classification head — initialize if absent; zero-pad if GLOBAL_COMP_DIM grew.
+  // v15: Dedicated classification head — initialize if absent; fix width if GLOBAL_COMP_DIM changed.
   const expectedClsCols = HIDDEN_DIM * 2 + GLOBAL_COMP_DIM;
   if (!w.W_cls1 || w.W_cls1.length !== CLS_DIM) {
     w.W_cls1 = initMatrix(CLS_DIM, expectedClsCols, rng, Math.sqrt(2.0 / expectedClsCols));
   } else if (w.W_cls1[0]?.length < expectedClsCols) {
-    // Zero-pad new columns so old trained weights are preserved; GNN learns new features incrementally.
     const padCls = expectedClsCols - w.W_cls1[0].length;
     for (const row of w.W_cls1) {
       for (let i = 0; i < padCls; i++) row.push(0);
+    }
+    invalidateFlatCache(w.W_cls1);
+  } else if (w.W_cls1[0]?.length > expectedClsCols) {
+    for (let r = 0; r < w.W_cls1.length; r++) {
+      w.W_cls1[r] = w.W_cls1[r].slice(0, expectedClsCols);
     }
     invalidateFlatCache(w.W_cls1);
   }
@@ -2860,15 +2830,23 @@ function migrateWeights(w: GNNWeights, rng: () => number): GNNWeights {
   if (typeof w.b_cls2 !== 'number' || !Number.isFinite(w.b_cls2)) {
     w.b_cls2 = 0.0;
   }
-  // If W_mlp1 was saved with old GLOBAL_COMP_DIM, zero-pad the new composition feature columns
-  // so old checkpoints are forward-compatible. New features contribute 0 until training updates them.
+  // If W_mlp1 was saved with a different GLOBAL_COMP_DIM, fix the column count:
+  // - Too narrow (old checkpoint): zero-pad new columns so they contribute 0 until trained.
+  // - Too wide (checkpoint from an experiment with larger GLOBAL_COMP_DIM): truncate extra cols.
   const expectedCols = HIDDEN_DIM * 2 + GLOBAL_COMP_DIM;
-  if (w.W_mlp1 && w.W_mlp1[0] && w.W_mlp1[0].length < expectedCols) {
-    const pad = expectedCols - w.W_mlp1[0].length;
-    for (const row of w.W_mlp1) {
-      for (let i = 0; i < pad; i++) row.push(0);
+  if (w.W_mlp1 && w.W_mlp1[0]) {
+    if (w.W_mlp1[0].length < expectedCols) {
+      const pad = expectedCols - w.W_mlp1[0].length;
+      for (const row of w.W_mlp1) {
+        for (let i = 0; i < pad; i++) row.push(0);
+      }
+      invalidateFlatCache(w.W_mlp1);
+    } else if (w.W_mlp1[0].length > expectedCols) {
+      for (let r = 0; r < w.W_mlp1.length; r++) {
+        w.W_mlp1[r] = w.W_mlp1[r].slice(0, expectedCols);
+      }
+      invalidateFlatCache(w.W_mlp1);
     }
-    invalidateFlatCache(w.W_mlp1);
   }
   return w;
 }
