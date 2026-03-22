@@ -3174,6 +3174,12 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         const tcGatedNorm  = sigOut7 * tcSigOut8;
         tcGatedErr = tcGatedNorm - tcNormTarget;
         totalLoss += 3.0 * tcGatedErr * tcGatedErr;
+        // Direct (ungated) regression loss for SC samples — ensures out[8] receives
+        // clean gradient independent of sigOut7. Without this, the gate suppresses
+        // out[8] gradient early in training (when sigOut7 ≈ 0.5), causing the
+        // regression head to collapse to a constant while classification succeeds.
+        const tcDirectErr = isSC ? (tcSigOut8 - tcNormTarget) : 0;
+        if (isSC) totalLoss += 1.5 * tcDirectErr * tcDirectErr;
         totalSamples++;
 
         // ── Allen-Dynes chain-rule gradient setup ───────────────────────────────
@@ -3283,10 +3289,14 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         //   SC (under-pred): tcGatedErr < 0 → pushes gate up → opens gate.
         const gateGrad = 6.0 * tcGatedErr * tcSigOut8 * sigOut7 * (1 - sigOut7) * tcMult;
         dLdOut[7] = clipGrad((sigOut7 - scTarget) * bceMult + gateGrad);
-        // out[8] → gated Tc regression gradient. Only for SC; non-SC gate gradient
-        //   already flows through out[7] above.
-        //   dL/dout[8] = 6 * tcGatedErr * sigOut7 * tcSigOut8*(1-tcSigOut8)
-        dLdOut[8] = isSC ? clipGrad(6.0 * tcGatedErr * sigOut7 * tcSigOut8 * (1 - tcSigOut8) * tcMult) : 0;
+        // out[8] → gated Tc regression gradient + direct ungated gradient (SC only).
+        //   Gated:  dL/dout[8] = 6 * tcGatedErr * sigOut7 * tcSigOut8*(1-tcSigOut8)
+        //   Direct: dL/dout[8] += 3 * tcDirectErr * tcSigOut8*(1-tcSigOut8)
+        // The direct term ensures out[8] trains even when sigOut7 is small early in training.
+        dLdOut[8] = isSC ? clipGrad(
+          6.0 * tcGatedErr * sigOut7 * tcSigOut8 * (1 - tcSigOut8) * tcMult
+          + 3.0 * tcDirectErr * tcSigOut8 * (1 - tcSigOut8)
+        ) : 0;
 
         // Uncertainty head (W_mlp2_var) receives no gradient — NLL removed.
         // Uncertainty outputs can be calibrated post-training via isotonic regression.
