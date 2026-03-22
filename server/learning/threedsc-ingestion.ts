@@ -32,14 +32,13 @@ const YIELD_MS   = 80;
 const STATE_KEY  = "3dsc_mp_ingestion";
 const SOURCE_TAG = "3dsc-mp";
 
-// GitHub download URLs to try (main then master branch, two likely file paths).
+// GitHub download URLs to try. Confirmed path as of 2026-03:
+//   superconductors_3D/data/final/MP/3DSC_MP.csv  (main branch only — no master)
 const GITHUB_URLS = [
-  "https://raw.githubusercontent.com/aimat-lab/3DSC/main/data/final/MP/3DSC_MP_no_SOAP_MAGPIE.csv",
-  "https://raw.githubusercontent.com/aimat-lab/3DSC/main/data/final/3DSC_MP_no_SOAP_MAGPIE.csv",
-  "https://raw.githubusercontent.com/aimat-lab/3DSC/main/3DSC_MP_no_SOAP_MAGPIE.csv",
-  "https://raw.githubusercontent.com/aimat-lab/3DSC/master/data/final/MP/3DSC_MP_no_SOAP_MAGPIE.csv",
-  "https://raw.githubusercontent.com/aimat-lab/3DSC/master/data/final/3DSC_MP_no_SOAP_MAGPIE.csv",
-  "https://raw.githubusercontent.com/aimat-lab/3DSC/master/3DSC_MP_no_SOAP_MAGPIE.csv",
+  "https://raw.githubusercontent.com/aimat-lab/3DSC/main/superconductors_3D/data/final/MP/3DSC_MP.csv",
+  // Fallbacks in case the repo is reorganised
+  "https://raw.githubusercontent.com/aimat-lab/3DSC/main/data/final/MP/3DSC_MP.csv",
+  "https://raw.githubusercontent.com/aimat-lab/3DSC/main/superconductors_3D/data/final/3DSC_MP.csv",
 ];
 
 let _running = false;
