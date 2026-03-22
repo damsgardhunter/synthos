@@ -257,10 +257,14 @@ const LAMBDA_MAX = 5.5;
 // Allen-Dynes formula is unconventional above ~300 K; cap predictions at training normalization ceiling.
 const TC_MAX_K = 300;
 // log1p normalisation for Tc regression:
-//   target  = log1p(Tc / 10) / TC_LOG_SCALE  ∈ [0, 1]
-//   inverse = 10 * expm1(sigmoid(out[8]) * TC_LOG_SCALE) → Tc in K
-// Compresses the 0–300 K range logarithmically; no arbitrary scale factor needed.
+//   training target = log1p(Tc / 10) / TC_LOG_SCALE * TC_NORM_CLAMP  ∈ [0, TC_NORM_CLAMP]
+//   inverse         = 10 * expm1(sigmoid(out[8]) * TC_LOG_SCALE / TC_NORM_CLAMP) → Tc in K
+// TC_NORM_CLAMP < 1.0 prevents the training target from reaching sigmoid's saturation region.
+// Without it, max-Tc samples (300K) push the target to exactly 1.0, forcing out[8]→+∞,
+// where sigmoid'→0 and gradients die — the regression head collapses to a constant bias.
+// With TC_NORM_CLAMP=0.9: max target = 0.9 → out[8]=logit(0.9)≈2.2 at optimum (finite!).
 const TC_LOG_SCALE = Math.log1p(TC_MAX_K / 10);  // log1p(30) ≈ 3.434
+const TC_NORM_CLAMP = 0.9; // max sigmoid target for Tc regression — keeps out[8] in finite range
 // Dedicated classification head hidden dimension — large enough to learn P(SC)
 // without competing with Tc regression in the shared h1 representation.
 const CLS_DIM = 24;
@@ -2425,7 +2429,7 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
   // Floor at 0.1 prevents a collapsed cls head (overfitting to training SC patterns)
   // from zeroing ALL predictions, which would make R²=-∞ and trigger the quality gate.
   const scProb = Math.max(0.1, sigmoid(sf(out7Cls)));
-  const predictedTcRaw = scProb * 10 * Math.expm1(sigmoid(sf(out[8] ?? 0)) * TC_LOG_SCALE);
+  const predictedTcRaw = scProb * 10 * Math.expm1(sigmoid(sf(out[8] ?? 0)) * TC_LOG_SCALE / TC_NORM_CLAMP);
   const confidenceRaw = sigmoid(sf(out[3] ?? 0));
   const bandgapRaw = sigmoid(sf(out[5] ?? 0)) * 5.0;
   const dosProxyRaw = softplus(sf(out[6] ?? 0));
@@ -2612,7 +2616,7 @@ function GNNPredictForTraining(graph: CrystalGraph, weights: GNNWeights): { pred
   // v15: P(SC) from dedicated cls head; out[8] → Tc magnitude.
   // Floor matches inference path to keep training R² consistent with val R².
   const scProb = Math.max(0.1, sigmoid(sf(out7Cls)));
-  const predictedTcRaw = scProb * 10 * Math.expm1(sigmoid(sf(out[8] ?? 0)) * TC_LOG_SCALE);
+  const predictedTcRaw = scProb * 10 * Math.expm1(sigmoid(sf(out[8] ?? 0)) * TC_LOG_SCALE / TC_NORM_CLAMP);
   const confidenceRaw = sigmoid(sf(out[3] ?? 0));
   const bandgapRaw = sigmoid(sf(out[5] ?? 0)) * 5.0;
   const dosProxyRaw = softplus(sf(out[6] ?? 0));
@@ -3142,13 +3146,13 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         const _diagS8  = sigmoid(directOut8);
         if (isSC) {
           // Gated prediction: what the model actually outputs at inference.
-          const predTcK = pSC * 10 * Math.expm1(_diagS8 * TC_LOG_SCALE);
+          const predTcK = pSC * 10 * Math.expm1(_diagS8 * TC_LOG_SCALE / TC_NORM_CLAMP);
           tcSumErr2    += (predTcK - actualTcK) ** 2;
           tcSumActual  += actualTcK;
           tcSumActual2 += actualTcK * actualTcK;
           nTcSamples++;
           // out[8]-only R²: raw magnitude head quality independent of gate.
-          const out8Pred = 10 * Math.expm1(_diagS8 * TC_LOG_SCALE);
+          const out8Pred = 10 * Math.expm1(_diagS8 * TC_LOG_SCALE / TC_NORM_CLAMP);
           out8SumErr2    += (out8Pred - actualTcK) ** 2;
           out8SumActual  += actualTcK;
           out8SumActual2 += actualTcK * actualTcK;
@@ -3173,7 +3177,7 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         // Gated Tc regression — applies to ALL samples.
         let tcSigOut8 = 0, tcGatedErr = 0;
         tcSigOut8 = sigmoid(directOut8);
-        const tcNormTarget = isSC ? Math.log1p(actualTcK / 10) / TC_LOG_SCALE : 0;
+        const tcNormTarget = isSC ? Math.log1p(actualTcK / 10) / TC_LOG_SCALE * TC_NORM_CLAMP : 0;
         const tcGatedNorm  = sigOut7 * tcSigOut8;
         tcGatedErr = tcGatedNorm - tcNormTarget;
         totalLoss += 3.0 * tcGatedErr * tcGatedErr;
@@ -3251,7 +3255,7 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         //    capped at 4× to prevent gradient instability.
         //    tcErrorK=10K→1×  |  35K→2×  |  60K→3×  |  85K+→4×
         // Use floored pSC (matching inference) to compute reward-system error.
-        const predTcKRew  = isSC ? pSC * 10 * Math.expm1(tcSigOut8 * TC_LOG_SCALE) : 0;
+        const predTcKRew  = isSC ? pSC * 10 * Math.expm1(tcSigOut8 * TC_LOG_SCALE / TC_NORM_CLAMP) : 0;
         const tcErrorKRew = isSC ? Math.abs(predTcKRew - actualTcK) : 0;
         const rmsePenalty = (isSC && tcErrorKRew > 10)
           ? Math.min(4.0, 1.0 + (tcErrorKRew - 10) / 25)
