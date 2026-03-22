@@ -503,7 +503,6 @@ export async function fetchMPStructureData(formula: string): Promise<MPStructure
   const data = await mpFetch("/materials/summary/", {
     formula: normalizedFormula,
     _limit: "1",
-    fields: "structure,material_id,symmetry,formula_pretty",
   });
 
   if (!data?.data?.length) return null;

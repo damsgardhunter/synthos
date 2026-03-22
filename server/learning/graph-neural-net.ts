@@ -121,10 +121,14 @@ interface GNNWeights {
   W_3body_update: number[][];
   W_attn_pool: number[][];
   residual_gates: number[];
-  /** Learnable intra-layer update gate raw params (pre-sigmoid). One per layer:
-   *  [0]=attn1, [1]=attn2, [2]=attn3, [3]=attn4, [4]=schnet.
-   *  Forward: h = input + sigmoid(gate) * update  */
-  update_gates: number[];
+  /** Feature-wise GRU update gates. g_i = sigmoid(W_gate_* @ h_i).
+   *  Residual: h_out = (1 - g_i) ⊙ h_in + g_i ⊙ update(h_in).
+   *  Init zeros → sigmoid(0) = 0.5; diversifies from first gradient step. */
+  W_gate_attn1: number[][];
+  W_gate_attn2: number[][];
+  W_gate_attn3: number[][];
+  W_gate_attn4: number[][];
+  W_gate_schnet: number[][];
   W_pressure: number[];
   W_mlp1: number[][];
   b_mlp1: number[];
@@ -185,10 +189,10 @@ export interface GNNPrediction {
 interface AttnLayerCache {
   inputEmbs: number[][];
   preActs: number[][];
-  preNormActs: number[][];  // h + alpha*activation(update) before layerNorm
+  preNormActs: number[][];  // (1-g)⊙input + g⊙activation(update) before layerNorm
   attnWts: number[][];
   neighborLists: number[][];
-  updateAlpha: number;      // sigmoid(update_gate) — used in backward pass
+  gateVecs: number[][];     // sigmoid(W_gate @ inputEmbs[i]) per node [nNodes × HIDDEN_DIM]
 }
 
 interface CGCNNLayerCache {
@@ -201,7 +205,8 @@ interface CGCNNLayerCache {
   cutoffWts: number[][];
   totalWeights: number[];
   adaptiveLogits?: number[][];
-  updateAlpha: number;      // sigmoid(update_gate) — used in backward pass
+  gateVecs: number[][];     // sigmoid(W_gate_schnet @ inputEmbs[i]) per node
+  aggUpdates: number[][];   // normalized aggregate update before gating (for gate backward)
 }
 
 interface GNNForwardCache {
@@ -1601,9 +1606,8 @@ function attnMessagePass(
   useLeakyMsg: boolean,
   mode: 'train' | 'infer',
   msgRng?: () => number,
-  updateGate: number = 0,
+  W_gate: number[][] = [],
 ): { embeddings: number[][]; cache: AttnLayerCache | null } {
-  const updateAlpha = sigmoid(updateGate);
   const nNodes = graph.nodes.length;
   // Deep-copy in train mode so backward pass has original pre-update inputs.
   const inputEmbs = mode === 'train'
@@ -1615,7 +1619,9 @@ function attnMessagePass(
   const preNormActs: number[][] = [];
   const attnWts: number[][] = [];
   const neighborLists: number[][] = [];
+  const gateVecs: number[][] = [];
   const newEmbeddings: number[][] = [];
+  const noGate = W_gate.length === 0;
 
   for (let i = 0; i < nNodes; i++) {
     const neighbors = graph.adjacency[i];
@@ -1626,6 +1632,7 @@ function attnMessagePass(
         preActs.push([...inputEmbs[i]]);
         preNormActs.push([...inputEmbs[i]]);
         attnWts.push([]);
+        gateVecs.push(new Array(HIDDEN_DIM).fill(0.5));
       }
       continue;
     }
@@ -1670,7 +1677,13 @@ function attnMessagePass(
     const hUpd = useLeakyMsg
       ? pre.map(v => v >= 0 ? v : 0.01 * v)
       : pre.map(v => v >= 0 ? v : 0);
-    const hRes = inputEmbs[i].map((v, k) => v + updateAlpha * (hUpd[k] ?? 0));
+    const rawG = noGate ? null : matVecMul(W_gate, inputEmbs[i]);
+    const g = rawG ? rawG.map(sigmoid) : null;
+    if (mode === 'train') gateVecs.push(g ? [...g] : new Array(HIDDEN_DIM).fill(0.5));
+    const hRes = inputEmbs[i].map((v, k) =>
+      g ? (1 - g[k]) * v + g[k] * (hUpd[k] ?? 0)
+        : 0.5 * v + 0.5 * (hUpd[k] ?? 0)
+    );
     if (mode === 'train') preNormActs.push(hRes);
     newEmbeddings.push(layerNorm(hRes));
   }
@@ -1680,7 +1693,7 @@ function attnMessagePass(
   }
 
   const cache = mode === 'train'
-    ? { inputEmbs, preActs, preNormActs, attnWts, neighborLists, updateAlpha }
+    ? { inputEmbs, preActs, preNormActs, attnWts, neighborLists, gateVecs }
     : null;
   return { embeddings: newEmbeddings, cache };
 }
@@ -1699,10 +1712,10 @@ function cgcnnConv(
   W_filter2: number[][], b_filter2: number[],
   adaptiveLogits: number[][] | undefined,
   mode: 'train' | 'infer',
-  updateGate: number = 0,
+  W_gate: number[][] = [],
 ): { embeddings: number[][]; cache: CGCNNLayerCache | null } {
-  const updateAlpha = sigmoid(updateGate);
   const nNodes = graph.nodes.length;
+  const noGate = W_gate.length === 0;
   // Deep-copy in train mode so backward pass has original pre-update inputs.
   const inputEmbs = mode === 'train'
     ? graph.nodes.map(n => [...n.embedding])
@@ -1712,6 +1725,8 @@ function cgcnnConv(
   const filterPreActs: number[][][] = [];
   const filterH1s: number[][][] = [];
   const filterOuts: number[][][] = [];
+  const gateVecs: number[][] = [];
+  const aggUpdates: number[][] = [];
   const rbfs: number[][][] = [];
   const preNormActs: number[][] = [];
   const cutoffWts: number[][] = [];
@@ -1798,9 +1813,16 @@ function cgcnnConv(
       for (let k = 0; k < HIDDEN_DIM; k++) aggUpdate[k] /= totalWeight;
     }
 
+    const rawG = noGate ? null : matVecMul(W_gate, inputEmbs[i]);
+    const g = rawG ? rawG.map(sigmoid) : null;
+    if (mode === 'train') {
+      gateVecs.push(g ? [...g] : new Array(HIDDEN_DIM).fill(0.5));
+      aggUpdates.push([...aggUpdate]);
+    }
     const hRes: number[] = new Array(HIDDEN_DIM);
     for (let k = 0; k < HIDDEN_DIM; k++) {
-      hRes[k] = (inputEmbs[i][k] ?? 0) + updateAlpha * aggUpdate[k];
+      const gk = g ? g[k] : 0.5;
+      hRes[k] = (1 - gk) * (inputEmbs[i][k] ?? 0) + gk * aggUpdate[k];
     }
     if (mode === 'train') preNormActs.push(hRes);
     // LayerNorm after residual — same in both modes (fixes prior train/infer mismatch).
@@ -1810,7 +1832,7 @@ function cgcnnConv(
   for (let i = 0; i < nNodes; i++) graph.nodes[i].embedding = newEmbeddings[i];
 
   const cache = mode === 'train'
-    ? { inputEmbs, filterPreActs, filterH1s, filterOuts, rbfs, preNormActs, cutoffWts, totalWeights, adaptiveLogits, updateAlpha }
+    ? { inputEmbs, filterPreActs, filterH1s, filterOuts, rbfs, preNormActs, cutoffWts, totalWeights, adaptiveLogits, gateVecs, aggUpdates }
     : null;
   return { embeddings: newEmbeddings, cache };
 }
@@ -1821,11 +1843,12 @@ function attnLayerBackward(
   graph: CrystalGraph,
   W_update: number[][], W_message: number[][],
   useLeaky: boolean,
+  W_gate: number[][] = [],
 ): {
-  dW_update: number[][]; dW_message: number[][]; dLdInput: number[][]; dUpdateGate: number;
+  dW_update: number[][]; dW_message: number[][]; dLdInput: number[][]; dW_gate: number[][];
 } {
-  const alpha = cache.updateAlpha ?? 1.0;
-  let dGateSum = 0;
+  const noGate = W_gate.length === 0;
+  const dW_gate = noGate ? [] : W_gate.map(r => new Array(r.length).fill(0));
   const nNodes = dLdOutput.length;
   const updateCols = W_update[0]?.length ?? 0;
   const msgCols = W_message[0]?.length ?? 0;
@@ -1844,19 +1867,37 @@ function attnLayerBackward(
     const dLdPreNorm = cache.preNormActs?.[i]
       ? layerNormBackward(cache.preNormActs[i], dLdOutput[i])
       : [...dLdOutput[i]];
-    // Residual pass-through: h_res = input + hUpd → ∂L/∂input += dLdPreNorm
-    for (let k = 0; k < HIDDEN_DIM; k++) dLdInput[i][k] += dLdPreNorm[k];
+    // Gate vector: g[k] = sigmoid(W_gate @ input[i])
+    const g = cache.gateVecs?.[i] ?? new Array(HIDDEN_DIM).fill(0.5);
+    // GRU direct residual: ∂L/∂input += (1-g[k]) * dLdPreNorm[k]
+    for (let k = 0; k < HIDDEN_DIM; k++) dLdInput[i][k] += (1 - g[k]) * dLdPreNorm[k];
 
     const pre = cache.preActs[i];
     const dPre = new Array(HIDDEN_DIM);
-    let dGateNode = 0;
+    const dRawGate = noGate ? null : new Array(HIDDEN_DIM).fill(0);
     for (let k = 0; k < HIDDEN_DIM; k++) {
       const mask = useLeaky ? (pre[k] >= 0 ? 1.0 : 0.01) : (pre[k] >= 0 ? 1.0 : 0.0);
-      const hUpd_k = pre[k] * mask;               // activation output
-      dGateNode += dLdPreNorm[k] * hUpd_k;        // ∂L/∂α accumulator (unscaled)
-      dPre[k] = alpha * dLdPreNorm[k] * mask;     // scale update gradient by α
+      const hUpd_k = pre[k] * mask;                 // activation output
+      const gk = g[k];
+      dPre[k] = gk * dLdPreNorm[k] * mask;          // scale update gradient by g[k]
+      // Gate: dL/d(rawGate[k]) = dLdPreNorm[k] * (hUpd_k - input[k]) * gk*(1-gk)
+      if (dRawGate) dRawGate[k] = dLdPreNorm[k] * (hUpd_k - (cache.inputEmbs[i][k] ?? 0)) * gk * (1 - gk);
     }
-    dGateSum += dGateNode;
+    // Accumulate dW_gate and gate-path input gradient
+    if (dRawGate && !noGate) {
+      const inp_i = cache.inputEmbs[i];
+      for (let r = 0; r < HIDDEN_DIM; r++) {
+        const dr = dRawGate[r];
+        if (Math.abs(dr) < 1e-12) continue;
+        for (let c = 0; c < HIDDEN_DIM; c++) dW_gate[r][c] += dr * (inp_i[c] ?? 0);
+      }
+      // dLdInput from gate path: (W_gate^T @ dRawGate)[k]
+      for (let k = 0; k < HIDDEN_DIM; k++) {
+        let sum = 0;
+        for (let r = 0; r < HIDDEN_DIM; r++) sum += dRawGate[r] * (W_gate[r]?.[k] ?? 0);
+        dLdInput[i][k] += sum;
+      }
+    }
 
     const emb_i = cache.inputEmbs[i];
     const aggMsg = initVector(HIDDEN_DIM);
@@ -1913,7 +1954,7 @@ function attnLayerBackward(
     }
   }
 
-  return { dW_update, dW_message, dLdInput, dUpdateGate: dGateSum * alpha * (1 - alpha) };
+  return { dW_update, dW_message, dLdInput, dW_gate };
 }
 
 function cgcnnLayerBackward(
@@ -1921,15 +1962,16 @@ function cgcnnLayerBackward(
   dLdOutput: number[][],
   graph: CrystalGraph,
   W_filter1: number[][], W_filter2: number[][],
+  W_gate: number[][] = [],
 ): {
   dW_filter1: number[][]; dW_filter2: number[][];
   db_filter1: number[]; db_filter2: number[];
   dLdInput: number[][];
   dAdaptiveLogits: number[][];
-  dUpdateGate: number;
+  dW_gate: number[][];
 } {
-  const alpha = cache.updateAlpha ?? 1.0;
-  let dGateSum = 0;
+  const noGate = W_gate.length === 0;
+  const dW_gate = noGate ? [] : W_gate.map(r => new Array(r.length).fill(0));
   const nNodes = dLdOutput.length;
   const dW_filter1 = W_filter1.map(r => new Array(r.length).fill(0));
   const dW_filter2 = W_filter2.map(r => new Array(r.length).fill(0));
@@ -1939,8 +1981,28 @@ function cgcnnLayerBackward(
   const dAdaptiveLogits: number[][] = graph.adjacency.map(ns => new Array(ns.length).fill(0));
 
   for (let i = 0; i < nNodes; i++) {
-    for (let k = 0; k < HIDDEN_DIM; k++) dLdInput[i][k] += dLdOutput[i][k];
-
+    const g = cache.gateVecs?.[i] ?? new Array(HIDDEN_DIM).fill(0.5);
+    // GRU direct residual: (1-g[k]) * dLdOutput[k]
+    for (let k = 0; k < HIDDEN_DIM; k++) dLdInput[i][k] += (1 - g[k]) * dLdOutput[i][k];
+    // Gate backward: dL/d(rawGate[k]) = dLdOutput[k] * (aggUpdate[k] - input[k]) * g[k]*(1-g[k])
+    if (!noGate && cache.aggUpdates?.[i]) {
+      const inp = cache.inputEmbs[i];
+      const agg = cache.aggUpdates[i];
+      const dRawGate = new Array(HIDDEN_DIM);
+      for (let k = 0; k < HIDDEN_DIM; k++) {
+        dRawGate[k] = dLdOutput[i][k] * ((agg[k] ?? 0) - (inp[k] ?? 0)) * g[k] * (1 - g[k]);
+      }
+      for (let r = 0; r < HIDDEN_DIM; r++) {
+        const dr = dRawGate[r];
+        if (Math.abs(dr) < 1e-12) continue;
+        for (let c = 0; c < HIDDEN_DIM; c++) dW_gate[r][c] += dr * (inp[c] ?? 0);
+      }
+      for (let k = 0; k < HIDDEN_DIM; k++) {
+        let sum = 0;
+        for (let r = 0; r < HIDDEN_DIM; r++) sum += dRawGate[r] * (W_gate[r]?.[k] ?? 0);
+        dLdInput[i][k] += sum;
+      }
+    }
     const totalW = cache.totalWeights[i];
     if (totalW <= 0) continue;
 
@@ -1962,15 +2024,13 @@ function cgcnnLayerBackward(
 
       const dH_ij: number[] = new Array(HIDDEN_DIM);
       let dAdaptLogitEdge = 0;
-      let dGateEdge = 0;
       for (let k = 0; k < HIDDEN_DIM; k++) {
         const rawGrad = (dLdOutput[i][k] / totalW) * cw;
-        dGateEdge      += rawGrad * (h_ij[k] ?? 0) * (hj[k] ?? 0);   // ∂L/∂α (per edge)
-        dH_ij[k]        = alpha * rawGrad * (hj[k] ?? 0);             // scale filter grad by α
-        dLdInput[j][k] += alpha * rawGrad * (h_ij[k] ?? 0);           // scale input grad by α
+        const gk = g[k];
+        dH_ij[k]        = gk * rawGrad * (hj[k] ?? 0);               // scale by g[k]
+        dLdInput[j][k] += gk * rawGrad * (h_ij[k] ?? 0);             // scale by g[k]
         dAdaptLogitEdge += dH_ij[k];
       }
-      dGateSum += dGateEdge;
       if (dAdaptiveLogits[i]) dAdaptiveLogits[i][nIdx] = dAdaptLogitEdge;
 
       const dH1_ij: number[] = new Array(HIDDEN_DIM).fill(0);
@@ -1994,8 +2054,7 @@ function cgcnnLayerBackward(
     }
   }
 
-  return { dW_filter1, dW_filter2, db_filter1, db_filter2, dLdInput, dAdaptiveLogits,
-    dUpdateGate: dGateSum * alpha * (1 - alpha) };
+  return { dW_filter1, dW_filter2, db_filter1, db_filter2, dLdInput, dAdaptiveLogits, dW_gate };
 }
 
 // ── GLFN-TC: Graph Learning Module ───────────────────────────────────────────
@@ -2049,14 +2108,14 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
     ? computeAdaptiveLogits(graph, weights.W_elem_feat, weights.W_graph_adapt)
     : undefined;
 
-  attnMessagePass(graph, weights.W_message, weights.W_update, weights.W_attn_query, weights.W_attn_key, true, 'infer', dropoutRng, 0);
+  attnMessagePass(graph, weights.W_message, weights.W_update, weights.W_attn_query, weights.W_attn_key, true, 'infer', dropoutRng, weights.W_gate_attn1);
   if (dropoutRng) {
     for (const node of graph.nodes) {
       node.embedding = applyDropout(node.embedding, MC_DROPOUT_RATE, dropoutRng, true);
     }
   }
 
-  cgcnnConv(graph, weights.W_filter1, weights.b_filter1, weights.W_filter2, weights.b_filter2, adaptLogits, 'infer', 0);
+  cgcnnConv(graph, weights.W_filter1, weights.b_filter1, weights.W_filter2, weights.b_filter2, adaptLogits, 'infer', weights.W_gate_schnet);
   if (dropoutRng) {
     for (const node of graph.nodes) {
       node.embedding = applyDropout(node.embedding, MC_DROPOUT_RATE, dropoutRng, true);
@@ -2070,7 +2129,7 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
   // Jumping Knowledge: snapshot after layer-0 gated residual (before layers 1-3)
   const jkSnap0Infer = graph.nodes.map(n => [...n.embedding]);
 
-  attnMessagePass(graph, weights.W_message2, weights.W_update2, weights.W_attn_query2, weights.W_attn_key2, false, 'infer', dropoutRng, 0);
+  attnMessagePass(graph, weights.W_message2, weights.W_update2, weights.W_attn_query2, weights.W_attn_key2, false, 'infer', dropoutRng, weights.W_gate_attn2);
   if (dropoutRng) {
     for (const node of graph.nodes) {
       node.embedding = applyDropout(node.embedding, MC_DROPOUT_RATE, dropoutRng, true);
@@ -2224,10 +2283,10 @@ function GNNPredictForTraining(graph: CrystalGraph, weights: GNNWeights, msgRng?
     ? computeAdaptiveLogits(graph, weights.W_elem_feat, weights.W_graph_adapt)
     : undefined;
 
-  const { cache: ac0 } = attnMessagePass(graph, weights.W_message, weights.W_update, weights.W_attn_query, weights.W_attn_key, true, 'train', msgRng, 0) as { embeddings: number[][]; cache: AttnLayerCache };
+  const { cache: ac0 } = attnMessagePass(graph, weights.W_message, weights.W_update, weights.W_attn_query, weights.W_attn_key, true, 'train', msgRng, weights.W_gate_attn1) as { embeddings: number[][]; cache: AttnLayerCache };
   attnCaches.push(ac0);
 
-  const { cache: cgcnnC } = cgcnnConv(graph, weights.W_filter1, weights.b_filter1, weights.W_filter2, weights.b_filter2, adaptLogits, 'train', 0) as { embeddings: number[][]; cache: CGCNNLayerCache };
+  const { cache: cgcnnC } = cgcnnConv(graph, weights.W_filter1, weights.b_filter1, weights.W_filter2, weights.b_filter2, adaptLogits, 'train', weights.W_gate_schnet) as { embeddings: number[][]; cache: CGCNNLayerCache };
 
   if (graph.threeBodyFeatures.length > 0) {
     threeBodyInteractionLayer(graph, weights.W_3body, weights.W_3body_update);
@@ -2236,7 +2295,7 @@ function GNNPredictForTraining(graph: CrystalGraph, weights: GNNWeights, msgRng?
   // ── Jumping Knowledge (JK-mean): snapshot after layer 0 (attn+CGCNN+3body) ──
   const jkSnap0: number[][] = graph.nodes.map(n => [...n.embedding]);
 
-  const { cache: ac1 } = attnMessagePass(graph, weights.W_message2, weights.W_update2, weights.W_attn_query2, weights.W_attn_key2, false, 'train', msgRng, 0) as { embeddings: number[][]; cache: AttnLayerCache };
+  const { cache: ac1 } = attnMessagePass(graph, weights.W_message2, weights.W_update2, weights.W_attn_query2, weights.W_attn_key2, false, 'train', msgRng, weights.W_gate_attn2) as { embeddings: number[][]; cache: AttnLayerCache };
   attnCaches.push(ac1);
 
   if (GNN_MSG_LAYERS >= 3) {
@@ -2415,9 +2474,12 @@ function initWeights(rng: () => number): GNNWeights {
     W_3body_update: initMatrix(HIDDEN_DIM, HIDDEN_DIM * 2, rng),
     W_attn_pool: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng),
     residual_gates: [-6, -6, -6, -6],  // deprecated v17 — outer residuals removed; kept for migration
-    // v17: Init to -2 → sigmoid(-2)≈0.12: model starts as near-identity, opens gates gradually.
-    // Old init 0 → sigmoid(0)=0.5 caused aggressive 50% update bypass at t=0.
-    update_gates: [-2, -2, -2, -2, -2],
+    // Feature-wise GRU update gates: zeros → sigmoid(W@h)≈0.5 blending at start.
+    W_gate_attn1:  initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0),
+    W_gate_attn2:  initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0),
+    W_gate_attn3:  initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0),
+    W_gate_attn4:  initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0),
+    W_gate_schnet: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, 0),
     W_pressure: Array.from({ length: HIDDEN_DIM }, () => (rng() - 0.5) * 2 * Math.sqrt(2.0 / HIDDEN_DIM)),
     W_mlp1: initMatrix(HIDDEN_DIM, HIDDEN_DIM * 2 + GLOBAL_COMP_DIM, rng),
     b_mlp1: initVector(HIDDEN_DIM),
@@ -2487,7 +2549,11 @@ function cloneWeights(w: GNNWeights): GNNWeights {
     W_input_proj: w.W_input_proj.map(r => [...r]),
     b_input_proj: [...w.b_input_proj],
     residual_gates: [...w.residual_gates],
-    update_gates: [...(w.update_gates ?? [0, 0, 0, 0, 0])],
+    W_gate_attn1:  (w.W_gate_attn1  ?? []).map((r: number[]) => [...r]),
+    W_gate_attn2:  (w.W_gate_attn2  ?? []).map((r: number[]) => [...r]),
+    W_gate_attn3:  (w.W_gate_attn3  ?? []).map((r: number[]) => [...r]),
+    W_gate_attn4:  (w.W_gate_attn4  ?? []).map((r: number[]) => [...r]),
+    W_gate_schnet: (w.W_gate_schnet ?? []).map((r: number[]) => [...r]),
     W_3body: w.W_3body.map(r => [...r]),
     W_3body_update: w.W_3body_update.map(r => [...r]),
     W_attn_pool: w.W_attn_pool.map(r => [...r]),
@@ -2519,9 +2585,14 @@ function cloneWeights(w: GNNWeights): GNNWeights {
  * the first forward pass, then learns to use the new parameters during training.
  */
 function migrateWeights(w: GNNWeights, rng: () => number): GNNWeights {
-  if (!w.update_gates || w.update_gates.length < 5) w.update_gates = [-2, -2, -2, -2, -2];
-  // v17: Fix update_gate init — sigmoid(-2)≈0.12 is stable; old init 0 caused 50% bypass at t=0.
-  if (w.update_gates.every((g: number) => g === 0)) w.update_gates = [-2, -2, -2, -2, -2];
+  // Migrate: replace scalar update_gates with feature-wise W_gate matrices.
+  const wAnyGate = w as any;
+  const zeroGate = () => Array.from({ length: HIDDEN_DIM }, () => new Array(HIDDEN_DIM).fill(0));
+  if (!wAnyGate.W_gate_attn1  || wAnyGate.W_gate_attn1.length  !== HIDDEN_DIM) w.W_gate_attn1  = zeroGate();
+  if (!wAnyGate.W_gate_attn2  || wAnyGate.W_gate_attn2.length  !== HIDDEN_DIM) w.W_gate_attn2  = zeroGate();
+  if (!wAnyGate.W_gate_attn3  || wAnyGate.W_gate_attn3.length  !== HIDDEN_DIM) w.W_gate_attn3  = zeroGate();
+  if (!wAnyGate.W_gate_attn4  || wAnyGate.W_gate_attn4.length  !== HIDDEN_DIM) w.W_gate_attn4  = zeroGate();
+  if (!wAnyGate.W_gate_schnet || wAnyGate.W_gate_schnet.length !== HIDDEN_DIM) w.W_gate_schnet = zeroGate();
   // SchNet migration: old checkpoints had W_conv_gate/W_conv_value.
   const wAny = w as any;
   if (!wAny.W_filter1 || wAny.W_filter1.length !== HIDDEN_DIM ||
@@ -2714,7 +2785,11 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
     bInputProj: mkAdamVecG(HIDDEN_DIM),
     pressure:   mkAdamVecG(HIDDEN_DIM),
     gates:        mkAdamVecG(weights.residual_gates.length),
-    updateGates:  mkAdamVecG(5),
+    gateAttn1:   mkAdamMatG(weights.W_gate_attn1),
+    gateAttn2:   mkAdamMatG(weights.W_gate_attn2),
+    gateAttn3:   mkAdamMatG(weights.W_gate_attn3),
+    gateAttn4:   mkAdamMatG(weights.W_gate_attn4),
+    gateSchnet:  mkAdamMatG(weights.W_gate_schnet),
     // GLFN-TC: Adam state for Graph Learning Module and Dense Residual gate.
     elemFeat:       mkAdamMatG(weights.W_elem_feat),
     graphAdapt:     mkAdamMatG(weights.W_graph_adapt),
@@ -3004,17 +3079,19 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         db_filter2: new Array(HIDDEN_DIM).fill(0),
         dW_input_proj: zeroMat(weights.W_input_proj),
         db_input_proj: new Array(HIDDEN_DIM).fill(0),
-        // v17: dGates/dDenseSkipGate are dead (outer residuals removed) — kept for type compat only.
+        // v17: dGates dead (outer residuals removed).
         dGates: new Array(4).fill(0),
-        dUpdateGates: new Array(5).fill(0),
+        dW_gate_attn1:  weights.W_gate_attn1.map((r: number[]) => new Array(r.length).fill(0)),
+        dW_gate_attn2:  weights.W_gate_attn2.map((r: number[]) => new Array(r.length).fill(0)),
+        dW_gate_attn3:  weights.W_gate_attn3.map((r: number[]) => new Array(r.length).fill(0)),
+        dW_gate_attn4:  weights.W_gate_attn4.map((r: number[]) => new Array(r.length).fill(0)),
+        dW_gate_schnet: weights.W_gate_schnet.map((r: number[]) => new Array(r.length).fill(0)),
         // GLFN-TC gradient accumulators
         dW_elem_feat:   zeroMat(weights.W_elem_feat),
         dW_graph_adapt: zeroMat(weights.W_graph_adapt),
         dDenseSkipGate: 0,
       };
-      // v17: Gate entropy regularization accumulators — one scalar per update_gate.
-      // Added once per batch (not per sample) after the sample loop.
-      const gradUpdateGateEntropy = new Array(5).fill(0);
+
 
       for (let b = batchStart; b < batchEnd; b++) {
         const idx = indices[b];
@@ -3501,10 +3578,10 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
           }
         }
 
-        const allLayerWeights: { W_msg: number[][]; W_upd: number[][]; useLeaky: boolean; gateIdx: number }[] = [
-          { W_msg: weights.W_message4, W_upd: weights.W_update4, useLeaky: false, gateIdx: 3 },
-          { W_msg: weights.W_message3, W_upd: weights.W_update3, useLeaky: false, gateIdx: 2 },
-          { W_msg: weights.W_message2, W_upd: weights.W_update2, useLeaky: false, gateIdx: 1 },
+        const allLayerWeights: { W_msg: number[][]; W_upd: number[][]; useLeaky: boolean; gateIdx: number; W_gate: number[][] }[] = [
+          { W_msg: weights.W_message4, W_upd: weights.W_update4, useLeaky: false, gateIdx: 3, W_gate: weights.W_gate_attn4 },
+          { W_msg: weights.W_message3, W_upd: weights.W_update3, useLeaky: false, gateIdx: 2, W_gate: weights.W_gate_attn3 },
+          { W_msg: weights.W_message2, W_upd: weights.W_update2, useLeaky: false, gateIdx: 1, W_gate: weights.W_gate_attn2 },
         ];
         // Only backprop through layers that were actually run in the forward pass
         const layerWeights = allLayerWeights.slice(4 - GNN_MSG_LAYERS);
@@ -3527,8 +3604,15 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
             }
           }
 
-          const { dW_update, dW_message, dLdInput, dUpdateGate: dUG_attn } = attnLayerBackward(ac, dLdCur, graph, lw.W_upd, lw.W_msg, lw.useLeaky);
-          graphGrads.dUpdateGates[lw.gateIdx] += clipGrad(dUG_attn);
+          const { dW_update, dW_message, dLdInput, dW_gate: dWG_attn } = attnLayerBackward(ac, dLdCur, graph, lw.W_upd, lw.W_msg, lw.useLeaky, lw.W_gate);
+          const gateGradMats: Record<number, number[][]> = {
+            1: graphGrads.dW_gate_attn2, 2: graphGrads.dW_gate_attn3, 3: graphGrads.dW_gate_attn4
+          };
+          if (gateGradMats[lw.gateIdx] && dWG_attn.length) {
+            for (let r = 0; r < dWG_attn.length; r++)
+              for (let c = 0; c < dWG_attn[r].length; c++)
+                gateGradMats[lw.gateIdx][r][c] += clipGrad(dWG_attn[r][c]);
+          }
 
           const gradIdx = lw.gateIdx;
           const addMat = (dst: number[][], src: number[][]) => {
@@ -3557,9 +3641,13 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
 
         const ac0 = cache.attnCaches[0];
         if (cache.cgcnnCache) {
-          const cgcnnBwd = cgcnnLayerBackward(cache.cgcnnCache, dLdCur, graph, weights.W_filter1, weights.W_filter2);
-          const { dW_filter1, dW_filter2, db_filter1, db_filter2, dLdInput: dLdCgcnnIn, dAdaptiveLogits } = cgcnnBwd;
-          graphGrads.dUpdateGates[4] += clipGrad(cgcnnBwd.dUpdateGate);
+          const cgcnnBwd = cgcnnLayerBackward(cache.cgcnnCache, dLdCur, graph, weights.W_filter1, weights.W_filter2, weights.W_gate_schnet);
+          const { dW_filter1, dW_filter2, db_filter1, db_filter2, dLdInput: dLdCgcnnIn, dAdaptiveLogits, dW_gate: dWG_schnet } = cgcnnBwd;
+          if (dWG_schnet && dWG_schnet.length) {
+            for (let r = 0; r < dWG_schnet.length; r++)
+              for (let c = 0; c < dWG_schnet[r].length; c++)
+                graphGrads.dW_gate_schnet[r][c] += clipGrad(dWG_schnet[r][c]);
+          }
           const addMat = (dst: number[][], src: number[][]) => {
             for (let r = 0; r < dst.length; r++)
               for (let c = 0; c < dst[r].length; c++)
@@ -3609,8 +3697,12 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         }
 
         {
-          const { dW_update, dW_message, dLdInput, dUpdateGate: dUG_attn0 } = attnLayerBackward(ac0, dLdCur, graph, weights.W_update, weights.W_message, true);
-          graphGrads.dUpdateGates[0] += clipGrad(dUG_attn0);
+          const { dW_update, dW_message, dLdInput, dW_gate: dWG_attn1 } = attnLayerBackward(ac0, dLdCur, graph, weights.W_update, weights.W_message, true, weights.W_gate_attn1);
+          if (dWG_attn1 && dWG_attn1.length) {
+            for (let r = 0; r < dWG_attn1.length; r++)
+              for (let c = 0; c < dWG_attn1[r].length; c++)
+                graphGrads.dW_gate_attn1[r][c] += clipGrad(dWG_attn1[r][c]);
+          }
           const addMat = (dst: number[][], src: number[][]) => {
             for (let r = 0; r < dst.length; r++)
               for (let c = 0; c < dst[r].length; c++)
@@ -3650,15 +3742,7 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         }
       }
 
-      // v17: Gate entropy regularization — penalize update_gates saturating to 0 or 1.
-      // L += GATE_ENTROPY_REG * Σ_i g*(1-g); gradient pushes gates toward non-extreme values.
-      const GATE_ENTROPY_REG = 0.001;
-      for (let gi = 0; gi < (weights.update_gates?.length ?? 0); gi++) {
-        const gv = sigmoid(weights.update_gates[gi] ?? 0);
-        totalLoss += GATE_ENTROPY_REG * gv * (1 - gv);
-        // ∂L/∂gate_raw = (1 - 2g) * g*(1-g) * GATE_ENTROPY_REG
-        gradUpdateGateEntropy[gi] = (1 - 2 * gv) * gv * (1 - gv) * GATE_ENTROPY_REG;
-      }
+
 
       const invN = 1.0 / batchSize_actual;
       adamStep++;
@@ -3760,15 +3844,11 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
       adamUpdateGraph(weights.W_input_proj,    graphGrads.dW_input_proj, graphAdam.inputProj);
       adamUpdateGraphVec(weights.b_input_proj, graphGrads.db_input_proj, graphAdam.bInputProj);
       adamUpdateGraphVec(weights.W_pressure,   gradPressure,             graphAdam.pressure);
-      // v17: residual_gates removed from forward pass — no Adam update needed.
-      for (let g = 0; g < weights.update_gates.length; g++) {
-        // v17: Combine backward gradient + entropy regularization gradient.
-        const gi = graphGrads.dUpdateGates[g] * invN + gradUpdateGateEntropy[g];
-        graphAdam.updateGates.m[g] = adamBeta1 * graphAdam.updateGates.m[g] + (1 - adamBeta1) * gi;
-        graphAdam.updateGates.v[g] = adamBeta2 * graphAdam.updateGates.v[g] + (1 - adamBeta2) * gi * gi;
-        weights.update_gates[g] -= graphLR * (graphAdam.updateGates.m[g] / bc1) / (Math.sqrt(graphAdam.updateGates.v[g] / bc2) + adamEps);
-        weights.update_gates[g] = Math.max(-6, Math.min(6, weights.update_gates[g]));
-      }
+      adamUpdateGraph(weights.W_gate_attn1,  graphGrads.dW_gate_attn1,  graphAdam.gateAttn1);
+      adamUpdateGraph(weights.W_gate_attn2,  graphGrads.dW_gate_attn2,  graphAdam.gateAttn2);
+      adamUpdateGraph(weights.W_gate_attn3,  graphGrads.dW_gate_attn3,  graphAdam.gateAttn3);
+      adamUpdateGraph(weights.W_gate_attn4,  graphGrads.dW_gate_attn4,  graphAdam.gateAttn4);
+      adamUpdateGraph(weights.W_gate_schnet, graphGrads.dW_gate_schnet, graphAdam.gateSchnet);
 
       // GLFN-TC: Adam updates for Graph Learning Module and Dense Residual gate.
       adamUpdateGraph(weights.W_elem_feat,   graphGrads.dW_elem_feat,   graphAdam.elemFeat);
@@ -3783,6 +3863,8 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         weights.W_message3, weights.W_update3, weights.W_message4, weights.W_update4,
         weights.W_filter1, weights.W_filter2, weights.W_input_proj,
         weights.W_elem_feat, weights.W_graph_adapt,
+        weights.W_gate_attn1, weights.W_gate_attn2, weights.W_gate_attn3,
+        weights.W_gate_attn4, weights.W_gate_schnet,
       ]) { invalidateFlatCache(wMat); }
     }
 
@@ -3848,8 +3930,10 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
     weights.W_mlp1, weights.W_mlp2, weights.W_mlp2_var, weights.W_attn_pool,
     weights.W_elem_feat, weights.W_graph_adapt,
     weights.W_cls1,  // v15: cls head — must scrub or NaN in cls head poisons all predictions
+    weights.W_gate_attn1, weights.W_gate_attn2, weights.W_gate_attn3,
+    weights.W_gate_attn4, weights.W_gate_schnet,
   ]) { scrubMatrix(wMat); }
-  for (const bVec of [weights.b_mlp1, weights.b_mlp2, weights.b_mlp2_var, weights.b_filter1, weights.b_filter2, weights.b_input_proj, weights.W_pressure, weights.residual_gates, weights.update_gates, weights.b_cls1, weights.W_cls2]) {
+  for (const bVec of [weights.b_mlp1, weights.b_mlp2, weights.b_mlp2_var, weights.b_filter1, weights.b_filter2, weights.b_input_proj, weights.W_pressure, weights.residual_gates, weights.b_cls1, weights.W_cls2]) {
     scrubVector(bVec);
   }
   if (!Number.isFinite(weights.dense_skip_gate)) weights.dense_skip_gate = -2.0;
