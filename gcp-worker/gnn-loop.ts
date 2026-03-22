@@ -372,13 +372,15 @@ async function loadQEDatasetSamples(existingFormulas: Set<string>): Promise<Trai
 // core SUPERCON_TRAINING_DATA (~274 samples); loading from the DB here ensures
 // every GNN training job uses the full 16k+ SC corpus.
 
-async function loadSuperconExternalSamples(existingFormulas: Set<string>, limit = 5000): Promise<TrainingSample[]> {
+async function loadSuperconExternalSamples(existingFormulas: Set<string>): Promise<TrainingSample[]> {
   try {
     // LEFT JOIN with jarvis-dft3d by shared external_id (JVASP-XXXXX) to pull
     // formation_energy_per_atom, bandgap_ev, and other DFT properties that are
     // absent from jarvis-supercon_3d entries. ~907/1058 SC3D entries match.
+    // No LIMIT — loads all sources including 3DSC, NIMS, JARVIS-Chem, etc.
     const rows = await db.execute(
       `SELECT sc.formula, sc.tc, sc.lambda, sc.space_group, sc.crystal_system,
+              sc.source,
               (sc.raw_data->>'wlog_K')::real                              AS omega_log_k,
               (sc.raw_data->>'mu_star')::real                             AS raw_mu_star,
               sc.raw_data->>'data_confidence'                             AS data_confidence,
@@ -388,11 +390,11 @@ async function loadSuperconExternalSamples(existingFormulas: Set<string>, limit 
        LEFT JOIN supercon_external_entries dft
          ON dft.external_id = sc.external_id AND dft.source = 'jarvis-dft3d'
        WHERE sc.is_superconductor = true AND sc.tc > 0
-       ORDER BY sc.tc DESC
-       LIMIT ${limit}`
+       ORDER BY sc.source, sc.tc DESC`
     );
     const items: any[] = (rows as any).rows ?? (Array.isArray(rows) ? rows : []);
     const samples: TrainingSample[] = [];
+    const srcCounts: Record<string, number> = {};
     for (const row of items) {
       const formula = row.formula as string;
       if (!formula || existingFormulas.has(formula)) continue;
@@ -417,6 +419,8 @@ async function loadSuperconExternalSamples(existingFormulas: Set<string>, limit 
       const bandgap = bgRaw != null && Number.isFinite(bgRaw) && bgRaw >= 0 ? bgRaw : undefined;
       // data_confidence from JARVIS SC3D raw_data — "dft-verified" unlocks 5× loss weight
       const dataConfidence = row.data_confidence === "dft-verified" ? "dft-verified" as const : undefined;
+      const src = (row.source as string) ?? 'unknown';
+      srcCounts[src] = (srcCounts[src] ?? 0) + 1;
       samples.push({
         formula,
         tc,
@@ -432,6 +436,8 @@ async function loadSuperconExternalSamples(existingFormulas: Set<string>, limit 
         prototype: undefined,
       });
     }
+    const srcSummary = Object.entries(srcCounts).map(([k, v]) => `${k}=${v}`).join(', ');
+    console.log(`[GNN-GCP] loadSuperconExternalSamples: ${samples.length} total (${srcSummary})`);
     return samples;
   } catch (err: any) {
     console.warn(`[GNN-GCP] loadSuperconExternalSamples failed: ${err.message?.slice(0, 120)}`);
@@ -859,7 +865,7 @@ async function runStartupFullCorpusTraining(): Promise<void> {
 
   console.log('[GNN-GCP] ════════════════════════════════════════════════════════');
   console.log('[GNN-GCP]  STARTUP PHASE 3 — Full Corpus Training');
-  console.log('[GNN-GCP]  Loading NIMS + JARVIS SC corpus (up to 5,000 entries)');
+  console.log('[GNN-GCP]  Loading full SC corpus (NIMS + JARVIS + 3DSC — no limit)');
   console.log('[GNN-GCP] ════════════════════════════════════════════════════════');
 
   // Pre-warm DB connection before heavy queries
@@ -868,9 +874,8 @@ async function runStartupFullCorpusTraining(): Promise<void> {
   const existingFormulas = new Set<string>();
 
   // Load full SC corpus from supercon_external_entries
-  const externalSC = await loadSuperconExternalSamples(existingFormulas, 5000);
+  const externalSC = await loadSuperconExternalSamples(existingFormulas);
   externalSC.forEach(s => existingFormulas.add(s.formula));
-  console.log(`[GNN-GCP]  Loaded ${externalSC.length} NIMS+JARVIS SC entries`);
 
   // Augment with DFT-verified QE entries
   const qeSamples = await loadQEDatasetSamples(existingFormulas);
