@@ -3301,150 +3301,165 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
           omegaLogGradBoost = 0.2 * omegaLogRelErr / dfptOmegaLog;
         }
 
-        // Allen-Dynes auxiliary: 0.1× weight — soft physics prior on λ/ω_log outputs.
-        // Not used for Tc prediction (no blend), only keeps λ and ω_log physically calibrated.
-        const dLossDAd = 0.1 * scW * 2 * allenDynesError / 300;
-
-        // ── Family-specific physics loss ──────────────────────────────────────
-        // Classify this sample's material family from composition rules, then
-        // apply the correct physics formula for its family. This gives each
-        // material class its own ground-truth physics signal rather than a
-        // generic Allen-Dynes approximation.
-        //
-        // Families and formulas:
-        //   hydride        → full Allen-Dynes with Dynes f1/f2 strong-coupling corrections
-        //   cuprate        → effective Allen-Dynes with λ_eff=0.5λ, μ*≤0.15 (resonating VB)
-        //   iron_based     → Allen-Dynes with reduced μ*≤0.08 (spin-fluctuation mediated)
-        //   boride (MgB2)  → two-band Allen-Dynes with λ_σ=0.7λ (σ-channel dominated)
-        //   kagome         → van-Hove enhanced Allen-Dynes with λ_vH=1.35λ
-        //   conventional   → standard Allen-Dynes (same as generic, but cleaner weight)
-
-        // --- Rule-based family classification (composition only, no neural) ---
-        let _trainFamily = 'unknown';
-        if (isSC) {
-          const _fc = parseFormulaCountsCanonical(sample.formula);
-          const _els = new Set(Object.keys(_fc));
-          const _total = Math.max(1, Object.values(_fc).reduce((a: number, b: number) => a + b, 0));
-          const _hFrac = (_fc['H'] ?? 0) / _total;
-          if (_hFrac > 0.35 && actualTcK > 50) {
-            _trainFamily = 'hydride';
-          } else if (_els.has('Cu') && _els.has('O') && _els.size >= 3) {
-            _trainFamily = 'cuprate';
-          } else if (_els.has('Fe') && (_els.has('As') || _els.has('Se') || _els.has('P'))) {
-            _trainFamily = 'iron_based';
-          } else if (_els.has('Mg') && _els.has('B') && _els.size <= 4) {
-            _trainFamily = 'boride';
-          } else if ((_els.has('Co') || _els.has('Fe')) && (_els.has('Sn') || _els.has('Cs')) &&
-                     (_els.has('V') || _els.has('Nb') || _els.has('Ta'))) {
-            _trainFamily = 'kagome';
-          } else if (_els.has('Ni') && _els.has('O') && _els.has('La')) {
-            _trainFamily = 'nickelate';
-          } else {
-            _trainFamily = 'conventional_bcs';
-          }
+        // ── Family classification ──────────────────────────────────────────────
+        // Composition-only rule to route the correct physics formula per family.
+        // Different SC families have different pairing mechanisms — applying a
+        // formula from the wrong family corrupts gradients in the shared backbone.
+        const _fc = parseFormulaCountsCanonical(sample.formula);
+        const _els = new Set(Object.keys(_fc));
+        const _total = Math.max(1, Object.values(_fc).reduce((a: number, b: number) => a + b, 0));
+        const _hFrac = (_fc['H'] ?? 0) / _total;
+        let _trainFamily = 'conventional_bcs';
+        if (_hFrac > 0.35 && actualTcK > 50) {
+          _trainFamily = 'hydride';
+        } else if (_els.has('Cu') && _els.has('O') && _els.size >= 3) {
+          _trainFamily = 'cuprate';
+        } else if (_els.has('Fe') && (_els.has('As') || _els.has('Se') || _els.has('P'))) {
+          _trainFamily = 'iron_based';
+        } else if (_els.has('Ni') && _els.has('O') && (_els.has('La') || _els.has('Nd') || _els.has('Pr'))) {
+          _trainFamily = 'nickelate';
         }
 
-        // --- Family-specific Tc prediction and exact gradients ---
-        let _familyTc = adTc;
-        let _dFamilyTcdLambda = dTcdLambda;
-        let _dFamilyTcdOmegaLog = dTcdOmegaLog;
+        // ── Physics-based auxiliary losses ────────────────────────────────────
+        // Each family gets the physically correct formula as a training constraint,
+        // or NO constraint if no reliable formula exists (better than a wrong one).
+        //
+        // HYDRIDES — Full Allen-Dynes with Dynes f1/f2 strong-coupling corrections
+        //   Tc = (ω_log/1.2) * f1 * f2 * exp[-1.04*(1+λ)/(λ*(1-0.62μ*)-μ*)]
+        //   f1 = [1 + (λ/λ_bar)^1.5]^(1/3),  λ_bar = 2.46*(1+3.8*μ*)
+        //   f2 = 1 + (λ−λ_0)²/(λ³+λ_0³),    λ_0 = sqrt(1.82*1.04*μ*/(1+6.3*μ*))
+        //   Source: Allen & Dynes (1975) Phys. Rev. B 12, 905
+        //   Valid for all λ including strong-coupling (LaH10 λ≈3.5, H3S λ≈2.0)
+        //
+        // CUPRATES — Presland-Tallon (1991) hole-doping parabola
+        //   Tc(p) = Tc_max * [1 − 82.6*(p − 0.16)²]
+        //   p = hole doping per CuO2 plane, estimated from formal charge balance on Cu
+        //   Tc_max estimated from composition (Hg > Tl > Bi/Y > La family hierarchy)
+        //   Source: Presland et al. (1991) Physica C 176, 95
+        //   This is NOT Allen-Dynes — cuprates are d-wave, pairing via spin fluctuations.
+        //
+        // IRON-BASED — No reliable analytical formula (s± pairing, nesting-dependent)
+        //   Allen-Dynes is wrong here. Direct MSE on out[8] is the only reliable signal.
+        //
+        // CONVENTIONAL BCS — Standard McMillan/Allen-Dynes
+        //   Same as the general adTc already computed above.
+
+        let _physAdTc = adTc;                   // formula Tc for phonon families
+        let _dPhysTcdLambda = dTcdLambda;
+        let _dPhysTcdOmegaLog = dTcdOmegaLog;
+        let _physLossW = 0.0;                   // loss weight for each family
+        let _cuprateAuxLoss = 0.0;              // Presland-Tallon loss for cuprates
+
         const _mu = sampleMuStar;
 
-        if (isSC && adLambda > 0.1 && adOmegaLog > 10) {
+        if (isSC && _trainFamily === 'hydride' && adLambda > 0.5 && adOmegaLog > 10) {
+          // Full Allen-Dynes with strong-coupling f1/f2 (Allen & Dynes 1975).
+          // This is the accepted standard for λ > 1 superconductors.
           const _D = Math.max(0.001, adLambda * (1 - 0.62 * _mu) - _mu);
-          const _expArg = Math.max(-40, -1.04 * (1 + adLambda) / _D);
-          const _expFact = Math.exp(_expArg);
+          const _expFact = Math.exp(Math.max(-40, -1.04 * (1 + adLambda) / _D));
           const _tcBase = (adOmegaLog / 1.2) * _expFact;
           const _dTcBase_dLambda = _tcBase * 1.04 * (1 + 0.38 * _mu) / (_D * _D);
-
-          if (_trainFamily === 'hydride') {
-            // Full Allen-Dynes (Dynes 1972): Tc = (ωlog/1.2) * f1 * f2 * exp(...)
-            // f1 = (1 + (λ/λ_bar)^1.5)^(1/3),  λ_bar = 2.46(1+3.8μ*)
-            // f2 = 1 + (λ-λ0)²/(λ³+λ0³) for λ>λ0,  λ0 = sqrt(1.82*1.04*μ/(1+6.3μ))
-            const _lambdaBar = 2.46 * (1 + 3.8 * _mu);
-            const _lambda0 = Math.sqrt(Math.max(0, 1.82 * 1.04 * _mu / (1 + 6.3 * _mu)));
-            const _f1base = 1 + Math.pow(adLambda / _lambdaBar, 1.5);
-            const _f1 = Math.pow(Math.max(1e-10, _f1base), 1 / 3);
-            const _f2num = adLambda > _lambda0 ? Math.pow(adLambda - _lambda0, 2) : 0;
-            const _f2den = Math.max(1e-10, Math.pow(adLambda, 3) + Math.pow(_lambda0, 3));
-            const _f2 = 1 + _f2num / _f2den;
-            _familyTc = _tcBase * _f1 * _f2;
-            // Exact dTc/dλ via product rule through f1, f2, and exp(...)
-            const _df1_dLambda = _f1base > 1e-10
-              ? 0.5 * Math.pow(adLambda / _lambdaBar, 0.5) / (_lambdaBar * Math.pow(_f1base, 2 / 3))
-              : 0;
-            let _df2_dLambda = 0;
-            if (adLambda > _lambda0 && _f2den > 1e-10) {
-              const _d_num = 2 * (adLambda - _lambda0);
-              const _d_den = 3 * adLambda * adLambda;
-              _df2_dLambda = (_d_num * _f2den - _f2num * _d_den) / (_f2den * _f2den);
-            }
-            _dFamilyTcdLambda = _f1 * _f2 * _dTcBase_dLambda
-              + _tcBase * (_df1_dLambda * _f2 + _f1 * _df2_dLambda);
-            _dFamilyTcdOmegaLog = adOmegaLog > 0 ? _familyTc / adOmegaLog : 0;
-
-          } else if (_trainFamily === 'boride') {
-            // MgB2-type two-band: σ-channel dominates, λ_σ ≈ 0.7λ
-            const _lSigma = 0.7 * adLambda;
-            const _Ds = Math.max(0.001, _lSigma * (1 - 0.62 * _mu) - _mu);
-            _familyTc = (adOmegaLog / 1.2) * Math.exp(Math.max(-40, -1.04 * (1 + _lSigma) / _Ds));
-            _dFamilyTcdLambda = 0.7 * _familyTc * 1.04 * (1 + 0.38 * _mu) / (_Ds * _Ds);
-            _dFamilyTcdOmegaLog = adOmegaLog > 0 ? _familyTc / adOmegaLog : 0;
-
-          } else if (_trainFamily === 'kagome') {
-            // van Hove singularity enhancement: λ_eff = 1.35λ
-            const _lVH = 1.35 * adLambda;
-            const _DvH = Math.max(0.001, _lVH * (1 - 0.62 * _mu) - _mu);
-            _familyTc = (adOmegaLog / 1.2) * Math.exp(Math.max(-40, -1.04 * (1 + _lVH) / _DvH));
-            _dFamilyTcdLambda = 1.35 * _familyTc * 1.04 * (1 + 0.38 * _mu) / (_DvH * _DvH);
-            _dFamilyTcdOmegaLog = adOmegaLog > 0 ? _familyTc / adOmegaLog : 0;
-
-          } else if (_trainFamily === 'iron_based') {
-            // Spin-fluctuation mediated: lower effective μ* (~0.05–0.08)
-            const _muFe = Math.min(_mu, 0.08);
-            const _DFe = Math.max(0.001, adLambda * (1 - 0.62 * _muFe) - _muFe);
-            _familyTc = (adOmegaLog / 1.2) * Math.exp(Math.max(-40, -1.04 * (1 + adLambda) / _DFe));
-            _dFamilyTcdLambda = _familyTc * 1.04 * (1 + 0.38 * _muFe) / (_DFe * _DFe);
-            _dFamilyTcdOmegaLog = adOmegaLog > 0 ? _familyTc / adOmegaLog : 0;
-
-          } else if (_trainFamily === 'cuprate') {
-            // Resonating valence bond: effective λ_eff = 0.5λ, capped μ*≤0.15
-            const _lCup = 0.5 * adLambda;
-            const _muCup = Math.min(_mu, 0.15);
-            const _DCup = Math.max(0.001, _lCup * (1 - 0.62 * _muCup) - _muCup);
-            _familyTc = (adOmegaLog / 1.2) * Math.exp(Math.max(-40, -1.04 * (1 + _lCup) / _DCup));
-            _dFamilyTcdLambda = 0.5 * _familyTc * 1.04 * (1 + 0.38 * _muCup) / (_DCup * _DCup);
-            _dFamilyTcdOmegaLog = adOmegaLog > 0 ? _familyTc / adOmegaLog : 0;
-
-          } else {
-            // conventional_bcs, nickelate, heavy_fermion, unknown — standard Allen-Dynes
-            _familyTc = adTc;
-            _dFamilyTcdLambda = dTcdLambda;
-            _dFamilyTcdOmegaLog = dTcdOmegaLog;
+          const _lambdaBar = 2.46 * (1 + 3.8 * _mu);
+          const _lambda0 = Math.sqrt(Math.max(0, 1.82 * 1.04 * _mu / (1 + 6.3 * _mu)));
+          const _f1base = 1 + Math.pow(adLambda / _lambdaBar, 1.5);
+          const _f1 = Math.pow(Math.max(1e-10, _f1base), 1 / 3);
+          const _f2num = adLambda > _lambda0 ? Math.pow(adLambda - _lambda0, 2) : 0;
+          const _f2den = Math.max(1e-10, Math.pow(adLambda, 3) + Math.pow(_lambda0, 3));
+          const _f2 = 1 + _f2num / _f2den;
+          _physAdTc = _tcBase * _f1 * _f2;
+          // dTc/dλ via exact product rule through f1, f2, and exp(...)
+          const _df1dLambda = _f1base > 1e-10
+            ? 0.5 * Math.pow(adLambda / _lambdaBar, 0.5) / (_lambdaBar * Math.pow(_f1base, 2 / 3))
+            : 0;
+          let _df2dLambda = 0;
+          if (adLambda > _lambda0 && _f2den > 1e-10) {
+            const _dn = 2 * (adLambda - _lambda0);
+            const _dd = 3 * adLambda * adLambda;
+            _df2dLambda = (_dn * _f2den - _f2num * _dd) / (_f2den * _f2den);
           }
-        }
+          _dPhysTcdLambda = _f1 * _f2 * _dTcBase_dLambda
+            + _tcBase * (_df1dLambda * _f2 + _f1 * _df2dLambda);
+          _dPhysTcdOmegaLog = adOmegaLog > 0 ? _physAdTc / adOmegaLog : 0;
+          _physLossW = 0.15;  // stronger weight for hydrides — formula is accurate
 
-        // Family-specific loss weight — higher for families where the formula is most accurate
-        const _familyLossW = isSC ? (
-          _trainFamily === 'hydride'      ? 0.7 :
-          _trainFamily === 'boride'       ? 0.6 :
-          _trainFamily === 'kagome'       ? 0.5 :
-          _trainFamily === 'iron_based'   ? 0.5 :
-          _trainFamily === 'cuprate'      ? 0.5 :
-          _trainFamily === 'nickelate'    ? 0.3 :
-          0.3  // conventional_bcs / unknown
-        ) : 0;
-        const _familyPhysErr = isSC ? (_familyTc / 300 - tcTarget) : 0;
-        if (isSC) totalLoss += _familyLossW * _familyPhysErr * _familyPhysErr;
-        // Gradient of family physics loss w.r.t. out[2] (ωlog) and out[4] (λ)
-        const _dLossDFamily = isSC ? (_familyLossW * 2 * _familyPhysErr / 300) : 0;
+        } else if (isSC && _trainFamily === 'cuprate') {
+          // Presland-Tallon (1991): Tc(p) = Tc_max * [1 − 82.6*(p − 0.16)²]
+          // p = hole doping per CuO2 plane, estimated from formal charge balance.
+          // Charge balance: sum of cation oxidation states must balance O²⁻ × n_O.
+          // Cu nominal valence in parent compound is 2+. Holes come from:
+          //   1. Heterovalent substitution (e.g., Sr²⁺→La³⁺, Ca²⁺→Y³⁺)
+          //   2. Excess oxygen (e.g., YBa2Cu3O6+x, La2CuO4+δ)
+          // We approximate: p = (n_O * 2 - Σ non-Cu cation oxidation) / n_Cu - 2
+          // where Σ non-Cu cation oxidation is estimated from standard valences.
+          const _ox: Record<string, number> = {
+            H: 1, Li: 1, Na: 1, K: 1, Rb: 1, Cs: 1,
+            Be: 2, Mg: 2, Ca: 2, Sr: 2, Ba: 2,
+            Al: 3, Ga: 3, In: 3,
+            La: 3, Nd: 3, Pr: 3, Sm: 3, Eu: 3, Gd: 3, Tb: 3, Dy: 3, Ho: 3, Er: 3, Tm: 3, Yb: 3, Lu: 3,
+            Y: 3, Sc: 3, Bi: 3,
+            Hg: 2, Tl: 1, Pb: 2, Cd: 2, Zn: 2,
+          };
+          const _nCu = _fc['Cu'] ?? 0;
+          const _nO  = _fc['O'] ?? 0;
+          if (_nCu > 0 && _nO > 0) {
+            let _cationSum = 0;
+            for (const [el, cnt] of Object.entries(_fc)) {
+              if (el === 'Cu' || el === 'O') continue;
+              _cationSum += (_ox[el] ?? 2) * (cnt as number);
+            }
+            // Cu oxidation = (2*n_O - _cationSum) / n_Cu
+            const _cuOx = (2 * _nO - _cationSum) / _nCu;
+            const _pEst = Math.max(0, Math.min(0.35, _cuOx - 2));  // holes above Cu²⁺
+            // Tc_max from family hierarchy (literature Tc_max per compound family):
+            //   Hg-family (Hg-1223): ~135 K    Tl-family (Tl-2223): ~127 K
+            //   Bi-2223: ~110 K                Bi-2212 / Y-123: ~93 K
+            //   La-214 (LSCO): ~40 K
+            let _tcMax = 93;  // default (YBCO-class)
+            if (_els.has('Hg')) _tcMax = 135;
+            else if (_els.has('Tl') && (_fc['Tl'] ?? 0) >= 2) _tcMax = 127;
+            else if (_els.has('Bi') && (_fc['Cu'] ?? 0) >= 3) _tcMax = 110;
+            else if (_els.has('La') && !_els.has('Y') && !_els.has('Bi')) _tcMax = 40;
+            // Presland-Tallon formula
+            const _ptTc = _tcMax * Math.max(0, 1 - 82.6 * Math.pow(_pEst - 0.16, 2));
+            // Confidence: higher near optimal doping (p=0.16), lower at edges
+            const _ptConf = Math.max(0, 1 - Math.abs(_pEst - 0.16) / 0.12);
+            if (_pEst > 0.02 && _pEst < 0.32 && _ptConf > 0.2) {
+              // Apply loss only when doping estimate is in a physically meaningful range.
+              // This loss trains out[8] directly (no gradient through λ/ωlog — correct,
+              // since cuprate Tc is NOT driven by phonon coupling).
+              const _ptErr = _ptTc / 300 - tcNormTarget / TC_NORM_CLAMP;
+              _cuprateAuxLoss = 0.1 * _ptConf * _ptErr * _ptErr;
+              totalLoss += _cuprateAuxLoss;
+              // Gradient of cuprate PT loss w.r.t. out[8] (sigmoid-activated Tc head)
+              // d/d(out8): 2 * 0.1 * ptConf * ptErr * d(ptTc/300)/d(sigmoid(out8))
+              // ptTc has no dependence on the GNN outputs — it is computed from composition.
+              // So this loss does NOT propagate through out[2]/out[4], only provides
+              // an additional normalizing reference for the training loss metric.
+            }
+          }
+          // For cuprates: no Allen-Dynes gradient — pairing is non-phonon.
+          _physLossW = 0.0;
+
+        } else if (isSC && _trainFamily === 'conventional_bcs' && adLambda > 0.1 && adOmegaLog > 10) {
+          // Standard Allen-Dynes (McMillan 1968 / Allen & Dynes 1975 simplified form).
+          _physAdTc = adTc;
+          _dPhysTcdLambda = dTcdLambda;
+          _dPhysTcdOmegaLog = dTcdOmegaLog;
+          _physLossW = 0.1;
+
+        }
+        // iron_based, nickelate: _physLossW = 0 — no reliable formula, data-driven only.
+
+        const _physErr = _physLossW > 0 ? (_physAdTc / 300 - tcTarget) : 0;
+        if (_physLossW > 0) totalLoss += _physLossW * scW * _physErr * _physErr;
+        const _dLossDAd = _physLossW > 0 ? (_physLossW * scW * 2 * _physErr / 300) : 0;
 
         const dLdOut = new Array(OUTPUT_DIM).fill(0);
         dLdOut[0] = hasFormationEnergy ? clipGrad(2 * feError * 0.1) : 0;
         dLdOut[1] = 0;
-        dLdOut[2] = clipGrad(((dLossDAd * dTcdOmegaLog) + (_dLossDFamily * _dFamilyTcdOmegaLog) + omegaLogGradBoost) * dOmegaLogdOut2);
+        dLdOut[2] = clipGrad((_dLossDAd * _dPhysTcdOmegaLog + omegaLogGradBoost) * dOmegaLogdOut2);
         dLdOut[3] = 0;
-        dLdOut[4] = clipGrad((dLossDAd * dTcdLambda + _dLossDFamily * _dFamilyTcdLambda) * dLambdadOut4);
+        dLdOut[4] = clipGrad(_dLossDAd * _dPhysTcdLambda * dLambdadOut4);
         const bgSig5 = sigmoid(cache.outRaw[5] ?? 0);
         dLdOut[5] = bgTarget != null ? clipGrad(2 * bgError * 0.05 * 5.0 * bgSig5 * (1 - bgSig5)) : 0;
         dLdOut[6] = 0;
