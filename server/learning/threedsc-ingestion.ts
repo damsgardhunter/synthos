@@ -293,8 +293,9 @@ async function ingestFile(filePath: string, state: IngestionState): Promise<void
   let totalInserted = state.rowsIngested;
 
   for await (const fields of parseCSVFile(filePath)) {
-    // First record is always the header
+    // First record is the header — but skip any leading comment lines (start with #)
     if (headers.length === 0) {
+      if (fields[0]?.trimStart().startsWith("#")) continue;
       headers = fields.map(h => h.toLowerCase().replace(/^"|"$/g, "").trim());
       continue;
     }
