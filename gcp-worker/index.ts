@@ -28,6 +28,7 @@ import { startXGBLoop, stopXGBLoop } from "./xgb-loop";
 import { startMLLoop, stopMLLoop } from "./ml-loop";
 import { startSuperConIngestion } from "../server/learning/supercon-db-ingestion";
 import { startJarvisIngestion } from "../server/learning/jarvis-ingestion";
+import { startThreeDSCIngestion } from "../server/learning/threedsc-ingestion";
 import { startCODCachePopulation, printSpaceGroupCoverage } from "../server/learning/space-group-explorer";
 
 // Default OMP_NUM_THREADS: 7 concurrent QE jobs × 4 threads = 28 vCPUs (main instance).
@@ -74,6 +75,10 @@ delay(15_000).then(() => {
 // JARVIS starts 45 s after SuperCon to avoid DB connection contention on startup.
 delay(60_000).then(() => {
   startJarvisIngestion();
+});
+// 3DSC_MP starts 90 s after SuperCon (staggered behind JARVIS).
+delay(105_000).then(() => {
+  startThreeDSCIngestion();
 });
 
 // Stagger loop starts to avoid saturating the Neon connection pool.

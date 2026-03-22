@@ -139,6 +139,7 @@ import { recordPredictionOutcome } from "./model-diagnostics";
 import { checkFormulaNovelty } from "./cod-client";
 import { systematicSGSweep, getSpaceGroupCoverageReport } from "./space-group-explorer";
 import { startSuperConIngestion } from "./supercon-db-ingestion";
+import { startThreeDSCIngestion } from "./threedsc-ingestion";
 
 function derivePairingSymmetry(mechanism: string | null | undefined, dWaveFlag?: boolean): string {
   const mech = (mechanism ?? "").toLowerCase();
@@ -8751,6 +8752,10 @@ export async function startEngine() {
   // into supercon_external_entries. Fire-and-forget — idempotent, resumes from
   // last checkpoint if the server restarts mid-ingestion.
   startSuperConIngestion();
+  // 3DSC_MP: ~2k+ MP-matched superconductors with DFT structural features
+  // (band gap, formation energy, e_above_hull, lattice params, density).
+  // Staggered 30 s to avoid DB connection contention with SuperCon.
+  setTimeout(() => startThreeDSCIngestion(), 30_000);
 
   // Reset any GNN training jobs that were stuck in 'running' due to a VM shutdown.
   storage.resetStuckGnnJobs().then(n => {
