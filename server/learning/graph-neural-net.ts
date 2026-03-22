@@ -265,15 +265,16 @@ const FIXED_MU_STAR = 0.10;
 const LAMBDA_MAX = 5.5;
 // Allen-Dynes formula is unconventional above ~300 K; cap predictions at training normalization ceiling.
 const TC_MAX_K = 300;
-// log1p normalisation for Tc regression:
-//   training target = log1p(Tc / 10) / TC_LOG_SCALE * TC_NORM_CLAMP  ∈ [0, TC_NORM_CLAMP]
-//   inverse         = 10 * expm1(sigmoid(out[8]) * TC_LOG_SCALE / TC_NORM_CLAMP) → Tc in K
-// TC_NORM_CLAMP < 1.0 prevents the training target from reaching sigmoid's saturation region.
-// Without it, max-Tc samples (300K) push the target to exactly 1.0, forcing out[8]→+∞,
-// where sigmoid'→0 and gradients die — the regression head collapses to a constant bias.
-// With TC_NORM_CLAMP=0.9: max target = 0.9 → out[8]=logit(0.9)≈2.2 at optimum (finite!).
+// log1p normalisation for Tc regression (direct, no sigmoid):
+//   training target = log1p(Tc / 10) / TC_LOG_SCALE  ∈ [0, 1]
+//   out[8] is trained to approximate this value directly (no sigmoid activation)
+//   inference Tc    = 10 * expm1(max(0, out[8]) * TC_LOG_SCALE)
+//
+// Why no sigmoid: sigmoid(out8) → 0 as out[8] → -∞, making gradient
+//   dL/d(out8) = err * sigmoid'(out8) → 0 — the vanishing gradient trap.
+// Once out[8] enters negative saturation (predicting ~0 K) it cannot recover.
+// Direct regression: gradient = 2 * coeff * (out8 - target), never vanishes.
 const TC_LOG_SCALE = Math.log1p(TC_MAX_K / 10);  // log1p(30) ≈ 3.434
-const TC_NORM_CLAMP = 0.9; // max sigmoid target for Tc regression — keeps out[8] in finite range
 // Dedicated classification head hidden dimension — large enough to learn P(SC)
 // without competing with Tc regression in the shared h1 representation.
 const CLS_DIM = 24;
@@ -2435,11 +2436,10 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
   // out[4] → λ via sigmoid soft cap into (0, LAMBDA_MAX).
   const lambdaRaw = LAMBDA_MAX * sigmoid(sf(out[4] ?? 0));
   // v15: P(SC) from dedicated classification head; out[8] → Tc magnitude.
-  // TcFinal = P(SC) × tcRaw — non-SC forces gate to close; SC forces gate to stay open.
-  // Floor at 0.1 prevents a collapsed cls head (overfitting to training SC patterns)
-  // from zeroing ALL predictions, which would make R²=-∞ and trigger the quality gate.
+  // Direct regression: out[8] ≈ log1p(Tc/10)/TC_LOG_SCALE ∈ [0,1]. No sigmoid — prevents
+  // vanishing gradient trap (sigmoid'→0 as out[8]→-∞ made predictions lock at 0K forever).
   const scProb = sigmoid(sf(out7Cls));
-  const predictedTcRaw = 10 * Math.expm1(sigmoid(sf(out[8] ?? 0)) * TC_LOG_SCALE / TC_NORM_CLAMP);
+  const predictedTcRaw = 10 * Math.expm1(Math.max(0, sf(out[8] ?? 0)) * TC_LOG_SCALE);
   const confidenceRaw = sigmoid(sf(out[3] ?? 0));
   const bandgapRaw = sigmoid(sf(out[5] ?? 0)) * 5.0;
   const dosProxyRaw = softplus(sf(out[6] ?? 0));
@@ -2624,9 +2624,9 @@ function GNNPredictForTraining(graph: CrystalGraph, weights: GNNWeights): { pred
   // out[4] → λ: sigmoid soft map into (0, LAMBDA_MAX) — gradient everywhere.
   const lambdaRaw = LAMBDA_MAX * sigmoid(sf(out[4] ?? 0));
   // v15: P(SC) from dedicated cls head; out[8] → Tc magnitude.
-  // Floor matches inference path to keep training R² consistent with val R².
+  // Direct regression (no sigmoid): out[8] ≈ log1p(Tc/10)/TC_LOG_SCALE ∈ [0,1].
   const scProb = sigmoid(sf(out7Cls));
-  const predictedTcRaw = 10 * Math.expm1(sigmoid(sf(out[8] ?? 0)) * TC_LOG_SCALE / TC_NORM_CLAMP);
+  const predictedTcRaw = 10 * Math.expm1(Math.max(0, sf(out[8] ?? 0)) * TC_LOG_SCALE);
   const confidenceRaw = sigmoid(sf(out[3] ?? 0));
   const bandgapRaw = sigmoid(sf(out[5] ?? 0)) * 5.0;
   const dosProxyRaw = softplus(sf(out[6] ?? 0));
@@ -2730,9 +2730,11 @@ function initWeights(rng: () => number): GNNWeights {
       // out[4] → λ via sigmoid(x): bias -1.5 → sigmoid(-1.5)≈0.18 → λ≈1.0 (typical phonon-mediated SC)
       // Without this, sigmoid(0)=0.5 → λ=2.75, immediately predicting Tc≈90K for all materials.
       b[4] = -1.5;
-      // out[8] → log1p-normalised sigmoid Tc. Bias=0 → sigmoid(0)=0.5 →
-      // 10*expm1(0.5*TC_LOG_SCALE) ≈ 45K — near the mean of high-Tc SC training data.
-      b[8] = 0.0;
+      // out[8] → log1p-normalised Tc (direct regression, no sigmoid).
+      // Bias 0.38 ≈ log1p(27/10)/TC_LOG_SCALE → ~27K initial prediction,
+      // near the SC training mean. Avoids starting at 0K where gradients would
+      // push correctly but initial loss is maximally bad.
+      b[8] = 0.38;
       return b;
     })(),
     W_mlp2_var: initMatrix(OUTPUT_DIM, HIDDEN_DIM, rng, 0.05),
@@ -3191,16 +3193,14 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
 
         // Track Tc predictions in Kelvin for inline R²/RMSE reporting.
         const pSC      = sigmoid(directOut7);
-        const _diagS8  = sigmoid(directOut8);
         if (isSC) {
-          const predTcK = 10 * Math.expm1(_diagS8 * TC_LOG_SCALE / TC_NORM_CLAMP);
+          const predTcK = 10 * Math.expm1(Math.max(0, directOut8) * TC_LOG_SCALE);
           tcSumErr2    += (predTcK - actualTcK) ** 2;
           tcSumActual  += actualTcK;
           tcSumActual2 += actualTcK * actualTcK;
           nTcSamples++;
           // out[8]-only R²: raw magnitude head quality independent of gate.
-          const out8Pred = 10 * Math.expm1(_diagS8 * TC_LOG_SCALE / TC_NORM_CLAMP);
-          out8SumErr2    += (out8Pred - actualTcK) ** 2;
+          out8SumErr2    += (predTcK - actualTcK) ** 2;
           out8SumActual  += actualTcK;
           out8SumActual2 += actualTcK * actualTcK;
           nOut8++;
@@ -3228,10 +3228,10 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         // push the classifier harder than low-confidence experimental entries.
         totalLoss += feWeight * feError * feError + sampleW * bceLoss;
         // Direct Tc regression (SC samples only). Base coefficient 6.0 × sampleW.
-        const tcSigOut8 = sigmoid(directOut8);
-        const tcNormTarget = isSC ? Math.log1p(actualTcK / 10) / TC_LOG_SCALE * TC_NORM_CLAMP : 0;
-
-        const tcDirectErr = isSC ? (tcSigOut8 - tcNormTarget) : 0;
+        // out[8] is trained as a real number targeting log1p(Tc/10)/TC_LOG_SCALE ∈ [0,1].
+        // No sigmoid activation — gradient = 12*(out8 - target), never vanishes.
+        const tcNormTarget = isSC ? Math.log1p(actualTcK / 10) / TC_LOG_SCALE : 0;
+        const tcDirectErr = isSC ? (directOut8 - tcNormTarget) : 0;
         if (isSC) totalLoss += sampleW * 6.0 * tcDirectErr * tcDirectErr;
         totalSamples++;
 
@@ -3405,7 +3405,8 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
               // Apply loss only when doping estimate is in a physically meaningful range.
               // This loss trains out[8] directly (no gradient through λ/ωlog — correct,
               // since cuprate Tc is NOT driven by phonon coupling).
-              const _ptErr = _ptTc / 300 - tcNormTarget / TC_NORM_CLAMP;
+              // Both sides in log-normalized space (same units as tcNormTarget after direct-regression fix)
+              const _ptErr = Math.log1p(_ptTc / 10) / TC_LOG_SCALE - tcNormTarget;
               _cuprateAuxLoss = 0.1 * _ptConf * _ptErr * _ptErr;
               totalLoss += _cuprateAuxLoss;
               // Gradient of cuprate PT loss w.r.t. out[8] (sigmoid-activated Tc head)
@@ -3444,8 +3445,8 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         // out[7]: standard BCE gradient
         // dL/d(out[7]) = sampleW * (σ(out7) - target): BCE gradient scaled by sample weight
         dLdOut[7] = clipGrad(sampleW * (sigOut7 - scTarget));
-        // dL/d(out[8]) = sampleW * 2*6 * tcDirectErr * σ'(out8)
-        dLdOut[8] = isSC ? clipGrad(sampleW * 12.0 * tcDirectErr * tcSigOut8 * (1 - tcSigOut8)) : 0;
+        // dL/d(out[8]) = sampleW * 2*6 * tcDirectErr  (no sigmoid → no vanishing gradient)
+        dLdOut[8] = isSC ? clipGrad(sampleW * 12.0 * tcDirectErr) : 0;
 
         // Uncertainty head (W_mlp2_var) receives no gradient — NLL removed.
         // Uncertainty outputs can be calibrated post-training via isotonic regression.
