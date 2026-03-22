@@ -47,7 +47,7 @@ export interface CrystalGraph {
   formula: string;
   prototype?: string;
   pressureGpa?: number;
-  globalFeatures?: number[]; // 19-dim: original 6 + 7 composition + 6 physics (λ, logω, DOS, FE, isCuprate, isIronBased)
+  globalFeatures?: number[]; // 32-dim: 23 composition/physics + 3 data-availability bits + 6 source one-hot
 }
 
 /**
@@ -66,6 +66,15 @@ export interface PhysicsFeatureHints {
   dosAtEF?: number | null;
   /** Log mean phonon frequency proxy (from Debye temperature or phonon spectrum). */
   logPhononFreq?: number | null;
+  // ── Data provenance metadata (used for source one-hot and availability mask) ──
+  /** Source dataset tag: 'qe-dft' | 'hamidieh' | 'jarvis-sc' | '3dsc-mp' | 'contrast-jarvis' | 'contrast-mp' */
+  sourceTag?: string;
+  /** True when λ comes from a real DFPT measurement (not a composition-based proxy fallback). */
+  hasLambdaMeasured?: boolean;
+  /** True when ω_log comes from a real DFPT measurement. */
+  hasOmegaLogMeasured?: boolean;
+  /** True when formation energy was measured (not the neutral-prior fallback). */
+  hasFEMeasured?: boolean;
 }
 
 function buildEdgeIndex(nodes: NodeFeature[], edges: EdgeFeature[]): (EdgeFeature | null)[] {
@@ -248,7 +257,7 @@ const HIDDEN_DIM = 48;
 const N_GAUSSIAN_BASIS = 40;             // expanded from 20 — denser RBF gives finer distance discrimination
 const EDGE_DIM = N_GAUSSIAN_BASIS + 4;   // derived: 40 RBF + bond order, EN diff, ionic char, radius sum
 const OUTPUT_DIM = 16;
-const GLOBAL_COMP_DIM = 23;
+const GLOBAL_COMP_DIM = 32; // 23 composition/physics + 3 data-availability bits + 6 source one-hot
 // Coulomb pseudopotential μ* — fixed at conventional BCS value.
 // Typical range: 0.10 (metals), 0.12-0.13 (hydrides, higher Coulomb screening).
 const FIXED_MU_STAR = 0.10;
@@ -1322,9 +1331,12 @@ function computeAtomicMismatch(counts: Record<string, number>): number {
   return Math.sqrt(Math.max(0, delta2));
 }
 
-// Computes GLOBAL_COMP_DIM (23) composition-level features injected at the MLP head.
-// 13 composition features + 6 physics features from PhysicsFeatureHints (λ, logω, DOS, FE, class flags)
-// + 4 engineered features (pressure, MgB2-type, heavy-fermion hint, mean TM d-count).
+// Computes GLOBAL_COMP_DIM (32) composition-level features injected at the MLP head.
+// [0-12]  13 composition features (EN, d-occ, VEC, Debye, mismatch, nEl, stdEN, H-flag, TM frac, entropy, ENdiff, mass, radius-std)
+// [13-18]  6 physics features from PhysicsFeatureHints (λ, logω, DOS, FE, isCuprate, isIronBased)
+// [19-22]  4 engineered features (pressure, MgB2-type, heavy-fermion, mean TM d-count)
+// [23-25]  3 data-availability bits (hasLambda, hasOmegaLog, hasFE) — tells GNN which fields are measured vs proxy
+// [26-31]  6 source one-hot (qe-dft, hamidieh, jarvis-sc, 3dsc-mp, contrast-jarvis, contrast-mp)
 // Hints contain measured/estimated physics — not model outputs — so there is no training leakage.
 function computeGlobalCompositionFeatures(counts: Record<string, number>, hints?: PhysicsFeatureHints, pressureGpa?: number): number[] {
   const els = Object.entries(counts);
@@ -1435,6 +1447,27 @@ function computeGlobalCompositionFeatures(counts: Record<string, number>, hints?
     ? tmEls.reduce((s, [el, n]) => s + (n / tmCount) * getDOrbitalOccupancy(getElementData(el)?.atomicNumber ?? 1), 0)
     : 0.0;
 
+  // ── Data availability mask [23-25] ──────────────────────────────────────────
+  // Tells the GNN which physics features are real measurements vs proxy fallbacks.
+  // Without this, a NIMS sample (no lambda measured) and a QE sample (lambda from DFPT)
+  // look identical to the network — it can't weight the physics features appropriately.
+  const hasLambdaMeasured  = hints?.hasLambdaMeasured  ? 1.0 : 0.0;
+  const hasOmegaLogMeasured = hints?.hasOmegaLogMeasured ? 1.0 : 0.0;
+  const hasFEMeasured      = hints?.hasFEMeasured      ? 1.0 : 0.0;
+
+  // ── Source one-hot [26-31] ────────────────────────────────────────────────────
+  // Lets the GNN learn source-specific biases (e.g. 3DSC has different Tc distribution
+  // than hamidieh; contrast samples from MP have no physics at all).
+  // At inference time all six bits are 0 (source unknown) — the model falls back to
+  // composition/physics features alone, which is correct behaviour.
+  const src = hints?.sourceTag ?? '';
+  const srcQE            = src === 'qe-dft'           ? 1.0 : 0.0;  // [26]
+  const srcHamidieh      = src === 'hamidieh'          ? 1.0 : 0.0;  // [27]
+  const srcJarvisSC      = src.startsWith('jarvis-supercon') ? 1.0 : 0.0; // [28]
+  const src3DSC          = src === '3dsc-mp'           ? 1.0 : 0.0;  // [29]
+  const srcContrastJarvis = src === 'contrast-jarvis'  ? 1.0 : 0.0;  // [30]
+  const srcContrastMP    = src === 'contrast-mp'       ? 1.0 : 0.0;  // [31]
+
   return [
     meanEN / 4.0,                           // [0] mean Pauling EN — ionicity proxy
     meanD,                                  // [1] mean d-orbital filling — BCS coupling proxy
@@ -1459,6 +1492,17 @@ function computeGlobalCompositionFeatures(counts: Record<string, number>, hints?
     isMgB2Type,                             // [20] MgB2-type flag — two-band phonon SC
     heavyFermionFeat,                       // [21] heavy-fermion/f-electron hint — Kondo-lattice SC
     meanTMdCount,                           // [22] mean d-count per TM — Stoner criterion / DOS proxy
+    // ── Data availability mask ───────────────────────────────────────────────
+    hasLambdaMeasured,                      // [23] 1 if λ is a real DFPT measurement, 0 if proxy
+    hasOmegaLogMeasured,                    // [24] 1 if ω_log is a real DFPT measurement
+    hasFEMeasured,                          // [25] 1 if formation energy was measured
+    // ── Source one-hot ───────────────────────────────────────────────────────
+    srcQE,                                  // [26] quantum_engine_dataset (DFT+phonons)
+    srcHamidieh,                            // [27] NIMS SuperCon (experimental Tc, often no λ)
+    srcJarvisSC,                            // [28] JARVIS SuperCon-Chem/3D/2D
+    src3DSC,                                // [29] 3DSC-MP (MP-matched, structural data, no λ)
+    srcContrastJarvis,                      // [30] JARVIS DFT3D metallic negatives (Tc=0)
+    srcContrastMP,                          // [31] MP metallic contrast samples (Tc=0)
   ];
 }
 
@@ -2795,10 +2839,17 @@ function migrateWeights(w: GNNWeights, rng: () => number): GNNWeights {
   if (typeof w.dense_skip_gate !== 'number' || !Number.isFinite(w.dense_skip_gate)) {
     w.dense_skip_gate = -2.0;
   }
-  // v15: Dedicated classification head — initialize if absent (old checkpoints start near-zero).
+  // v15: Dedicated classification head — initialize if absent; zero-pad if GLOBAL_COMP_DIM grew.
   const expectedClsCols = HIDDEN_DIM * 2 + GLOBAL_COMP_DIM;
-  if (!w.W_cls1 || w.W_cls1.length !== CLS_DIM || w.W_cls1[0]?.length !== expectedClsCols) {
+  if (!w.W_cls1 || w.W_cls1.length !== CLS_DIM) {
     w.W_cls1 = initMatrix(CLS_DIM, expectedClsCols, rng, Math.sqrt(2.0 / expectedClsCols));
+  } else if (w.W_cls1[0]?.length < expectedClsCols) {
+    // Zero-pad new columns so old trained weights are preserved; GNN learns new features incrementally.
+    const padCls = expectedClsCols - w.W_cls1[0].length;
+    for (const row of w.W_cls1) {
+      for (let i = 0; i < padCls; i++) row.push(0);
+    }
+    invalidateFlatCache(w.W_cls1);
   }
   if (!w.b_cls1 || w.b_cls1.length !== CLS_DIM) {
     w.b_cls1 = initVector(CLS_DIM);
@@ -2849,6 +2900,10 @@ export interface TrainingSample {
    *  Used as soft label for out[7] BCE loss so the GNN starts with an informed
    *  SC/non-SC prior rather than learning the classification from scratch. */
   xgbScProb?: number;
+  /** Source dataset tag — passed into PhysicsFeatureHints so the GNN's global feature vector
+   *  includes a source one-hot (features [26-31]) and data-availability mask ([23-25]).
+   *  Values: 'qe-dft' | 'hamidieh' | 'jarvis-sc' | '3dsc-mp' | 'contrast-jarvis' | 'contrast-mp' */
+  sourceTag?: string;
 }
 
 function structureHash(structure: any): string {
@@ -2938,9 +2993,15 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
     if (!graphCache.has(key)) {
       // Pass known physics from the training sample as hints so the GNN sees
       // the same physics features at train time that it will derive at inference.
+      // Also pass source provenance and data-availability flags so features [23-31]
+      // correctly reflect which fields are measured vs estimated for this sample.
       const sampleHints: PhysicsFeatureHints = {
         electronPhononLambda: sample.lambda ?? null,
         formationEnergy:      sample.formationEnergy ?? null,
+        sourceTag:            sample.sourceTag,
+        hasLambdaMeasured:    sample.lambda != null,
+        hasOmegaLogMeasured:  sample.omegaLog != null,
+        hasFEMeasured:        sample.formationEnergy != null,
       };
       const g = sample.prototype
         ? buildPrototypeGraph(sample.formula, sample.prototype, sample.pressureGpa, sampleHints)
@@ -3135,7 +3196,18 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         const feWeight   = hasFormationEnergy ? 0.1 : 0.0;
         const actualTcK  = sample.qeDFPTTc ?? sample.tc;
         const isSC       = actualTcK > 0;
-        const scW        = isSC ? 3.0 : 1.0;  // kept for Allen-Dynes auxiliary below
+        // ── Sample weight: Tc-tier × dataConfidence multiplier ───────────────
+        // Tc tiers: >100K (room-T discovery targets) = 4×, 40-100K = 3×,
+        //           20-40K = 2×, >0K (low-Tc SC) = 1.5×, =0K (contrast) = 1×.
+        // DFT-verified measurements get an additional 5× on top — they are ground truth.
+        const tcTierW = !isSC ? 1.0
+          : actualTcK >= 100 ? 4.0
+          : actualTcK >= 40  ? 3.0
+          : actualTcK >= 20  ? 2.0
+          : 1.5;
+        const dftVerified = sample.dataConfidence === 'dft-verified';
+        const sampleW = dftVerified ? tcTierW * 5.0 : tcTierW;
+        const scW = sampleW; // alias kept for Allen-Dynes auxiliary loss below
         const directOut7 = cache.outRaw[7] ?? 0;
         const directOut8 = cache.outRaw[8] ?? 0;
 
@@ -3174,15 +3246,15 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         const sigOut7  = sigmoid(directOut7);
         const bceClamp = Math.max(1e-7, Math.min(1 - 1e-7, sigOut7));
         const bceLoss  = -(scTarget * Math.log(bceClamp) + (1 - scTarget) * Math.log(1 - bceClamp));
-        totalLoss += feWeight * feError * feError + bceLoss;
-        // Direct Tc regression (SC samples only). Weight 6.0 replaces the removed
-        // gated loss (3.0) + old direct loss (1.5) combined = 4.5, rounded up to
-        // 6.0 to maintain sufficient gradient magnitude to out[8].
+        // BCE loss is weighted by sampleW so DFT-verified and high-Tc samples
+        // push the classifier harder than low-confidence experimental entries.
+        totalLoss += feWeight * feError * feError + sampleW * bceLoss;
+        // Direct Tc regression (SC samples only). Base coefficient 6.0 × sampleW.
         const tcSigOut8 = sigmoid(directOut8);
         const tcNormTarget = isSC ? Math.log1p(actualTcK / 10) / TC_LOG_SCALE * TC_NORM_CLAMP : 0;
 
         const tcDirectErr = isSC ? (tcSigOut8 - tcNormTarget) : 0;
-        if (isSC) totalLoss += 6.0 * tcDirectErr * tcDirectErr;
+        if (isSC) totalLoss += sampleW * 6.0 * tcDirectErr * tcDirectErr;
         totalSamples++;
 
         // ── Allen-Dynes chain-rule gradient setup ───────────────────────────────
@@ -3377,9 +3449,10 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         dLdOut[5] = bgTarget != null ? clipGrad(2 * bgError * 0.05 * 5.0 * bgSig5 * (1 - bgSig5)) : 0;
         dLdOut[6] = 0;
         // out[7]: standard BCE gradient
-        dLdOut[7] = clipGrad(sigOut7 - scTarget);
-        // out[8]: direct Tc MSE gradient (SC only); dL/d(out[8]) = 2*6*tcDirectErr * sigmoid'
-        dLdOut[8] = isSC ? clipGrad(12.0 * tcDirectErr * tcSigOut8 * (1 - tcSigOut8)) : 0;
+        // dL/d(out[7]) = sampleW * (σ(out7) - target): BCE gradient scaled by sample weight
+        dLdOut[7] = clipGrad(sampleW * (sigOut7 - scTarget));
+        // dL/d(out[8]) = sampleW * 2*6 * tcDirectErr * σ'(out8)
+        dLdOut[8] = isSC ? clipGrad(sampleW * 12.0 * tcDirectErr * tcSigOut8 * (1 - tcSigOut8)) : 0;
 
         // Uncertainty head (W_mlp2_var) receives no gradient — NLL removed.
         // Uncertainty outputs can be calibrated post-training via isotonic regression.

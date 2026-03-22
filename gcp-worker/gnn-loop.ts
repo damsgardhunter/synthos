@@ -356,6 +356,7 @@ async function loadQEDatasetSamples(existingFormulas: Set<string>): Promise<Trai
         dataConfidence: "dft-verified", // QE entries are real DFT — unlock 5× loss weight
         structure: undefined,
         prototype: undefined,
+        sourceTag: 'qe-dft',
       });
     }
     return samples;
@@ -421,6 +422,12 @@ async function loadSuperconExternalSamples(existingFormulas: Set<string>): Promi
       const dataConfidence = row.data_confidence === "dft-verified" ? "dft-verified" as const : undefined;
       const src = (row.source as string) ?? 'unknown';
       srcCounts[src] = (srcCounts[src] ?? 0) + 1;
+      // Normalize source tag to one of the GNN's known one-hot buckets
+      const sourceTag = src === 'hamidieh' ? 'hamidieh'
+        : src.startsWith('jarvis-supercon') ? 'jarvis-sc'
+        : src === '3dsc-mp' ? '3dsc-mp'
+        : src === 'jarvis-dft3d' ? 'contrast-jarvis'
+        : src;
       samples.push({
         formula,
         tc,
@@ -434,6 +441,7 @@ async function loadSuperconExternalSamples(existingFormulas: Set<string>): Promi
           ? { spaceGroup: spaceGroup ?? undefined, crystalSystem: crystalSystem ?? undefined, dimensionality: undefined }
           : undefined,
         prototype: undefined,
+        sourceTag,
       });
     }
     const srcSummary = Object.entries(srcCounts).map(([k, v]) => `${k}=${v}`).join(', ');
@@ -482,6 +490,7 @@ async function loadJarvisDFT3DContrast(existingFormulas: Set<string>, scCount: n
           ? { spaceGroup: spaceGroup ?? undefined, crystalSystem: crystalSystem ?? undefined, dimensionality: undefined }
           : undefined,
         prototype: undefined,
+        sourceTag: 'contrast-jarvis',
       });
     }
     return samples;
@@ -510,7 +519,7 @@ async function loadMPContrastSamples(existingFormulas: Set<string>, scCount: num
       // Default to 0 (metallic) when field is absent — we only seed metallic formulas,
       // so missing bandGap means the API didn't return it, not that it's an insulator.
       if (d.bandGap != null && d.bandGap > 0.1) continue;
-      samples.push({ formula, tc: 0, formationEnergy: d.formationEnergyPerAtom ?? undefined, structure: undefined, prototype: undefined });
+      samples.push({ formula, tc: 0, formationEnergy: d.formationEnergyPerAtom ?? undefined, structure: undefined, prototype: undefined, sourceTag: 'contrast-mp' });
     }
     return samples;
   } catch (err: any) {
