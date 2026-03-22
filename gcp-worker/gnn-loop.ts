@@ -1061,7 +1061,8 @@ export async function startGNNLoop(): Promise<void> {
       if (!processed) {
         const now = Date.now();
         if (now - lastHeartbeatMs >= HEARTBEAT_INTERVAL_MS) {
-          console.log(`[GNN-GCP] Polling — no queued jobs found (${pollCount} polls since start). Waiting for local server to dispatch.`);
+          const reason = !isGNNTrainingSlotFree() ? 'startup training in progress' : 'waiting for local server to dispatch';
+          console.log(`[GNN-GCP] Polling — idle (${pollCount} polls since start). ${reason}.`);
           lastHeartbeatMs = now;
         }
       } else {

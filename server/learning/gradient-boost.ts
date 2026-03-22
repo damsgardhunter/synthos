@@ -2366,9 +2366,15 @@ async function dispatchXGBJobToGCP(X: number[][], y: number[], formulas?: string
   // train on the same data and stay in sync. Skip if a GNN job is already queued
   // to avoid piling up duplicate jobs when XGB retrains on the same dataset.
   if (formulas && formulas.length > 0 && process.env.OFFLOAD_GNN_TO_GCP === "true") {
-    storage.getQueuedGnnTrainingJob().then(existing => {
+    (async () => {
+      const { db: gnnDb } = await import("../db");
+      const activeCheck = await gnnDb.execute(
+        `SELECT id, status FROM gnn_training_jobs WHERE status IN ('queued', 'running') ORDER BY created_at ASC LIMIT 1`
+      );
+      return (activeCheck as any).rows?.[0] ?? (Array.isArray(activeCheck) ? activeCheck[0] : undefined);
+    })().then(existing => {
       if (existing) {
-        console.log(`[XGBoost] GNN co-dispatch skipped — job #${existing.id} already queued`);
+        console.log(`[XGBoost] GNN co-dispatch skipped — job #${existing.id} already ${existing.status}`);
         return;
       }
       const feIdx = PHYSICS_FEATURE_NAMES.indexOf("formationEnergy");
