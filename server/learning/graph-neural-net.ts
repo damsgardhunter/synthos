@@ -2825,10 +2825,17 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
   // Pre-fetch real atomic positions from Materials Project for formulas that
   // lack a prototype-based graph. Real positions activate buildCrystalGraph's
   // physics-consistent distance calculation path instead of heuristic distances.
+  // CAP: skip for large corpus runs — sequential fetching stalls training for hours
+  // on 10k+ formulas. Heuristic graphs are used as fallback (identical for Hamidieh,
+  // which has no MP structure data anyway).
+  const MAX_PREFETCH_FORMULAS = 300;
   const formulasNeedingStructure = [...new Set(
     trainingData.filter(s => !s.prototype).map(s => s.formula)
   )];
-  const mpStructureMap = formulasNeedingStructure.length > 0
+  if (formulasNeedingStructure.length > MAX_PREFETCH_FORMULAS) {
+    console.log(`[GNN] Skipping MP structure prefetch (${formulasNeedingStructure.length} formulas > cap ${MAX_PREFETCH_FORMULAS}) — using heuristic graphs`);
+  }
+  const mpStructureMap = formulasNeedingStructure.length > 0 && formulasNeedingStructure.length <= MAX_PREFETCH_FORMULAS
     ? await prefetchStructures(formulasNeedingStructure)
     : new Map<string, any>();
 
