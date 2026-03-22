@@ -184,7 +184,6 @@ interface CGCNNLayerCache {
   filterOuts: number[][][];
   rbfs: number[][][];
   preNormActs: number[][];
-  preNormActs: number[][];  // h + aggUpdate before layerNorm
   cutoffWts: number[][];
   totalWeights: number[];
   adaptiveLogits?: number[][];
@@ -957,7 +956,7 @@ const SITE_TYPICAL_COORD: Record<string, Record<string, number>> = {
 
 function assignSiteLabels(formula: string, prototype: string): Record<string, string> {
   const counts = parseFormulaCounts(formula);
-  const elements = Object.keys(counts);
+  const elements = Object.keys(counts).sort();
   const protoInfo = PROTOTYPE_COORDINATIONS[prototype];
   if (!protoInfo) return {};
 
@@ -1054,7 +1053,7 @@ function assignSiteLabels(formula: string, prototype: string): Record<string, st
 
 export function buildPrototypeGraph(formula: string, prototype: string, pressureGpa?: number, hints?: PhysicsFeatureHints): CrystalGraph {
   const rawCounts = parseFormulaCounts(formula);
-  const elements = Object.keys(rawCounts);
+  const elements = Object.keys(rawCounts).sort();
   const protoInfo = PROTOTYPE_COORDINATIONS[prototype];
 
   if (!protoInfo) {
@@ -1172,6 +1171,9 @@ export function buildPrototypeGraph(formula: string, prototype: string, pressure
     }
   }
 
+  // Normalize ordering for permutation invariance
+  edges.sort((a, b) => a.source !== b.source ? a.source - b.source : a.target - b.target);
+  for (let i = 0; i < adjacency.length; i++) adjacency[i].sort((a, b) => a - b);
   const edgeIndex = buildEdgeIndex(nodes, edges);
   const globalFeatures = computeGlobalCompositionFeatures(rawCounts, hints, pressureGpa);
   const threeBodyFeatures = compute3BodyFeatures({ nodes, edges, threeBodyFeatures: [], adjacency, edgeIndex, formula, prototype, globalFeatures });
@@ -1519,7 +1521,7 @@ function computeGlobalCompositionFeatures(counts: Record<string, number>, hints?
 
 export function buildCrystalGraph(formula: string, structure?: any, pressureGpa?: number, hints?: PhysicsFeatureHints): CrystalGraph {
   const rawCounts = parseFormulaCounts(formula);
-  const elements = Object.keys(rawCounts);
+  const elements = Object.keys(rawCounts).sort();
   const { normalized, multiplicities } = normalizeFormulaCounts(rawCounts);
 
   const nodes: NodeFeature[] = [];
@@ -1706,6 +1708,9 @@ export function buildCrystalGraph(formula: string, structure?: any, pressureGpa?
     } catch { /* leave as null — computeGlobalCompositionFeatures will use proxy fallbacks */ }
   }
 
+  // Normalize ordering for permutation invariance
+  edges.sort((a, b) => a.source !== b.source ? a.source - b.source : a.target - b.target);
+  for (let i = 0; i < adjacency.length; i++) adjacency[i].sort((a, b) => a - b);
   const edgeIndex = buildEdgeIndex(nodes, edges);
   const globalFeatures = computeGlobalCompositionFeatures(rawCounts, enrichedHints, pressureGpa);
   const partialGraph: CrystalGraph = { nodes, edges, threeBodyFeatures: [], adjacency, edgeIndex, formula, pressureGpa, globalFeatures };
@@ -2018,103 +2023,6 @@ function cgcnnConvCached(
   const filterH1s: number[][][] = [];
   const filterOuts: number[][][] = [];
   const rbfs: number[][][] = [];
-  const cutoffWts: number[][] = [];
-  const totalWeights: number[] = [];
-  const newEmbeddings: number[][] = [];
-
-  for (let i = 0; i < nNodes; i++) {
-    const neighbors = graph.adjacency[i];
-    const nodePreActs: number[][] = [];
-    const nodeH1s: number[][] = [];
-    const nodeOuts: number[][] = [];
-    const nodeRbfs: number[][] = [];
-    const nodeCutoffs: number[] = [];
-
-    if (!neighbors || neighbors.length === 0) {
-      newEmbeddings.push([...inputEmbs[i]]);
-      filterPreActs.push(nodePreActs);
-      filterH1s.push(nodeH1s);
-      filterOuts.push(nodeOuts);
-      rbfs.push(nodeRbfs);
-      cutoffWts.push(nodeCutoffs);
-      totalWeights.push(0);
-      continue;
-    }
-
-    const aggUpdate = initVector(HIDDEN_DIM);
-    let totalWeight = 0;
-
-    for (let nIdx = 0; nIdx < neighbors.length; nIdx++) {
-      const j = neighbors[nIdx];
-      const edgeFeat = getEdgeFromIndex(graph.edgeIndex, nNodes, i, j);
-      const distance = edgeFeat?.distance ?? 2.5;
-      const cw = cosineCutoff(distance);
-      nodeCutoffs.push(cw);
-      if (cw <= 0) {
-        nodePreActs.push([]);
-        nodeH1s.push([]);
-        nodeOuts.push([]);
-        nodeRbfs.push([]);
-        continue;
-      }
-
-      const edgeVec = edgeFeat?.features ?? initVector(EDGE_DIM);
-      const rbf_ij: number[] = new Array(N_GAUSSIAN_BASIS);
-      for (let k = 0; k < N_GAUSSIAN_BASIS; k++) rbf_ij[k] = edgeVec[k] ?? 0;
-
-      const z_ij = vecAdd(matVecMul(W_filter1, rbf_ij), b_filter1);
-      const h1_ij: number[] = new Array(HIDDEN_DIM);
-      for (let k = 0; k < HIDDEN_DIM; k++) h1_ij[k] = silu(z_ij[k] ?? 0);
-      const h_ij = vecAdd(matVecMul(W_filter2, h1_ij), b_filter2);
-
-      const adaptLogit = adaptiveLogits?.[i]?.[nIdx] ?? 0;
-      if (adaptLogit !== 0) {
-        for (let k = 0; k < HIDDEN_DIM; k++) h_ij[k] += adaptLogit;
-      }
-
-      nodePreActs.push(z_ij);
-      nodeH1s.push(h1_ij);
-      nodeOuts.push(h_ij);
-      nodeRbfs.push(rbf_ij);
-
-      const hj = inputEmbs[j];
-      for (let k = 0; k < HIDDEN_DIM; k++) {
-        aggUpdate[k] += (h_ij[k] ?? 0) * (hj[k] ?? 0) * cw;
-      }
-      totalWeight += cw;
-    }
-
-    filterPreActs.push(nodePreActs);
-    filterH1s.push(nodeH1s);
-    filterOuts.push(nodeOuts);
-    rbfs.push(nodeRbfs);
-    cutoffWts.push(nodeCutoffs);
-    totalWeights.push(totalWeight);
-
-    if (totalWeight > 0) {
-      for (let k = 0; k < HIDDEN_DIM; k++) aggUpdate[k] /= totalWeight;
-    }
-
-    const updated: number[] = new Array(HIDDEN_DIM);
-    for (let k = 0; k < HIDDEN_DIM; k++) {
-      updated[k] = (inputEmbs[i][k] ?? 0) + aggUpdate[k];
-    }
-    newEmbeddings.push(updated);
-  }
-
-  for (let i = 0; i < nNodes; i++) graph.nodes[i].embedding = newEmbeddings[i];
-
-  return {
-    embeddings: newEmbeddings,
-    cache: { inputEmbs, filterPreActs, filterH1s, filterOuts, rbfs, cutoffWts, totalWeights, adaptiveLogits },
-  };
-} {
-  const nNodes = graph.nodes.length;
-  const inputEmbs = graph.nodes.map(n => [...n.embedding]);
-  const filterPreActs: number[][][] = [];
-  const filterH1s: number[][][] = [];
-  const filterOuts: number[][][] = [];
-  const rbfs: number[][][] = [];
   const preNormActs: number[][] = [];
   const cutoffWts: number[][] = [];
   const totalWeights: number[] = [];
@@ -2311,76 +2219,6 @@ function cgcnnLayerBackward(
   db_filter1: number[]; db_filter2: number[];
   dLdInput: number[][];
   dAdaptiveLogits: number[][];
-} {
-  const nNodes = dLdOutput.length;
-  const dW_filter1 = W_filter1.map(r => new Array(r.length).fill(0));
-  const dW_filter2 = W_filter2.map(r => new Array(r.length).fill(0));
-  const db_filter1 = new Array(HIDDEN_DIM).fill(0);
-  const db_filter2 = new Array(HIDDEN_DIM).fill(0);
-  const dLdInput: number[][] = Array.from({ length: nNodes }, () => new Array(HIDDEN_DIM).fill(0));
-  const dAdaptiveLogits: number[][] = graph.adjacency.map(ns => new Array(ns.length).fill(0));
-
-  const dLdEff: number[][] = Array.from({ length: nNodes }, (_, i) => {
-    const pn = (cache as any).preNormActs?.[i] as number[] | undefined;
-    return pn ? layerNormBackward(pn, dLdOutput[i]) : [...dLdOutput[i]];
-  });
-  for (let i = 0; i < nNodes; i++) {
-    for (let k = 0; k < HIDDEN_DIM; k++) dLdInput[i][k] += dLdEff[i][k];
-
-    const totalW = cache.totalWeights[i];
-    if (totalW <= 0) continue;
-
-    const neighbors = graph.adjacency[i];
-    if (!neighbors || neighbors.length === 0) continue;
-
-    for (let nIdx = 0; nIdx < neighbors.length; nIdx++) {
-      const cw = cache.cutoffWts[i][nIdx] ?? 0;
-      if (cw <= 0) continue;
-
-      const z_ij   = cache.filterPreActs[i][nIdx];
-      const h1_ij  = cache.filterH1s[i][nIdx];
-      const h_ij   = cache.filterOuts[i][nIdx];
-      const rbf_ij = cache.rbfs[i][nIdx];
-      if (!z_ij || !h1_ij || !h_ij || !rbf_ij) continue;
-
-      const j = neighbors[nIdx];
-      const hj = cache.inputEmbs[j];
-
-      // d(message_k) = dLdOutput[i][k]/totalW * cw
-      // d(h_ij_k)    = d(message_k) * hj[k]
-      // d(hj_k)     += d(message_k) * h_ij[k]
-      const dH_ij: number[] = new Array(HIDDEN_DIM);
-      let dAdaptLogitEdge = 0;
-      for (let k = 0; k < HIDDEN_DIM; k++) {
-        const dMsg_k = (dLdEff[i][k] / totalW) * cw;
-        dH_ij[k] = dMsg_k * (hj[k] ?? 0);
-        dLdInput[j][k] += dMsg_k * (h_ij[k] ?? 0);
-        dAdaptLogitEdge += dH_ij[k];
-      }
-      if (dAdaptiveLogits[i]) dAdaptiveLogits[i][nIdx] = dAdaptLogitEdge;
-
-      // Backward through W_filter2
-      const dH1_ij: number[] = new Array(HIDDEN_DIM).fill(0);
-      for (let r = 0; r < HIDDEN_DIM; r++) {
-        db_filter2[r] += dH_ij[r];
-        for (let c = 0; c < HIDDEN_DIM; c++) {
-          dW_filter2[r][c] += dH_ij[r] * (h1_ij[c] ?? 0);
-          dH1_ij[c] += dH_ij[r] * (W_filter2[r]?.[c] ?? 0);
-        }
-      }
-
-      // Backward through silu + W_filter1
-      for (let r = 0; r < HIDDEN_DIM; r++) {
-        const dZ_r = dH1_ij[r] * siluGrad(z_ij[r] ?? 0);
-        db_filter1[r] += dZ_r;
-        for (let c = 0; c < N_GAUSSIAN_BASIS; c++) {
-          dW_filter1[r][c] += dZ_r * (rbf_ij[c] ?? 0);
-        }
-      }
-    }
-  }
-
-  return { dW_filter1, dW_filter2, db_filter1, db_filter2, dLdInput, dAdaptiveLogits };
 } {
   const nNodes = dLdOutput.length;
   const dW_filter1 = W_filter1.map(r => new Array(r.length).fill(0));
