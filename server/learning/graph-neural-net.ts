@@ -48,7 +48,7 @@ export interface CrystalGraph {
   formula: string;
   prototype?: string;
   pressureGpa?: number;
-  globalFeatures?: number[]; // 23-dim: 13 composition + 6 physics hints + 4 engineered features
+  globalFeatures?: number[]; // 9-dim: VEC, hasH, λ, logPhonon, DOS, FE, pressure, hasLambdaMeasured, hasFEMeasured
 }
 
 /**
@@ -286,9 +286,10 @@ const HIDDEN_DIM = 48;
 const N_GAUSSIAN_BASIS = 40;             // expanded from 20 — denser RBF gives finer distance discrimination
 const EDGE_DIM = N_GAUSSIAN_BASIS;       // pure RBF(distance) — let model learn bond character from node features
 const OUTPUT_DIM = 16;
-// Reduced from 23: only physics hints + VEC + hasH + pressure survive.
-// Composition structure (EN, Debye, mismatch, class flags, etc.) is learned by the graph.
-const GLOBAL_COMP_DIM = 7;
+// 9-dim: VEC + hasH + λ + logPhonon + DOS + FE + pressure + hasLambdaMeasured + hasFEMeasured.
+// The two measurement flags prevent dataset-membership shortcuts (e.g. feFeat=0 being a
+// Hamidieh proxy) by making measurement availability an explicit, separable signal.
+const GLOBAL_COMP_DIM = 9;
 // Coulomb pseudopotential μ* — fixed at conventional BCS value.
 // Typical range: 0.10 (metals), 0.12-0.13 (hydrides, higher Coulomb screening).
 const FIXED_MU_STAR = 0.10;
@@ -1337,7 +1338,7 @@ function computeAtomicMismatch(counts: Record<string, number>): number {
   return Math.sqrt(Math.max(0, delta2));
 }
 
-// Computes GLOBAL_COMP_DIM (7) global features injected at the MLP head.
+// Computes GLOBAL_COMP_DIM (9) global features injected at the MLP head.
 // Only features that graph message-passing cannot derive from bond geometry + node features:
 // [0] VEC       — valence electron concentration (strongest empirical SC predictor)
 // [1] hasH      — hydrogen flag (hydride SCs are a categorically different regime)
@@ -1395,14 +1396,23 @@ function computeGlobalCompositionFeatures(counts: Record<string, number>, hints?
     ? znorm(Math.log1p(pressureGpa / 10), FEAT_NORM.logPressure.m, FEAT_NORM.logPressure.s)
     : 0.0;
 
+  // Measurement flags — explicit signals that break dataset-membership shortcuts.
+  // Without these, feFeat=0 and lambdaFeat≈proxy are indistinguishable from
+  // a "Hamidieh sample" (all SC, no FE/λ measurements), teaching the model a
+  // dataset-membership proxy rather than actual physics.
+  const hasLambdaMeasured = (lambda != null && lambda >= 0) ? 1.0 : 0.0;
+  const hasFEMeasured     = (fe != null || hd != null)      ? 1.0 : 0.0;
+
   return [
     znorm(vec, FEAT_NORM.vec.m, FEAT_NORM.vec.s), // [0] VEC
     hasHydrogen,                                    // [1] H-flag
-    lambdaFeat,                                     // [2] λ
-    logPhononFeat,                                  // [3] log ω_log
-    dosFeat,                                        // [4] DOS at E_F
-    feFeat,                                         // [5] formation energy
+    lambdaFeat,                                     // [2] λ (or proxy)
+    logPhononFeat,                                  // [3] log ω_log (or proxy)
+    dosFeat,                                        // [4] DOS at E_F (or proxy)
+    feFeat,                                         // [5] formation energy (or 0 if unknown)
     pressureFeat,                                   // [6] pressure
+    hasLambdaMeasured,                              // [7] 1 if λ was actually measured, 0 if proxy
+    hasFEMeasured,                                  // [8] 1 if FE/HD was actually measured, 0 if unknown
   ];
 }
 
@@ -2358,7 +2368,20 @@ function GNNPredictForTraining(graph: CrystalGraph, weights: GNNWeights, msgRng?
 
   // Concat global composition features so W_mlp1 can learn their contribution.
   // Stored in cache.pooled so the backward pass correctly computes dW_mlp1.
-  const compFeats = graph.globalFeatures ?? new Array(GLOBAL_COMP_DIM).fill(0);
+  // Physics hint dropout — break dataset-membership shortcuts during training.
+  // Hamidieh (~21k samples) is ALL superconductors with NO measured FE or λ, so
+  // feFeat=0 and lambdaFeat≈proxy are reliable Hamidieh proxies without dropout.
+  // Randomly masking hints (and their measurement flags) forces the model to learn
+  // physics from node embeddings rather than from hint-availability patterns.
+  const compFeats = graph.globalFeatures ? [...graph.globalFeatures] : new Array(GLOBAL_COMP_DIM).fill(0);
+  if (msgRng) {
+    const DROP_P = 0.30;
+    if (msgRng() < DROP_P) { compFeats[2] = 0.0; compFeats[7] = 0.0; }   // drop λ + hasLambda flag
+    if (msgRng() < DROP_P * 0.5) compFeats[3] = 0.0;                      // drop logPhonon
+    if (msgRng() < DROP_P * 0.5) compFeats[4] = 0.0;                      // drop DOS
+    if (msgRng() < DROP_P) { compFeats[5] = 0.0; compFeats[8] = 0.0; }   // drop FE + hasFE flag
+    if (msgRng() < DROP_P * 0.3) compFeats[6] = 0.0;                      // drop pressure
+  }
   const pooledWithComp = [...pooled, ...compFeats];
 
   const z1 = vecAdd(matVecMul(weights.W_mlp1, pooledWithComp), weights.b_mlp1);
