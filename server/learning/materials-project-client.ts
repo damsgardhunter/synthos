@@ -488,6 +488,49 @@ export async function fetchMagnetism(formula: string): Promise<MPMagnetismData |
   return result;
 }
 
+export interface MPStructureData {
+  latticeParams: { a: number; b: number; c: number };
+  atomicPositions: { element: string; x: number; y: number; z: number }[];
+  spaceGroup: string | null;
+}
+
+export async function fetchMPStructureData(formula: string): Promise<MPStructureData | null> {
+  const cached = await getCachedData(formula, "structure");
+  if (cached) return cached as MPStructureData;
+
+  const normalizedFormula = normalizeFormula(formula);
+
+  const data = await mpFetch("/materials/summary/", {
+    formula: normalizedFormula,
+    _limit: "1",
+    fields: "structure,material_id,symmetry,formula_pretty",
+  });
+
+  if (!data?.data?.length) return null;
+
+  const entry = data.data[0];
+  const s = entry.structure;
+  if (!s?.lattice || !Array.isArray(s.sites) || s.sites.length === 0) return null;
+
+  const result: MPStructureData = {
+    latticeParams: {
+      a: s.lattice.a ?? 5,
+      b: s.lattice.b ?? 5,
+      c: s.lattice.c ?? 5,
+    },
+    atomicPositions: s.sites.map((site: any) => ({
+      element: site.species?.[0]?.element ?? "X",
+      x: site.abc?.[0] ?? 0,
+      y: site.abc?.[1] ?? 0,
+      z: site.abc?.[2] ?? 0,
+    })),
+    spaceGroup: entry.symmetry?.symbol ?? null,
+  };
+
+  await setCachedData(formula, "structure", result, entry.material_id);
+  return result;
+}
+
 export async function fetchPhonon(formula: string): Promise<MPPhononData | null> {
   const cached = await getCachedData(formula, "phonon");
   if (cached) return cached as MPPhononData;

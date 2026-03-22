@@ -9,6 +9,7 @@ import { predictLambda } from "./lambda-regressor";
 import { allenDynesTcRaw } from "./physics-engine";
 import { normalizeSpaceGroup, matchPrototype } from "./structure-predictor";
 import { parseFormulaCounts as parseFormulaCountsCanonical } from "./utils";
+import { prefetchStructures } from "./structure-resolver";
 
 export interface NodeFeature {
   element: string;
@@ -120,6 +121,10 @@ interface GNNWeights {
   W_3body_update: number[][];
   W_attn_pool: number[][];
   residual_gates: number[];
+  /** Learnable intra-layer update gate raw params (pre-sigmoid). One per layer:
+   *  [0]=attn1, [1]=attn2, [2]=attn3, [3]=attn4, [4]=schnet.
+   *  Forward: h = input + sigmoid(gate) * update  */
+  update_gates: number[];
   W_pressure: number[];
   W_mlp1: number[][];
   b_mlp1: number[];
@@ -180,9 +185,10 @@ export interface GNNPrediction {
 interface AttnLayerCache {
   inputEmbs: number[][];
   preActs: number[][];
-  preNormActs: number[][];  // h + activation(update) before layerNorm
+  preNormActs: number[][];  // h + alpha*activation(update) before layerNorm
   attnWts: number[][];
   neighborLists: number[][];
+  updateAlpha: number;      // sigmoid(update_gate) — used in backward pass
 }
 
 interface CGCNNLayerCache {
@@ -195,6 +201,7 @@ interface CGCNNLayerCache {
   cutoffWts: number[][];
   totalWeights: number[];
   adaptiveLogits?: number[][];
+  updateAlpha: number;      // sigmoid(update_gate) — used in backward pass
 }
 
 interface GNNForwardCache {
@@ -215,6 +222,10 @@ interface GNNForwardCache {
   /** GLFN-TC Dense Residual: H0 embeddings saved after input projection.
    *  Used in backward to route the dense-skip gradient back to input_proj. */
   denseH0?: number[][];
+  /** Jumping Knowledge: embeddings after layer-0 gated residual.
+   *  JK-mean = (jkSnap0 + h_final) / 2 is applied before pooling to prevent oversmoothing.
+   *  Stored so backward can split gradient equally between the two layers. */
+  jkSnap0?: number[][];
   /** v15: Classification head pre- and post-activation. */
   zCls: number[];
   hCls: number[];
@@ -362,28 +373,81 @@ let modelTrainedAt = 0;
 const MODEL_STALE_MS = 6 * 60 * 60 * 1000;
 
 const LATENT_REF_MAX = 200;
-// Per-dimension statistics of training latent embeddings for Mahalanobis distance.
-// Mean and variance are computed once in updateTrainingEmbeddings and reused at inference.
-let trainingLatentMean: number[] = [];
-let trainingLatentVar: number[]  = [];
+// PCA whitening statistics for full-covariance Mahalanobis distance.
+// Computed once in updateTrainingEmbeddings from the training latent distribution.
+let trainingLatentMean: number[]   = [];
+let trainingPCAVectors: number[][] = [];   // columns are eigenvectors (D×D)
+let trainingPCAValues:  number[]   = [];   // eigenvalues (D), floored for stability
 
 /**
- * Diagonal Mahalanobis distance from a latent embedding to the training distribution.
+ * Jacobi eigendecomposition for symmetric matrices.
+ * Produces eigenvectors (columns of V) and eigenvalues such that A = V diag(λ) V^T.
+ * O(D³) per convergence — fast and exact for D=48.
+ */
+function jacobiEigenSymm(A: number[][]): { values: number[]; vectors: number[][] } {
+  const D = A.length;
+  const S = A.map(row => [...row]);
+  // V starts as identity; columns accumulate as eigenvectors.
+  const V: number[][] = Array.from({ length: D }, (_, i) =>
+    Array.from({ length: D }, (_, j) => (i === j ? 1 : 0)));
+
+  const MAX_SWEEPS = 60;
+  const EPS = 1e-12;
+
+  for (let sweep = 0; sweep < MAX_SWEEPS; sweep++) {
+    let offNorm = 0;
+    for (let i = 0; i < D - 1; i++)
+      for (let j = i + 1; j < D; j++) offNorm += S[i][j] * S[i][j];
+    if (offNorm < EPS) break;
+
+    for (let p = 0; p < D - 1; p++) {
+      for (let q = p + 1; q < D; q++) {
+        if (Math.abs(S[p][q]) < 1e-14) continue;
+        const theta = 0.5 * Math.atan2(2 * S[p][q], S[q][q] - S[p][p]);
+        const c = Math.cos(theta), s = Math.sin(theta);
+
+        // S <- R^T S R
+        for (let i = 0; i < D; i++) {
+          const sp = S[i][p], sq = S[i][q];
+          S[i][p] = c * sp - s * sq;
+          S[i][q] = s * sp + c * sq;
+        }
+        for (let j = 0; j < D; j++) {
+          const sp = S[p][j], sq = S[q][j];
+          S[p][j] = c * sp - s * sq;
+          S[q][j] = s * sp + c * sq;
+        }
+
+        // V <- V R
+        for (let i = 0; i < D; i++) {
+          const vp = V[i][p], vq = V[i][q];
+          V[i][p] = c * vp - s * vq;
+          V[i][q] = s * vp + c * vq;
+        }
+      }
+    }
+  }
+
+  return { values: S.map((row, i) => row[i]), vectors: V };
+}
+
+/**
+ * PCA-whitened Mahalanobis distance to the training distribution.
  *
- * d_M(x) = sqrt( sum_k (x_k - μ_k)² / σ_k² ) / sqrt(D)
+ * d(x) = ||Λ^{-1/2} V^T (x − μ)|| / sqrt(D)
  *
- * Dividing by sqrt(D) (the expected chi value) puts in-distribution inputs at ≈ 1.0
- * and out-of-distribution inputs well above 1.0. Cosine similarity ignored magnitude
- * and assumed isotropic geometry; diagonal Mahalanobis corrects both by using the
- * empirical per-dimension spread of the training embeddings.
+ * Full-covariance Mahalanobis — captures correlations between latent dimensions
+ * that the diagonal approximation misses. In-distribution ≈ 1.0, OOD > 1.0.
  */
 function computeLatentDistance(embedding: number[]): number {
   const D = trainingLatentMean.length;
-  if (D === 0) return 1.0;
+  if (D === 0 || trainingPCAVectors.length === 0) return 1.0;
   let sum = 0;
   for (let k = 0; k < D; k++) {
-    const diff = (embedding[k] ?? 0) - trainingLatentMean[k];
-    sum += (diff * diff) / trainingLatentVar[k];
+    // z_k = V[:,k] · (x − μ)  — project onto k-th principal component
+    let z = 0;
+    for (let j = 0; j < D; j++) z += trainingPCAVectors[j][k] * ((embedding[j] ?? 0) - trainingLatentMean[j]);
+    sum += (z * z) / trainingPCAValues[k];
   }
   return Math.sqrt(sum / D);
 }
@@ -401,25 +465,30 @@ function updateTrainingEmbeddings(trainingData: { formula: string; tc: number }[
   }
 
   const n = collected.length;
-  if (n === 0) { trainingLatentMean = []; trainingLatentVar = []; return; }
+  if (n === 0) { trainingLatentMean = []; trainingPCAVectors = []; trainingPCAValues = []; return; }
 
   const D = collected[0].length;
-  // Per-dimension mean.
+
+  // Mean.
   trainingLatentMean = new Array<number>(D).fill(0);
   for (const emb of collected)
     for (let k = 0; k < D; k++) trainingLatentMean[k] += (emb[k] ?? 0) / n;
 
-  // Per-dimension variance with a small regularisation floor to keep the
-  // precision matrix well-conditioned even in nearly-constant dimensions.
-  trainingLatentVar = new Array<number>(D).fill(0);
+  // Full covariance C = (1/n) Σ (x_i − μ)(x_i − μ)^T  (D×D).
+  const C: number[][] = Array.from({ length: D }, () => new Array<number>(D).fill(0));
   for (const emb of collected) {
-    for (let k = 0; k < D; k++) {
-      const d = (emb[k] ?? 0) - trainingLatentMean[k];
-      trainingLatentVar[k] += (d * d) / n;
-    }
+    const d = emb.map((v, k) => (v ?? 0) - trainingLatentMean[k]);
+    for (let i = 0; i < D; i++)
+      for (let j = 0; j < D; j++)
+        C[i][j] += d[i] * d[j] / n;
   }
-  const VAR_FLOOR = 1e-6;
-  for (let k = 0; k < D; k++) trainingLatentVar[k] = Math.max(trainingLatentVar[k], VAR_FLOOR);
+
+  // PCA via Jacobi EVD: C = V Λ V^T.
+  const { values, vectors } = jacobiEigenSymm(C);
+
+  // Floor eigenvalues for numerical stability of the whitening transform.
+  trainingPCAValues  = values.map(v => Math.max(v, 1e-6));
+  trainingPCAVectors = vectors;
 }
 
 function parseFormulaCounts(formula: string): Record<string, number> {
@@ -1161,11 +1230,9 @@ function threeBodyInteractionLayer(
   const embeddings = graph.nodes.map(n => n.embedding);
 
   const threeBodyAgg: number[][] = embeddings.map(() => initVector(HIDDEN_DIM));
-
-  const neighborCounts = new Uint16Array(nNodes);
-  for (const tb of graph.threeBodyFeatures) {
-    neighborCounts[tb.center]++;
-  }
+  // Sum of distFeature weights per center — mirrors SchNet's totalWeight pattern.
+  // Using distFeature in both numerator and denominator gives a proper weighted mean.
+  const totalDistFeature = new Float64Array(nNodes);
 
   for (const tb of graph.threeBodyFeatures) {
     const angleFeature = tb.angle / Math.PI;
@@ -1182,15 +1249,16 @@ function threeBodyInteractionLayer(
     for (let k = 0; k < HIDDEN_DIM; k++) {
       threeBodyAgg[tb.center][k] += (transformed[k] ?? 0) * distFeature;
     }
+    totalDistFeature[tb.center] += distFeature;
   }
 
   const newEmbeddings: number[][] = [];
   for (let i = 0; i < nNodes; i++) {
-    const nc = neighborCounts[i];
-    if (nc > 0) {
-      const normFactor = Math.sqrt(nc);
+    // Weighted mean: divide by Σ distFeature so weight sums to 1 (same pattern as SchNet / totalWeight).
+    const tw = totalDistFeature[i];
+    if (tw > 0) {
       for (let k = 0; k < HIDDEN_DIM; k++) {
-        threeBodyAgg[i][k] /= normFactor;
+        threeBodyAgg[i][k] /= tw;
       }
     }
 
@@ -1264,149 +1332,72 @@ function computeAtomicMismatch(counts: Record<string, number>): number {
   return Math.sqrt(Math.max(0, delta2));
 }
 
-// Computes GLOBAL_COMP_DIM (23) composition-level features injected at the MLP head.
-// [0-12]  13 composition features (EN, d-occ, VEC, Debye, mismatch, nEl, stdEN, H-flag, TM frac, entropy, ENdiff, mass, radius-std)
-// [13-18]  6 physics features from PhysicsFeatureHints (λ, logω, DOS, FE, isCuprate, isIronBased)
-// [19-22]  4 engineered features (pressure, MgB2-type, heavy-fermion, mean TM d-count)
-// Hints contain measured/estimated physics — not model outputs — so there is no training leakage.
+// Computes GLOBAL_COMP_DIM (7) global features injected at the MLP head.
+// Only features that graph message-passing cannot derive from bond geometry + node features:
+// [0] VEC       — valence electron concentration (strongest empirical SC predictor)
+// [1] hasH      — hydrogen flag (hydride SCs are a categorically different regime)
+// [2] λ         — measured electron-phonon coupling; central BCS scalar
+// [3] logPhonon — measured phonon energy scale (Allen-Dynes ω_log proxy)
+// [4] DOS       — measured Fermi-level electronic density
+// [5] formE     — thermodynamic stability signal (−formation energy)
+// [6] pressure  — not encoded anywhere in graph topology
+// All other composition statistics (EN, Debye, mismatch, class flags, TM fraction…)
+// are left for the GNN embeddings to discover — that is what they exist for.
 function computeGlobalCompositionFeatures(counts: Record<string, number>, hints?: PhysicsFeatureHints, pressureGpa?: number): number[] {
   const els = Object.entries(counts);
   if (els.length === 0) return new Array(GLOBAL_COMP_DIM).fill(0);
   const total = els.reduce((s, [, n]) => s + n, 0);
   if (total <= 0) return new Array(GLOBAL_COMP_DIM).fill(0);
 
-  // --- original 6 ---
-  const enValues  = els.map(([el, n]) => ({ w: n / total, v: getElementData(el)?.paulingElectronegativity ?? 1.5 }));
-  const meanEN    = enValues.reduce((s, { w, v }) => s + w * v, 0);
-  const meanD     = els.reduce((s, [el, n]) => s + (n / total) * getDOrbitalOccupancy(getElementData(el)?.atomicNumber ?? 1), 0);
-  const vec       = computeVEC(counts);
-  const meanDebye = els.reduce((s, [el, n]) => s + (n / total) * (getElementData(el)?.debyeTemperature ?? 300), 0);
-  const mismatch  = computeAtomicMismatch(counts);
-  const nElements = els.length;
+  // [0] valence electron concentration — strongest empirical SC predictor
+  const vec = computeVEC(counts);
 
-  // --- 7 XGBoost-inspired additions ---
-  // [6] std of Pauling EN — high spread → large ionicity gap (cuprate-like or hydride-like)
-  const stdEN = Math.sqrt(enValues.reduce((s, { w, v }) => s + w * (v - meanEN) ** 2, 0));
-
-  // [7] binary: formula contains hydrogen (hydride superconductors are a separate class at high P)
+  // [1] hydrogen flag — hydride SC regime is categorically different
   const hasHydrogen = counts["H"] ? 1.0 : 0.0;
 
-  // [8] fraction of stoichiometric weight from transition metals (d-electron BCS coupling density)
-  const tmWeight = els.reduce((s, [el, n]) => s + (isTransitionMetal(el) ? n : 0), 0);
-  const transitionMetalFraction = tmWeight / total;
-
-  // [9] configurational (mixing) entropy −Σ x_i ln(x_i), normalized by ln(N_max=6)
-  // captures HEA / medium-entropy alloy superconductors
-  const cfgEntropy = els.reduce((s, [, n]) => {
-    const x = n / total;
-    return s + (x > 0 ? -x * Math.log(x) : 0);
-  }, 0) / Math.log(Math.max(nElements, 2));
-
-  // [10] max pairwise EN difference — ionicity extremes (e.g. Na vs F = 3.16 - 0.93 = 2.23)
-  const enList = els.map(([el]) => getElementData(el)?.paulingElectronegativity ?? 1.5);
-  const maxENdiff = enList.length > 1
-    ? Math.max(...enList) - Math.min(...enList)
-    : 0;
-
-  // [11] mean atomic mass — heavier atoms → lower Debye freq → conventional BCS weakened
-  const meanMass = els.reduce((s, [el, n]) => s + (n / total) * (getElementData(el)?.atomicMass ?? 50), 0);
-
-  // [12] std of atomic radius — additional lattice strain signal beyond scalar mismatch
-  const radii  = els.map(([el, n]) => ({ w: n / total, v: getElementData(el)?.atomicRadius ?? 130 }));
-  const meanR  = radii.reduce((s, { w, v }) => s + w * v, 0);
-  const stdRadius = Math.sqrt(radii.reduce((s, { w, v }) => s + w * (v - meanR) ** 2, 0));
-
-  // --- 6 physics features from hints (no leakage: these are physics estimates, not model outputs) ---
-
-  // [13] electron-phonon coupling λ — the central BCS scalar
+  // [2] electron-phonon coupling λ — core BCS scalar; fallback: d-orbital × TM-fraction proxy
+  const meanD = els.reduce((s, [el, n]) => s + (n / total) * getDOrbitalOccupancy(getElementData(el)?.atomicNumber ?? 1), 0);
+  const tmFrac = els.reduce((s, [el, n]) => s + (isTransitionMetal(el) ? n / total : 0), 0);
   const lambda = hints?.electronPhononLambda;
   const lambdaFeat = lambda != null && lambda >= 0
     ? znorm(lambda, FEAT_NORM.lambda.m, FEAT_NORM.lambda.s)
-    : znorm(meanD * transitionMetalFraction, FEAT_NORM.lambda.m, FEAT_NORM.lambda.s);
+    : znorm(meanD * tmFrac, FEAT_NORM.lambda.m, FEAT_NORM.lambda.s);
 
-  // [14] log phonon frequency proxy — phonon energy scale; high → higher Tc ceiling
-  // Hint is ln(ω_log / 1K); fallback is ln(mean Debye temperature).
-  const logPhononFreqHint = hints?.logPhononFreq;
+  // [3] log phonon frequency — Allen-Dynes ω_log proxy; fallback: mean Debye temperature
+  const meanDebye = els.reduce((s, [el, n]) => s + (n / total) * (getElementData(el)?.debyeTemperature ?? 300), 0);
   const logPhononFeat = znorm(
-    logPhononFreqHint != null ? logPhononFreqHint : Math.log(Math.max(1, meanDebye)),
+    hints?.logPhononFreq != null ? hints.logPhononFreq : Math.log(Math.max(1, meanDebye)),
     FEAT_NORM.logPhonon.m, FEAT_NORM.logPhonon.s,
   );
 
-  // [15] density of states at E_F proxy — high DOS → strong coupling per BCS N(0)V
-  // Unit: states/eV/atom; fallback: d-orbital filling heuristic scaled to same range.
-  const dosHint = hints?.dosAtEF;
+  // [4] DOS at E_F — electronic density at Fermi level; fallback: d-filling heuristic
   const dosFeat = znorm(
-    dosHint != null && dosHint >= 0 ? dosHint : meanD * 2.0,
+    hints?.dosAtEF != null && hints.dosAtEF >= 0 ? hints.dosAtEF : meanD * 2.0,
     FEAT_NORM.dos.m, FEAT_NORM.dos.s,
   );
 
-  // [16] formation energy signal — more negative fe = more thermodynamically stable → higher z-score.
-  // Use −fe so that stability is positively correlated with the feature value.
+  // [5] formation energy — thermodynamic viability; −fe so stable → larger value
   const fe = hints?.formationEnergy;
   const hd = hints?.hullDistance;
   const feFeat = fe != null
     ? znorm(-fe, FEAT_NORM.negFe.m, FEAT_NORM.negFe.s)
     : hd != null
-      ? znorm(-hd, FEAT_NORM.negHd.m, FEAT_NORM.negHd.s)  // −hull distance: 0 = on hull (best)
-      : 0.0;                                                // unknown → neutral (distribution mean)
+      ? znorm(-hd, FEAT_NORM.negHd.m, FEAT_NORM.negHd.s)
+      : 0.0;
 
-  // [17] cuprate class flag — Cu + O compound → d-wave unconventional SC regime
-  const isCuprate = (counts["Cu"] != null && counts["O"] != null) ? 1.0 : 0.0;
-
-  // [18] iron-based class flag — Fe + pnictogen/chalcogen → sign-changing s± pairing
-  const IRON_SC_ANIONS = new Set(["As", "P", "Se", "Te", "S"]);
-  const isIronBased = (counts["Fe"] != null && Object.keys(counts).some(el => IRON_SC_ANIONS.has(el))) ? 1.0 : 0.0;
-
-  // --- 4 engineered features ---
-
-  // [19] pressure — critical for high-P hydride SCs (H3S@150GPa, LaH10@170GPa).
-  // Log transform first (compresses 0-200 GPa range), then z-score.
+  // [6] pressure — not in graph topology; log-normalised for 0–200 GPa range
   const pressureFeat = pressureGpa != null && pressureGpa > 0
     ? znorm(Math.log1p(pressureGpa / 10), FEAT_NORM.logPressure.m, FEAT_NORM.logPressure.s)
     : 0.0;
 
-  // [20] MgB2-type flag — Mg:B ≈ 1:2; two-band phonon SC mechanism; Tc~39K at ambient P
-  const mgCount = counts["Mg"] ?? 0;
-  const bCount  = counts["B"]  ?? 0;
-  const isMgB2Type = (mgCount > 0 && bCount > 0 && Math.abs(bCount / mgCount - 2) < 0.6) ? 1.0 : 0.0;
-
-  // [21] heavy-fermion / f-electron hint — Ce, U, Yb, Pr, Sm → unconventional Kondo-lattice SC
-  const HEAVY_FERMION_ELS = new Set(["Ce", "U", "Yb", "Pr", "Sm"]);
-  const hfWeight = els.reduce((s, [el, n]) => s + (HEAVY_FERMION_ELS.has(el) ? n / total : 0), 0);
-  const heavyFermionFeat = znorm(hfWeight, FEAT_NORM.hfWeight.m, FEAT_NORM.hfWeight.s);
-
-  // [22] mean d-electron count per TM atom — finer-grained than d-orbital filling average
-  // More directly related to Stoner criterion and density of states at E_F.
-  const tmEls = els.filter(([el]) => isTransitionMetal(el));
-  const tmCount = tmEls.reduce((s, [, n]) => s + n, 0);
-  const meanTMdCount = tmCount > 0
-    ? tmEls.reduce((s, [el, n]) => s + (n / tmCount) * getDOrbitalOccupancy(getElementData(el)?.atomicNumber ?? 1), 0)
-    : 0.0;
-
   return [
-    znorm(meanEN,    FEAT_NORM.en.m,       FEAT_NORM.en.s),       // [0] mean Pauling EN — ionicity proxy
-    meanD,                                                         // [1] mean d-orbital filling — BCS coupling proxy
-    znorm(vec,       FEAT_NORM.vec.m,      FEAT_NORM.vec.s),      // [2] valence electron concentration — strongest empirical SC predictor
-    znorm(meanDebye, FEAT_NORM.debye.m,    FEAT_NORM.debye.s),    // [3] mean Debye temperature — phonon frequency proxy
-    znorm(mismatch,  FEAT_NORM.mismatch.m, FEAT_NORM.mismatch.s), // [4] atomic size mismatch δ — lattice distortion (suppresses Tc)
-    znorm(nElements, FEAT_NORM.nElements.m,FEAT_NORM.nElements.s),// [5] compound complexity
-    znorm(stdEN,     FEAT_NORM.stdEN.m,    FEAT_NORM.stdEN.s),    // [6] EN heterogeneity — cuprate/hydride indicator
-    hasHydrogen,                                                    // [7] hydrogen flag — hydride SC class separator
-    transitionMetalFraction,                                       // [8] TM fraction — d-electron BCS coupling density
-    znorm(cfgEntropy, FEAT_NORM.cfgEntropy.m, FEAT_NORM.cfgEntropy.s), // [9] configurational entropy — HEA/entropy alloy signal
-    znorm(maxENdiff, FEAT_NORM.maxENdiff.m,FEAT_NORM.maxENdiff.s),// [10] max EN spread — ionicity extremes
-    znorm(meanMass,  FEAT_NORM.meanMass.m, FEAT_NORM.meanMass.s), // [11] mean atomic mass — phonon mass scale
-    znorm(stdRadius, FEAT_NORM.stdRadius.m,FEAT_NORM.stdRadius.s),// [12] radius std — lattice strain heterogeneity
-    lambdaFeat,                             // [13] electron-phonon λ — core BCS coupling constant
-    logPhononFeat,                          // [14] log phonon frequency — phonon energy scale
-    dosFeat,                                // [15] DOS at E_F — electronic density at Fermi level
-    feFeat,                                 // [16] formation energy signal — thermodynamic viability
-    isCuprate,                              // [17] cuprate flag — d-wave/unconventional class
-    isIronBased,                            // [18] iron-based flag — s± pairing class
-    pressureFeat,                           // [19] pressure (log-normalised) — high-P hydride class
-    isMgB2Type,                             // [20] MgB2-type flag — two-band phonon SC
-    heavyFermionFeat,                       // [21] heavy-fermion/f-electron hint — Kondo-lattice SC
-    meanTMdCount,                           // [22] mean d-count per TM — Stoner criterion / DOS proxy
+    znorm(vec, FEAT_NORM.vec.m, FEAT_NORM.vec.s), // [0] VEC
+    hasHydrogen,                                    // [1] H-flag
+    lambdaFeat,                                     // [2] λ
+    logPhononFeat,                                  // [3] log ω_log
+    dosFeat,                                        // [4] DOS at E_F
+    feFeat,                                         // [5] formation energy
+    pressureFeat,                                   // [6] pressure
   ];
 }
 
@@ -1610,7 +1601,9 @@ function attnMessagePass(
   useLeakyMsg: boolean,
   mode: 'train' | 'infer',
   msgRng?: () => number,
+  updateGate: number = 0,
 ): { embeddings: number[][]; cache: AttnLayerCache | null } {
+  const updateAlpha = sigmoid(updateGate);
   const nNodes = graph.nodes.length;
   // Deep-copy in train mode so backward pass has original pre-update inputs.
   const inputEmbs = mode === 'train'
@@ -1677,7 +1670,7 @@ function attnMessagePass(
     const hUpd = useLeakyMsg
       ? pre.map(v => v >= 0 ? v : 0.01 * v)
       : pre.map(v => v >= 0 ? v : 0);
-    const hRes = inputEmbs[i].map((v, k) => v + (hUpd[k] ?? 0));
+    const hRes = inputEmbs[i].map((v, k) => v + updateAlpha * (hUpd[k] ?? 0));
     if (mode === 'train') preNormActs.push(hRes);
     newEmbeddings.push(layerNorm(hRes));
   }
@@ -1687,7 +1680,7 @@ function attnMessagePass(
   }
 
   const cache = mode === 'train'
-    ? { inputEmbs, preActs, preNormActs, attnWts, neighborLists }
+    ? { inputEmbs, preActs, preNormActs, attnWts, neighborLists, updateAlpha }
     : null;
   return { embeddings: newEmbeddings, cache };
 }
@@ -1706,7 +1699,9 @@ function cgcnnConv(
   W_filter2: number[][], b_filter2: number[],
   adaptiveLogits: number[][] | undefined,
   mode: 'train' | 'infer',
+  updateGate: number = 0,
 ): { embeddings: number[][]; cache: CGCNNLayerCache | null } {
+  const updateAlpha = sigmoid(updateGate);
   const nNodes = graph.nodes.length;
   // Deep-copy in train mode so backward pass has original pre-update inputs.
   const inputEmbs = mode === 'train'
@@ -1805,7 +1800,7 @@ function cgcnnConv(
 
     const hRes: number[] = new Array(HIDDEN_DIM);
     for (let k = 0; k < HIDDEN_DIM; k++) {
-      hRes[k] = (inputEmbs[i][k] ?? 0) + aggUpdate[k];
+      hRes[k] = (inputEmbs[i][k] ?? 0) + updateAlpha * aggUpdate[k];
     }
     if (mode === 'train') preNormActs.push(hRes);
     // LayerNorm after residual — same in both modes (fixes prior train/infer mismatch).
@@ -1815,7 +1810,7 @@ function cgcnnConv(
   for (let i = 0; i < nNodes; i++) graph.nodes[i].embedding = newEmbeddings[i];
 
   const cache = mode === 'train'
-    ? { inputEmbs, filterPreActs, filterH1s, filterOuts, rbfs, preNormActs, cutoffWts, totalWeights, adaptiveLogits }
+    ? { inputEmbs, filterPreActs, filterH1s, filterOuts, rbfs, preNormActs, cutoffWts, totalWeights, adaptiveLogits, updateAlpha }
     : null;
   return { embeddings: newEmbeddings, cache };
 }
@@ -1827,8 +1822,10 @@ function attnLayerBackward(
   W_update: number[][], W_message: number[][],
   useLeaky: boolean,
 ): {
-  dW_update: number[][]; dW_message: number[][]; dLdInput: number[][];
+  dW_update: number[][]; dW_message: number[][]; dLdInput: number[][]; dUpdateGate: number;
 } {
+  const alpha = cache.updateAlpha ?? 1.0;
+  let dGateSum = 0;
   const nNodes = dLdOutput.length;
   const updateCols = W_update[0]?.length ?? 0;
   const msgCols = W_message[0]?.length ?? 0;
@@ -1852,10 +1849,14 @@ function attnLayerBackward(
 
     const pre = cache.preActs[i];
     const dPre = new Array(HIDDEN_DIM);
+    let dGateNode = 0;
     for (let k = 0; k < HIDDEN_DIM; k++) {
       const mask = useLeaky ? (pre[k] >= 0 ? 1.0 : 0.01) : (pre[k] >= 0 ? 1.0 : 0.0);
-      dPre[k] = dLdPreNorm[k] * mask;  // gradient flows through activation from dLdPreNorm
+      const hUpd_k = pre[k] * mask;               // activation output
+      dGateNode += dLdPreNorm[k] * hUpd_k;        // ∂L/∂α accumulator (unscaled)
+      dPre[k] = alpha * dLdPreNorm[k] * mask;     // scale update gradient by α
     }
+    dGateSum += dGateNode;
 
     const emb_i = cache.inputEmbs[i];
     const aggMsg = initVector(HIDDEN_DIM);
@@ -1912,7 +1913,7 @@ function attnLayerBackward(
     }
   }
 
-  return { dW_update, dW_message, dLdInput };
+  return { dW_update, dW_message, dLdInput, dUpdateGate: dGateSum * alpha * (1 - alpha) };
 }
 
 function cgcnnLayerBackward(
@@ -1925,7 +1926,10 @@ function cgcnnLayerBackward(
   db_filter1: number[]; db_filter2: number[];
   dLdInput: number[][];
   dAdaptiveLogits: number[][];
+  dUpdateGate: number;
 } {
+  const alpha = cache.updateAlpha ?? 1.0;
+  let dGateSum = 0;
   const nNodes = dLdOutput.length;
   const dW_filter1 = W_filter1.map(r => new Array(r.length).fill(0));
   const dW_filter2 = W_filter2.map(r => new Array(r.length).fill(0));
@@ -1958,12 +1962,15 @@ function cgcnnLayerBackward(
 
       const dH_ij: number[] = new Array(HIDDEN_DIM);
       let dAdaptLogitEdge = 0;
+      let dGateEdge = 0;
       for (let k = 0; k < HIDDEN_DIM; k++) {
-        const dMsg_k = (dLdOutput[i][k] / totalW) * cw;
-        dH_ij[k] = dMsg_k * (hj[k] ?? 0);
-        dLdInput[j][k] += dMsg_k * (h_ij[k] ?? 0);
+        const rawGrad = (dLdOutput[i][k] / totalW) * cw;
+        dGateEdge      += rawGrad * (h_ij[k] ?? 0) * (hj[k] ?? 0);   // ∂L/∂α (per edge)
+        dH_ij[k]        = alpha * rawGrad * (hj[k] ?? 0);             // scale filter grad by α
+        dLdInput[j][k] += alpha * rawGrad * (h_ij[k] ?? 0);           // scale input grad by α
         dAdaptLogitEdge += dH_ij[k];
       }
+      dGateSum += dGateEdge;
       if (dAdaptiveLogits[i]) dAdaptiveLogits[i][nIdx] = dAdaptLogitEdge;
 
       const dH1_ij: number[] = new Array(HIDDEN_DIM).fill(0);
@@ -1987,7 +1994,8 @@ function cgcnnLayerBackward(
     }
   }
 
-  return { dW_filter1, dW_filter2, db_filter1, db_filter2, dLdInput, dAdaptiveLogits };
+  return { dW_filter1, dW_filter2, db_filter1, db_filter2, dLdInput, dAdaptiveLogits,
+    dUpdateGate: dGateSum * alpha * (1 - alpha) };
 }
 
 // ── GLFN-TC: Graph Learning Module ───────────────────────────────────────────
@@ -2036,28 +2044,19 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
     graph.nodes[i].embedding = projected;
   }
 
-  // GLFN-TC Dense Residual: save H0 (post-projection) for skip to layer-2 input.
-  const denseH0 = graph.nodes.map(n => [...n.embedding]);
   // GLFN-TC Graph Learning Module: pre-compute adaptive edge logits once.
   const adaptLogits = (weights.W_elem_feat && weights.W_graph_adapt)
     ? computeAdaptiveLogits(graph, weights.W_elem_feat, weights.W_graph_adapt)
     : undefined;
 
-  const saveResidual = (nodes: CrystalGraph["nodes"]) =>
-    nodes.map(n => [...n.embedding]);
-
-  const gates = weights.residual_gates;
-
-  const residual0 = saveResidual(graph.nodes);
-
-  attnMessagePass(graph, weights.W_message, weights.W_update, weights.W_attn_query, weights.W_attn_key, true, 'infer', dropoutRng);
+  attnMessagePass(graph, weights.W_message, weights.W_update, weights.W_attn_query, weights.W_attn_key, true, 'infer', dropoutRng, 0);
   if (dropoutRng) {
     for (const node of graph.nodes) {
       node.embedding = applyDropout(node.embedding, MC_DROPOUT_RATE, dropoutRng, true);
     }
   }
 
-  cgcnnConv(graph, weights.W_filter1, weights.b_filter1, weights.W_filter2, weights.b_filter2, adaptLogits, 'infer');
+  cgcnnConv(graph, weights.W_filter1, weights.b_filter1, weights.W_filter2, weights.b_filter2, adaptLogits, 'infer', 0);
   if (dropoutRng) {
     for (const node of graph.nodes) {
       node.embedding = applyDropout(node.embedding, MC_DROPOUT_RATE, dropoutRng, true);
@@ -2068,71 +2067,38 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
     threeBodyInteractionLayer(graph, weights.W_3body, weights.W_3body_update);
   }
 
-  const g0 = sigmoid(gates[0] ?? 0);
-  for (let i = 0; i < graph.nodes.length; i++) {
-    for (let k = 0; k < HIDDEN_DIM; k++) {
-      graph.nodes[i].embedding[k] = (graph.nodes[i].embedding[k] ?? 0) + (residual0[i][k] ?? 0) * g0;
-    }
-  }
+  // Jumping Knowledge: snapshot after layer-0 gated residual (before layers 1-3)
+  const jkSnap0Infer = graph.nodes.map(n => [...n.embedding]);
 
-  // GLFN-TC Dense Residual (§2.4): add a learned fraction of H0 to H1 before
-  // layer-2 attention so later convolutions can access the original node features.
-  // dense_skip_gate is a learnable scalar; sigmoid(-2)≈0.12 at init → small skip.
-  const denseGate = sigmoid(weights.dense_skip_gate ?? -2);
-  if (denseGate > 1e-4) {
-    for (let i = 0; i < graph.nodes.length; i++) {
-      for (let k = 0; k < HIDDEN_DIM; k++) {
-        graph.nodes[i].embedding[k] += denseGate * (denseH0[i][k] ?? 0);
-      }
-    }
-  }
-
-  const residual1 = saveResidual(graph.nodes);
-  attnMessagePass(graph, weights.W_message2, weights.W_update2, weights.W_attn_query2, weights.W_attn_key2, false, 'infer', dropoutRng);
+  attnMessagePass(graph, weights.W_message2, weights.W_update2, weights.W_attn_query2, weights.W_attn_key2, false, 'infer', dropoutRng, 0);
   if (dropoutRng) {
     for (const node of graph.nodes) {
       node.embedding = applyDropout(node.embedding, MC_DROPOUT_RATE, dropoutRng, true);
     }
   }
 
-  const g1 = sigmoid(gates[1] ?? 0);
-  for (let i = 0; i < graph.nodes.length; i++) {
-    for (let k = 0; k < HIDDEN_DIM; k++) {
-      graph.nodes[i].embedding[k] = (graph.nodes[i].embedding[k] ?? 0) + (residual1[i][k] ?? 0) * g1;
-    }
-  }
-
   if (GNN_MSG_LAYERS >= 3) {
-    const residual2 = saveResidual(graph.nodes);
     attnMessagePass(graph, weights.W_message3, weights.W_update3, weights.W_attn_query3, weights.W_attn_key3, false, 'infer', dropoutRng);
     if (dropoutRng) {
       for (const node of graph.nodes) {
         node.embedding = applyDropout(node.embedding, MC_DROPOUT_RATE, dropoutRng, true);
       }
     }
-    const g2 = sigmoid(gates[2] ?? 0);
-    for (let i = 0; i < graph.nodes.length; i++) {
-      for (let k = 0; k < HIDDEN_DIM; k++) {
-        graph.nodes[i].embedding[k] = (graph.nodes[i].embedding[k] ?? 0) + (residual2[i][k] ?? 0) * g2;
-      }
-    }
   }
 
   if (GNN_MSG_LAYERS >= 4) {
-    const residual3 = saveResidual(graph.nodes);
     attnMessagePass(graph, weights.W_message4, weights.W_update4, weights.W_attn_query4, weights.W_attn_key4, false, 'infer', dropoutRng);
     if (dropoutRng) {
       for (const node of graph.nodes) {
         node.embedding = applyDropout(node.embedding, MC_DROPOUT_RATE, dropoutRng, true);
       }
     }
-    const g3 = sigmoid(gates[3] ?? 0);
-    for (let i = 0; i < graph.nodes.length; i++) {
-      for (let k = 0; k < HIDDEN_DIM; k++) {
-        graph.nodes[i].embedding[k] = (graph.nodes[i].embedding[k] ?? 0) + (residual3[i][k] ?? 0) * g3;
-      }
-    }
   }
+
+  // JK-mean: blend layer-0 snapshot with final embeddings before pooling
+  for (let ni = 0; ni < graph.nodes.length; ni++)
+    for (let k = 0; k < HIDDEN_DIM; k++)
+      graph.nodes[ni].embedding[k] = (jkSnap0Infer[ni][k] + (graph.nodes[ni].embedding[k] ?? 0)) * 0.5;
 
   const nNodes = graph.nodes.length;
   const meanPool = initVector(HIDDEN_DIM);
@@ -2149,7 +2115,18 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
     }
   }
 
-  const attnPool = attentionPooling(graph, weights.W_attn_pool);
+  const attnScores: number[] = [];
+  for (const node of graph.nodes) {
+    const attnVec = matVecMul(weights.W_attn_pool, node.embedding);
+    attnScores.push(attnVec.reduce((s, v) => s + v, 0) + Math.log(node.multiplicity ?? 1));
+  }
+  const attnPoolWeights = softmax(attnScores);
+  const attnPool = initVector(HIDDEN_DIM);
+  for (let n = 0; n < nNodes; n++) {
+    for (let k = 0; k < HIDDEN_DIM; k++) {
+      attnPool[k] += (graph.nodes[n].embedding[k] ?? 0) * attnPoolWeights[n];
+    }
+  }
 
   const pooled = new Array(HIDDEN_DIM * 2);
   for (let k = 0; k < HIDDEN_DIM; k++) {
@@ -2240,77 +2217,43 @@ function GNNPredictForTraining(graph: CrystalGraph, weights: GNNWeights, msgRng?
     graph.nodes[i].embedding = pre.map(v => v >= 0 ? v : 0.01 * v);
   }
 
-  const saveResidual = (nodes: CrystalGraph["nodes"]) =>
-    nodes.map(n => [...n.embedding]);
-
-  const gates = weights.residual_gates;
   const attnCaches: AttnLayerCache[] = [];
 
-  // GLFN-TC Dense Residual: save H0 after input projection for dense skip.
-  const denseH0 = graph.nodes.map(n => [...n.embedding]);
   // GLFN-TC Graph Learning Module: pre-compute adaptive edge logits once per graph.
   const adaptLogits = (weights.W_elem_feat && weights.W_graph_adapt)
     ? computeAdaptiveLogits(graph, weights.W_elem_feat, weights.W_graph_adapt)
     : undefined;
 
-  const residual0 = saveResidual(graph.nodes);
-  const { cache: ac0 } = attnMessagePass(graph, weights.W_message, weights.W_update, weights.W_attn_query, weights.W_attn_key, true, 'train', msgRng) as { embeddings: number[][]; cache: AttnLayerCache };
+  const { cache: ac0 } = attnMessagePass(graph, weights.W_message, weights.W_update, weights.W_attn_query, weights.W_attn_key, true, 'train', msgRng, 0) as { embeddings: number[][]; cache: AttnLayerCache };
   attnCaches.push(ac0);
 
-  const { cache: cgcnnC } = cgcnnConv(graph, weights.W_filter1, weights.b_filter1, weights.W_filter2, weights.b_filter2, adaptLogits, 'train') as { embeddings: number[][]; cache: CGCNNLayerCache };
+  const { cache: cgcnnC } = cgcnnConv(graph, weights.W_filter1, weights.b_filter1, weights.W_filter2, weights.b_filter2, adaptLogits, 'train', 0) as { embeddings: number[][]; cache: CGCNNLayerCache };
 
   if (graph.threeBodyFeatures.length > 0) {
     threeBodyInteractionLayer(graph, weights.W_3body, weights.W_3body_update);
   }
-  const g0 = sigmoid(gates[0] ?? 0);
-  for (let i = 0; i < nNodes; i++) {
-    for (let k = 0; k < HIDDEN_DIM; k++) {
-      graph.nodes[i].embedding[k] = (graph.nodes[i].embedding[k] ?? 0) + (residual0[i][k] ?? 0) * g0;
-    }
-  }
 
-  // GLFN-TC Dense Residual (§2.4): inject H0 into layer-2 input.
-  // residual1 is saved BEFORE the skip so the gated-residual path stays clean (gate1 → H1).
-  const denseGate = sigmoid(weights.dense_skip_gate ?? -2);
-  if (denseGate > 1e-4) {
-    for (let i = 0; i < nNodes; i++) {
-      for (let k = 0; k < HIDDEN_DIM; k++) {
-        graph.nodes[i].embedding[k] += denseGate * (denseH0[i][k] ?? 0);
-      }
-    }
-  }
+  // ── Jumping Knowledge (JK-mean): snapshot after layer 0 (attn+CGCNN+3body) ──
+  const jkSnap0: number[][] = graph.nodes.map(n => [...n.embedding]);
 
-  const residual1 = saveResidual(graph.nodes);
-  const { cache: ac1 } = attnMessagePass(graph, weights.W_message2, weights.W_update2, weights.W_attn_query2, weights.W_attn_key2, false, 'train', msgRng) as { embeddings: number[][]; cache: AttnLayerCache };
+  const { cache: ac1 } = attnMessagePass(graph, weights.W_message2, weights.W_update2, weights.W_attn_query2, weights.W_attn_key2, false, 'train', msgRng, 0) as { embeddings: number[][]; cache: AttnLayerCache };
   attnCaches.push(ac1);
-  const g1 = sigmoid(gates[1] ?? 0);
-  for (let i = 0; i < nNodes; i++) {
-    for (let k = 0; k < HIDDEN_DIM; k++) {
-      graph.nodes[i].embedding[k] = (graph.nodes[i].embedding[k] ?? 0) + (residual1[i][k] ?? 0) * g1;
-    }
-  }
 
   if (GNN_MSG_LAYERS >= 3) {
-    const residual2 = saveResidual(graph.nodes);
     const { cache: ac2 } = attnMessagePass(graph, weights.W_message3, weights.W_update3, weights.W_attn_query3, weights.W_attn_key3, false, 'train', msgRng) as { embeddings: number[][]; cache: AttnLayerCache };
     attnCaches.push(ac2);
-    const g2 = sigmoid(gates[2] ?? 0);
-    for (let i = 0; i < nNodes; i++) {
-      for (let k = 0; k < HIDDEN_DIM; k++) {
-        graph.nodes[i].embedding[k] = (graph.nodes[i].embedding[k] ?? 0) + (residual2[i][k] ?? 0) * g2;
-      }
-    }
   }
 
   if (GNN_MSG_LAYERS >= 4) {
-    const residual3 = saveResidual(graph.nodes);
     const { cache: ac3 } = attnMessagePass(graph, weights.W_message4, weights.W_update4, weights.W_attn_query4, weights.W_attn_key4, false, 'train', msgRng) as { embeddings: number[][]; cache: AttnLayerCache };
     attnCaches.push(ac3);
-    const g3 = sigmoid(gates[3] ?? 0);
-    for (let i = 0; i < nNodes; i++) {
-      for (let k = 0; k < HIDDEN_DIM; k++) {
-        graph.nodes[i].embedding[k] = (graph.nodes[i].embedding[k] ?? 0) + (residual3[i][k] ?? 0) * g3;
-      }
+  }
+
+  // Apply JK-mean: blend layer-0 snapshot with final embeddings before pooling.
+  // Backward: each layer receives 0.5 × dLdNodeEmb (handled in training loop).
+  for (let ni = 0; ni < nNodes; ni++) {
+    for (let k = 0; k < HIDDEN_DIM; k++) {
+      graph.nodes[ni].embedding[k] = (jkSnap0[ni][k] + (graph.nodes[ni].embedding[k] ?? 0)) * 0.5;
     }
   }
 
@@ -2435,10 +2378,10 @@ function GNNPredictForTraining(graph: CrystalGraph, weights: GNNWeights, msgRng?
     inputProjPreActs,
     maxPoolArgmax,
     attnPoolWeights,
-    denseH0,  // GLFN-TC: saved for dense-skip gradient in backward pass
     zCls: [...zCls],
     hCls: [...hCls],
     lambdaSigForTc,  // v16: sigmoid(out[4]) for cross-task (λ→Tc) backward
+    jkSnap0,         // JK-mean: layer-0 snapshot used to split backward gradient
   };
 
   return { pred, cache };
@@ -2471,7 +2414,10 @@ function initWeights(rng: () => number): GNNWeights {
     W_3body: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, Math.sqrt(2.0 / HIDDEN_DIM) * 1.5),
     W_3body_update: initMatrix(HIDDEN_DIM, HIDDEN_DIM * 2, rng),
     W_attn_pool: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng),
-    residual_gates: [0.5, 0.5, 0.5, 0.5],
+    residual_gates: [-6, -6, -6, -6],  // deprecated v17 — outer residuals removed; kept for migration
+    // v17: Init to -2 → sigmoid(-2)≈0.12: model starts as near-identity, opens gates gradually.
+    // Old init 0 → sigmoid(0)=0.5 caused aggressive 50% update bypass at t=0.
+    update_gates: [-2, -2, -2, -2, -2],
     W_pressure: Array.from({ length: HIDDEN_DIM }, () => (rng() - 0.5) * 2 * Math.sqrt(2.0 / HIDDEN_DIM)),
     W_mlp1: initMatrix(HIDDEN_DIM, HIDDEN_DIM * 2 + GLOBAL_COMP_DIM, rng),
     b_mlp1: initVector(HIDDEN_DIM),
@@ -2541,6 +2487,7 @@ function cloneWeights(w: GNNWeights): GNNWeights {
     W_input_proj: w.W_input_proj.map(r => [...r]),
     b_input_proj: [...w.b_input_proj],
     residual_gates: [...w.residual_gates],
+    update_gates: [...(w.update_gates ?? [0, 0, 0, 0, 0])],
     W_3body: w.W_3body.map(r => [...r]),
     W_3body_update: w.W_3body_update.map(r => [...r]),
     W_attn_pool: w.W_attn_pool.map(r => [...r]),
@@ -2572,6 +2519,9 @@ function cloneWeights(w: GNNWeights): GNNWeights {
  * the first forward pass, then learns to use the new parameters during training.
  */
 function migrateWeights(w: GNNWeights, rng: () => number): GNNWeights {
+  if (!w.update_gates || w.update_gates.length < 5) w.update_gates = [-2, -2, -2, -2, -2];
+  // v17: Fix update_gate init — sigmoid(-2)≈0.12 is stable; old init 0 caused 50% bypass at t=0.
+  if (w.update_gates.every((g: number) => g === 0)) w.update_gates = [-2, -2, -2, -2, -2];
   // SchNet migration: old checkpoints had W_conv_gate/W_conv_value.
   const wAny = w as any;
   if (!wAny.W_filter1 || wAny.W_filter1.length !== HIDDEN_DIM ||
@@ -2763,7 +2713,8 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
     bFilter2:   mkAdamVecG(HIDDEN_DIM),
     bInputProj: mkAdamVecG(HIDDEN_DIM),
     pressure:   mkAdamVecG(HIDDEN_DIM),
-    gates:      mkAdamVecG(weights.residual_gates.length),
+    gates:        mkAdamVecG(weights.residual_gates.length),
+    updateGates:  mkAdamVecG(5),
     // GLFN-TC: Adam state for Graph Learning Module and Dense Residual gate.
     elemFeat:       mkAdamMatG(weights.W_elem_feat),
     graphAdapt:     mkAdamMatG(weights.W_graph_adapt),
@@ -2772,6 +2723,17 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
 
   const graphCache = new Map<string, CrystalGraph>();
   const origEmbeddings = new Map<string, number[][]>();
+
+  // Pre-fetch real atomic positions from Materials Project for formulas that
+  // lack a prototype-based graph. Real positions activate buildCrystalGraph's
+  // physics-consistent distance calculation path instead of heuristic distances.
+  const formulasNeedingStructure = [...new Set(
+    trainingData.filter(s => !s.prototype).map(s => s.formula)
+  )];
+  const mpStructureMap = formulasNeedingStructure.length > 0
+    ? await prefetchStructures(formulasNeedingStructure)
+    : new Map<string, any>();
+
   for (let si = 0; si < trainingData.length; si++) {
     const sample = trainingData[si];
     const key = graphCacheKey(sample.formula, sample.prototype, sample.structure);
@@ -2790,7 +2752,7 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
       };
       const g = sample.prototype
         ? buildPrototypeGraph(sample.formula, sample.prototype, sample.pressureGpa, sampleHints)
-        : buildCrystalGraph(sample.formula, sample.structure, sample.pressureGpa, sampleHints);
+        : buildCrystalGraph(sample.formula, sample.structure ?? mpStructureMap.get(sample.formula), sample.pressureGpa, sampleHints);
       graphCache.set(key, g);
       origEmbeddings.set(key, g.nodes.map(n => [...n.embedding]));
     }
@@ -2909,8 +2871,19 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
   }
 
   for (let epoch = 0; epoch < epochs; epoch++) {
-    // Cosine LR decay: LR_INIT → LR_INIT/10 over the training run.
-    const lr = LR_INIT * (0.1 + 0.9 * 0.5 * (1 + Math.cos(Math.PI * epoch / epochs)));
+    // LR schedule: linear warmup for first 8% of epochs, then cosine decay → LR_INIT/10.
+    const WARMUP_FRAC = 0.08;
+    const warmupEpochs = Math.max(1, Math.floor(epochs * WARMUP_FRAC));
+    let lr: number;
+    if (epoch < warmupEpochs) {
+      // Linear warmup: 0 → LR_INIT (avoids large gradient steps on random init).
+      lr = LR_INIT * (epoch + 1) / warmupEpochs;
+    } else {
+      // Cosine decay over the remaining epochs.
+      const decayEpoch = epoch - warmupEpochs;
+      const decayEpochs = Math.max(1, epochs - warmupEpochs);
+      lr = LR_INIT * (0.1 + 0.9 * 0.5 * (1 + Math.cos(Math.PI * decayEpoch / decayEpochs)));
+    }
     let totalLoss = 0;
     let totalSamples = 0;
     let tcSumErr2 = 0;    // sum of (predictedTcK - actualTcK)² — SC samples only
@@ -3031,12 +3004,17 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         db_filter2: new Array(HIDDEN_DIM).fill(0),
         dW_input_proj: zeroMat(weights.W_input_proj),
         db_input_proj: new Array(HIDDEN_DIM).fill(0),
+        // v17: dGates/dDenseSkipGate are dead (outer residuals removed) — kept for type compat only.
         dGates: new Array(4).fill(0),
+        dUpdateGates: new Array(5).fill(0),
         // GLFN-TC gradient accumulators
         dW_elem_feat:   zeroMat(weights.W_elem_feat),
         dW_graph_adapt: zeroMat(weights.W_graph_adapt),
         dDenseSkipGate: 0,
       };
+      // v17: Gate entropy regularization accumulators — one scalar per update_gate.
+      // Added once per batch (not per sample) after the sample loop.
+      const gradUpdateGateEntropy = new Array(5).fill(0);
 
       for (let b = batchStart; b < batchEnd; b++) {
         const idx = indices[b];
@@ -3059,12 +3037,15 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         // >100K: 4× (room-T SCs), 40-100K: 3×, >0: 2× (counteract contrast imbalance), =0: 1×
         // DFT-verified labels carry 5× the base weight — they are the ground truth.
         const feError = hasFormationEnergy ? pred.formationEnergy - feTarget : 0;
-        // Bandgap: real measured value when available, otherwise skip.
-        const bgTarget = sample.bandgap ?? null;
+        // Bandgap: real measured value when available; SC materials are always metallic
+        // so pin bandgap = 0 as a soft constraint even without an explicit measurement.
+        const actualTcKPre = sample.qeDFPTTc ?? sample.tc;
+        const bgTarget = sample.bandgap != null ? sample.bandgap
+          : (actualTcKPre > 0 ? 0.0 : null);
         const bgError  = bgTarget != null ? pred.bandgap - bgTarget : 0;
 
         const feWeight   = hasFormationEnergy ? 0.1 : 0.0;
-        const actualTcK  = sample.qeDFPTTc ?? sample.tc;
+        const actualTcK  = actualTcKPre;
         const isSC       = actualTcK > 0;
         // ── Sample weight: Tc-tier × dataConfidence multiplier ───────────────
         // Tc tiers: >100K (room-T discovery targets) = 4×, 40-100K = 3×,
@@ -3343,11 +3324,29 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         const dLdOut = new Array(OUTPUT_DIM).fill(0);
         // v16: Scale FE gradient by precFE (uncertainty weighting).
         dLdOut[0] = hasFormationEnergy ? clipGrad(precFE * 2 * feError * 0.1) : 0;
-        dLdOut[1] = 0;
+        // Phonon stability BCE — out[1] trained from explicit DFPT labels or soft SC proxy.
+        // SC materials are likely phonon-stable (they have a real phonon condensation that drives SC).
+        // Non-SC materials without a label are skipped (label is uncertain).
+        const phStableTarget = sample.phononStable != null
+          ? (sample.phononStable ? 1.0 : 0.0)
+          : (isSC ? 0.8 : null);
+        const phSig1 = sigmoid(cache.outRaw[1] ?? 0);
+        if (phStableTarget != null) {
+          const phClamp = Math.max(1e-7, Math.min(1 - 1e-7, phSig1));
+          totalLoss += 0.15 * sampleW * -(phStableTarget * Math.log(phClamp) + (1 - phStableTarget) * Math.log(1 - phClamp));
+          dLdOut[1] = clipGrad(0.15 * sampleW * (phSig1 - phStableTarget));
+        }
         // v16: Allen-Dynes / physics gradients scaled by precAD (included in _dLossDAd above).
         dLdOut[2] = clipGrad((_dLossDAd * _dPhysTcdOmegaLog + omegaLogGradBoost) * dOmegaLogdOut2);
         dLdOut[3] = 0;
         dLdOut[4] = clipGrad(_dLossDAd * _dPhysTcdLambda * dLambdadOut4);
+        // Direct λ supervision when DFPT/experimental value is available (JARVIS wlog_K companion).
+        // Stronger signal than Allen-Dynes chain-rule alone; skipped when value is missing or out-of-range.
+        if (sample.lambda != null && sample.lambda > 0 && sample.lambda < LAMBDA_MAX) {
+          const lambdaDirectErr = adLambda - sample.lambda;
+          totalLoss += 0.2 * sampleW * lambdaDirectErr * lambdaDirectErr;
+          dLdOut[4] += clipGrad(0.2 * sampleW * 2 * lambdaDirectErr * dLambdadOut4);
+        }
         const bgSig5 = sigmoid(cache.outRaw[5] ?? 0);
         dLdOut[5] = bgTarget != null ? clipGrad(2 * bgError * 0.05 * 5.0 * bgSig5 * (1 - bgSig5)) : 0;
         dLdOut[6] = 0;
@@ -3364,21 +3363,42 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
           dLdOut[4] += clipGrad(dLdOut[8] * alphaCross * lSig * (1 - lSig));
         }
 
-        // v16: Physics constraint penalties — prevent unphysical λ/ω_log for SC materials.
-        // Outputs are sigmoid-clamped so "< 0" manifests as near-zero values.
-        // Penalty fires when adLambda < 0.1 or adOmegaLog < 50 K for SC materials.
+        // Physics constraint penalties — prevent unphysical outputs.
+        //
+        // SC materials: λ >= 0.3 (BCS weak-coupling floor; λ ≈ 0 is non-superconducting)
+        //   and ω_log >= 50 K (any lower is implausible for a phonon-mediated SC).
+        //   Coefficient raised 0.5 → 5.0 so these are binding constraints, not soft nudges.
+        //
+        // All materials: Tc > TC_MAX_K (300 K) is physically impossible at ambient pressure.
+        //   Penalise outRaw[8] before the inference clamp so gradients flow properly.
         if (isSC) {
-          const lambdaPenalty = 0.5 * Math.max(0, 0.1 - adLambda);
+          // Hard λ floor: λ < 0.3 is effectively zero — unphysical for a superconductor.
+          const lambdaPenalty = 5.0 * Math.max(0, 0.3 - adLambda);
           if (lambdaPenalty > 0) {
             totalLoss += lambdaPenalty * lambdaPenalty;
-            // d(penalty)/d(out[4]) = -2 * penalty * dLambda/d(out[4])
             dLdOut[4] += clipGrad(-2 * lambdaPenalty * dLambdadOut4);
           }
-          const omegaPenalty = 0.5 * Math.max(0, 50 - adOmegaLog);
+          // Hard ω_log floor: < 50 K is physically unrealistic for any phonon-mediated SC.
+          const omegaPenalty = 5.0 * Math.max(0, 50 - adOmegaLog);
           if (omegaPenalty > 0) {
             totalLoss += omegaPenalty * omegaPenalty;
-            // d(penalty)/d(out[2]) = -2 * penalty * dOmegaLog/d(out[2])
             dLdOut[2] += clipGrad(-2 * omegaPenalty * dOmegaLogdOut2);
+          }
+        }
+        // Hard Tc ceiling (all samples): predicted Tc > 300 K is physically impossible.
+        // Operates on outRaw[8] so the penalty gradient flows through log1p Tc decoding.
+        {
+          const raw8 = cache.outRaw[8] ?? 0;
+          if (raw8 > 0) {
+            const predTcK = 10 * Math.expm1(raw8 * TC_LOG_SCALE);
+            const tcExcess = predTcK - TC_MAX_K;
+            if (tcExcess > 0) {
+              // Quadratic penalty, dimensionless: 10 x (excess / 300)^2
+              totalLoss += 10.0 * (tcExcess / TC_MAX_K) ** 2;
+              // d(predTcK)/d(raw8) = 10 x TC_LOG_SCALE x exp(raw8 x TC_LOG_SCALE)
+              const dPredTcdRaw8 = 10 * TC_LOG_SCALE * Math.exp(raw8 * TC_LOG_SCALE);
+              dLdOut[8] += clipGrad(20.0 * (tcExcess / TC_MAX_K) / TC_MAX_K * dPredTcdRaw8);
+            }
           }
         }
 
@@ -3481,8 +3501,6 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
           }
         }
 
-        const gateVals = weights.residual_gates.map(g => sigmoid(g));
-
         const allLayerWeights: { W_msg: number[][]; W_upd: number[][]; useLeaky: boolean; gateIdx: number }[] = [
           { W_msg: weights.W_message4, W_upd: weights.W_update4, useLeaky: false, gateIdx: 3 },
           { W_msg: weights.W_message3, W_upd: weights.W_update3, useLeaky: false, gateIdx: 2 },
@@ -3492,29 +3510,25 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         const layerWeights = allLayerWeights.slice(4 - GNN_MSG_LAYERS);
         const layerCacheIndices = layerWeights.map(lw => lw.gateIdx);
 
-        // GLFN-TC Dense Residual backward: save layer-2 attention input gradient
-        // so we can route it back to H0 through the dense skip connection.
-        let dLdInput_layer2: number[][] | null = null;
-        let dLdCur = dLdNodeEmb;
+        // JK-mean backward: h_out = (h0 + h_final)*0.5 → split gradient equally
+        const jkSnap0 = cache.jkSnap0;
+        let dLdCur: number[][] = jkSnap0
+          ? dLdNodeEmb.map(row => row.map(v => v * 0.5))
+          : dLdNodeEmb;
         for (let li = 0; li < layerWeights.length; li++) {
           const lw = layerWeights[li];
           const ci = layerCacheIndices[li];
           const ac = cache.attnCaches[ci];
-          const gi = lw.gateIdx;
-          const gv = gateVals[gi];
 
           const dLdLayerIn: number[][] = Array.from({ length: nN }, () => new Array(HIDDEN_DIM).fill(0));
           for (let ni = 0; ni < nN; ni++) {
             for (let k = 0; k < HIDDEN_DIM; k++) {
-              dLdLayerIn[ni][k] = dLdCur[ni][k] * gv;
+              dLdLayerIn[ni][k] = dLdCur[ni][k];
             }
           }
 
-          const { dW_update, dW_message, dLdInput } = attnLayerBackward(ac, dLdCur, graph, lw.W_upd, lw.W_msg, lw.useLeaky);
-
-          // GLFN-TC: capture the gradient at layer-2's attention input (= H1 + denseGate*H0).
-          // This is used below to back-propagate through the dense skip to H0.
-          if (gi === 1) dLdInput_layer2 = dLdInput;
+          const { dW_update, dW_message, dLdInput, dUpdateGate: dUG_attn } = attnLayerBackward(ac, dLdCur, graph, lw.W_upd, lw.W_msg, lw.useLeaky);
+          graphGrads.dUpdateGates[lw.gateIdx] += clipGrad(dUG_attn);
 
           const gradIdx = lw.gateIdx;
           const addMat = (dst: number[][], src: number[][]) => {
@@ -3531,34 +3545,21 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
             }
           }
 
-          let dEmbSum = 0;
-          for (let ni = 0; ni < nN; ni++)
-            for (let k = 0; k < HIDDEN_DIM; k++)
-              dEmbSum += dLdCur[ni][k] * (ac.inputEmbs[ni]?.[k] ?? 0);
-          graphGrads.dGates[gi] += clipGrad(dEmbSum * gv * (1 - gv));
-
           dLdCur = dLdLayerIn;
         }
 
-        // GLFN-TC Dense Residual (§2.4) backward:
-        //   Forward:  layer2_input = H1 + denseGate * H0
-        //   ∂L/∂H0_dense  = denseGate  * dLdInput_layer2  (added to dLdPreProj below)
-        //   ∂L/∂dense_raw = Σ dLdInput_layer2[i][k] * H0[i][k]  * gate*(1-gate)
-        const denseGateVal = sigmoid(weights.dense_skip_gate ?? -2);
-        if (dLdInput_layer2 && cache.denseH0) {
-          let dDenseSkipRaw = 0;
-          for (let ni = 0; ni < nN; ni++) {
-            for (let k = 0; k < HIDDEN_DIM; k++) {
-              dDenseSkipRaw += (dLdInput_layer2[ni]?.[k] ?? 0) * (cache.denseH0[ni]?.[k] ?? 0);
-            }
-          }
-          graphGrads.dDenseSkipGate += clipGrad(dDenseSkipRaw * denseGateVal * (1 - denseGateVal));
+        // JK-mean: add 0.5*dLdNodeEmb as gradient w.r.t. layer-0 snapshot
+        if (jkSnap0) {
+          for (let ni = 0; ni < nN; ni++)
+            for (let k = 0; k < HIDDEN_DIM; k++)
+              dLdCur[ni][k] += dLdNodeEmb[ni][k] * 0.5;
         }
 
         const ac0 = cache.attnCaches[0];
         if (cache.cgcnnCache) {
-          const { dW_filter1, dW_filter2, db_filter1, db_filter2, dLdInput: dLdCgcnnIn, dAdaptiveLogits } =
-            cgcnnLayerBackward(cache.cgcnnCache, dLdCur, graph, weights.W_filter1, weights.W_filter2);
+          const cgcnnBwd = cgcnnLayerBackward(cache.cgcnnCache, dLdCur, graph, weights.W_filter1, weights.W_filter2);
+          const { dW_filter1, dW_filter2, db_filter1, db_filter2, dLdInput: dLdCgcnnIn, dAdaptiveLogits } = cgcnnBwd;
+          graphGrads.dUpdateGates[4] += clipGrad(cgcnnBwd.dUpdateGate);
           const addMat = (dst: number[][], src: number[][]) => {
             for (let r = 0; r < dst.length; r++)
               for (let c = 0; c < dst[r].length; c++)
@@ -3608,7 +3609,8 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         }
 
         {
-          const { dW_update, dW_message, dLdInput } = attnLayerBackward(ac0, dLdCur, graph, weights.W_update, weights.W_message, true);
+          const { dW_update, dW_message, dLdInput, dUpdateGate: dUG_attn0 } = attnLayerBackward(ac0, dLdCur, graph, weights.W_update, weights.W_message, true);
+          graphGrads.dUpdateGates[0] += clipGrad(dUG_attn0);
           const addMat = (dst: number[][], src: number[][]) => {
             for (let r = 0; r < dst.length; r++)
               for (let c = 0; c < dst[r].length; c++)
@@ -3617,23 +3619,12 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
           addMat(graphGrads.dW_msg[0], dW_message);
           addMat(graphGrads.dW_upd[0], dW_update);
 
-          const g0v = gateVals[0];
           const dLdPreProj: number[][] = Array.from({ length: nN }, () => new Array(HIDDEN_DIM).fill(0));
           for (let ni = 0; ni < nN; ni++) {
             for (let k = 0; k < HIDDEN_DIM; k++) {
-              // Standard gradients: layer-1 attention backward + gated residual to H0.
-              // GLFN-TC Dense Residual: dLdInput_layer2 (grad at layer-2 attention input)
-              // also flows back to H0 through the dense skip (H0 was added to H1).
-              const denseSkipContrib = dLdInput_layer2 ? denseGateVal * (dLdInput_layer2[ni]?.[k] ?? 0) : 0;
-              dLdPreProj[ni][k] = clipGrad(dLdInput[ni][k]) + dLdCur[ni][k] * g0v + clipGrad(denseSkipContrib);
+              dLdPreProj[ni][k] = clipGrad(dLdInput[ni][k]);
             }
           }
-
-          let dEmbSum0 = 0;
-          for (let ni = 0; ni < nN; ni++)
-            for (let k = 0; k < HIDDEN_DIM; k++)
-              dEmbSum0 += dLdCur[ni][k] * (ac0.inputEmbs[ni]?.[k] ?? 0);
-          graphGrads.dGates[0] += clipGrad(dEmbSum0 * g0v * (1 - g0v));
 
           for (let ni = 0; ni < nN; ni++) {
             const pre = cache.inputProjPreActs[ni];
@@ -3657,6 +3648,16 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
             }
           }
         }
+      }
+
+      // v17: Gate entropy regularization — penalize update_gates saturating to 0 or 1.
+      // L += GATE_ENTROPY_REG * Σ_i g*(1-g); gradient pushes gates toward non-extreme values.
+      const GATE_ENTROPY_REG = 0.001;
+      for (let gi = 0; gi < (weights.update_gates?.length ?? 0); gi++) {
+        const gv = sigmoid(weights.update_gates[gi] ?? 0);
+        totalLoss += GATE_ENTROPY_REG * gv * (1 - gv);
+        // ∂L/∂gate_raw = (1 - 2g) * g*(1-g) * GATE_ENTROPY_REG
+        gradUpdateGateEntropy[gi] = (1 - 2 * gv) * gv * (1 - gv) * GATE_ENTROPY_REG;
       }
 
       const invN = 1.0 / batchSize_actual;
@@ -3759,26 +3760,20 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
       adamUpdateGraph(weights.W_input_proj,    graphGrads.dW_input_proj, graphAdam.inputProj);
       adamUpdateGraphVec(weights.b_input_proj, graphGrads.db_input_proj, graphAdam.bInputProj);
       adamUpdateGraphVec(weights.W_pressure,   gradPressure,             graphAdam.pressure);
-      for (let g = 0; g < weights.residual_gates.length; g++) {
-        const gi = graphGrads.dGates[g] * invN;
-        graphAdam.gates.m[g] = adamBeta1 * graphAdam.gates.m[g] + (1 - adamBeta1) * gi;
-        graphAdam.gates.v[g] = adamBeta2 * graphAdam.gates.v[g] + (1 - adamBeta2) * gi * gi;
-        weights.residual_gates[g] -= graphLR * (graphAdam.gates.m[g] / bc1) / (Math.sqrt(graphAdam.gates.v[g] / bc2) + adamEps);
-        weights.residual_gates[g] = Math.max(-3, Math.min(3, weights.residual_gates[g]));
+      // v17: residual_gates removed from forward pass — no Adam update needed.
+      for (let g = 0; g < weights.update_gates.length; g++) {
+        // v17: Combine backward gradient + entropy regularization gradient.
+        const gi = graphGrads.dUpdateGates[g] * invN + gradUpdateGateEntropy[g];
+        graphAdam.updateGates.m[g] = adamBeta1 * graphAdam.updateGates.m[g] + (1 - adamBeta1) * gi;
+        graphAdam.updateGates.v[g] = adamBeta2 * graphAdam.updateGates.v[g] + (1 - adamBeta2) * gi * gi;
+        weights.update_gates[g] -= graphLR * (graphAdam.updateGates.m[g] / bc1) / (Math.sqrt(graphAdam.updateGates.v[g] / bc2) + adamEps);
+        weights.update_gates[g] = Math.max(-6, Math.min(6, weights.update_gates[g]));
       }
 
       // GLFN-TC: Adam updates for Graph Learning Module and Dense Residual gate.
       adamUpdateGraph(weights.W_elem_feat,   graphGrads.dW_elem_feat,   graphAdam.elemFeat);
       adamUpdateGraph(weights.W_graph_adapt, graphGrads.dW_graph_adapt, graphAdam.graphAdapt);
-      {
-        const dsg = graphGrads.dDenseSkipGate * invN;
-        graphAdam.denseSkipGate.m[0] = adamBeta1 * graphAdam.denseSkipGate.m[0] + (1 - adamBeta1) * dsg;
-        graphAdam.denseSkipGate.v[0] = adamBeta2 * graphAdam.denseSkipGate.v[0] + (1 - adamBeta2) * dsg * dsg;
-        weights.dense_skip_gate -= graphLR * (graphAdam.denseSkipGate.m[0] / bc1) / (Math.sqrt(graphAdam.denseSkipGate.v[0] / bc2) + adamEps);
-        // Clamp so denseGate = sigmoid(raw) stays in (0.01, 0.99) — prevents the skip
-        // from either fully vanishing or drowning the gated-residual path.
-        weights.dense_skip_gate = Math.max(-4.6, Math.min(4.6, weights.dense_skip_gate));
-      }
+      // v17: dense_skip_gate removed from forward pass — no Adam update needed.
       // Invalidate flat matrix caches after Adam in-place mutations.
       // adamUpdate mutates w[i][j] in-place so the WeakMap-cached Float32Array goes stale;
       // without invalidation every forward pass from batch 2 onward reads pre-update weights.
@@ -3854,7 +3849,7 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
     weights.W_elem_feat, weights.W_graph_adapt,
     weights.W_cls1,  // v15: cls head — must scrub or NaN in cls head poisons all predictions
   ]) { scrubMatrix(wMat); }
-  for (const bVec of [weights.b_mlp1, weights.b_mlp2, weights.b_mlp2_var, weights.b_filter1, weights.b_filter2, weights.b_input_proj, weights.W_pressure, weights.residual_gates, weights.b_cls1, weights.W_cls2]) {
+  for (const bVec of [weights.b_mlp1, weights.b_mlp2, weights.b_mlp2_var, weights.b_filter1, weights.b_filter2, weights.b_input_proj, weights.W_pressure, weights.residual_gates, weights.update_gates, weights.b_cls1, weights.W_cls2]) {
     scrubVector(bVec);
   }
   if (!Number.isFinite(weights.dense_skip_gate)) weights.dense_skip_gate = -2.0;
