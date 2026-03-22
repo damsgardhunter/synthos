@@ -108,10 +108,12 @@ interface GNNWeights {
   W_attn_key3: number[][];
   W_attn_query4: number[][];
   W_attn_key4: number[][];
-  W_conv_gate: number[][];
-  W_conv_value: number[][];
-  b_conv_gate: number[];
-  b_conv_value: number[];
+  /** SchNet continuous filter MLP layer 1: HIDDEN_DIM × N_GAUSSIAN_BASIS */
+  W_filter1: number[][];
+  b_filter1: number[];
+  /** SchNet continuous filter MLP layer 2: HIDDEN_DIM × HIDDEN_DIM */
+  W_filter2: number[][];
+  b_filter2: number[];
   W_input_proj: number[][];
   b_input_proj: number[];
   W_3body: number[][];
@@ -170,19 +172,21 @@ export interface GNNPrediction {
 interface AttnLayerCache {
   inputEmbs: number[][];
   preActs: number[][];
+  preNormActs: number[][];  // h + activation(update) before layerNorm
   attnWts: number[][];
   neighborLists: number[][];
 }
 
 interface CGCNNLayerCache {
   inputEmbs: number[][];
-  gateRaws: number[][][];
-  valueRaws: number[][][];
-  concats: number[][][];
+  filterPreActs: number[][][];
+  filterH1s: number[][][];
+  filterOuts: number[][][];
+  rbfs: number[][][];
+  preNormActs: number[][];
+  preNormActs: number[][];  // h + aggUpdate before layerNorm
   cutoffWts: number[][];
   totalWeights: number[];
-  /** GLFN-TC Graph Learning Module: adaptive scalar logit per edge (node_i × neighbor_idx).
-   *  Stored so cgcnnLayerBackward can compute dL/d(W_graph_adapt) and dL/d(W_elem_feat). */
   adaptiveLogits?: number[][];
 }
 
@@ -280,7 +284,7 @@ const TC_LOG_SCALE = Math.log1p(TC_MAX_K / 10);  // log1p(30) ≈ 3.434
 const CLS_DIM = 24;
 // Absolute ceiling on ω_log — even high-pressure hydrides (H₃S, LaH₁₀) have ω_log < 1500 K.
 const OMEGA_LOG_MAX = 1500;              // 6 composition + 7 XGBoost-inspired composition + 6 physics (λ, logω, DOS, FE, isCuprate, isIronBased)
-const CGCNN_CONCAT_DIM = HIDDEN_DIM * 2 + EDGE_DIM;
+// CGCNN_CONCAT_DIM removed - replaced by SchNet filter MLP (W_filter1/W_filter2)
 export const ENSEMBLE_SIZE = 5;
 const MC_DROPOUT_PASSES = 10;
 const MC_DROPOUT_RATE = 0.25;
@@ -388,6 +392,35 @@ function releaseBuffer(buf: Float64Array): void {
 
 function toArray(buf: Float64Array): number[] {
   return Array.from(buf);
+}
+
+/** Backward pass through LayerNorm (no learned scale/bias).
+ *  preNorm: the pre-norm input x (same as vec passed to layerNorm).
+ *  dLdY:    upstream gradient ∂L/∂y where y = (x − μ) / σ.
+ *  Returns: ∂L/∂x = (1/σ) * [dL/dy − mean(dL/dy) − ŷ·mean(dL/dy·ŷ)]
+ */
+function layerNormBackward(preNorm: number[], dLdY: number[], eps: number = 1e-5): number[] {
+  const n = preNorm.length;
+  if (n === 0) return [];
+  let mean = 0;
+  for (let i = 0; i < n; i++) mean += preNorm[i];
+  mean /= n;
+  let variance = 0;
+  for (let i = 0; i < n; i++) { const d = preNorm[i] - mean; variance += d * d; }
+  variance /= n;
+  const std = Math.sqrt(variance + eps);
+  let sumDy = 0, sumDyY = 0;
+  for (let i = 0; i < n; i++) {
+    const yHat = (preNorm[i] - mean) / std;
+    sumDy  += dLdY[i];
+    sumDyY += dLdY[i] * yHat;
+  }
+  const dLdX = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const yHat = (preNorm[i] - mean) / std;
+    dLdX[i] = (dLdY[i] - sumDy / n - yHat * sumDyY / n) / std;
+  }
+  return dLdX;
 }
 
 function layerNorm(vec: number[], eps: number = 1e-5): number[] {
@@ -511,6 +544,17 @@ function sigmoid(x: number): number {
 function softplus(x: number): number {
   if (x > 20) return x;
   return Math.log(1 + Math.exp(x));
+}
+
+/** SiLU (Swish) activation - smooth non-monotonic, good for filter MLPs. */
+function silu(x: number): number {
+  return x * sigmoid(x);
+}
+
+/** Derivative of SiLU: sigma(x) + x*sigma(x)*(1 - sigma(x)) */
+function siluGrad(x: number): number {
+  const s = sigmoid(x);
+  return s + x * s * (1 - s);
 }
 
 const COSINE_CUTOFF_RADIUS = 6.0;
@@ -1669,17 +1713,26 @@ export function buildCrystalGraph(formula: string, structure?: any, pressureGpa?
   return partialGraph;
 }
 
+/**
+ * SchNet continuous filter convolution (inference, non-cached).
+ * h_ij = W_filter2 @ silu(W_filter1 @ rbf_ij + b_filter1) + b_filter2
+ * message = h_ij * h_j (element-wise);  h_i' = h_i + mean_j(message * cutoff)
+ */
+/**
+ * SchNet continuous filter convolution (inference, non-cached).
+ * h_ij = W_filter2 @ silu(W_filter1 @ rbf_ij + b_filter1) + b_filter2
+ * message = h_ij * h_j (element-wise);  h_i' = h_i + mean_j(message * cutoff)
+ */
 export function cgcnnConvolutionLayer(
   graph: CrystalGraph,
-  W_gate: number[][],
-  W_value: number[][],
-  b_gate: number[],
-  b_value: number[],
+  W_filter1: number[][],
+  b_filter1: number[],
+  W_filter2: number[][],
+  b_filter2: number[],
   adaptiveLogits?: number[][],
 ): number[][] {
   const nNodes = graph.nodes.length;
   const embeddings = graph.nodes.map(n => n.embedding);
-
   const newEmbeddings: number[][] = [];
 
   for (let i = 0; i < nNodes; i++) {
@@ -1696,43 +1749,32 @@ export function cgcnnConvolutionLayer(
       const j = neighbors[nIdx];
       const edgeFeat = getEdgeFromIndex(graph.edgeIndex, nNodes, i, j);
       const distance = edgeFeat?.distance ?? 2.5;
-      const cutoffWeight = cosineCutoff(distance);
-      if (cutoffWeight <= 0) continue;
+      const cw = cosineCutoff(distance);
+      if (cw <= 0) continue;
 
       const edgeVec = edgeFeat?.features ?? initVector(EDGE_DIM);
+      const rbf_ij: number[] = new Array(N_GAUSSIAN_BASIS);
+      for (let k = 0; k < N_GAUSSIAN_BASIS; k++) rbf_ij[k] = edgeVec[k] ?? 0;
 
-      const concat: number[] = new Array(CGCNN_CONCAT_DIM);
-      for (let k = 0; k < HIDDEN_DIM; k++) {
-        concat[k] = embeddings[i][k] ?? 0;
-      }
-      for (let k = 0; k < HIDDEN_DIM; k++) {
-        concat[HIDDEN_DIM + k] = embeddings[j][k] ?? 0;
-      }
-      for (let k = 0; k < EDGE_DIM; k++) {
-        concat[HIDDEN_DIM * 2 + k] = edgeVec[k] ?? 0;
-      }
+      const z_ij = vecAdd(matVecMul(W_filter1, rbf_ij), b_filter1);
+      const h1_ij: number[] = new Array(HIDDEN_DIM);
+      for (let k = 0; k < HIDDEN_DIM; k++) h1_ij[k] = silu(z_ij[k] ?? 0);
+      const h_ij = vecAdd(matVecMul(W_filter2, h1_ij), b_filter2);
 
-      const gateRaw = vecAdd(matVecMul(W_gate, concat), b_gate);
-      // GLFN-TC Graph Learning Module: add adaptive element-pair logit to gate.
       const adaptLogit = adaptiveLogits?.[i]?.[nIdx] ?? 0;
       if (adaptLogit !== 0) {
-        for (let k = 0; k < HIDDEN_DIM; k++) gateRaw[k] += adaptLogit;
+        for (let k = 0; k < HIDDEN_DIM; k++) h_ij[k] += adaptLogit;
       }
-      const valueRaw = vecAdd(matVecMul(W_value, concat), b_value);
 
+      const hj = embeddings[j];
       for (let k = 0; k < HIDDEN_DIM; k++) {
-        const gateVal = sigmoid(gateRaw[k] ?? 0);
-        const valueVal = softplus(valueRaw[k] ?? 0);
-        aggUpdate[k] += gateVal * valueVal * cutoffWeight;
+        aggUpdate[k] += (h_ij[k] ?? 0) * (hj[k] ?? 0) * cw;
       }
-
-      totalWeight += cutoffWeight;
+      totalWeight += cw;
     }
 
     if (totalWeight > 0) {
-      for (let k = 0; k < HIDDEN_DIM; k++) {
-        aggUpdate[k] /= totalWeight;
-      }
+      for (let k = 0; k < HIDDEN_DIM; k++) aggUpdate[k] /= totalWeight;
     }
 
     const updated: number[] = new Array(HIDDEN_DIM);
@@ -1742,10 +1784,7 @@ export function cgcnnConvolutionLayer(
     newEmbeddings.push(updated);
   }
 
-  for (let i = 0; i < nNodes; i++) {
-    graph.nodes[i].embedding = newEmbeddings[i];
-  }
-
+  for (let i = 0; i < nNodes; i++) graph.nodes[i].embedding = newEmbeddings[i];
   return newEmbeddings;
 }
 
@@ -1814,13 +1853,10 @@ export function attentionMessagePassingLayer(
     }
 
     const combined = [...embeddings[i], ...aggMessage];
-    const updated = fusedUpdate(W_update, combined);
-    // No layerNorm here — the training path (attnMessagePassCached) does not apply
-    // layerNorm, so applying it at inference would create a train/inference mismatch
-    // that causes validation R² to be far worse than training R².
-    // Activation explosion is prevented by the W_update He-initialization and the
-    // residual gates (sigmoid-gated skip connections) that bound the norm growth.
-    newEmbeddings.push(updated);
+    const hUpd = fusedUpdate(W_update, combined);
+    // Residual + LayerNorm — consistent with training path (attnMessagePassCached).
+    const hRes = embeddings[i].map((v, k) => v + (hUpd[k] ?? 0));
+    newEmbeddings.push(layerNorm(hRes));
   }
 
   for (let i = 0; i < nNodes; i++) {
@@ -1899,6 +1935,7 @@ function attnMessagePassCached(
   const nNodes = graph.nodes.length;
   const inputEmbs = graph.nodes.map(n => [...n.embedding]);
   const preActs: number[][] = [];
+  const preNormActs: number[][] = [];
   const attnWts: number[][] = [];
   const neighborLists: number[][] = [];
   const newEmbeddings: number[][] = [];
@@ -1909,6 +1946,7 @@ function attnMessagePassCached(
     if (neighbors.length === 0) {
       newEmbeddings.push([...inputEmbs[i]]);
       preActs.push([...inputEmbs[i]]);
+      preNormActs.push([...inputEmbs[i]]);
       attnWts.push([]);
       continue;
     }
@@ -1945,47 +1983,59 @@ function attnMessagePassCached(
     const combined = [...inputEmbs[i], ...aggMessage];
     const pre = matVecMul(W_update, combined);
     preActs.push([...pre]);
-    if (useLeakyMsg) {
-      newEmbeddings.push(pre.map(v => v >= 0 ? v : 0.01 * v));
-    } else {
-      newEmbeddings.push(pre.map(v => v >= 0 ? v : 0));
-    }
+    const hUpd = useLeakyMsg
+      ? pre.map(v => v >= 0 ? v : 0.01 * v)
+      : pre.map(v => v >= 0 ? v : 0);
+    // Residual: h = input + activation(update)
+    const hRes = inputEmbs[i].map((v, k) => v + (hUpd[k] ?? 0));
+    preNormActs.push(hRes);
+    // LayerNorm after residual
+    newEmbeddings.push(layerNorm(hRes));
   }
 
   for (let i = 0; i < nNodes; i++) {
     graph.nodes[i].embedding = newEmbeddings[i];
   }
 
-  return { embeddings: newEmbeddings, cache: { inputEmbs, preActs, attnWts, neighborLists } };
+  return { embeddings: newEmbeddings, cache: { inputEmbs, preActs, preNormActs, attnWts, neighborLists } };
 }
 
+/**
+ * SchNet continuous filter convolution (cached, training).
+ */
+/**
+ * SchNet continuous filter convolution (cached, training).
+ */
 function cgcnnConvCached(
   graph: CrystalGraph,
-  W_gate: number[][], W_value: number[][],
-  b_gate: number[], b_value: number[],
+  W_filter1: number[][], b_filter1: number[],
+  W_filter2: number[][], b_filter2: number[],
   adaptiveLogits?: number[][],
 ): { embeddings: number[][]; cache: CGCNNLayerCache } {
   const nNodes = graph.nodes.length;
   const inputEmbs = graph.nodes.map(n => [...n.embedding]);
-  const gateRaws: number[][][] = [];
-  const valueRaws: number[][][] = [];
-  const concats: number[][][] = [];
+  const filterPreActs: number[][][] = [];
+  const filterH1s: number[][][] = [];
+  const filterOuts: number[][][] = [];
+  const rbfs: number[][][] = [];
   const cutoffWts: number[][] = [];
   const totalWeights: number[] = [];
   const newEmbeddings: number[][] = [];
 
   for (let i = 0; i < nNodes; i++) {
     const neighbors = graph.adjacency[i];
-    const nodeGates: number[][] = [];
-    const nodeValues: number[][] = [];
-    const nodeConcats: number[][] = [];
+    const nodePreActs: number[][] = [];
+    const nodeH1s: number[][] = [];
+    const nodeOuts: number[][] = [];
+    const nodeRbfs: number[][] = [];
     const nodeCutoffs: number[] = [];
 
     if (!neighbors || neighbors.length === 0) {
       newEmbeddings.push([...inputEmbs[i]]);
-      gateRaws.push(nodeGates);
-      valueRaws.push(nodeValues);
-      concats.push(nodeConcats);
+      filterPreActs.push(nodePreActs);
+      filterH1s.push(nodeH1s);
+      filterOuts.push(nodeOuts);
+      rbfs.push(nodeRbfs);
       cutoffWts.push(nodeCutoffs);
       totalWeights.push(0);
       continue;
@@ -2001,43 +2051,43 @@ function cgcnnConvCached(
       const cw = cosineCutoff(distance);
       nodeCutoffs.push(cw);
       if (cw <= 0) {
-        nodeGates.push([]);
-        nodeValues.push([]);
-        nodeConcats.push([]);
+        nodePreActs.push([]);
+        nodeH1s.push([]);
+        nodeOuts.push([]);
+        nodeRbfs.push([]);
         continue;
       }
 
       const edgeVec = edgeFeat?.features ?? initVector(EDGE_DIM);
-      const concat: number[] = new Array(CGCNN_CONCAT_DIM);
-      for (let k = 0; k < HIDDEN_DIM; k++) concat[k] = inputEmbs[i][k] ?? 0;
-      for (let k = 0; k < HIDDEN_DIM; k++) concat[HIDDEN_DIM + k] = inputEmbs[j][k] ?? 0;
-      for (let k = 0; k < EDGE_DIM; k++) concat[HIDDEN_DIM * 2 + k] = edgeVec[k] ?? 0;
+      const rbf_ij: number[] = new Array(N_GAUSSIAN_BASIS);
+      for (let k = 0; k < N_GAUSSIAN_BASIS; k++) rbf_ij[k] = edgeVec[k] ?? 0;
 
-      const gateRaw = vecAdd(matVecMul(W_gate, concat), b_gate);
-      // GLFN-TC Graph Learning Module: add adaptive element-pair logit to every gate
-      // dimension. This biases the gate uniformly, making compatible element pairs
-      // exchange more information without altering the gate's per-feature learned
-      // selectivity. The logit is a small scalar (≈0 at init) so training starts
-      // identically to the baseline and the model learns to use it gradually.
+      const z_ij = vecAdd(matVecMul(W_filter1, rbf_ij), b_filter1);
+      const h1_ij: number[] = new Array(HIDDEN_DIM);
+      for (let k = 0; k < HIDDEN_DIM; k++) h1_ij[k] = silu(z_ij[k] ?? 0);
+      const h_ij = vecAdd(matVecMul(W_filter2, h1_ij), b_filter2);
+
       const adaptLogit = adaptiveLogits?.[i]?.[nIdx] ?? 0;
       if (adaptLogit !== 0) {
-        for (let k = 0; k < HIDDEN_DIM; k++) gateRaw[k] += adaptLogit;
+        for (let k = 0; k < HIDDEN_DIM; k++) h_ij[k] += adaptLogit;
       }
-      const valueRaw = vecAdd(matVecMul(W_value, concat), b_value);
 
-      nodeGates.push(gateRaw);
-      nodeValues.push(valueRaw);
-      nodeConcats.push(concat);
+      nodePreActs.push(z_ij);
+      nodeH1s.push(h1_ij);
+      nodeOuts.push(h_ij);
+      nodeRbfs.push(rbf_ij);
 
+      const hj = inputEmbs[j];
       for (let k = 0; k < HIDDEN_DIM; k++) {
-        aggUpdate[k] += sigmoid(gateRaw[k] ?? 0) * softplus(valueRaw[k] ?? 0) * cw;
+        aggUpdate[k] += (h_ij[k] ?? 0) * (hj[k] ?? 0) * cw;
       }
       totalWeight += cw;
     }
 
-    gateRaws.push(nodeGates);
-    valueRaws.push(nodeValues);
-    concats.push(nodeConcats);
+    filterPreActs.push(nodePreActs);
+    filterH1s.push(nodeH1s);
+    filterOuts.push(nodeOuts);
+    rbfs.push(nodeRbfs);
     cutoffWts.push(nodeCutoffs);
     totalWeights.push(totalWeight);
 
@@ -2056,7 +2106,103 @@ function cgcnnConvCached(
 
   return {
     embeddings: newEmbeddings,
-    cache: { inputEmbs, gateRaws, valueRaws, concats, cutoffWts, totalWeights, adaptiveLogits },
+    cache: { inputEmbs, filterPreActs, filterH1s, filterOuts, rbfs, cutoffWts, totalWeights, adaptiveLogits },
+  };
+} {
+  const nNodes = graph.nodes.length;
+  const inputEmbs = graph.nodes.map(n => [...n.embedding]);
+  const filterPreActs: number[][][] = [];
+  const filterH1s: number[][][] = [];
+  const filterOuts: number[][][] = [];
+  const rbfs: number[][][] = [];
+  const preNormActs: number[][] = [];
+  const cutoffWts: number[][] = [];
+  const totalWeights: number[] = [];
+  const newEmbeddings: number[][] = [];
+
+  for (let i = 0; i < nNodes; i++) {
+    const neighbors = graph.adjacency[i];
+    const nodeFilterPreActs: number[][] = [];
+    const nodeFilterH1s: number[][] = [];
+    const nodeFilterOuts: number[][] = [];
+    const nodeRbfs: number[][] = [];
+    const nodeCutoffs: number[] = [];
+
+    if (!neighbors || neighbors.length === 0) {
+      newEmbeddings.push([...inputEmbs[i]]);
+      preNormActs.push([...inputEmbs[i]]);
+      filterPreActs.push(nodeFilterPreActs);
+      filterH1s.push(nodeFilterH1s);
+      filterOuts.push(nodeFilterOuts);
+      rbfs.push(nodeRbfs);
+      cutoffWts.push(nodeCutoffs);
+      totalWeights.push(0);
+      continue;
+    }
+
+    const aggUpdate = initVector(HIDDEN_DIM);
+    let totalWeight = 0;
+
+    for (let nIdx = 0; nIdx < neighbors.length; nIdx++) {
+      const j = neighbors[nIdx];
+      const edgeFeat = getEdgeFromIndex(graph.edgeIndex, nNodes, i, j);
+      const distance = edgeFeat?.distance ?? 2.5;
+      const cw = cosineCutoff(distance);
+      nodeCutoffs.push(cw);
+      if (cw <= 0) {
+        nodeFilterPreActs.push([]);
+        nodeFilterH1s.push([]);
+        nodeFilterOuts.push([]);
+        nodeRbfs.push([]);
+        continue;
+      }
+
+      const edgeVec = edgeFeat?.features ?? initVector(EDGE_DIM);
+      const rbf_ij: number[] = new Array(N_GAUSSIAN_BASIS);
+      for (let k = 0; k < N_GAUSSIAN_BASIS; k++) rbf_ij[k] = edgeVec[k] ?? 0;
+
+      const z_ij = vecAdd(matVecMul(W_filter1, rbf_ij), b_filter1);
+      const h1_ij = z_ij.map(v => { const s = 1 / (1 + Math.exp(-v)); return v * s; });  // silu
+      const h_ij = vecAdd(matVecMul(W_filter2, h1_ij), b_filter2);
+
+      const adaptLogit = adaptiveLogits?.[i]?.[nIdx] ?? 0;
+      const hj = inputEmbs[j];
+
+      nodeFilterPreActs.push([...z_ij]);
+      nodeFilterH1s.push([...h1_ij]);
+      nodeFilterOuts.push([...h_ij]);
+      nodeRbfs.push([...rbf_ij]);
+
+      for (let k = 0; k < HIDDEN_DIM; k++) {
+        aggUpdate[k] += (h_ij[k] + adaptLogit) * (hj[k] ?? 0) * cw;
+      }
+      totalWeight += cw;
+    }
+
+    filterPreActs.push(nodeFilterPreActs);
+    filterH1s.push(nodeFilterH1s);
+    filterOuts.push(nodeFilterOuts);
+    rbfs.push(nodeRbfs);
+    cutoffWts.push(nodeCutoffs);
+    totalWeights.push(totalWeight);
+
+    if (totalWeight > 0) {
+      for (let k = 0; k < HIDDEN_DIM; k++) aggUpdate[k] /= totalWeight;
+    }
+
+    const hRes: number[] = new Array(HIDDEN_DIM);
+    for (let k = 0; k < HIDDEN_DIM; k++) {
+      hRes[k] = (inputEmbs[i][k] ?? 0) + aggUpdate[k];
+    }
+    preNormActs.push(hRes);
+    newEmbeddings.push(hRes);
+  }
+
+  for (let i = 0; i < nNodes; i++) graph.nodes[i].embedding = newEmbeddings[i];
+
+  return {
+    embeddings: newEmbeddings,
+    cache: { inputEmbs, filterPreActs, filterH1s, filterOuts, rbfs, preNormActs, cutoffWts, totalWeights, adaptiveLogits },
   };
 }
 
@@ -2083,11 +2229,18 @@ function attnLayerBackward(
       continue;
     }
 
+    // Backprop through layerNorm(h_res): upstream dLdOutput → dLd(h_res)
+    const dLdPreNorm = cache.preNormActs?.[i]
+      ? layerNormBackward(cache.preNormActs[i], dLdOutput[i])
+      : [...dLdOutput[i]];
+    // Residual pass-through: h_res = input + hUpd → ∂L/∂input += dLdPreNorm
+    for (let k = 0; k < HIDDEN_DIM; k++) dLdInput[i][k] += dLdPreNorm[k];
+
     const pre = cache.preActs[i];
     const dPre = new Array(HIDDEN_DIM);
     for (let k = 0; k < HIDDEN_DIM; k++) {
       const mask = useLeaky ? (pre[k] >= 0 ? 1.0 : 0.01) : (pre[k] >= 0 ? 1.0 : 0.0);
-      dPre[k] = dLdOutput[i][k] * mask;
+      dPre[k] = dLdPreNorm[k] * mask;  // gradient flows through activation from dLdPreNorm
     }
 
     const emb_i = cache.inputEmbs[i];
@@ -2147,32 +2300,32 @@ function attnLayerBackward(
 
   return { dW_update, dW_message, dLdInput };
 }
-
+
 function cgcnnLayerBackward(
   cache: CGCNNLayerCache,
   dLdOutput: number[][],
   graph: CrystalGraph,
-  W_gate: number[][], W_value: number[][],
+  W_filter1: number[][], W_filter2: number[][],
 ): {
-  dW_gate: number[][]; dW_value: number[][];
-  db_gate: number[]; db_value: number[];
+  dW_filter1: number[][]; dW_filter2: number[][];
+  db_filter1: number[]; db_filter2: number[];
   dLdInput: number[][];
-  /** GLFN-TC: gradient at the adaptive scalar logit for each edge [node_i][neighbor_idx].
-   *  = Σ_k dL/d(gateRaw_ij[k]). Used to backprop through W_graph_adapt and W_elem_feat. */
   dAdaptiveLogits: number[][];
 } {
   const nNodes = dLdOutput.length;
-  const dW_gate = W_gate.map(r => new Array(r.length).fill(0));
-  const dW_value = W_value.map(r => new Array(r.length).fill(0));
-  const db_gate = new Array(HIDDEN_DIM).fill(0);
-  const db_value = new Array(HIDDEN_DIM).fill(0);
+  const dW_filter1 = W_filter1.map(r => new Array(r.length).fill(0));
+  const dW_filter2 = W_filter2.map(r => new Array(r.length).fill(0));
+  const db_filter1 = new Array(HIDDEN_DIM).fill(0);
+  const db_filter2 = new Array(HIDDEN_DIM).fill(0);
   const dLdInput: number[][] = Array.from({ length: nNodes }, () => new Array(HIDDEN_DIM).fill(0));
   const dAdaptiveLogits: number[][] = graph.adjacency.map(ns => new Array(ns.length).fill(0));
 
+  const dLdEff: number[][] = Array.from({ length: nNodes }, (_, i) => {
+    const pn = (cache as any).preNormActs?.[i] as number[] | undefined;
+    return pn ? layerNormBackward(pn, dLdOutput[i]) : [...dLdOutput[i]];
+  });
   for (let i = 0; i < nNodes; i++) {
-    for (let k = 0; k < HIDDEN_DIM; k++) {
-      dLdInput[i][k] += dLdOutput[i][k];
-    }
+    for (let k = 0; k < HIDDEN_DIM; k++) dLdInput[i][k] += dLdEff[i][k];
 
     const totalW = cache.totalWeights[i];
     if (totalW <= 0) continue;
@@ -2183,54 +2336,114 @@ function cgcnnLayerBackward(
     for (let nIdx = 0; nIdx < neighbors.length; nIdx++) {
       const cw = cache.cutoffWts[i][nIdx] ?? 0;
       if (cw <= 0) continue;
-      const gateRaw = cache.gateRaws[i][nIdx];
-      const valueRaw = cache.valueRaws[i][nIdx];
-      const concat = cache.concats[i][nIdx];
-      if (!gateRaw || !valueRaw || !concat) continue;
+
+      const z_ij   = cache.filterPreActs[i][nIdx];
+      const h1_ij  = cache.filterH1s[i][nIdx];
+      const h_ij   = cache.filterOuts[i][nIdx];
+      const rbf_ij = cache.rbfs[i][nIdx];
+      if (!z_ij || !h1_ij || !h_ij || !rbf_ij) continue;
 
       const j = neighbors[nIdx];
+      const hj = cache.inputEmbs[j];
 
+      // d(message_k) = dLdOutput[i][k]/totalW * cw
+      // d(h_ij_k)    = d(message_k) * hj[k]
+      // d(hj_k)     += d(message_k) * h_ij[k]
+      const dH_ij: number[] = new Array(HIDDEN_DIM);
       let dAdaptLogitEdge = 0;
       for (let k = 0; k < HIDDEN_DIM; k++) {
-        const gateVal = sigmoid(gateRaw[k] ?? 0);
-        const valVal = softplus(valueRaw[k] ?? 0);
-        const dAgg = dLdOutput[i][k] / totalW;
-
-        const dGateVal = dAgg * valVal * cw;
-        const dValVal = dAgg * gateVal * cw;
-
-        const dGateRaw = dGateVal * gateVal * (1 - gateVal);
-        const dValRaw = dValVal * sigmoid(valueRaw[k] ?? 0);
-
-        // GLFN-TC: adaptive logit is added to gateRaw[k] for all k, so its gradient
-        // is the sum of all per-dimension gate gradients.
-        dAdaptLogitEdge += dGateRaw;
-
-        db_gate[k] += dGateRaw;
-        db_value[k] += dValRaw;
-
-        for (let c = 0; c < CGCNN_CONCAT_DIM; c++) {
-          dW_gate[k][c] += dGateRaw * (concat[c] ?? 0);
-          dW_value[k][c] += dValRaw * (concat[c] ?? 0);
-        }
-
-        const dConcat_k_gate = dGateRaw;
-        const dConcat_k_val = dValRaw;
-        for (let c = 0; c < HIDDEN_DIM; c++) {
-          const contrib = dConcat_k_gate * (W_gate[k][c] ?? 0) + dConcat_k_val * (W_value[k][c] ?? 0);
-          dLdInput[i][c] += contrib;
-        }
-        for (let c = 0; c < HIDDEN_DIM; c++) {
-          const contrib = dConcat_k_gate * (W_gate[k][HIDDEN_DIM + c] ?? 0)
-            + dConcat_k_val * (W_value[k][HIDDEN_DIM + c] ?? 0);
-          dLdInput[j][c] += contrib;
-        }
+        const dMsg_k = (dLdEff[i][k] / totalW) * cw;
+        dH_ij[k] = dMsg_k * (hj[k] ?? 0);
+        dLdInput[j][k] += dMsg_k * (h_ij[k] ?? 0);
+        dAdaptLogitEdge += dH_ij[k];
       }
       if (dAdaptiveLogits[i]) dAdaptiveLogits[i][nIdx] = dAdaptLogitEdge;
+
+      // Backward through W_filter2
+      const dH1_ij: number[] = new Array(HIDDEN_DIM).fill(0);
+      for (let r = 0; r < HIDDEN_DIM; r++) {
+        db_filter2[r] += dH_ij[r];
+        for (let c = 0; c < HIDDEN_DIM; c++) {
+          dW_filter2[r][c] += dH_ij[r] * (h1_ij[c] ?? 0);
+          dH1_ij[c] += dH_ij[r] * (W_filter2[r]?.[c] ?? 0);
+        }
+      }
+
+      // Backward through silu + W_filter1
+      for (let r = 0; r < HIDDEN_DIM; r++) {
+        const dZ_r = dH1_ij[r] * siluGrad(z_ij[r] ?? 0);
+        db_filter1[r] += dZ_r;
+        for (let c = 0; c < N_GAUSSIAN_BASIS; c++) {
+          dW_filter1[r][c] += dZ_r * (rbf_ij[c] ?? 0);
+        }
+      }
     }
   }
 
-  return { dW_gate, dW_value, db_gate, db_value, dLdInput, dAdaptiveLogits };
+  return { dW_filter1, dW_filter2, db_filter1, db_filter2, dLdInput, dAdaptiveLogits };
+} {
+  const nNodes = dLdOutput.length;
+  const dW_filter1 = W_filter1.map(r => new Array(r.length).fill(0));
+  const dW_filter2 = W_filter2.map(r => new Array(r.length).fill(0));
+  const db_filter1 = new Array(HIDDEN_DIM).fill(0);
+  const db_filter2 = new Array(HIDDEN_DIM).fill(0);
+  const dLdInput: number[][] = Array.from({ length: nNodes }, () => new Array(HIDDEN_DIM).fill(0));
+  const dAdaptiveLogits: number[][] = graph.adjacency.map(ns => new Array(ns.length).fill(0));
+
+  for (let i = 0; i < nNodes; i++) {
+    for (let k = 0; k < HIDDEN_DIM; k++) dLdInput[i][k] += dLdOutput[i][k];
+
+    const totalW = cache.totalWeights[i];
+    if (totalW <= 0) continue;
+
+    const neighbors = graph.adjacency[i];
+    if (!neighbors || neighbors.length === 0) continue;
+
+    for (let nIdx = 0; nIdx < neighbors.length; nIdx++) {
+      const cw = cache.cutoffWts[i][nIdx] ?? 0;
+      if (cw <= 0) continue;
+
+      const z_ij = cache.filterPreActs[i][nIdx];
+      const h1_ij = cache.filterH1s[i][nIdx];
+      const h_ij = cache.filterOuts[i][nIdx];
+      const rbf_ij = cache.rbfs[i][nIdx];
+      if (!z_ij || !h1_ij || !h_ij || !rbf_ij) continue;
+
+      const j = neighbors[nIdx];
+      const hj = cache.inputEmbs[j];
+
+      const dH_ij: number[] = new Array(HIDDEN_DIM);
+      let dAdaptLogitEdge = 0;
+      for (let k = 0; k < HIDDEN_DIM; k++) {
+        const dMsg_k = (dLdOutput[i][k] / totalW) * cw;
+        dH_ij[k] = dMsg_k * (hj[k] ?? 0);
+        dLdInput[j][k] += dMsg_k * (h_ij[k] ?? 0);
+        dAdaptLogitEdge += dH_ij[k];
+      }
+      if (dAdaptiveLogits[i]) dAdaptiveLogits[i][nIdx] = dAdaptLogitEdge;
+
+      const dH1_ij: number[] = new Array(HIDDEN_DIM).fill(0);
+      for (let r = 0; r < HIDDEN_DIM; r++) {
+        db_filter2[r] += dH_ij[r];
+        for (let c = 0; c < HIDDEN_DIM; c++) {
+          dW_filter2[r][c] += dH_ij[r] * (h1_ij[c] ?? 0);
+          dH1_ij[c] += dH_ij[r] * (W_filter2[r]?.[c] ?? 0);
+        }
+      }
+
+      for (let r = 0; r < HIDDEN_DIM; r++) {
+        const z = z_ij[r] ?? 0;
+        const sig = 1 / (1 + Math.exp(-z));
+        const dZ_r = dH1_ij[r] * sig * (1 + z * (1 - sig));  // silu gradient
+        db_filter1[r] += dZ_r;
+        for (let c = 0; c < N_GAUSSIAN_BASIS; c++) {
+          dW_filter1[r][c] += dZ_r * (rbf_ij[c] ?? 0);
+        }
+      }
+    }
+  }
+
+  return { dW_filter1, dW_filter2, db_filter1, db_filter2, dLdInput, dAdaptiveLogits };
 }
 
 // ── GLFN-TC: Graph Learning Module ───────────────────────────────────────────
@@ -2298,7 +2511,7 @@ export function GNNPredict(graph: CrystalGraph, weights: GNNWeights, dropoutRng?
     }
   }
 
-  cgcnnConvolutionLayer(graph, weights.W_conv_gate, weights.W_conv_value, weights.b_conv_gate, weights.b_conv_value, adaptLogits);
+  cgcnnConvolutionLayer(graph, weights.W_filter1, weights.b_filter1, weights.W_filter2, weights.b_filter2, adaptLogits);
   if (dropoutRng) {
     for (const node of graph.nodes) {
       node.embedding = applyDropout(node.embedding, MC_DROPOUT_RATE, dropoutRng);
@@ -2494,7 +2707,7 @@ function GNNPredictForTraining(graph: CrystalGraph, weights: GNNWeights): { pred
   const { cache: ac0 } = attnMessagePassCached(graph, weights.W_message, weights.W_update, weights.W_attn_query, weights.W_attn_key, true);
   attnCaches.push(ac0);
 
-  const { cache: cgcnnC } = cgcnnConvCached(graph, weights.W_conv_gate, weights.W_conv_value, weights.b_conv_gate, weights.b_conv_value, adaptLogits);
+  const { cache: cgcnnC } = cgcnnConvCached(graph, weights.W_filter1, weights.b_filter1, weights.W_filter2, weights.b_filter2, adaptLogits);
 
   if (graph.threeBodyFeatures.length > 0) {
     threeBodyInteractionLayer(graph, weights.W_3body, weights.W_3body_update);
@@ -2694,10 +2907,10 @@ function initWeights(rng: () => number): GNNWeights {
     W_attn_key3: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, Math.sqrt(1.0 / HIDDEN_DIM)),
     W_attn_query4: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, Math.sqrt(1.0 / HIDDEN_DIM)),
     W_attn_key4: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, Math.sqrt(1.0 / HIDDEN_DIM)),
-    W_conv_gate: initMatrix(HIDDEN_DIM, CGCNN_CONCAT_DIM, rng),
-    W_conv_value: initMatrix(HIDDEN_DIM, CGCNN_CONCAT_DIM, rng),
-    b_conv_gate: initVector(HIDDEN_DIM),
-    b_conv_value: initVector(HIDDEN_DIM),
+    W_filter1: initMatrix(HIDDEN_DIM, N_GAUSSIAN_BASIS, rng, Math.sqrt(2.0 / N_GAUSSIAN_BASIS)),
+    b_filter1: initVector(HIDDEN_DIM),
+    W_filter2: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, Math.sqrt(2.0 / HIDDEN_DIM)),
+    b_filter2: initVector(HIDDEN_DIM),
     W_input_proj: initMatrix(HIDDEN_DIM, NODE_DIM, rng, Math.sqrt(2.0 / NODE_DIM)),
     b_input_proj: initVector(HIDDEN_DIM),
     W_3body: initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, Math.sqrt(2.0 / HIDDEN_DIM) * 1.5),
@@ -2762,10 +2975,10 @@ function cloneWeights(w: GNNWeights): GNNWeights {
     W_attn_key3: w.W_attn_key3.map(r => [...r]),
     W_attn_query4: w.W_attn_query4.map(r => [...r]),
     W_attn_key4: w.W_attn_key4.map(r => [...r]),
-    W_conv_gate: w.W_conv_gate.map(r => [...r]),
-    W_conv_value: w.W_conv_value.map(r => [...r]),
-    b_conv_gate: [...w.b_conv_gate],
-    b_conv_value: [...w.b_conv_value],
+    W_filter1: w.W_filter1.map(r => [...r]),
+    b_filter1: [...w.b_filter1],
+    W_filter2: w.W_filter2.map(r => [...r]),
+    b_filter2: [...w.b_filter2],
     W_input_proj: w.W_input_proj.map(r => [...r]),
     b_input_proj: [...w.b_input_proj],
     residual_gates: [...w.residual_gates],
@@ -2798,6 +3011,21 @@ function cloneWeights(w: GNNWeights): GNNWeights {
  * the first forward pass, then learns to use the new parameters during training.
  */
 function migrateWeights(w: GNNWeights, rng: () => number): GNNWeights {
+  // SchNet migration: old checkpoints had W_conv_gate/W_conv_value.
+  const wAny = w as any;
+  if (!wAny.W_filter1 || wAny.W_filter1.length !== HIDDEN_DIM ||
+      wAny.W_filter1[0]?.length !== N_GAUSSIAN_BASIS) {
+    w.W_filter1 = initMatrix(HIDDEN_DIM, N_GAUSSIAN_BASIS, rng, Math.sqrt(2.0 / N_GAUSSIAN_BASIS));
+    w.b_filter1 = initVector(HIDDEN_DIM);
+    w.W_filter2 = initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, Math.sqrt(2.0 / HIDDEN_DIM));
+    w.b_filter2 = initVector(HIDDEN_DIM);
+  }
+  if (!w.b_filter1 || w.b_filter1.length !== HIDDEN_DIM) w.b_filter1 = initVector(HIDDEN_DIM);
+  if (!w.W_filter2 || w.W_filter2.length !== HIDDEN_DIM ||
+      w.W_filter2[0]?.length !== HIDDEN_DIM) {
+    w.W_filter2 = initMatrix(HIDDEN_DIM, HIDDEN_DIM, rng, Math.sqrt(2.0 / HIDDEN_DIM));
+  }
+  if (!w.b_filter2 || w.b_filter2.length !== HIDDEN_DIM) w.b_filter2 = initVector(HIDDEN_DIM);
   if (!w.W_elem_feat || w.W_elem_feat.length !== 119) {
     w.W_elem_feat = initMatrix(119, GRAPH_FEAT_DIM, rng, 0.01);
   }
@@ -2951,11 +3179,11 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
   const graphAdam = {
     msg:       [weights.W_message, weights.W_message2, weights.W_message3, weights.W_message4].map(mkAdamMatG),
     upd:       [weights.W_update,  weights.W_update2,  weights.W_update3,  weights.W_update4 ].map(mkAdamMatG),
-    convGate:  mkAdamMatG(weights.W_conv_gate),
-    convValue: mkAdamMatG(weights.W_conv_value),
+    filter1:   mkAdamMatG(weights.W_filter1),
+    filter2:   mkAdamMatG(weights.W_filter2),
     inputProj: mkAdamMatG(weights.W_input_proj),
-    bConvGate:  mkAdamVecG(HIDDEN_DIM),
-    bConvValue: mkAdamVecG(HIDDEN_DIM),
+    bFilter1:   mkAdamVecG(HIDDEN_DIM),
+    bFilter2:   mkAdamVecG(HIDDEN_DIM),
     bInputProj: mkAdamVecG(HIDDEN_DIM),
     pressure:   mkAdamVecG(HIDDEN_DIM),
     gates:      mkAdamVecG(weights.residual_gates.length),
@@ -3135,10 +3363,10 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
       const graphGrads = {
         dW_msg: [zeroMat(weights.W_message), zeroMat(weights.W_message2), zeroMat(weights.W_message3), zeroMat(weights.W_message4)],
         dW_upd: [zeroMat(weights.W_update), zeroMat(weights.W_update2), zeroMat(weights.W_update3), zeroMat(weights.W_update4)],
-        dW_conv_gate: zeroMat(weights.W_conv_gate),
-        dW_conv_value: zeroMat(weights.W_conv_value),
-        db_conv_gate: new Array(HIDDEN_DIM).fill(0),
-        db_conv_value: new Array(HIDDEN_DIM).fill(0),
+        dW_filter1: zeroMat(weights.W_filter1),
+        dW_filter2: zeroMat(weights.W_filter2),
+        db_filter1: new Array(HIDDEN_DIM).fill(0),
+        db_filter2: new Array(HIDDEN_DIM).fill(0),
         dW_input_proj: zeroMat(weights.W_input_proj),
         db_input_proj: new Array(HIDDEN_DIM).fill(0),
         dGates: new Array(4).fill(0),
@@ -3623,18 +3851,18 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
 
         const ac0 = cache.attnCaches[0];
         if (cache.cgcnnCache) {
-          const { dW_gate, dW_value, db_gate, db_value, dLdInput: dLdCgcnnIn, dAdaptiveLogits } =
-            cgcnnLayerBackward(cache.cgcnnCache, dLdCur, graph, weights.W_conv_gate, weights.W_conv_value);
+          const { dW_filter1, dW_filter2, db_filter1, db_filter2, dLdInput: dLdCgcnnIn, dAdaptiveLogits } =
+            cgcnnLayerBackward(cache.cgcnnCache, dLdCur, graph, weights.W_filter1, weights.W_filter2);
           const addMat = (dst: number[][], src: number[][]) => {
             for (let r = 0; r < dst.length; r++)
               for (let c = 0; c < dst[r].length; c++)
                 dst[r][c] += clipGrad(src[r][c]);
           };
-          addMat(graphGrads.dW_conv_gate, dW_gate);
-          addMat(graphGrads.dW_conv_value, dW_value);
+          addMat(graphGrads.dW_filter1, dW_filter1);
+          addMat(graphGrads.dW_filter2, dW_filter2);
           for (let k = 0; k < HIDDEN_DIM; k++) {
-            graphGrads.db_conv_gate[k] += clipGrad(db_gate[k]);
-            graphGrads.db_conv_value[k] += clipGrad(db_value[k]);
+            graphGrads.db_filter1[k] += clipGrad(db_filter1[k]);
+            graphGrads.db_filter2[k] += clipGrad(db_filter2[k]);
           }
           dLdCur = dLdCgcnnIn;
 
@@ -3793,10 +4021,10 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         adamUpdateGraph(wMsgMats[li], graphGrads.dW_msg[li], graphAdam.msg[li]);
         adamUpdateGraph(wUpdMats[li], graphGrads.dW_upd[li], graphAdam.upd[li]);
       }
-      adamUpdateGraph(weights.W_conv_gate,  graphGrads.dW_conv_gate,  graphAdam.convGate);
-      adamUpdateGraph(weights.W_conv_value, graphGrads.dW_conv_value, graphAdam.convValue);
-      adamUpdateGraphVec(weights.b_conv_gate,  graphGrads.db_conv_gate,  graphAdam.bConvGate);
-      adamUpdateGraphVec(weights.b_conv_value, graphGrads.db_conv_value, graphAdam.bConvValue);
+      adamUpdateGraph(weights.W_filter1, graphGrads.dW_filter1, graphAdam.filter1);
+      adamUpdateGraph(weights.W_filter2, graphGrads.dW_filter2, graphAdam.filter2);
+      adamUpdateGraphVec(weights.b_filter1, graphGrads.db_filter1, graphAdam.bFilter1);
+      adamUpdateGraphVec(weights.b_filter2, graphGrads.db_filter2, graphAdam.bFilter2);
       adamUpdateGraph(weights.W_input_proj,    graphGrads.dW_input_proj, graphAdam.inputProj);
       adamUpdateGraphVec(weights.b_input_proj, graphGrads.db_input_proj, graphAdam.bInputProj);
       adamUpdateGraphVec(weights.W_pressure,   gradPressure,             graphAdam.pressure);
@@ -3861,12 +4089,12 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
     weights.W_message3, weights.W_update3, weights.W_message4, weights.W_update4,
     weights.W_attn_query, weights.W_attn_key, weights.W_attn_query2, weights.W_attn_key2,
     weights.W_attn_query3, weights.W_attn_key3, weights.W_attn_query4, weights.W_attn_key4,
-    weights.W_conv_gate, weights.W_conv_value, weights.W_input_proj, weights.W_3body, weights.W_3body_update,
+    weights.W_filter1, weights.W_filter2, weights.W_input_proj, weights.W_3body, weights.W_3body_update,
     weights.W_mlp1, weights.W_mlp2, weights.W_mlp2_var, weights.W_attn_pool,
     weights.W_elem_feat, weights.W_graph_adapt,
     weights.W_cls1,  // v15: cls head — must scrub or NaN in cls head poisons all predictions
   ]) { scrubMatrix(wMat); }
-  for (const bVec of [weights.b_mlp1, weights.b_mlp2, weights.b_mlp2_var, weights.b_conv_gate, weights.b_conv_value, weights.b_input_proj, weights.W_pressure, weights.residual_gates, weights.b_cls1, weights.W_cls2]) {
+  for (const bVec of [weights.b_mlp1, weights.b_mlp2, weights.b_mlp2_var, weights.b_filter1, weights.b_filter2, weights.b_input_proj, weights.W_pressure, weights.residual_gates, weights.b_cls1, weights.W_cls2]) {
     scrubVector(bVec);
   }
   if (!Number.isFinite(weights.dense_skip_gate)) weights.dense_skip_gate = -2.0;
@@ -3877,7 +4105,7 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
     weights.W_message3, weights.W_update3, weights.W_message4, weights.W_update4,
     weights.W_attn_query, weights.W_attn_key, weights.W_attn_query2, weights.W_attn_key2,
     weights.W_attn_query3, weights.W_attn_key3, weights.W_attn_query4, weights.W_attn_key4,
-    weights.W_conv_gate, weights.W_conv_value, weights.W_input_proj, weights.W_3body, weights.W_3body_update,
+    weights.W_filter1, weights.W_filter2, weights.W_input_proj, weights.W_3body, weights.W_3body_update,
     weights.W_mlp1, weights.W_mlp2, weights.W_mlp2_var, weights.W_attn_pool,
     weights.W_elem_feat, weights.W_graph_adapt,
     weights.W_cls1,  // v15: cls head flat cache
