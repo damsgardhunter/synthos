@@ -3237,6 +3237,140 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         // Not used for Tc prediction (no blend), only keeps λ and ω_log physically calibrated.
         const dLossDAd = 0.1 * scW * 2 * allenDynesError / 300;
 
+        // ── Family-specific physics loss ──────────────────────────────────────
+        // Classify this sample's material family from composition rules, then
+        // apply the correct physics formula for its family. This gives each
+        // material class its own ground-truth physics signal rather than a
+        // generic Allen-Dynes approximation.
+        //
+        // Families and formulas:
+        //   hydride        → full Allen-Dynes with Dynes f1/f2 strong-coupling corrections
+        //   cuprate        → effective Allen-Dynes with λ_eff=0.5λ, μ*≤0.15 (resonating VB)
+        //   iron_based     → Allen-Dynes with reduced μ*≤0.08 (spin-fluctuation mediated)
+        //   boride (MgB2)  → two-band Allen-Dynes with λ_σ=0.7λ (σ-channel dominated)
+        //   kagome         → van-Hove enhanced Allen-Dynes with λ_vH=1.35λ
+        //   conventional   → standard Allen-Dynes (same as generic, but cleaner weight)
+
+        // --- Rule-based family classification (composition only, no neural) ---
+        let _trainFamily = 'unknown';
+        if (isSC) {
+          const _fc = parseFormulaCountsCanonical(sample.formula);
+          const _els = new Set(Object.keys(_fc));
+          const _total = Math.max(1, Object.values(_fc).reduce((a: number, b: number) => a + b, 0));
+          const _hFrac = (_fc['H'] ?? 0) / _total;
+          if (_hFrac > 0.35 && actualTcK > 50) {
+            _trainFamily = 'hydride';
+          } else if (_els.has('Cu') && _els.has('O') && _els.size >= 3) {
+            _trainFamily = 'cuprate';
+          } else if (_els.has('Fe') && (_els.has('As') || _els.has('Se') || _els.has('P'))) {
+            _trainFamily = 'iron_based';
+          } else if (_els.has('Mg') && _els.has('B') && _els.size <= 4) {
+            _trainFamily = 'boride';
+          } else if ((_els.has('Co') || _els.has('Fe')) && (_els.has('Sn') || _els.has('Cs')) &&
+                     (_els.has('V') || _els.has('Nb') || _els.has('Ta'))) {
+            _trainFamily = 'kagome';
+          } else if (_els.has('Ni') && _els.has('O') && _els.has('La')) {
+            _trainFamily = 'nickelate';
+          } else {
+            _trainFamily = 'conventional_bcs';
+          }
+        }
+
+        // --- Family-specific Tc prediction and exact gradients ---
+        let _familyTc = adTc;
+        let _dFamilyTcdLambda = dTcdLambda;
+        let _dFamilyTcdOmegaLog = dTcdOmegaLog;
+        const _mu = sampleMuStar;
+
+        if (isSC && adLambda > 0.1 && adOmegaLog > 10) {
+          const _D = Math.max(0.001, adLambda * (1 - 0.62 * _mu) - _mu);
+          const _expArg = Math.max(-40, -1.04 * (1 + adLambda) / _D);
+          const _expFact = Math.exp(_expArg);
+          const _tcBase = (adOmegaLog / 1.2) * _expFact;
+          const _dTcBase_dLambda = _tcBase * 1.04 * (1 + 0.38 * _mu) / (_D * _D);
+
+          if (_trainFamily === 'hydride') {
+            // Full Allen-Dynes (Dynes 1972): Tc = (ωlog/1.2) * f1 * f2 * exp(...)
+            // f1 = (1 + (λ/λ_bar)^1.5)^(1/3),  λ_bar = 2.46(1+3.8μ*)
+            // f2 = 1 + (λ-λ0)²/(λ³+λ0³) for λ>λ0,  λ0 = sqrt(1.82*1.04*μ/(1+6.3μ))
+            const _lambdaBar = 2.46 * (1 + 3.8 * _mu);
+            const _lambda0 = Math.sqrt(Math.max(0, 1.82 * 1.04 * _mu / (1 + 6.3 * _mu)));
+            const _f1base = 1 + Math.pow(adLambda / _lambdaBar, 1.5);
+            const _f1 = Math.pow(Math.max(1e-10, _f1base), 1 / 3);
+            const _f2num = adLambda > _lambda0 ? Math.pow(adLambda - _lambda0, 2) : 0;
+            const _f2den = Math.max(1e-10, Math.pow(adLambda, 3) + Math.pow(_lambda0, 3));
+            const _f2 = 1 + _f2num / _f2den;
+            _familyTc = _tcBase * _f1 * _f2;
+            // Exact dTc/dλ via product rule through f1, f2, and exp(...)
+            const _df1_dLambda = _f1base > 1e-10
+              ? 0.5 * Math.pow(adLambda / _lambdaBar, 0.5) / (_lambdaBar * Math.pow(_f1base, 2 / 3))
+              : 0;
+            let _df2_dLambda = 0;
+            if (adLambda > _lambda0 && _f2den > 1e-10) {
+              const _d_num = 2 * (adLambda - _lambda0);
+              const _d_den = 3 * adLambda * adLambda;
+              _df2_dLambda = (_d_num * _f2den - _f2num * _d_den) / (_f2den * _f2den);
+            }
+            _dFamilyTcdLambda = _f1 * _f2 * _dTcBase_dLambda
+              + _tcBase * (_df1_dLambda * _f2 + _f1 * _df2_dLambda);
+            _dFamilyTcdOmegaLog = adOmegaLog > 0 ? _familyTc / adOmegaLog : 0;
+
+          } else if (_trainFamily === 'boride') {
+            // MgB2-type two-band: σ-channel dominates, λ_σ ≈ 0.7λ
+            const _lSigma = 0.7 * adLambda;
+            const _Ds = Math.max(0.001, _lSigma * (1 - 0.62 * _mu) - _mu);
+            _familyTc = (adOmegaLog / 1.2) * Math.exp(Math.max(-40, -1.04 * (1 + _lSigma) / _Ds));
+            _dFamilyTcdLambda = 0.7 * _familyTc * 1.04 * (1 + 0.38 * _mu) / (_Ds * _Ds);
+            _dFamilyTcdOmegaLog = adOmegaLog > 0 ? _familyTc / adOmegaLog : 0;
+
+          } else if (_trainFamily === 'kagome') {
+            // van Hove singularity enhancement: λ_eff = 1.35λ
+            const _lVH = 1.35 * adLambda;
+            const _DvH = Math.max(0.001, _lVH * (1 - 0.62 * _mu) - _mu);
+            _familyTc = (adOmegaLog / 1.2) * Math.exp(Math.max(-40, -1.04 * (1 + _lVH) / _DvH));
+            _dFamilyTcdLambda = 1.35 * _familyTc * 1.04 * (1 + 0.38 * _mu) / (_DvH * _DvH);
+            _dFamilyTcdOmegaLog = adOmegaLog > 0 ? _familyTc / adOmegaLog : 0;
+
+          } else if (_trainFamily === 'iron_based') {
+            // Spin-fluctuation mediated: lower effective μ* (~0.05–0.08)
+            const _muFe = Math.min(_mu, 0.08);
+            const _DFe = Math.max(0.001, adLambda * (1 - 0.62 * _muFe) - _muFe);
+            _familyTc = (adOmegaLog / 1.2) * Math.exp(Math.max(-40, -1.04 * (1 + adLambda) / _DFe));
+            _dFamilyTcdLambda = _familyTc * 1.04 * (1 + 0.38 * _muFe) / (_DFe * _DFe);
+            _dFamilyTcdOmegaLog = adOmegaLog > 0 ? _familyTc / adOmegaLog : 0;
+
+          } else if (_trainFamily === 'cuprate') {
+            // Resonating valence bond: effective λ_eff = 0.5λ, capped μ*≤0.15
+            const _lCup = 0.5 * adLambda;
+            const _muCup = Math.min(_mu, 0.15);
+            const _DCup = Math.max(0.001, _lCup * (1 - 0.62 * _muCup) - _muCup);
+            _familyTc = (adOmegaLog / 1.2) * Math.exp(Math.max(-40, -1.04 * (1 + _lCup) / _DCup));
+            _dFamilyTcdLambda = 0.5 * _familyTc * 1.04 * (1 + 0.38 * _muCup) / (_DCup * _DCup);
+            _dFamilyTcdOmegaLog = adOmegaLog > 0 ? _familyTc / adOmegaLog : 0;
+
+          } else {
+            // conventional_bcs, nickelate, heavy_fermion, unknown — standard Allen-Dynes
+            _familyTc = adTc;
+            _dFamilyTcdLambda = dTcdLambda;
+            _dFamilyTcdOmegaLog = dTcdOmegaLog;
+          }
+        }
+
+        // Family-specific loss weight — higher for families where the formula is most accurate
+        const _familyLossW = isSC ? (
+          _trainFamily === 'hydride'      ? 0.7 :
+          _trainFamily === 'boride'       ? 0.6 :
+          _trainFamily === 'kagome'       ? 0.5 :
+          _trainFamily === 'iron_based'   ? 0.5 :
+          _trainFamily === 'cuprate'      ? 0.5 :
+          _trainFamily === 'nickelate'    ? 0.3 :
+          0.3  // conventional_bcs / unknown
+        ) : 0;
+        const _familyPhysErr = isSC ? (_familyTc / 300 - tcTarget) : 0;
+        if (isSC) totalLoss += _familyLossW * _familyPhysErr * _familyPhysErr;
+        // Gradient of family physics loss w.r.t. out[2] (ωlog) and out[4] (λ)
+        const _dLossDFamily = isSC ? (_familyLossW * 2 * _familyPhysErr / 300) : 0;
+
         // ── Reward / Punishment system ────────────────────────────────────────
         // Per-sample gradient multipliers applied to out[7] (P(SC) BCE) and
         // out[8] (Tc regression). The base loss values are unchanged — only
@@ -3285,10 +3419,10 @@ export async function trainGNNSurrogate(trainingData: TrainingSample[], preInitW
         // derived from tc>0 flag, not real measurements. Removed to reduce noise.
         dLdOut[1] = 0;
         // out[2] → ω_log via Allen-Dynes chain + direct DFPT supervision if available.
-        dLdOut[2] = clipGrad((dLossDAd * dTcdOmegaLog + omegaLogGradBoost) * dOmegaLogdOut2);
+        dLdOut[2] = clipGrad(((dLossDAd * dTcdOmegaLog) + (_dLossDFamily * _dFamilyTcdOmegaLog) + omegaLogGradBoost) * dOmegaLogdOut2);
         dLdOut[3] = 0;
-        // out[4] → λ via Allen-Dynes chain only (removed heuristic lambda MSE target).
-        dLdOut[4] = clipGrad(dLossDAd * dTcdLambda * dLambdadOut4);
+        // out[4] → λ via Allen-Dynes chain + family-specific physics gradient.
+        dLdOut[4] = clipGrad((dLossDAd * dTcdLambda + _dLossDFamily * _dFamilyTcdLambda) * dLambdadOut4);
         // out[5] → bandgap via sigmoid(out[5]) * 5.0; chain rule includes sigmoid derivative.
         // dL/d(out[5]) = 2 * bgError * 0.05 * 5.0 * sigmoid'(out[5])
         const bgSig5 = sigmoid(cache.outRaw[5] ?? 0);
