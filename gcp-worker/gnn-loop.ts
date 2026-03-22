@@ -601,7 +601,6 @@ async function processNextGnnJob(): Promise<boolean> {
   const trainSet = [...scTrain, ...cappedNonSc];
   const valSet   = scVal; // held-out SC samples only — these are the discovery targets
 
-
   console.log(
     `[GNN-GCP] Starting training job #${jobId} — ${datasetSize} seed + ${externalSCSamples.length} NIMS+JARVIS + ${qeSamples.length} QE + ${jarvisContrast.length + mpContrast.length} contrast (capped ${cappedNonSc.length})` +
     ` | train=${trainSet.length} val=${valSet.length} (SC holdout)`
@@ -659,9 +658,9 @@ async function processNextGnnJob(): Promise<boolean> {
       }
     } catch { /* non-fatal — proceed without guard */ }
 
-    if (r2 < -5 || mae > 200) {
+    if (r2 < -5 || mae > 200 || rmse > 100) {
       console.warn(
-        `[GNN-GCP] Job #${jobId} quality below threshold (R²=${r2.toFixed(3)}, MAE=${mae.toFixed(1)}K) — discarding to preserve working weights`
+        `[GNN-GCP] Job #${jobId} quality below threshold (R²=${r2.toFixed(3)}, MAE=${mae.toFixed(1)}K, RMSE=${rmse.toFixed(1)}K) — discarding to preserve working weights`
       );
       await db.execute(`UPDATE gnn_training_jobs SET status = 'discarded' WHERE id = ${jobId}`);
     } else if (Number.isFinite(startupValR2) && r2 < startupValR2 - 0.05) {
@@ -971,8 +970,9 @@ async function runStartupFullCorpusTraining(): Promise<void> {
   // would overwrite the current working model with useless weights on the local server.
   const MIN_STORE_R2 = -5;
   const MAX_STORE_MAE = 200;
-  if (r2 < MIN_STORE_R2 || mae > MAX_STORE_MAE) {
-    console.warn(`[GNN-GCP] Startup weights NOT stored — model quality below threshold (R²=${r2.toFixed(3)}, MAE=${mae.toFixed(1)}K). Existing weights on local server preserved.`);
+  const MAX_STORE_RMSE = 100;
+  if (r2 < MIN_STORE_R2 || mae > MAX_STORE_MAE || rmse > MAX_STORE_RMSE) {
+    console.warn(`[GNN-GCP] Startup weights NOT stored — model quality below threshold (R²=${r2.toFixed(3)}, MAE=${mae.toFixed(1)}K, RMSE=${rmse.toFixed(1)}K). Existing weights on local server preserved.`);
   } else {
     // Store the trained weights as a completed job so the local server's GCP
     // weight poller picks them up and applies them.

@@ -1521,14 +1521,28 @@ async function retrainGNNWithEnrichedData(
   if (process.env.OFFLOAD_GNN_TO_GCP === "true") {
     // Fire-and-forget: dispatch to GCP and continue immediately.
     // A background poller (startGCPWeightPoller) applies weights when GCP finishes.
+    // Only queue a new job if none is already queued or running — otherwise active
+    // learning floods the queue with hundreds of duplicate jobs.
     const dftSamples = getDFTTrainingDataset().length;
-    storage.insertGnnTrainingJob({
-      status: "queued",
-      trainingData: trainingData as any,
-      datasetSize: trainingData.length,
-      dftSamples,
-    }).then(job => {
-      console.log(`[ActiveLearning] GNN training job #${job.id} dispatched to GCP (${trainingData.length} samples) — continuing cycle`);
+    (async () => {
+      const { db: gnnDb } = await import("../db");
+      const activeCheck = await gnnDb.execute(
+        `SELECT id FROM gnn_training_jobs WHERE status IN ('queued', 'running') ORDER BY created_at ASC LIMIT 1`
+      );
+      return ((activeCheck as any).rows?.[0] ?? (Array.isArray(activeCheck) ? activeCheck[0] : undefined));
+    })().then(existing => {
+      if (existing) {
+        console.log(`[ActiveLearning] GNN dispatch skipped — job #${existing.id} already queued/running`);
+        return;
+      }
+      return storage.insertGnnTrainingJob({
+        status: "queued",
+        trainingData: trainingData as any,
+        datasetSize: trainingData.length,
+        dftSamples,
+      }).then(job => {
+        console.log(`[ActiveLearning] GNN training job #${job.id} dispatched to GCP (${trainingData.length} samples) — continuing cycle`);
+      });
     }).catch(err => {
       console.warn(`[ActiveLearning] Failed to dispatch GNN job to GCP: ${err.message}`);
     });
