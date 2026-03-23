@@ -342,19 +342,22 @@ def load_ensemble(path: str) -> List[SuperconductorGNN]:
 
     # Normalise: always work with a list of state_dicts
     if isinstance(raw, dict):
-        # Single model state_dict (Colab default save)
-        state_dicts = [raw]
+        if "model_state" in raw:
+            # Training checkpoint format: {model_state, optimizer_state, epoch, ...}
+            state_dicts = [raw["model_state"]]
+        else:
+            # Plain state dict (torch.save(model.state_dict()))
+            state_dicts = [raw]
     elif isinstance(raw, list) and all(isinstance(s, dict) for s in raw):
-        state_dicts = raw
+        # Each element might also be a training checkpoint
+        state_dicts = [s["model_state"] if "model_state" in s else s for s in raw]
     else:
         raise ValueError(f"Unrecognised checkpoint format in {path}: {type(raw)}")
 
     models = []
     for sd in state_dicts:
         m = SuperconductorGNN().to(device)
-        result = m.load_state_dict(sd, strict=False)
-        if result.missing_keys:
-            log.warning(f"Partial load from {Path(path).name}: {len(result.missing_keys)} missing keys (using defaults), {len(result.unexpected_keys)} unexpected keys ignored")
+        m.load_state_dict(sd)
         m.eval()
         models.append(m)
     log.info(f"Loaded {len(models)}-model ensemble from {path}")
