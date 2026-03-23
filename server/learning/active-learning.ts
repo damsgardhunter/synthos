@@ -2251,6 +2251,10 @@ function parseFormulaCountsLocal(formula: string): Record<string, number> {
  * the weights locally. Call once at engine startup when OFFLOAD_GNN_TO_GCP=true.
  */
 export function startGCPWeightPoller(): void {
+  // PyTorch GNN weight application is disabled — system relies on Colab XGBoost weights.
+  // Re-enable by removing this early return when the GNN pipeline is repaired.
+  console.log("[GCP-Poller] PyTorch GNN weight poller DISABLED — using Colab XGBoost weights only");
+  return;
   if (process.env.OFFLOAD_GNN_TO_GCP !== "true") return;
 
   let lastAppliedJobId = 0;

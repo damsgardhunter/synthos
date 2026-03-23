@@ -1,3 +1,5 @@
+import fs from "fs";
+import path from "path";
 import { SUPERCON_TRAINING_DATA, type SuperconEntry } from "./supercon-dataset";
 import { getExtendedTrainingData } from "./extended-dataset";
 import { extractFeatures, type MLFeatureVector } from "./ml-predictor";
@@ -1508,6 +1510,39 @@ const _xgbServiceURL = process.env.GNN_PYTORCH_SERVICE_URL ?? "";
 const _xgbCache = new Map<string, { result: XGBUncertaintyResult; fetchedAt: number }>();
 const XGB_CACHE_TTL_MS = 5 * 60 * 1000;
 
+// Disk-backed cache so Colab XGBoost predictions survive server restarts.
+// Written every time a fresh prediction arrives; loaded eagerly at startup.
+const _XGB_DISK_CACHE_PATH = path.join(process.cwd(), "colab-xgb-cache.json");
+
+function _loadXGBCacheFromDisk(): void {
+  try {
+    if (!fs.existsSync(_XGB_DISK_CACHE_PATH)) return;
+    const raw = fs.readFileSync(_XGB_DISK_CACHE_PATH, "utf8");
+    const parsed = JSON.parse(raw) as Record<string, { result: XGBUncertaintyResult; fetchedAt: number }>;
+    let count = 0;
+    for (const [formula, entry] of Object.entries(parsed)) {
+      // Load with current timestamp so TTL check doesn't immediately expire them.
+      // Fresh network fetches will overwrite these as materials get re-scored.
+      _xgbCache.set(formula, { result: entry.result, fetchedAt: Date.now() });
+      count++;
+    }
+    if (count > 0) console.log(`[Colab-XGB] Loaded ${count} cached predictions from disk (${_XGB_DISK_CACHE_PATH})`);
+  } catch { /* non-fatal — fresh predictions will fill the cache */ }
+}
+
+function _saveXGBCacheToDisk(): void {
+  try {
+    const obj: Record<string, { result: XGBUncertaintyResult; fetchedAt: number }> = {};
+    for (const [formula, entry] of _xgbCache.entries()) {
+      obj[formula] = entry;
+    }
+    fs.writeFileSync(_XGB_DISK_CACHE_PATH, JSON.stringify(obj), "utf8");
+  } catch { /* non-fatal */ }
+}
+
+// Load persisted cache immediately on module load.
+_loadXGBCacheFromDisk();
+
 async function fetchColabXGBPrediction(formula: string, pressureGpa = 0): Promise<XGBUncertaintyResult | null> {
   if (!_xgbServiceURL) return null;
   try {
@@ -1554,6 +1589,7 @@ export async function gbPredictWithUncertaintyAsync(features: MLFeatureVector, f
     const result = await fetchColabXGBPrediction(resolvedFormula, pressureGpa);
     if (result) {
       _xgbCache.set(cacheKey, { result, fetchedAt: Date.now() });
+      _saveXGBCacheToDisk();
       console.log(`[Colab-XGB] ${resolvedFormula}: Tc=${result.tcMean}K`);
       return result;
     }
@@ -1573,6 +1609,7 @@ export async function gbPredictWithUncertainty(features: MLFeatureVector, formul
     fetchColabXGBPrediction(resolvedFormula).then(result => {
       if (result) {
         _xgbCache.set(cacheKey, { result, fetchedAt: Date.now() });
+        _saveXGBCacheToDisk();
         console.log(`[Colab-XGB] ${resolvedFormula}: Tc=${result.tcMean}K`);
       }
     }).catch(() => {});

@@ -46,7 +46,9 @@ if (!process.env.OMP_NUM_THREADS) {
 process.env.OFFLOAD_GNN_TO_GCP = "true";
 
 const ENABLE_DFT = process.env.ENABLE_DFT_WORKER !== "false";
-const ENABLE_GNN = process.env.ENABLE_GNN_WORKER !== "false";
+// GNN training loop is disabled until the PyTorch pipeline is repaired.
+// Set ENABLE_GNN_WORKER=true explicitly to re-enable.
+const ENABLE_GNN = process.env.ENABLE_GNN_WORKER === "true";
 const ENABLE_XGB = process.env.ENABLE_XGB_WORKER !== "false";
 const ENABLE_ML  = process.env.ENABLE_ML_WORKER  !== "false";
 
