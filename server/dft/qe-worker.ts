@@ -2748,8 +2748,8 @@ function generateVCRelaxInput(
   tprnfor = .true.,
   tstress = .true.,
   forc_conv_thr = 1.0d-3,
-  etot_conv_thr = 1.0d-5,
-  nstep = 100,
+  etot_conv_thr = 1.0d-4,
+  nstep = 250,
   max_seconds = ${QE_MAX_SECONDS},
 /
 &SYSTEM
@@ -3376,6 +3376,9 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
         console.log(`[QE-Worker] vc-relax ${vcParsed.converged ? "converged" : "partial"} for ${formula}: ${positions.length} atoms, E=${vcParsed.totalEnergy.toFixed(4)} eV, wall=${vcParsed.wallTimeSeconds.toFixed(0)}s`);
       } else {
         console.log(`[QE-Worker] vc-relax produced no usable positions for ${formula} (exit=${vcResult.exitCode}), proceeding with original geometry`);
+        // Dump last 1000 chars of stdout so we can see whether QE wrote a final geometry block
+        const vcDiagTail = vcResult.stdout.slice(-1000);
+        console.log(`[QE-Worker] vc-relax stdout tail for ${formula}:\n${vcDiagTail}`);
       }
 
       cleanQETmpDir(path.join(jobDir, "tmp"));
