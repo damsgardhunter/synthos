@@ -352,7 +352,9 @@ def load_ensemble(path: str) -> List[SuperconductorGNN]:
     models = []
     for sd in state_dicts:
         m = SuperconductorGNN().to(device)
-        m.load_state_dict(sd)
+        result = m.load_state_dict(sd, strict=False)
+        if result.missing_keys:
+            log.warning(f"Partial load from {Path(path).name}: {len(result.missing_keys)} missing keys (using defaults), {len(result.unexpected_keys)} unexpected keys ignored")
         m.eval()
         models.append(m)
     log.info(f"Loaded {len(models)}-model ensemble from {path}")
