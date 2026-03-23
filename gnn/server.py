@@ -412,6 +412,43 @@ async def get_metrics():
     return MetricsResponse(**_last_metrics) if _last_metrics else MetricsResponse()
 
 
+class XGBPredictRequest(BaseModel):
+    formula:      str
+    pressure_gpa: float = 0.0
+
+class XGBPredictResponse(BaseModel):
+    tc:         float
+    r2:         float
+    n_features: int
+    source:     str = "colab-xgb"
+
+@app.post("/predict-xgb", response_model=XGBPredictResponse)
+async def predict_xgb(req: XGBPredictRequest):
+    """
+    Predict Tc using the Colab-trained XGBoost model (xgb_model.pkl).
+    Features are derived from the formula via graph_builder's 23-dim global
+    composition vector (matches GLOBAL_COMP_DIM used during Colab training).
+    """
+    if _xgb_model is None:
+        raise HTTPException(status_code=503, detail="XGBoost model not loaded")
+    try:
+        graph = build_crystal_graph(req.formula, pressure_gpa=req.pressure_gpa)
+        feat  = graph.global_features  # shape [23]
+        import numpy as np
+        x = np.array(feat, dtype=np.float32).reshape(1, -1)
+        tc_pred = float(_xgb_model.predict(x)[0])
+        tc_pred = max(0.0, tc_pred)
+        return XGBPredictResponse(
+            tc=round(tc_pred, 2),
+            r2=0.9117,   # from xgb_metadata.json
+            n_features=int(x.shape[1]),
+            source="colab-xgb",
+        )
+    except Exception as e:
+        log.warning(f"XGBoost predict failed for {req.formula}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/train", response_model=TrainResponse)
 async def train(req: TrainRequest):
     """
