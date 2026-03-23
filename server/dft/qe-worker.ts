@@ -1007,7 +1007,24 @@ const PP_GBRV_URLS: Record<string, string> = {
   Ir: `${GBRV_BASE}/ir_pbe_v1.2.uspp.F.UPF`,
   Pt: `${GBRV_BASE}/pt_pbe_v1.4.uspp.F.UPF`,
   Au: `${GBRV_BASE}/au_pbe_v1.uspp.F.UPF`,
+  Mg: `${GBRV_BASE}/mg_pbe_v1.4.uspp.F.UPF`,
+  Hg: `${GBRV_BASE}/hg_pbe_v1.uspp.F.UPF`,
+  Co: `${GBRV_BASE}/co_pbe_v1.2.uspp.F.UPF`,
+  Zn: `${GBRV_BASE}/zn_pbe_v1.uspp.F.UPF`,
+  Tc: `${GBRV_BASE}/tc_pbe_v1.uspp.F.UPF`,
+  // Lanthanides
   Yb: `${GBRV_BASE}/yb_pbe_v1.uspp.F.UPF`,
+  Pr: `${GBRV_BASE}/pr_pbe_v1.uspp.F.UPF`,
+  Nd: `${GBRV_BASE}/nd_pbe_v1.uspp.F.UPF`,
+  Sm: `${GBRV_BASE}/sm_pbe_v1.uspp.F.UPF`,
+  Eu: `${GBRV_BASE}/eu_pbe_v1.uspp.F.UPF`,
+  Gd: `${GBRV_BASE}/gd_pbe_v1.uspp.F.UPF`,
+  Tb: `${GBRV_BASE}/tb_pbe_v1.uspp.F.UPF`,
+  Dy: `${GBRV_BASE}/dy_pbe_v1.uspp.F.UPF`,
+  Ho: `${GBRV_BASE}/ho_pbe_v1.uspp.F.UPF`,
+  Er: `${GBRV_BASE}/er_pbe_v1.uspp.F.UPF`,
+  Tm: `${GBRV_BASE}/tm_pbe_v1.uspp.F.UPF`,
+  Lu: `${GBRV_BASE}/lu_pbe_v1.uspp.F.UPF`,
 };
 
 // QE website as fallback (often unreliable)
