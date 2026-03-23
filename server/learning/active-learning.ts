@@ -1456,6 +1456,15 @@ async function retrainGNNWithEnrichedData(
               undefined,
               (c as any).pressureGpa ?? 0
             );
+            // Bridge dft-verified candidates into the persistent GNN training dataset
+            // so they are visible to the ML pipeline (fixes 0 DFT records bug).
+            addDFTTrainingResult({
+              formula: c.formula,
+              tc: qeDFPTTc ?? storedTc,
+              source: "dft",
+              bandGap: (c as any).bandGap ?? undefined,
+              formationEnergy: c.decompositionEnergy ?? undefined,
+            });
           }
         }
       }

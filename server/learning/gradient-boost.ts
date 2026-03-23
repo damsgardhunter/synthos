@@ -1503,10 +1503,83 @@ export interface XGBUncertaintyResult {
   reasoning: string[];
 }
 
+// ── Colab XGBoost GCP service cache ──────────────────────────────────────────
+const _xgbServiceURL = process.env.GNN_PYTORCH_SERVICE_URL ?? "";
+const _xgbCache = new Map<string, { result: XGBUncertaintyResult; fetchedAt: number }>();
+const XGB_CACHE_TTL_MS = 5 * 60 * 1000;
+
+async function fetchColabXGBPrediction(formula: string, pressureGpa = 0): Promise<XGBUncertaintyResult | null> {
+  if (!_xgbServiceURL) return null;
+  try {
+    const res = await fetch(`${_xgbServiceURL}/predict-xgb`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ formula, pressure_gpa: pressureGpa }),
+      signal: AbortSignal.timeout(4000),
+    });
+    if (!res.ok) return null;
+    const d = await res.json() as { tc: number; r2: number };
+    const tc = Math.max(0, Number(d.tc ?? 0));
+    const std = tc * 0.12; // ~12% uncertainty from metadata MAE/mean
+    return {
+      tcMean: Math.round(tc * 10) / 10,
+      tcStd: Math.round(std * 10) / 10,
+      tcCI95: [Math.max(0, Math.round((tc - 1.96 * std) * 10) / 10), Math.round((tc + 1.96 * std) * 10) / 10],
+      epistemicStd: Math.round(std * 100) / 100,
+      aleatoricStd: 0,
+      totalStd: Math.round(std * 100) / 100,
+      normalizedUncertainty: Math.min(1, std / Math.max(1, tc + 10)),
+      score: tc > 100 ? 0.85 : tc > 40 ? 0.65 : tc > 10 ? 0.4 : 0.15,
+      perModelPredictions: [tc],
+      acquisitionScore: Math.min(1, tc / 300 + 0.1),
+      reasoning: [`Colab XGBoost (R²=0.911): Tc=${tc.toFixed(1)}K`, `95% CI: [${Math.max(0, tc - 1.96 * std).toFixed(1)}K, ${(tc + 1.96 * std).toFixed(1)}K]`],
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Async version — awaits the Colab XGBoost GCP result before falling back
+ * to the local DB model. Use this in async contexts (benchmark, scoring routes).
+ */
+export async function gbPredictWithUncertaintyAsync(features: MLFeatureVector, formula?: string, pressureGpa = 0): Promise<XGBUncertaintyResult> {
+  const resolvedFormula = formula || features._sourceFormula;
+  if (_xgbServiceURL && resolvedFormula) {
+    const cacheKey = resolvedFormula;
+    const cached = _xgbCache.get(cacheKey);
+    if (cached && Date.now() - cached.fetchedAt < XGB_CACHE_TTL_MS) {
+      return cached.result;
+    }
+    const result = await fetchColabXGBPrediction(resolvedFormula, pressureGpa);
+    if (result) {
+      _xgbCache.set(cacheKey, { result, fetchedAt: Date.now() });
+      console.log(`[Colab-XGB] ${resolvedFormula}: Tc=${result.tcMean}K`);
+      return result;
+    }
+  }
+  return gbPredictWithUncertainty(features, formula);
+}
+
 export async function gbPredictWithUncertainty(features: MLFeatureVector, formula?: string): Promise<XGBUncertaintyResult> {
+  // Return Colab XGBoost result if cached and fresh; fire background refresh if stale/missing.
+  const resolvedFormula = formula || features._sourceFormula;
+  if (_xgbServiceURL && resolvedFormula) {
+    const cacheKey = resolvedFormula;
+    const cached = _xgbCache.get(cacheKey);
+    if (cached && Date.now() - cached.fetchedAt < XGB_CACHE_TTL_MS) {
+      return cached.result;
+    }
+    fetchColabXGBPrediction(resolvedFormula).then(result => {
+      if (result) {
+        _xgbCache.set(cacheKey, { result, fetchedAt: Date.now() });
+        console.log(`[Colab-XGB] ${resolvedFormula}: Tc=${result.tcMean}K`);
+      }
+    }).catch(() => {});
+  }
+
   await getTrainedModel();
 
-  const resolvedFormula = formula || features._sourceFormula;
   const x = featureVectorToArray(features, resolvedFormula);
 
   if (!cachedEnsembleXGB) {

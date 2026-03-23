@@ -250,7 +250,7 @@ export interface UncertaintyBreakdown {
     bandgap: number;
   };
   weightProfile?: {
-    mode: 'high-tc' | 'standard';
+    mode: 'high-tc' | 'standard' | 'pytorch';
     tc: number;
     ensemble: number;
     latent: number;
@@ -4281,6 +4281,67 @@ export function getGNNLatestR2(): number {
 const GNN_PRED_CACHE_MAX = 500;
 const gnnPredictionCache = new Map<string, { prediction: GNNPrediction; trainedAt: number }>();
 
+// ── PyTorch GNN service (GCP) ───────────────────────────────────────────────
+const PYTORCH_SERVICE_URL = process.env.GNN_PYTORCH_SERVICE_URL ?? "";
+const _pytorchCache = new Map<string, { result: GNNPredictionWithUncertainty; fetchedAt: number }>();
+const PYTORCH_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+async function fetchPyTorchPrediction(
+  formula: string,
+  prototype?: string,
+  pressureGpa?: number,
+): Promise<GNNPredictionWithUncertainty | null> {
+  if (!PYTORCH_SERVICE_URL) return null;
+  try {
+    const body = JSON.stringify({ formula, prototype: prototype ?? null, pressure_gpa: pressureGpa ?? 0 });
+    const res = await fetch(`${PYTORCH_SERVICE_URL}/predict`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) return null;
+    const d = await res.json() as Record<string, number | boolean>;
+    const tc       = Number(d.tc ?? 0);
+    const lam      = Number(d.lam ?? 0);
+    const totalStd = Number(d.total_std ?? 0);
+    const epStd    = Number(d.epistemic_std ?? 0);
+    const alStd    = Number(d.aleatoric_std ?? 0);
+    const lamVar   = Number(d.lambda_var ?? 0);
+    const lamStd   = Math.sqrt(lamVar);
+    const latDist  = Number(d.latent_distance ?? 0);
+    const normUnc  = Math.min(1, totalStd / Math.max(tc, 1));
+    return {
+      tc,
+      omegaLog:            Number(d.omega_log ?? 0),
+      formationEnergy:     Number(d.formation_energy ?? 0),
+      lambda:              lam,
+      bandgap:             Number(d.bandgap ?? 0),
+      dosProxy:            Number(d.dos_proxy ?? 0),
+      stabilityProbability: Number(d.stability_prob ?? 0),
+      uncertainty:         Math.round(normUnc * 1000) / 1000,
+      uncertaintyBreakdown: {
+        ensemble: 0,
+        mcDropout: 0,
+        aleatoric: Math.round(Math.min(1, alStd / Math.max(tc, 1)) * 1000) / 1000,
+        latentDistance: Math.round(latDist * 1000) / 1000,
+        perTarget: { tc: Math.round(normUnc * 1000) / 1000, formationEnergy: 0, lambda: 0, bandgap: 0 },
+        weightProfile: { mode: "pytorch", tc: 1, ensemble: 0, latent: 0, formationEnergy: 0, lambda: 0, bandgap: 0 },
+      },
+      phononStability:     Boolean(d.phonon_stable),
+      confidence:          Math.max(0.05, Math.min(0.95, Number(d.confidence ?? 0.5))),
+      latentDistance:      Math.round(latDist * 1000) / 1000,
+      tcCI95:              [Number(d.tc_ci95_lo ?? 0), Number(d.tc_ci95_hi ?? 0)] as [number, number],
+      lambdaCI95:          [Math.max(0, lam - 1.96 * lamStd), lam + 1.96 * lamStd] as [number, number],
+      epistemicUncertainty: Math.round(epStd * 100) / 100,
+      aleatoricUncertainty: Math.round(alStd * 100) / 100,
+      totalStd:             Math.round(totalStd * 100) / 100,
+    };
+  } catch {
+    return null;
+  }
+}
+
 export function getGNNPrediction(formula: string, structure?: any, prototype?: string): GNNPrediction {
   const weights = getGNNModel();
   const currentTrainedAt = modelTrainedAt;
@@ -4304,6 +4365,22 @@ export function getGNNPrediction(formula: string, structure?: any, prototype?: s
 
 
 export function gnnPredictWithUncertainty(formula: string, prototype?: string, pressureGpa?: number): GNNPredictionWithUncertainty {
+  // Return PyTorch result if cached and fresh; fire background refresh if stale/missing.
+  if (PYTORCH_SERVICE_URL) {
+    const cacheKey = `${formula}|${prototype ?? ""}|${pressureGpa ?? 0}`;
+    const cached = _pytorchCache.get(cacheKey);
+    if (cached && Date.now() - cached.fetchedAt < PYTORCH_CACHE_TTL_MS) {
+      return cached.result;
+    }
+    // Fire-and-forget refresh (non-blocking).
+    fetchPyTorchPrediction(formula, prototype, pressureGpa).then(result => {
+      if (result) {
+        _pytorchCache.set(cacheKey, { result, fetchedAt: Date.now() });
+        console.log(`[PyTorch-GNN] Cached prediction for ${formula}: Tc=${result.tc}K λ=${result.lambda}`);
+      }
+    }).catch(() => {});
+  }
+
   const t0 = Date.now();
   const ensembleModels = getEnsembleModels();
   const predictions: GNNPrediction[] = [];
@@ -4470,6 +4547,32 @@ export function gnnPredictWithUncertainty(formula: string, prototype?: string, p
   const elapsed = Date.now() - t0;
   try { import("./model-diagnostics").then(m => m.recordInferenceTime("gnn", elapsed)).catch(() => {}); } catch {}
   return result;
+}
+
+/**
+ * Async version of gnnPredictWithUncertainty — awaits the PyTorch GCP service
+ * before falling back to the local TS GNN. Use this in async contexts (e.g.
+ * benchmark, scoring routes) so the first call also gets PyTorch results.
+ */
+export async function gnnPredictWithUncertaintyAsync(
+  formula: string,
+  prototype?: string,
+  pressureGpa?: number,
+): Promise<GNNPredictionWithUncertainty> {
+  if (PYTORCH_SERVICE_URL) {
+    const cacheKey = `${formula}|${prototype ?? ""}|${pressureGpa ?? 0}`;
+    const cached = _pytorchCache.get(cacheKey);
+    if (cached && Date.now() - cached.fetchedAt < PYTORCH_CACHE_TTL_MS) {
+      return cached.result;
+    }
+    const result = await fetchPyTorchPrediction(formula, prototype, pressureGpa);
+    if (result) {
+      _pytorchCache.set(cacheKey, { result, fetchedAt: Date.now() });
+      console.log(`[PyTorch-GNN] ${formula}: Tc=${result.tc}K λ=${result.lambda}`);
+      return result;
+    }
+  }
+  return gnnPredictWithUncertainty(formula, prototype, pressureGpa);
 }
 
 export function getUncertaintyDecomposition(formula: string): UncertaintyBreakdown {

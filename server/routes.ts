@@ -33,8 +33,8 @@ import {
   getDesignRepresentationStats,
   type DesignProgram, type DesignGraph,
 } from "./inverse/design-representations";
-import { getCalibrationData, getConfidenceBand, getEvaluatedDatasetStats, gbPredictWithUncertainty, getXGBEnsembleStats, getModelVersionHistory, getFailureExampleCount, startPoolInit } from "./learning/gradient-boost";
-import { gnnPredictWithUncertainty, getGNNVersionHistory, getGNNModelVersion, getDFTTrainingDatasetStats, buildCrystalGraph, getHeldOutValidationSet, getGNNPrediction } from "./learning/graph-neural-net";
+import { getCalibrationData, getConfidenceBand, getEvaluatedDatasetStats, gbPredictWithUncertainty, gbPredictWithUncertaintyAsync, getXGBEnsembleStats, getModelVersionHistory, getFailureExampleCount, startPoolInit } from "./learning/gradient-boost";
+import { gnnPredictWithUncertainty, gnnPredictWithUncertaintyAsync, getGNNVersionHistory, getGNNModelVersion, getDFTTrainingDatasetStats, buildCrystalGraph, getHeldOutValidationSet, getGNNPrediction } from "./learning/graph-neural-net";
 import { predictPressureCurve, findOptimalPressure, pressureSensitivity, getPressureCurveStats, getPressureExplorationStats } from "./learning/pressure-aware-surrogate";
 import { detectPhaseTransitions, getPhaseTransitionStats } from "./learning/pressure-phase-detector";
 import { computeEnthalpyPressureCurve, findStabilityPressureWindow, getEnthalpyStats } from "./learning/enthalpy-stability";
@@ -5505,8 +5505,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         // not the heuristic. Matches the logic in runModelBenchmarks (active-learning.ts).
         if (ref.textbook.lambda != null) (features as any).electronPhononLambda = ref.textbook.lambda;
         if (ref.textbook.omegaLog != null) (features as any).logPhononFreq = ref.textbook.omegaLog;
-        const xgb = await gbPredictWithUncertainty(features, ref.formula);
-        const gnn = gnnPredictWithUncertainty(ref.formula);
+        const xgb = await gbPredictWithUncertaintyAsync(features, ref.formula, ref.textbook.pressureGpa ?? 0);
+        const gnn = await gnnPredictWithUncertaintyAsync(ref.formula, undefined, ref.textbook.pressureGpa ?? 0);
 
         const xgboostTc = xgb.tcMean ?? 0;
         const gnnTc = gnn.tc ?? 0;

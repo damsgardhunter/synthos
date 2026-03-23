@@ -2583,7 +2583,7 @@ function generateSCFInputWithParams(
   counts: Record<string, number>,
   latticeA: number,
   positions: Array<{ element: string; x: number; y: number; z: number }>,
-  params: { mixingBeta: number; maxSteps: number; diag: string; smearing?: string; degauss?: number; ecutwfcBoost?: number; convThr?: string; forcConvThr?: string; etotConvThr?: string; dftPlusULines?: string; dftPlusUNspin2?: boolean },
+  params: { mixingBeta: number; maxSteps: number; diag: string; smearing?: string; degauss?: number; ecutwfcBoost?: number; convThr?: string; forcConvThr?: string; etotConvThr?: string; dftPlusULines?: string; dftPlusUNspin2?: boolean; mixingMode?: string; mixingNdim?: number },
 ): string {
   const totalAtoms = positions.length;
   const nTypes = elements.length;
@@ -2659,7 +2659,8 @@ ${magBlock}${hubbardBlock}/
   electron_maxstep = ${params.maxSteps},
   conv_thr = ${convThr},
   mixing_beta = ${params.mixingBeta},
-  mixing_mode = 'plain',
+  mixing_mode = '${params.mixingMode ?? "plain"}',
+  mixing_ndim = ${params.mixingNdim ?? 8},
   diagonalization = '${params.diag}',
   scf_must_converge = .false.,
 /
@@ -3415,14 +3416,19 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     }
     // ----------------------------------------------------------
 
-    const retryConfigs: Array<{ mixingBeta: number; maxSteps: number; diag: string; smearing?: string; degauss?: number; ecutwfcBoost?: number; convThr?: string; forcConvThr?: string; etotConvThr?: string }> = [
-      // Attempts 1-2: screening-quality (degauss=0.02 Ry = wider smearing → faster Fermi,
+    const retryConfigs: Array<{ mixingBeta: number; maxSteps: number; diag: string; smearing?: string; degauss?: number; ecutwfcBoost?: number; convThr?: string; forcConvThr?: string; etotConvThr?: string; mixingMode?: string; mixingNdim?: number }> = [
+      // Attempts 1-2: screening-quality plain mixing (degauss=0.02 Ry = wider smearing → faster Fermi,
       // conv_thr=1e-8 is sufficient for band gaps/energies, saves ~2x per attempt)
       { mixingBeta: 0.3, maxSteps: 300, diag: "david", degauss: 0.02, convThr: "1.0d-8", forcConvThr: "1.0d-3", etotConvThr: "1.0d-5" },
       { mixingBeta: 0.2, maxSteps: 400, diag: "david", ecutwfcBoost: 10, degauss: 0.02, convThr: "1.0d-8", forcConvThr: "1.0d-3", etotConvThr: "1.0d-5" },
-      { mixingBeta: 0.15, maxSteps: 500, diag: "cg", ecutwfcBoost: 15, degauss: 0.01, convThr: "1.0d-8", forcConvThr: "1.0d-3", etotConvThr: "1.0d-5" },
-      { mixingBeta: 0.1, maxSteps: 500, diag: "cg", smearing: "mp", degauss: 0.003, ecutwfcBoost: 20, convThr: "1.0d-6", forcConvThr: "1.0d-2", etotConvThr: "1.0d-4" },
-      { mixingBeta: 0.07, maxSteps: 800, diag: "cg", smearing: "mp", degauss: 0.001, ecutwfcBoost: 25, convThr: "1.0d-5", forcConvThr: "1.0d-2", etotConvThr: "1.0d-4" },
+      // Attempts 3-4: switch to local-TF mixing — handles charge sloshing in heterogeneous
+      // multi-element systems (e.g. K3CrH7PdN) where plain Pulay mixing oscillates.
+      // mixingNdim=16 stores more history for better Pulay acceleration.
+      { mixingBeta: 0.15, maxSteps: 500, diag: "cg", ecutwfcBoost: 15, degauss: 0.01, convThr: "1.0d-8", forcConvThr: "1.0d-3", etotConvThr: "1.0d-5", mixingMode: "local-TF", mixingNdim: 16 },
+      { mixingBeta: 0.1, maxSteps: 500, diag: "cg", smearing: "mp", degauss: 0.003, ecutwfcBoost: 20, convThr: "1.0d-6", forcConvThr: "1.0d-2", etotConvThr: "1.0d-4", mixingMode: "local-TF", mixingNdim: 16 },
+      // Attempt 5: very low beta + local-TF with extra mixing history — last resort for
+      // pathological cases. Wider degauss to stabilize Fermi surface.
+      { mixingBeta: 0.05, maxSteps: 800, diag: "cg", smearing: "mp", degauss: 0.005, ecutwfcBoost: 25, convThr: "1.0d-5", forcConvThr: "1.0d-2", etotConvThr: "1.0d-4", mixingMode: "local-TF", mixingNdim: 20 },
     ];
 
     const firstAttempt = opts?.startAttempt ?? 0;
@@ -3445,7 +3451,8 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
 
       const smearInfo = params.smearing ? `, smearing=${params.smearing}` : "";
       const convInfo = params.convThr ? `, conv_thr=${params.convThr}` : "";
-      console.log(`[QE-Worker] SCF attempt ${attempt + 1}/${retryConfigs.length} for ${formula} (a=${latticeA.toFixed(2)} A, beta=${params.mixingBeta}, diag=${params.diag}, maxstep=${params.maxSteps}${convInfo}${smearInfo})`);
+      const mixInfo = params.mixingMode ? `, mixing=${params.mixingMode}` : "";
+      console.log(`[QE-Worker] SCF attempt ${attempt + 1}/${retryConfigs.length} for ${formula} (a=${latticeA.toFixed(2)} A, beta=${params.mixingBeta}, diag=${params.diag}, maxstep=${params.maxSteps}${convInfo}${smearInfo}${mixInfo})`);
 
       const scfResult = await runQECommand(
         path.posix.join(getQEBinDir(), "pw.x"),
