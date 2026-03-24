@@ -56,7 +56,7 @@ interface ParsedComposition {
   vec: number;
 }
 
-function parseComposition(formula: string): ParsedComposition {
+export function parseComposition(formula: string): ParsedComposition {
   const elements = parseFormulaElements(formula);
   const counts = parseFormulaCounts(formula);
   const totalAtoms = getTotalAtoms(counts);
@@ -153,6 +153,14 @@ export function applyAmbientTcCap(tc: number, lambda: number, pressureGpa: numbe
     const hRatio = metalAtomCount > 0 ? hCount / metalAtomCount : 0;
     if (hRatio >= 6) pressureThresholdLow = 100;
     materialBonus = computePhysicsDerivedBonusParsed(pc, lambda);
+
+    // Rule 4: no hydrogen + ambient pressure → McMillan-regime ceiling (40 K).
+    // High-Tc hydrides require H and pressure; non-hydride ambient materials are
+    // bound by phonon-mediated pairing in the conventional BCS regime.
+    const hCountAmb = pc.counts["H"] || 0;
+    if (hCountAmb === 0 && pressureGpa === 0) {
+      tc = Math.min(tc, 40);
+    }
   }
 
   const highPressureAnchor = pressureThresholdLow >= 100 ? 150 : 50;

@@ -15,7 +15,7 @@ import { constraintGuidedGenerate, checkPhysicsConstraints, updateConstraintWeig
 import { runPillarCycle, evaluatePillars, updatePillarWeightsFromReward, getPillarOptimizerStats, incorporateDFTFeedbackIntoPillars, getPillarDFTFeedbackStats } from "../inverse/sc-pillars-optimizer";
 import type { InverseCandidate } from "../inverse/target-schema";
 import { discoverSynthesisProcesses, discoverChemicalReactions, getNextReactionTopic } from "./synthesis-tracker";
-import { runFullPhysicsAnalysis, applyAmbientTcCap, setConstraintMode, getConstraintMode, parseFormulaElements, computeElectronicStructure, reconcileTc, FAMILY_TC_CAPS, computeCapExtensionFactor, allenDynesTcRaw } from "./physics-engine";
+import { runFullPhysicsAnalysis, applyAmbientTcCap, setConstraintMode, getConstraintMode, parseFormulaElements, parseComposition, computeElectronicStructure, reconcileTc, FAMILY_TC_CAPS, computeCapExtensionFactor, allenDynesTcRaw } from "./physics-engine";
 import type { CapExtensionEvidence } from "./physics-engine";
 import { runPressureAnalysis } from "./pressure-engine";
 import { runStructurePredictionBatch, runGenerativeStructureDiscovery, getStructuralVariantCount, runNovelPrototypeGeneration, getNovelPrototypeCount, runEvolutionaryStructureSearch, setMutationIntensity, matchPrototype } from "./structure-predictor";
@@ -100,7 +100,8 @@ import {
   simulateSynthesisEffects, getSimulatorStats, optimizeSynthesisForFixedMaterial,
   defaultSynthesisVector, type SynthesisVector,
 } from "../physics/synthesis-simulator";
-import { recordSynthesisResult, getSynthesisLearningStats } from "../synthesis/synthesis-learning-db";
+import { recordSynthesisResult, getSynthesisLearningStats, seedDFTTrainingEntries } from "../synthesis/synthesis-learning-db";
+import { scheduleParetoRecompute } from "../inverse/pareto-optimizer";
 import { generateDefectVariants, adjustElectronicStructure, getDefectEngineStats } from "../physics/defect-engine";
 import { generateAllDisorderVariants, suggestDisorders } from "../crystal/disorder-generator";
 import { computeConfigurationalEntropy, estimateDOSDisorderSignal } from "../crystal/disorder-metrics";
@@ -1645,6 +1646,54 @@ async function insertCandidateWithStabilityCheck(candidateData: Parameters<typeo
       return false;
     }
 
+    // ── GNN-based pre-screens (Rules 1 & 2) ─────────────────────────────────
+    // Fail-open: if GNN is unavailable the material proceeds, it just won't be
+    // pre-screened here — the acquisition function will still penalise it.
+    try {
+      const gnnScreen = gnnPredictWithUncertainty(candidateData.formula, undefined, candidateData.pressureGpa ?? 0);
+
+      // Rule 1: bandgap > 0.5 eV → insulator, cannot superconduct.
+      if (gnnScreen.bandgap > 0.5) {
+        emit("log", {
+          phase: "engine",
+          event: "Bandgap reject",
+          detail: `${candidateData.formula}: bandgap=${gnnScreen.bandgap.toFixed(2)} eV > 0.5 eV — insulator, rejected`,
+          dataSource: "GNN pre-screen",
+        });
+        if (generatorSource) recordGeneratorOutcome(generatorSource, false, 0, 0);
+        return false;
+      }
+
+      // Rule 2: Stoner I·N(Ef) > 1.0 → likely ferromagnet, flag and skip e-ph.
+      // Stoner exchange integrals (eV) for common magnetic transition metals.
+      const STONER_I: Record<string, number> = {
+        Fe: 0.93, Co: 0.99, Ni: 1.01, Mn: 0.72, Cr: 0.58, V: 0.53, Ti: 0.47,
+      };
+      const pc = parseComposition(candidateData.formula);
+      const totalAtoms = Object.values(pc.counts).reduce((s, c) => s + c, 0) || 1;
+      let iWeighted = 0;
+      for (const [el, I] of Object.entries(STONER_I)) {
+        const frac = (pc.counts[el] ?? 0) / totalAtoms;
+        iWeighted += I * frac;
+      }
+      const stonerProduct = iWeighted * (gnnScreen.dosProxy ?? 0);
+      if (stonerProduct > 1.0) {
+        const existingFeatures = (candidateData.mlFeatures as Record<string, any>) ?? {};
+        candidateData.mlFeatures = {
+          ...existingFeatures,
+          stonerFerromagnet: true,
+          stonerProduct: Math.round(stonerProduct * 1000) / 1000,
+          skipEph: true,
+        };
+        emit("log", {
+          phase: "engine",
+          event: "Stoner ferromagnet flag",
+          detail: `${candidateData.formula}: I·N(Ef)=${stonerProduct.toFixed(3)} > 1.0 — flagged as ferromagnet, e-ph skipped`,
+          dataSource: "GNN pre-screen",
+        });
+      }
+    } catch { /* GNN unavailable — proceed without pre-screen */ }
+
     const stabilityResult = await passesStabilityGate(candidateData.formula, candidateData.pressureGpa ?? 0);
 
     // Stability gate is now a SOFT penalty, not a hard reject.
@@ -1691,6 +1740,21 @@ async function insertCandidateWithStabilityCheck(candidateData: Parameters<typeo
         phase: "engine",
         event: "Stability gate penalty",
         detail: `${candidateData.formula}: hull=${hullDist.toFixed(4)} eV/atom (${stabilityResult.verdict}), score penalised ${currentScore.toFixed(3)} → ${candidateData.ensembleScore}`,
+        dataSource: "Stability Gate",
+      });
+    }
+
+    // Rule 3: hull distance > 0.1 eV/atom → deprioritize, even if stability gate passes.
+    const hullVal = stabilityResult.hullDistance ?? 0;
+    if (stabilityResult.pass && hullVal > 0.1) {
+      const softPenalty = Math.min(0.4, (hullVal - 0.1) * 2);
+      const preScore = candidateData.ensembleScore ?? 0.5;
+      candidateData.ensembleScore = Math.round(Math.max(0.01, preScore * (1 - softPenalty)) * 10000) / 10000;
+      if (candidateData.dataConfidence === "high") candidateData.dataConfidence = "medium";
+      emit("log", {
+        phase: "engine",
+        event: "Hull deprioritize",
+        detail: `${candidateData.formula}: hull=${hullVal.toFixed(4)} eV/atom > 0.1 eV/atom — deprioritized, score ${preScore.toFixed(3)} → ${candidateData.ensembleScore}`,
         dataSource: "Stability Gate",
       });
     }
@@ -2461,6 +2525,19 @@ async function runPhase10_Physics() {
         totalPhysicsComputed++;
         recordEngineSuccess("physics");
 
+        // Record physics insight before the insulator check so that insulators can still
+        // be corroborated by other engines (defect, synthesis, ML) in the cross-engine hub.
+        try {
+          crossEngineHub.recordInsight("physics", candidate.formula, {
+            lambda: result.coupling.lambda,
+            dosAtFermi: result.electronicStructure.densityOfStatesAtFermi,
+            omegaLog: result.coupling.omegaLog,
+            metallicity: result.electronicStructure.metallicity,
+            correlationStrength: result.correlation?.ratio ?? 0,
+            instabilityFlags: result.instabilityProximity?.nearestBoundary ? [result.instabilityProximity.nearestBoundary] : [],
+          });
+        } catch (hubErr) { console.error(`[Engine] CrossEngineHub physics insight failed for ${candidate.formula}:`, hubErr); }
+
         if (result.electronicStructure.metallicity < 0.1 && result.electronicStructure.bandGap > 0.3) {
           emit("log", {
             phase: "phase-10",
@@ -2474,17 +2551,6 @@ async function runPhase10_Physics() {
           });
           continue;
         }
-
-        try {
-          crossEngineHub.recordInsight("physics", candidate.formula, {
-            lambda: result.coupling.lambda,
-            dosAtFermi: result.electronicStructure.densityOfStatesAtFermi,
-            omegaLog: result.coupling.omegaLog,
-            metallicity: result.electronicStructure.metallicity,
-            correlationStrength: result.correlation?.ratio ?? 0,
-            instabilityFlags: result.instabilityProximity?.nearestBoundary ? [result.instabilityProximity.nearestBoundary] : [],
-          });
-        } catch (hubErr) { console.error(`[Engine] CrossEngineHub physics insight failed for ${candidate.formula}:`, hubErr); }
 
         const rawPhysicsTc = result.eliashberg.predictedTc;
         const physicsTc = (Number.isFinite(rawPhysicsTc) && rawPhysicsTc > 0 && rawPhysicsTc < 1000) ? rawPhysicsTc : 0;
@@ -4764,7 +4830,16 @@ async function processSynthesisCandidate(candidate: any, emit: any): Promise<{
     // too high to be worth a DFT slot.  Stamp synthesisRejected into mlFeatures
     // so that every DFT submission path in later phases can skip this formula.
     try {
-      const gate = evaluateSynthesisGate(candidate.formula);
+      const candidateMlf = (candidate.mlFeatures as Record<string, any>) ?? {};
+      const gate = evaluateSynthesisGate(
+        candidate.formula,
+        null,
+        null,
+        {
+          hullDistanceEv: candidateMlf?.stabilityGate?.hullDistance ?? undefined,
+          requiredPressureGpa: candidate.pressureGpa ?? 0,
+        },
+      );
       const dijkstraFields = {
         ...(gate.graphPathCost !== null && { synthesisGraphPathCost: gate.graphPathCost }),
         ...(gate.dijkstraBottleneck !== null && { synthesisBottleneck: gate.dijkstraBottleneck }),
@@ -6031,7 +6106,7 @@ async function runAutonomousFastPath() {
       } catch (e) { console.error("[Engine] Theory discovery cycle failed:", e); }
     }
 
-    if (cycleCount - lastCausalDiscoveryCycle >= 20 && cycleCount % 20 === 0) {
+    if (cycleCount - lastCausalDiscoveryCycle >= 20 && (cycleCount % 20 === 0 || lastCausalDiscoveryCycle === 0)) {
       try {
         const gtSummary = getGroundTruthSummary();
         const MIN_CAUSAL_DATAPOINTS = 500;
@@ -6076,6 +6151,30 @@ async function runAutonomousFastPath() {
         }
         emit("log", { phase: "engine", event: "Causal discovery cycle", detail: `Causal graph: ${causalResult.graph.edges.length} edges, ${causalResult.hypotheses.length} hypotheses, ${causalResult.rules.length} rules. Dataset: ${causalDataset.length} (GT=${gtSummary.totalDatapoints}). Top guidance: ${causalResult.designGuidance[0]?.variable ?? "none"} (${causalResult.designGuidance[0]?.direction ?? ""})`, dataSource: "Integrated Subsystems" });
       } catch (e) { console.error("[Engine] Causal discovery cycle failed:", e); }
+    }
+
+    // Periodic Pareto frontier recompute — independent of DFT completions so the
+    // frontier stays current even when GCP DFT is unavailable (pw.x missing).
+    if (cycleCount % 25 === 0 && cycleCount > 0) {
+      scheduleParetoRecompute(
+        async () => {
+          const top = await storage.getTopCandidatesMerged(490, 10);
+          return top.map(c => ({
+            formula: c.formula,
+            predictedTc: c.predictedTc,
+            decompositionEnergy: c.decompositionEnergy,
+            mlFeatures: c.mlFeatures as Record<string, any> | null,
+          }));
+        },
+        2_000,
+        async (results) => {
+          for (const r of results) {
+            try {
+              await storage.updateCandidateByFormulaDft(r.formula, {}, { paretoRank: r.rank, paretoFront: r.isFront });
+            } catch { /* non-fatal */ }
+          }
+        },
+      );
     }
 
     {
@@ -6366,7 +6465,11 @@ async function runAutonomousFastPath() {
         break;
       }
       await new Promise<void>(r => setTimeout(r, 0)); // yield once per batch
-      await Promise.allSettled(
+      // Wrap each batch with a 30s hard timeout: Promise.allSettled waits for ALL
+      // promises to settle, but if a Neon DB call hangs indefinitely (connection
+      // never returns), the entire batch waits forever and the 3-min check above
+      // never fires. The race ensures we always escape a stuck batch within 30s.
+      const _batchPromise = Promise.allSettled(
         filteredCandidates.slice(_bi, _bi + SCREENING_BATCH_SIZE).map(async (_f) => {
           if (!markFormulaInFlight(_f)) return;
           try {
@@ -6379,6 +6482,8 @@ async function runAutonomousFastPath() {
           }
         })
       );
+      const _batchTimeout = new Promise<void>(r => setTimeout(r, 30_000));
+      await Promise.race([_batchPromise, _batchTimeout]);
     }
 
     // ── Phase 2: sequential post-processing using pre-computed results ────────────
@@ -8817,9 +8922,16 @@ export async function startEngine() {
   // so both tasks don't simultaneously hit the DB and saturate the Neon pool.
   // The SG sweep has a 2-hour wall-time cap so this wait is bounded.
   setTimeout(async () => {
-    while (isSGSweepActive) {
+    if (isSGSweepActive) {
       console.log("[Engine] background: backfill waiting for SG sweep to finish...");
-      await new Promise(r => setTimeout(r, 30_000));
+      let _backfillWaitLogged = Date.now();
+      while (isSGSweepActive) {
+        await new Promise(r => setTimeout(r, 30_000));
+        if (isSGSweepActive && Date.now() - _backfillWaitLogged >= 600_000) {
+          console.log("[Engine] background: backfill still waiting for SG sweep...");
+          _backfillWaitLogged = Date.now();
+        }
+      }
     }
     console.log("[Engine] background: backfillGBScores + recalculatePhysics starting...");
     backfillGBScores()
@@ -8867,7 +8979,12 @@ export async function startEngine() {
           // Pause while the fast-path screening loop is active — both loops share the
           // 5-connection Neon pool, and running them concurrently causes cascading
           // 20s connection timeouts that freeze the event loop.
+          // Cap the wait at 10 min so a stuck fast-path can't block the SG sweep
+          // indefinitely and prevent the 2-hour wall-time limit from firing.
+          const _fpWaitStart = Date.now();
           while (isFastPathScreeningActive) {
+            if (Date.now() - _fpWaitStart > 10 * 60 * 1000) break;
+            if (Date.now() - sgSweepStart > SG_SWEEP_WALL_LIMIT_MS) break;
             await new Promise(r => setTimeout(r, 500));
           }
           try {
@@ -8911,7 +9028,23 @@ export async function startEngine() {
     console.log("[Engine] startup: getInverseDesignCampaigns done, count=", dbCampaigns.length, Date.now());
     if (dbCampaigns.length > 0) {
       console.log("[Engine] startup: restoreCampaignsFromDB start", Date.now());
-      const restored = await restoreCampaignsFromDB(dbCampaigns as any);
+      // DB rows store target fields as flat columns; reconstruct the nested target object
+      // that restoreCampaignsFromDB / loadCampaign expect.
+      const mappedCampaigns = dbCampaigns.map((c: any) => ({
+        ...c,
+        target: {
+          targetTc: c.targetTc,
+          maxPressure: c.maxPressure ?? 1,
+          minLambda: c.minLambda ?? 1.5,
+          maxHullDistance: c.maxHullDistance ?? 0.05,
+          metallicRequired: c.metallicRequired ?? true,
+          phononStable: c.phononStable ?? true,
+          preferredPrototypes: c.preferredPrototypes ?? [],
+          preferredElements: c.preferredElements ?? [],
+          excludeElements: c.excludeElements ?? [],
+        },
+      }));
+      const restored = await restoreCampaignsFromDB(mappedCampaigns as any);
       console.log("[Engine] startup: restoreCampaignsFromDB done, restored=", restored, Date.now());
       if (restored > 0) {
         emit("log", { phase: "inverse-optimizer", event: "Campaigns restored", detail: `${restored} inverse design campaigns restored from database` });
@@ -8992,6 +9125,58 @@ export async function startEngine() {
         emit("log", { phase: "engine", event: "Bayesian optimizer seeded from DB", detail: `Loaded ${boSeeded} observations. Best Tc=${bayesianOptimizer.getStats().bestTc}K`, dataSource: "Internal" });
       }
     } catch (e) { console.error("[Engine] bg BO seeding error:", e); }
+
+    await yieldLoop();
+
+    // SynthesisPredictor seeding — loads DB candidates with DFT-derived physics data
+    // (electronPhononCoupling set, or verificationStage >= 1) as training examples.
+    // Without this, the predictor is frozen at the 112 hardcoded entries because the
+    // normal seeding path (recordSynthesisResult) only fires on DFT job completions,
+    // which never arrive when GCP pw.x is unavailable.
+    try {
+      const dftCandidates = await storage.getSuperconductorCandidates(2000);
+      const synthEntries = dftCandidates
+        .filter(c => c.electronPhononCoupling != null || (c.verificationStage ?? 0) >= 1)
+        .map(c => ({
+          formula: c.formula,
+          // stabilityScore (0-1) as feasibility proxy; fall back to a moderate 0.6
+          feasible: c.stabilityScore ?? (c.electronPhononCoupling != null ? 0.7 : 0.6),
+          pressureGpa: c.pressureGpa ?? 0,
+          pressureConditioned: (c.pressureGpa ?? 0) >= 1,
+        }));
+      if (synthEntries.length > 0) {
+        seedDFTTrainingEntries(synthEntries);
+        emit("log", { phase: "engine", event: "SynthesisPredictor seeded from DB", detail: `Loaded ${synthEntries.length} DFT-enriched candidates as training examples`, dataSource: "Internal" });
+      }
+    } catch (e) { console.error("[Engine] bg synthesis seeding error:", e); }
+
+    await yieldLoop();
+
+    // Pareto frontier startup trigger — computes ranks from existing DB candidates
+    // immediately, rather than waiting for a DFT job to complete (which may never
+    // happen when GCP pw.x is unavailable).
+    try {
+      scheduleParetoRecompute(
+        async () => {
+          const top = await storage.getTopCandidatesMerged(490, 10);
+          return top.map(c => ({
+            formula: c.formula,
+            predictedTc: c.predictedTc,
+            decompositionEnergy: c.decompositionEnergy,
+            mlFeatures: c.mlFeatures as Record<string, any> | null,
+          }));
+        },
+        5_000, // 5s delay after seeding completes
+        async (results) => {
+          for (const r of results) {
+            try {
+              await storage.updateCandidateByFormulaDft(r.formula, {}, { paretoRank: r.rank, paretoFront: r.isFront });
+            } catch { /* non-fatal */ }
+          }
+          emit("log", { phase: "engine", event: "Pareto frontier computed at startup", detail: `Ranked ${results.length} candidates; rank-1 count: ${results.filter(r => r.rank === 1).length}`, dataSource: "Pareto Optimizer" });
+        },
+      );
+    } catch (e) { console.error("[Engine] bg Pareto startup trigger error:", e); }
 
     await yieldLoop();
 

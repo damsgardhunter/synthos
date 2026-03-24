@@ -3164,7 +3164,7 @@ async function runDFPTEPC(
   };
 }
 
-export async function runFullDFT(formula: string, opts?: { startAttempt?: number; pressureGpa?: number; ensembleScore?: number; forceSpin?: boolean }): Promise<QEFullResult> {
+export async function runFullDFT(formula: string, opts?: { startAttempt?: number; pressureGpa?: number; ensembleScore?: number; forceSpin?: boolean; skipEph?: boolean }): Promise<QEFullResult> {
   const startTime = Date.now();
   const result: QEFullResult = {
     formula,
@@ -3623,13 +3623,15 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     const phononPhysicallyStable = result.phonon
       ? result.phonon.lowestFrequency > -10.0
       : true;
-    if (scfUsable && phononPhysicallyStable && (opts?.ensembleScore ?? 0) > 0.7) {
+    if (scfUsable && phononPhysicallyStable && (opts?.ensembleScore ?? 0) > 0.7 && !opts?.skipEph) {
       console.log(`[QE-Worker] ${formula} qualifies for DFPT EPC (ensembleScore=${opts!.ensembleScore!.toFixed(3)})`);
       try {
         result.dfpt = await runDFPTEPC(formula, elements, counts, jobDir, workerPressure);
       } catch (dfptErr: any) {
         console.log(`[QE-Worker] DFPT EPC failed for ${formula}: ${(dfptErr.message ?? "").slice(-200)}`);
       }
+    } else if (opts?.skipEph) {
+      console.log(`[QE-Worker] ${formula} DFPT EPC skipped — Stoner ferromagnet flag set`);
     }
   } catch (err: any) {
     result.error = err.message;

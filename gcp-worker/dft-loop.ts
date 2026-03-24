@@ -70,12 +70,18 @@ async function claimAndRunJob(): Promise<boolean> {
         ? inputData.pressureGpa
         : undefined;
 
-    // Look up ensembleScore so the worker can decide whether to run full DFPT EPC.
+    // Look up ensembleScore and Stoner flag so the worker can decide whether to run DFPT EPC.
     let ensembleScore: number | undefined;
+    let skipEph = false;
     try {
       const candidates = await storage.getSuperconductorsByFormula(formula);
       const best = candidates.reduce((b, c) => Math.max(b, c.ensembleScore ?? 0), 0);
       if (best > 0) ensembleScore = best;
+      // Stoner ferromagnet flag stored in mlFeatures by pre-screening
+      if (candidates.some(c => (c.mlFeatures as any)?.skipEph === true)) {
+        skipEph = true;
+        console.log(`[DFT-GCP] ${formula} flagged as Stoner ferromagnet — skipping DFPT e-ph`);
+      }
     } catch { /* non-fatal */ }
 
     const dftResult = await runFullDFT(formula, {
@@ -83,6 +89,7 @@ async function claimAndRunJob(): Promise<boolean> {
       pressureGpa: jobPressureGpa,
       ensembleScore,
       forceSpin: isTSCJob,
+      skipEph,
     });
 
     const scfSuccess = dftResult.scf?.converged || false;
