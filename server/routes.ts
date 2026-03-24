@@ -7,7 +7,7 @@ import { getSignalDefinitions } from "./learning/material-signal-scanner";
 import { enumeratePrototypesForFormula } from "./learning/crystal-prototypes";
 import { isDFTAvailable, getDFTMethodInfo, getXTBStats, runLandscapeExploration, getLandscapeStats as getEnergyLandscapeStats } from "./dft/qe-dft-engine";
 import { generateDopedVariants, generateDopedVariantsWithRelaxation, getDopingEngineStats, getDopingRecommendations, runDopingBatch, detectSCSignals, runDopingSearchLoop, analyzeHessianPhonons, detectAnharmonicVibrations, runMDSampling, computeDebyeTemp, computeDynamicLatticeScore } from "./learning/doping-engine";
-import { getDFTQueueStats, startDFTWorkerLoop, submitDFTJob } from "./dft/dft-job-queue";
+import { getDFTQueueStats, startDFTWorkerLoop, submitDFTJob, promoteDFTJob } from "./dft/dft-job-queue";
 import {
   createPipeline as createNextGenPipeline,
   runPipelineIteration as runNextGenIteration,
@@ -622,6 +622,49 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json(stats);
     } catch (e) {
       res.status(500).json({ error: "Failed to fetch DFT queue stats" });
+    }
+  });
+
+  // Force-queue or promote specific formulas to the front of the DFT queue.
+  // Body: { formulas: string | string[], priority?: number (default 99) }
+  // skipStabilityGate=true so manually targeted candidates are never blocked.
+  app.post("/api/dft-queue/promote", async (req, res) => {
+    try {
+      const raw = req.body?.formulas;
+      const formulas: string[] = Array.isArray(raw) ? raw : typeof raw === "string" ? [raw] : [];
+      if (formulas.length === 0) {
+        res.status(400).json({ error: "formulas required (string or string[])" });
+        return;
+      }
+      const priority: number = Math.min(99, Math.max(1, Number(req.body?.priority ?? 99)));
+      const queued: string[] = [];
+      const promoted: string[] = [];
+      const failed: string[] = [];
+
+      for (const formula of formulas) {
+        try {
+          // Try to promote if already queued
+          const wasPromoted = await promoteDFTJob(formula, priority);
+          if (wasPromoted) {
+            promoted.push(formula);
+          } else {
+            // Not queued yet — submit fresh, bypassing stability gate
+            const job = await submitDFTJob(formula, null, priority, "scf", true);
+            if (job) {
+              queued.push(formula);
+            } else {
+              failed.push(formula);
+            }
+          }
+        } catch {
+          failed.push(formula);
+        }
+      }
+
+      console.log(`[DFT-Queue] Manual promote: queued=[${queued}] promoted=[${promoted}] failed=[${failed}] priority=${priority}`);
+      res.json({ queued, promoted, failed, priority });
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message ?? "Failed to promote DFT jobs" });
     }
   });
 

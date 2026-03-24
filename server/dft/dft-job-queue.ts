@@ -623,7 +623,18 @@ async function refillQueueIfLow(): Promise<number> {
       }
     }
 
-    exploitPool.sort((a, b) => (b.ensembleScore ?? 0) - (a.ensembleScore ?? 0));
+    // Exploit pool: sort by Tc-weighted score (70% predictedTc, 30% ensembleScore).
+    // predictedTc is the direct signal from GNN/XGB/physics; ensembleScore can be
+    // inflated for structurally exotic compounds that score well on novelty.
+    // Cap normalisation at 300 K so hydride Tc values don't dominate unfairly.
+    const TC_NORM_SCALE = 300;
+    exploitPool.sort((a, b) => {
+      const aTc = Math.min(1.0, (a.predictedTc ?? 0) / TC_NORM_SCALE);
+      const bTc = Math.min(1.0, (b.predictedTc ?? 0) / TC_NORM_SCALE);
+      const aScore = 0.7 * aTc + 0.3 * (a.ensembleScore ?? 0);
+      const bScore = 0.7 * bTc + 0.3 * (b.ensembleScore ?? 0);
+      return bScore - aScore;
+    });
     explorePool.sort((a, b) => {
       const aAcq = (a.uncertaintyEstimate ?? 0) * 0.6 + (a.discoveryScore ?? 0) * 0.4;
       const bAcq = (b.uncertaintyEstimate ?? 0) * 0.6 + (b.discoveryScore ?? 0) * 0.4;
@@ -653,7 +664,12 @@ async function refillQueueIfLow(): Promise<number> {
 
         const acquisitionPriority = source === "explore"
           ? Math.round(((candidate.uncertaintyEstimate ?? 0) * 0.6 + (candidate.discoveryScore ?? 0) * 0.4) * 100)
-          : Math.round((candidate.ensembleScore ?? 0) * 100);
+          // Exploit: 70% predictedTc (normalised to 300 K) + 30% ensembleScore.
+          // Cap at 90 so manually promoted candidates (91–99) always win.
+          : Math.min(90, Math.round(
+              (0.7 * Math.min(1.0, (candidate.predictedTc ?? 0) / TC_NORM_SCALE) +
+               0.3 * (candidate.ensembleScore ?? 0)) * 100
+            ));
 
         const numericCandidateId = typeof candidate.id === "string" && /^\d+$/.test(candidate.id)
           ? parseInt(candidate.id, 10)
