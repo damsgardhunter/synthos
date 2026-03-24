@@ -641,11 +641,21 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
+  // Count caches — COUNT(*) on every request is expensive under pool pressure.
+  // Totals are informational; 60s staleness is acceptable.
+  const COUNT_CACHE_TTL = 60_000;
+  let _synthesisCountCache = { value: 0, at: 0 };
+  let _reactionCountCache  = { value: 0, at: 0 };
+
   app.get("/api/synthesis-processes", async (req, res) => {
     try {
       const limit = Math.min(Number(req.query.limit) || 200, 1000);
       const processes = await storage.getSynthesisProcesses(limit);
-      const total = await storage.getSynthesisCount();
+      let total = _synthesisCountCache.value;
+      if (Date.now() - _synthesisCountCache.at > COUNT_CACHE_TTL) {
+        storage.getSynthesisCount().then(v => { _synthesisCountCache = { value: v, at: Date.now() }; }).catch(() => {});
+        total = total || processes.length;
+      }
       res.json({ processes, total });
     } catch (e) {
       res.status(500).json({ error: "Failed to fetch synthesis processes" });
@@ -656,7 +666,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     try {
       const limit = Math.min(Number(req.query.limit) || 200, 1000);
       const reactions = await storage.getChemicalReactions(limit);
-      const total = await storage.getReactionCount();
+      let total = _reactionCountCache.value;
+      if (Date.now() - _reactionCountCache.at > COUNT_CACHE_TTL) {
+        storage.getReactionCount().then(v => { _reactionCountCache = { value: v, at: Date.now() }; }).catch(() => {});
+        total = total || reactions.length;
+      }
       res.json({ reactions, total });
     } catch (e) {
       res.status(500).json({ error: "Failed to fetch chemical reactions" });

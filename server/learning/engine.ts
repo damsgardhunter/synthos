@@ -944,6 +944,33 @@ let _logWriteBackoffUntil = 0;
 const LOG_WRITE_FAIL_THRESHOLD = 5;   // open circuit after N consecutive failures
 const LOG_WRITE_BACKOFF_MS = 30_000;  // stay open for 30 s
 
+// Write buffer — accumulates log entries and flushes as a single batched INSERT
+// every LOG_FLUSH_INTERVAL_MS, or immediately when the batch hits LOG_FLUSH_BATCH_SIZE.
+// This prevents one DB round-trip per emit() call from exhausting the connection pool.
+const _logWriteBuffer: Parameters<typeof storage.bulkInsertResearchLogs>[0] = [];
+const LOG_FLUSH_INTERVAL_MS = 2_000;
+const LOG_FLUSH_BATCH_SIZE  = 30;
+
+async function _flushLogBuffer(): Promise<void> {
+  if (_logWriteBuffer.length === 0) return;
+  if (Date.now() < _logWriteBackoffUntil) { _logWriteBuffer.length = 0; return; }
+  const batch = _logWriteBuffer.splice(0);
+  try {
+    await storage.bulkInsertResearchLogs(batch);
+    _logWriteFailures = 0;
+  } catch (e: any) {
+    _logWriteFailures++;
+    if (_logWriteFailures >= LOG_WRITE_FAIL_THRESHOLD) {
+      _logWriteBackoffUntil = Date.now() + LOG_WRITE_BACKOFF_MS;
+      console.error(`[Engine] Research log circuit open for ${LOG_WRITE_BACKOFF_MS / 1000}s after ${_logWriteFailures} failures`);
+      _logWriteFailures = 0;
+    } else {
+      console.error(`[Engine] Research log write failed: ${e?.message?.slice(0, 120) ?? "unknown"}`);
+    }
+  }
+}
+setInterval(() => { _flushLogBuffer().catch(() => {}); }, LOG_FLUSH_INTERVAL_MS);
+
 const DEDUP_EVENT_PATTERNS = [
   "started", "discovery started", "fetch started", "import started",
   "analysis started", "Prediction patterns discovered",
@@ -972,26 +999,16 @@ const emit: EventEmitter = (type: string, data: any) => {
 
   if (type === "log" && data.event && data.phase) {
     const now = Date.now();
-    if (now < _logWriteBackoffUntil) {
-      // Circuit open — skip write silently to avoid pool saturation
-    } else {
-      storage.insertResearchLog({
+    if (now >= _logWriteBackoffUntil) {
+      _logWriteBuffer.push({
         phase: data.phase,
         event: data.event,
         detail: data.detail || null,
         dataSource: data.dataSource || null,
-      }).then(() => {
-        _logWriteFailures = 0; // reset on success
-      }).catch((e: any) => {
-        _logWriteFailures++;
-        if (_logWriteFailures >= LOG_WRITE_FAIL_THRESHOLD) {
-          _logWriteBackoffUntil = Date.now() + LOG_WRITE_BACKOFF_MS;
-          console.error(`[Engine] Research log circuit open for ${LOG_WRITE_BACKOFF_MS / 1000}s after ${_logWriteFailures} failures`);
-          _logWriteFailures = 0;
-        } else {
-          console.error(`[Engine] Research log write failed: ${e?.message?.slice(0, 120) ?? "unknown"}`);
-        }
       });
+      if (_logWriteBuffer.length >= LOG_FLUSH_BATCH_SIZE) {
+        _flushLogBuffer().catch(() => {});
+      }
     }
     if (data.event === "Novel insight discovered") {
       const detail = data.detail || "";

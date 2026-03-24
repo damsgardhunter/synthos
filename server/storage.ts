@@ -253,6 +253,11 @@ export class DatabaseStorage implements IStorage {
     return l;
   }
 
+  async bulkInsertResearchLogs(logs: InsertResearchLog[]): Promise<void> {
+    if (logs.length === 0) return;
+    await db.insert(researchLogs).values(logs);
+  }
+
   async getSynthesisProcesses(limit = 50): Promise<SynthesisProcess[]> {
     return db.select().from(synthesisProcesses).orderBy(desc(synthesisProcesses.discoveredAt)).limit(limit);
   }
