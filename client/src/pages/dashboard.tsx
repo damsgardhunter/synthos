@@ -2105,7 +2105,15 @@ export default function Dashboard() {
       }
       doInvalidate();
     }
-  }, [ws.messages.length]);
+
+    return () => {
+      if (startupInvalidateTimerRef.current) {
+        clearTimeout(startupInvalidateTimerRef.current);
+        startupInvalidateTimerRef.current = null;
+        startupInvalidatePendingRef.current = false;
+      }
+    };
+  }, [ws.messageCount]);
 
   const radarData = phases?.map(p => ({
     subject: p.name.split(" ").slice(0, 2).join(" "),

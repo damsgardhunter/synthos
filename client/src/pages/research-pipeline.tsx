@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "wouter";
 import { queryClient } from "@/lib/queryClient";
 import { useStartupSafeInterval } from "@/hooks/use-startup-interval";
@@ -886,11 +886,14 @@ export default function ResearchPipeline() {
     }
   }, [ws.messageCount]);
 
-  const logsByPhase: Record<string, ResearchLog[]> = {};
-  logs?.forEach(log => {
-    if (!logsByPhase[log.phase]) logsByPhase[log.phase] = [];
-    logsByPhase[log.phase].push(log);
-  });
+  const logsByPhase = useMemo(() => {
+    const grouped: Record<string, ResearchLog[]> = {};
+    logs?.forEach(log => {
+      if (!grouped[log.phase]) grouped[log.phase] = [];
+      grouped[log.phase].push(log);
+    });
+    return grouped;
+  }, [logs]);
 
   const sourceColors: Record<string, string> = {
     "NIST": "bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300",

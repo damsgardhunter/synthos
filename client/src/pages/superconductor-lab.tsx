@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueries } from "@tanstack/react-query";
 import { useEffect, useMemo } from "react";
 import { queryClient } from "@/lib/queryClient";
 import { useStartupSafeInterval } from "@/hooks/use-startup-interval";
@@ -14,8 +14,19 @@ import { Link } from "wouter";
 import {
   Zap, Thermometer, Shield, Atom, FlaskConical, Beaker, Target,
   CheckCircle2, XCircle, ArrowRight, Gauge, Magnet, ExternalLink,
-  Microscope, Layers, Star, Hexagon,
+  Microscope, Layers, Star, Hexagon, AlertTriangle,
 } from "lucide-react";
+
+interface UnifiedCIData {
+  tcMean: number;
+  tcCI95: [number, number];
+  tcTotalStd: number;
+  gnn: { weight: number; tcMean: number; totalStd: number };
+  xgb: { weight: number; tcMean: number; totalStd: number };
+  calibrationNote?: string;
+  isOOD: boolean;
+  physicsUQ?: { tcMean: number; tcStd: number };
+}
 
 interface CalibrationResponse {
   r2: number;
@@ -74,14 +85,16 @@ const DIFFICULTY_COLORS: Record<string, string> = {
   "extreme": "bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300",
 };
 
-function ConfidenceBadge({ level }: { level?: string | null }) {
+function ConfidenceBadge({ level, verificationStage }: { level?: string | null; verificationStage?: number | null }) {
   if (!level) return null;
   const styles: Record<string, string> = {
     high: "bg-green-100 text-green-700 dark:bg-green-950 dark:text-green-400",
     medium: "bg-yellow-100 text-yellow-700 dark:bg-yellow-950 dark:text-yellow-400",
     low: "bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-400",
   };
-  const labels: Record<string, string> = { high: "DFT", medium: "Model", low: "Est." };
+  // Only show "DFT" if DFT has actually been run (stage >= 2). At stage 0/1, this is a physics engine estimate.
+  const dftLabel = (verificationStage != null && verificationStage >= 2) ? "DFT" : "Physics Est.";
+  const labels: Record<string, string> = { high: dftLabel, medium: "Model", low: "Est." };
   return (
     <span data-testid={`confidence-badge-${level}`} className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium ${styles[level] ?? styles.low}`}>
       {labels[level] ?? level}
@@ -158,11 +171,13 @@ function DiscoveryScoreIndicator({ score }: { score: number | null | undefined }
   );
 }
 
-function CandidateCard({ candidate, p90 }: { candidate: SuperconductorCandidate; p90?: number }) {
+function CandidateCard({ candidate, p90, consensusCi }: { candidate: SuperconductorCandidate; p90?: number; consensusCi?: UnifiedCIData }) {
   const statusColor = STATUS_COLORS[candidate.status] ?? STATUS_COLORS["theoretical"];
-  const tcColor = (candidate.predictedTc ?? 0) >= 293 ? "text-green-600 dark:text-green-400" : "text-foreground";
+  const displayTc = consensusCi?.tcMean ?? candidate.predictedTc ?? null;
+  const tcColor = (displayTc ?? 0) >= 293 ? "text-green-600 dark:text-green-400" : "text-foreground";
   const prototype = extractPrototype(candidate);
   const spaceGroup = extractSpaceGroup(candidate);
+  const hasPressure = (candidate.pressureGpa ?? 0) > 0;
 
   return (
     <Card data-testid={`sc-candidate-${candidate.id}`} className="flex flex-col">
@@ -198,39 +213,97 @@ function CandidateCard({ candidate, p90 }: { candidate: SuperconductorCandidate;
         </div>
       </CardHeader>
       <CardContent className="flex-1 space-y-3">
-        <div className="grid grid-cols-2 gap-3">
+        <div className="space-y-2">
+          {/* Consensus Tc */}
           <div className="p-2.5 bg-muted/50 rounded-md">
-            <div className="flex items-center gap-1.5 mb-0.5">
-              <Thermometer className="h-3 w-3 text-muted-foreground" />
-              <span className="text-xs text-muted-foreground">Predicted Tc</span>
+            <div className="flex items-center justify-between mb-0.5">
+              <div className="flex items-center gap-1.5">
+                <Thermometer className="h-3 w-3 text-muted-foreground" />
+                <span className="text-xs text-muted-foreground">
+                  {consensusCi ? "Consensus Tc" : "Physics Engine Tc"}
+                </span>
+              </div>
+              <div className="flex items-center gap-1">
+                {consensusCi?.isOOD && (
+                  <AlertTriangle className="h-3 w-3 text-amber-500" title="Out-of-distribution" />
+                )}
+                <ConfidenceBadge level={candidate.dataConfidence} verificationStage={candidate.verificationStage} />
+              </div>
             </div>
-            <div className="flex items-center gap-1.5">
-              <p className={`text-lg font-mono font-bold ${tcColor}`}>
-                {candidate.predictedTc ? `${candidate.predictedTc}K` : "N/A"}
-              </p>
-              <ConfidenceBadge level={candidate.dataConfidence} />
-            </div>
-            {candidate.predictedTc != null && p90 != null && (
-              <TcErrorBar predictedTc={candidate.predictedTc} p90={p90} />
+            <p className={`text-lg font-mono font-bold ${tcColor}`}>
+              {displayTc != null ? `${consensusCi ? displayTc.toFixed(1) : displayTc}K` : "N/A"}
+            </p>
+            {consensusCi ? (
+              <div className="mt-1 space-y-0.5">
+                <div className="flex items-center gap-1">
+                  <span className="text-[10px] text-muted-foreground font-mono">{consensusCi.tcCI95[0].toFixed(1)}K</span>
+                  <div className="flex-1 h-1.5 bg-muted rounded-full overflow-hidden relative min-w-[40px]">
+                    <div
+                      className="absolute inset-y-0 bg-primary/30 rounded-full"
+                      style={{
+                        left: `${Math.min(98, (consensusCi.tcCI95[0] / Math.max(consensusCi.tcCI95[1] * 1.05, 1)) * 100)}%`,
+                        right: `${Math.max(0, 100 - (consensusCi.tcCI95[1] / Math.max(consensusCi.tcCI95[1] * 1.05, 1)) * 100)}%`,
+                      }}
+                    />
+                    <div
+                      className="absolute inset-y-0 w-0.5 bg-primary"
+                      style={{ left: `${Math.min(98, (consensusCi.tcMean / Math.max(consensusCi.tcCI95[1] * 1.05, 1)) * 100)}%` }}
+                    />
+                  </div>
+                  <span className="text-[10px] text-muted-foreground font-mono">{consensusCi.tcCI95[1].toFixed(1)}K</span>
+                </div>
+                <div className="flex gap-2 text-[10px] text-muted-foreground">
+                  <span>GNN {Math.round(consensusCi.gnn.weight * 100)}%</span>
+                  <span>·</span>
+                  <span>XGB {Math.round(consensusCi.xgb.weight * 100)}%</span>
+                </div>
+              </div>
+            ) : (
+              candidate.predictedTc != null && p90 != null && (
+                <TcErrorBar predictedTc={candidate.predictedTc} p90={p90} />
+              )
             )}
           </div>
+
+          {/* Pressure row */}
           <div className="p-2.5 bg-muted/50 rounded-md">
             <div className="flex items-center gap-1.5 mb-0.5">
               <Gauge className="h-3 w-3 text-muted-foreground" />
               <span className="text-xs text-muted-foreground">Pressure</span>
             </div>
-            <p className="text-lg font-mono font-bold">
+            <p className="text-base font-mono font-bold">
               {candidate.pressureGpa != null
                 ? (candidate.pressureGpa <= 0 ? "Ambient" : `${candidate.pressureGpa} GPa`)
                 : "Not specified"}
             </p>
           </div>
+
+          {/* Physics engine Tc at pressure — only when pressure-dependent */}
+          {hasPressure && candidate.predictedTc != null && (
+            <div className="p-2.5 bg-indigo-50/60 dark:bg-indigo-950/20 rounded-md border border-indigo-200/50 dark:border-indigo-800/30">
+              <div className="flex items-center gap-1.5 mb-0.5">
+                <Zap className="h-3 w-3 text-indigo-500" />
+                <span className="text-xs text-indigo-600 dark:text-indigo-400">
+                  Physics Engine Tc @ {candidate.pressureGpa} GPa
+                </span>
+              </div>
+              <p className={`text-lg font-mono font-bold ${candidate.predictedTc >= 293 ? "text-green-600 dark:text-green-400" : "text-indigo-600 dark:text-indigo-400"}`}>
+                {candidate.predictedTc}K
+              </p>
+              {(candidate.verificationStage == null || candidate.verificationStage < 2) && (
+                <p className="text-[10px] text-amber-600 dark:text-amber-400 mt-0.5">physics-engine-only CI — not ML-validated</p>
+              )}
+              {p90 != null && (
+                <TcErrorBar predictedTc={candidate.predictedTc} p90={p90} />
+              )}
+            </div>
+          )}
         </div>
 
         <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 p-2.5 bg-muted/30 rounded-md">
           <BoolIndicator value={candidate.meissnerEffect ?? false} label="Meissner Effect" />
           <BoolIndicator value={candidate.zeroResistance ?? false} label="Zero Resistance" />
-          <BoolIndicator value={candidate.roomTempViable ?? false} label="Room Temp Viable" />
+          <BoolIndicator value={(displayTc ?? 0) >= 293 && (candidate.pressureGpa == null || candidate.pressureGpa <= 1)} label="Room Temp Viable" />
           <BoolIndicator value={(candidate.quantumCoherence ?? 0) > 0.5} label="Quantum Coherent" />
         </div>
 
@@ -273,6 +346,7 @@ function CandidateCard({ candidate, p90 }: { candidate: SuperconductorCandidate;
         )}
 
         <div className="space-y-1.5">
+          <p className="text-[10px] text-muted-foreground">Tc quality scores (not Kelvin)</p>
           <ScoreBar label="XGBoost" score={candidate.xgboostScore} color="bg-blue-500" />
           <ScoreBar label="Neural Net" score={candidate.neuralNetScore} color="bg-purple-500" />
           <ScoreBar label="Ensemble" score={candidate.ensembleScore} color="bg-primary" />
@@ -574,20 +648,48 @@ export default function SuperconductorLab() {
   const ws = useWebSocket();
 
   useEffect(() => {
-    const relevantTypes = ["phaseUpdate", "progress", "prediction", "insight", "cycleEnd", "log"];
-    const hasRelevant = ws.messages.some((m) => relevantTypes.includes(m.type));
-    if (hasRelevant) {
+    const last = ws.messages[ws.messages.length - 1];
+    if (!last) return;
+    const relevantTypes = new Set(["phaseUpdate", "progress", "prediction", "insight", "cycleEnd", "log"]);
+    if (relevantTypes.has(last.type)) {
       queryClient.invalidateQueries({ queryKey: ["/api/superconductor-candidates"] });
       queryClient.invalidateQueries({ queryKey: ["/api/synthesis-processes"] });
       queryClient.invalidateQueries({ queryKey: ["/api/chemical-reactions"] });
     }
-  }, [ws.messages.length]);
+  }, [ws.messageCount]);
 
   const candidates = scData?.candidates ?? [];
   const processes = synthData?.processes ?? [];
   const reactions = rxnData?.reactions ?? [];
 
-  const roomTempCandidates = candidates.filter(c => c.roomTempViable);
+  // Batch-fetch consensus Tc for all candidates
+  const consensusResults = useQueries({
+    queries: candidates.map(c => ({
+      queryKey: ["/api/unified-ci", c.formula],
+      enabled: !!c.formula,
+      staleTime: 5 * 60 * 1000,
+    })),
+  });
+
+  const consensusMap = useMemo(() => {
+    const map: Record<string, UnifiedCIData> = {};
+    candidates.forEach((c, i) => {
+      const d = consensusResults[i]?.data as UnifiedCIData | undefined;
+      if (d) map[c.formula] = d;
+    });
+    return map;
+  }, [candidates, consensusResults]);
+
+  // Sort all candidates by consensus tcMean (desc), falling back to predictedTc
+  const sortedCandidates = useMemo(() =>
+    [...candidates].sort((a, b) => {
+      const tcA = consensusMap[a.formula]?.tcMean ?? a.predictedTc ?? 0;
+      const tcB = consensusMap[b.formula]?.tcMean ?? b.predictedTc ?? 0;
+      return tcB - tcA;
+    }),
+  [candidates, consensusMap]);
+
+  const roomTempCandidates = sortedCandidates.filter(c => c.roomTempViable);
   const meissnerCandidates = candidates.filter(c => c.meissnerEffect);
   const highScoreCandidates = candidates.filter(c => (c.ensembleScore ?? 0) > 0.6);
 
@@ -709,7 +811,7 @@ export default function SuperconductorLab() {
                 </Badge>
               </div>
               <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-                {roomTempCandidates.map(c => <CandidateCard key={c.id} candidate={c} p90={p90} />)}
+                {roomTempCandidates.map(c => <CandidateCard key={c.id} candidate={c} p90={p90} consensusCi={consensusMap[c.formula]} />)}
               </div>
             </div>
           )}
@@ -718,15 +820,16 @@ export default function SuperconductorLab() {
             <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
               {[...Array(6)].map((_, i) => <Skeleton key={i} className="h-72" />)}
             </div>
-          ) : candidates.length > 0 ? (
+          ) : sortedCandidates.length > 0 ? (
             <div className="space-y-2">
               <div className="flex items-center gap-2">
                 <Atom className="h-4 w-4 text-primary" />
                 <h2 className="text-base font-semibold">All Candidates</h2>
-                <Badge variant="secondary">{candidates.length}</Badge>
+                <Badge variant="secondary">{sortedCandidates.length}</Badge>
+                <span className="text-[10px] text-muted-foreground ml-1">ranked by consensus Tc</span>
               </div>
               <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-                {candidates.map(c => <CandidateCard key={c.id} candidate={c} p90={p90} />)}
+                {sortedCandidates.map(c => <CandidateCard key={c.id} candidate={c} p90={p90} consensusCi={consensusMap[c.formula]} />)}
               </div>
             </div>
           ) : (

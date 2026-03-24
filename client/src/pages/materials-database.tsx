@@ -75,12 +75,13 @@ export default function MaterialsDatabase() {
   const ws = useWebSocket();
 
   useEffect(() => {
-    const relevantTypes = ["phaseUpdate", "progress", "prediction", "insight", "cycleEnd", "log"];
-    const hasRelevant = ws.messages.some((m) => relevantTypes.includes(m.type));
-    if (hasRelevant) {
+    const last = ws.messages[ws.messages.length - 1];
+    if (!last) return;
+    const relevantTypes = new Set(["phaseUpdate", "progress", "prediction", "insight", "cycleEnd", "log"]);
+    if (relevantTypes.has(last.type)) {
       queryClient.invalidateQueries({ queryKey: ["/api/materials"] });
     }
-  }, [ws.messages.length]);
+  }, [ws.messageCount]);
 
   const materials = data?.materials ?? [];
 

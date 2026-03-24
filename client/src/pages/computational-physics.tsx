@@ -1485,9 +1485,10 @@ export default function ComputationalPhysics() {
   const ws = useWebSocket();
 
   useEffect(() => {
-    const relevantTypes = ["phaseUpdate", "progress", "prediction", "insight", "cycleEnd", "log"];
-    const hasRelevant = ws.messages.some((m) => relevantTypes.includes(m.type));
-    if (hasRelevant) {
+    const last = ws.messages[ws.messages.length - 1];
+    if (!last) return;
+    const relevantTypes = new Set(["phaseUpdate", "progress", "prediction", "insight", "cycleEnd", "log"]);
+    if (relevantTypes.has(last.type)) {
       queryClient.invalidateQueries({ queryKey: ["/api/superconductor-candidates"] });
       queryClient.invalidateQueries({ queryKey: ["/api/pipeline-stats"] });
       queryClient.invalidateQueries({ queryKey: ["/api/computational-results/failed"] });
@@ -1495,7 +1496,7 @@ export default function ComputationalPhysics() {
       queryClient.invalidateQueries({ queryKey: ["/api/synthesis-variables/stats"] });
       queryClient.invalidateQueries({ queryKey: ["/api/synthesis-simulator/stats"] });
     }
-  }, [ws.messages.length]);
+  }, [ws.messageCount]);
 
   const candidates = scData?.candidates ?? [];
   const physicsAnalyzed = candidates.filter(c => c.electronPhononCoupling != null || c.verificationStage != null && c.verificationStage > 0);

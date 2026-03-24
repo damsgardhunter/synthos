@@ -118,12 +118,13 @@ export default function NovelDiscovery() {
   const ws = useWebSocket();
 
   useEffect(() => {
-    const relevantTypes = ["phaseUpdate", "progress", "prediction", "cycleEnd", "log"];
-    const hasRelevant = ws.messages.some((m) => relevantTypes.includes(m.type));
-    if (hasRelevant) {
+    const last = ws.messages[ws.messages.length - 1];
+    if (!last) return;
+    const relevantTypes = new Set(["phaseUpdate", "progress", "prediction", "cycleEnd", "log"]);
+    if (relevantTypes.has(last.type)) {
       queryClient.invalidateQueries({ queryKey: ["/api/novel-predictions"] });
     }
-  }, [ws.messages.length]);
+  }, [ws.messageCount]);
 
   const literatureReported = predictions?.filter(p => p.status === "literature-reported" || p.status === "synthesized") ?? [];
   const underReview = predictions?.filter(p => p.status === "under_review") ?? [];
