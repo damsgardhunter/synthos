@@ -4282,7 +4282,11 @@ const GNN_PRED_CACHE_MAX = 500;
 const gnnPredictionCache = new Map<string, { prediction: GNNPrediction; trainedAt: number }>();
 
 // ── PyTorch GNN service (GCP) ───────────────────────────────────────────────
-const PYTORCH_SERVICE_URL = process.env.GNN_PYTORCH_SERVICE_URL ?? "";
+// PyTorch GNN inference disabled — system relies on Colab XGBoost weights only.
+// The same env var (GNN_PYTORCH_SERVICE_URL) is still used by gradient-boost.ts
+// for the XGBoost /predict-xgb endpoint, so it cannot be unset globally.
+// Restore PyTorch GNN by changing "" back to: process.env.GNN_PYTORCH_SERVICE_URL ?? ""
+const PYTORCH_SERVICE_URL = "";
 const _pytorchCache = new Map<string, { result: GNNPredictionWithUncertainty; fetchedAt: number }>();
 const PYTORCH_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
