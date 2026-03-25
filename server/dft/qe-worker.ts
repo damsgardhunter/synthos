@@ -355,12 +355,14 @@ function detectPPType(element: string): "paw" | "uspp" | "nc" {
 }
 
 function ecutrhoMultiplier(elements: string[]): number {
-  let allNC = true;
+  // USPP requires 8x cutoff due to augmentation charges.
+  // PAW and NC only need 4x — using 8x for PAW causes FFT grid memory overflow
+  // for large hydrides like LaH10 (ecutrho = 100 * 8 = 800 Ry → OOM → code 6 crash).
   for (const el of elements) {
     const ppType = detectPPType(el);
-    if (ppType !== "nc") { allNC = false; break; }
+    if (ppType === "uspp") return 8;
   }
-  return allNC ? 4 : 8;
+  return 4;
 }
 
 function getAtomicMass(el: string): number {
@@ -1480,6 +1482,10 @@ function generateSCFInput(
   const ELEMENT_CUTOFFS: Record<string, number> = {
     H: 100, O: 70, F: 80, N: 60, Cl: 60, S: 55, P: 55, Se: 50, Br: 50,
     Li: 60, Be: 60, B: 55, C: 60, Na: 60, Mg: 55, Al: 50, Si: 50,
+    // Lanthanides and group-3: PAW pseudopotentials, recommended ~55 Ry wavefunction cutoff
+    La: 55, Ce: 55, Pr: 55, Nd: 55, Sm: 55, Eu: 55, Gd: 55, Tb: 55,
+    Dy: 55, Ho: 55, Er: 55, Tm: 55, Yb: 55, Lu: 55, Sc: 50, Y: 50,
+    Th: 55,
   };
   const hasHydrogen = elements.includes("H");
   const baseEcutwfc = elements.reduce((max, el) => Math.max(max, ELEMENT_CUTOFFS[el] ?? 45), hasHydrogen ? 80 : 45);
@@ -2403,11 +2409,15 @@ function validateFormulaForDFT(formula: string, counts: Record<string, number>):
 
   const ALKALINE_EARTH_SYMBOLS = new Set(["Ca", "Sr", "Ba", "Mg"]);
   const KNOWN_SUPERHYDRIDE_PRESSURES: Record<string, number> = {
-    LaH10: 150, LaH9: 120, LaH11: 200,
-    YH6: 160, YH9: 200,
+    LaH10: 150, LaH9: 120, LaH11: 200, LaH12: 175,
+    YH6: 160, YH9: 200, YH10: 200,
     CeH9: 150, CeH10: 170,
     ThH10: 175, CaH6: 200,
     ScH9: 130, BaH12: 150, LaBeH8: 100,
+    // Ternary superhydrides — pressure estimated from constituent binary analogues
+    Li2LaH12: 175, LaH11Li2: 175, LaLiH12: 175,
+    YH9Na2: 200, NaYH9: 200, Na2YH9: 200,
+    Li2CeH12: 170, Li2YH12: 175,
   };
   const hCount = counts["H"] || 0;
   if (hCount > 0 && totalAtoms > 2) {
@@ -2611,6 +2621,9 @@ function generateSCFInputWithParams(
   const ELEMENT_CUTOFFS2: Record<string, number> = {
     H: 100, O: 70, F: 80, N: 60, Cl: 60, S: 55, P: 55, Se: 50, Br: 50,
     Li: 60, Be: 60, B: 55, C: 60, Na: 60, Mg: 55, Al: 50, Si: 50,
+    La: 55, Ce: 55, Pr: 55, Nd: 55, Sm: 55, Eu: 55, Gd: 55, Tb: 55,
+    Dy: 55, Ho: 55, Er: 55, Tm: 55, Yb: 55, Lu: 55, Sc: 50, Y: 50,
+    Th: 55,
   };
   const hasHydrogen2 = elements.includes("H");
   const rawEcutwfc = elements.reduce((max, el) => Math.max(max, ELEMENT_CUTOFFS2[el] ?? 45), hasHydrogen2 ? 80 : 45);
