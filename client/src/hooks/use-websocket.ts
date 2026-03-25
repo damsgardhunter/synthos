@@ -76,7 +76,8 @@ function connectWS() {
     // Seed the activity feed with recent log history so it's not empty on connect/reconnect
     fetch("/api/research-logs?limit=20")
       .then((r) => r.json())
-      .then((logs: any[]) => {
+      .then((data: { logs: any[] }) => {
+        const logs = data?.logs ?? [];
         if (!Array.isArray(logs) || logs.length === 0) return;
         // Convert DB log format to WSMessage format, oldest first
         const historical: WSMessage[] = logs.reverse().map((log) => ({

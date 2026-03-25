@@ -1,7 +1,6 @@
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useState, useEffect } from "react";
 import { queryClient, apiRequest } from "@/lib/queryClient";
-import { useStartupSafeInterval } from "@/hooks/use-startup-interval";
 import { useWebSocket } from "@/hooks/use-websocket";
 import type { SuperconductorCandidate, ComputationalResult, CrystalStructure } from "@shared/schema";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -365,13 +364,12 @@ function CrystalStructureCard({ structure }: { structure: CrystalStructure }) {
 }
 
 function NextGenPipelinePanel() {
-  const ri30 = useStartupSafeInterval(30000);
   const { data: stats, isLoading } = useQuery<{
     activePipelines: number;
     totalRuns: number;
     totalCandidatesProcessed: number;
     pipelines: { id: string; status: string; iteration: number; bestTc: number; bestDistance: number; bestFormula: string }[];
-  }>({ queryKey: ["/api/next-gen-pipeline/stats"], refetchInterval: ri30 });
+  }>({ queryKey: ["/api/next-gen-pipeline/stats"], refetchInterval: false });
 
   const defaultPipelineId = stats?.pipelines?.[0]?.id;
 
@@ -392,7 +390,7 @@ function NextGenPipelinePanel() {
   }>({
     queryKey: ["/api/next-gen-pipeline", defaultPipelineId],
     enabled: !!defaultPipelineId,
-    refetchInterval: ri30,
+    refetchInterval: false,
   });
 
   const createMutation = useMutation({
@@ -619,12 +617,11 @@ function NextGenPipelinePanel() {
 }
 
 function SelfImprovingLabPanel() {
-  const ri30 = useStartupSafeInterval(30000);
   const { data: overview, isLoading } = useQuery<{
     activeLabs: number;
     totalRuns: number;
     labs: { id: string; status: string; iteration: number; bestTc: number; bestFormula: string; strategiesEvolved: number; knowledgeEntries: number }[];
-  }>({ queryKey: ["/api/self-improving-lab/stats"], refetchInterval: ri30 });
+  }>({ queryKey: ["/api/self-improving-lab/stats"], refetchInterval: false });
 
   const defaultLabId = overview?.labs?.[0]?.id;
 
@@ -649,7 +646,7 @@ function SelfImprovingLabPanel() {
   }>({
     queryKey: ["/api/self-improving-lab", defaultLabId],
     enabled: !!defaultLabId,
-    refetchInterval: ri30,
+    refetchInterval: false,
   });
 
   const createMutation = useMutation({
@@ -1031,16 +1028,17 @@ function AdvancedPhysicsPanel() {
     avgExperimentScore: number;
   }>({ queryKey: ["/api/experiment-planner/stats"] });
 
-  const { messages } = useWebSocket();
+  const { messages, messageCount } = useWebSocket();
   useEffect(() => {
-    const engineEvents = messages.filter(m => m.type === "log" && (m.data?.phase === "defect-engine" || m.data?.phase === "correlation-engine" || m.data?.phase === "crystal-growth"));
-    if (engineEvents.length > 0) {
+    const last = messages[messages.length - 1];
+    if (!last) return;
+    if (last.type === "log" || last.type === "cycleEnd" || last.type === "phaseUpdate") {
       queryClient.invalidateQueries({ queryKey: ["/api/defect-engine/stats"] });
       queryClient.invalidateQueries({ queryKey: ["/api/correlation-engine/stats"] });
       queryClient.invalidateQueries({ queryKey: ["/api/crystal-growth/stats"] });
       queryClient.invalidateQueries({ queryKey: ["/api/experiment-planner/stats"] });
     }
-  }, [messages]);
+  }, [messageCount]);
 
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -1293,11 +1291,10 @@ interface DFTQueueStatsData {
 }
 
 function DFTQueuePanel() {
-  const ri30 = useStartupSafeInterval(30000);
   const { messages } = useWebSocket();
   const { data: queueStats, isLoading } = useQuery<DFTQueueStatsData>({
     queryKey: ["/api/dft-queue/stats"],
-    refetchInterval: ri30,
+    refetchInterval: false,
   });
 
   const lastMessage = messages[messages.length - 1];
@@ -1403,7 +1400,6 @@ function DFTQueuePanel() {
 }
 
 export default function ComputationalPhysics() {
-  const ri30 = useStartupSafeInterval(30000);
   const { data: scData, isLoading: scLoading } = useQuery<{ candidates: SuperconductorCandidate[]; total: number }>({
     queryKey: ["/api/superconductor-candidates", { limit: 100 }],
   });
@@ -1453,7 +1449,7 @@ export default function ComputationalPhysics() {
     };
   }>({
     queryKey: ["/api/synthesis-variables/stats"],
-    refetchInterval: ri30,
+    refetchInterval: false,
   });
 
   const { data: simData } = useQuery<{
@@ -1479,7 +1475,7 @@ export default function ComputationalPhysics() {
     };
   }>({
     queryKey: ["/api/synthesis-simulator/stats"],
-    refetchInterval: ri30,
+    refetchInterval: false,
   });
 
   const ws = useWebSocket();
@@ -1495,6 +1491,11 @@ export default function ComputationalPhysics() {
       queryClient.invalidateQueries({ queryKey: ["/api/crystal-structures"] });
       queryClient.invalidateQueries({ queryKey: ["/api/synthesis-variables/stats"] });
       queryClient.invalidateQueries({ queryKey: ["/api/synthesis-simulator/stats"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/next-gen-pipeline/stats"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/self-improving-lab/stats"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/design-representations/stats"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/doping-engine/stats"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/dft-queue/stats"] });
     }
   }, [ws.messageCount]);
 
@@ -2208,7 +2209,6 @@ interface GeneratedGraph {
 }
 
 function DesignRepresentationsPanel() {
-  const ri30 = useStartupSafeInterval(30000);
   const [selectedStrategy, setSelectedStrategy] = useState("hydride-cage-optimizer");
   const [activeView, setActiveView] = useState<"program" | "graph" | "stats">("stats");
   const [generatedProgram, setGeneratedProgram] = useState<GeneratedProgram | null>(null);
@@ -2216,7 +2216,7 @@ function DesignRepresentationsPanel() {
 
   const statsQuery = useQuery<DesignReprStats>({
     queryKey: ["/api/design-representations/stats"],
-    refetchInterval: ri30,
+    refetchInterval: false,
   });
 
   const generateProgramMutation = useMutation({
@@ -4624,7 +4624,6 @@ function TopologicalInvariantsPanel() {
 }
 
 function DopingEnginePanel() {
-  const ri30 = useStartupSafeInterval(30000);
   const [formula, setFormula] = useState("La2CuO4");
   const [relaxing, setRelaxing] = useState(false);
   const [searchRunning, setSearchRunning] = useState(false);
@@ -4720,7 +4719,7 @@ function DopingEnginePanel() {
     recentResults: Array<{ base: string; variants: number; timestamp: number }>;
   }>({
     queryKey: ["/api/doping-engine/stats"],
-    refetchInterval: ri30,
+    refetchInterval: false,
   });
 
   const dopingQuery = useQuery<{

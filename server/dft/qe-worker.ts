@@ -94,11 +94,12 @@ const QE_WORK_DIR = getTempSubdir("qe_calculations");
 const QE_PSEUDO_DIR = getTempSubdir("qe_pseudo");
 // When QE runs inside WSL on Windows, paths in the input file must use the /mnt/... form
 const QE_PSEUDO_DIR_INPUT = IS_WINDOWS ? toWslPath(QE_PSEUDO_DIR) : QE_PSEUDO_DIR;
-// 10 min was too short for complex hydrides (CeH10, ReRuH6) on GCP.
-// Default 30 min; override via QE_TIMEOUT_MS env var (e.g. 3600000 for 60 min).
-const QE_TIMEOUT_MS = parseInt(process.env.QE_TIMEOUT_MS ?? "1800000", 10);
-// QE graceful-stop margin: QE writes output and exits cleanly 60s before Node kills it.
-const QE_MAX_SECONDS = Math.floor(QE_TIMEOUT_MS / 1000) - 60;
+// Complex hydrides (LaH10, CeH10, ReRuH6) routinely need 60-90 min on GCP.
+// Default 90 min; override via QE_TIMEOUT_MS env var (e.g. 7200000 for 2 h).
+const QE_TIMEOUT_MS = parseInt(process.env.QE_TIMEOUT_MS ?? "5400000", 10);
+// QE graceful-stop margin: QE writes output and exits cleanly 120s before Node kills it.
+// The 60s margin was too tight — QE sometimes needs extra time to flush large outputs.
+const QE_MAX_SECONDS = Math.floor(QE_TIMEOUT_MS / 1000) - 120;
 
 const PROJECT_ROOT = path.resolve(process.cwd());
 const PP_SOURCE_DIR = path.join(PROJECT_ROOT, "server/dft/pseudo");
@@ -2457,7 +2458,10 @@ function tryXTBPreRelaxation(
   pressureGpa: number = 0,
 ): Array<{ element: string; x: number; y: number; z: number }> | null {
   try {
-    if (!fs.existsSync(XTB_BIN)) return null;
+    if (!fs.existsSync(XTB_BIN)) {
+      console.warn(`[QE-Worker] xTB binary not found at ${XTB_BIN} — skipping pre-relax. Set XTB_BIN env var or install xtb. Run: which xtb && xtb --version`);
+      return null;
+    }
 
     const preRelaxElements = Array.from(new Set(positions.map(p => p.element)));
     const scale = pressureGpa > 0 ? computePressureScale(pressureGpa, preRelaxElements) : 1.0;
@@ -2765,8 +2769,8 @@ function generateVCRelaxInput(
   nspin = ${nspin},
 ${magLines}/
 &ELECTRONS
-  electron_maxstep = 200,
-  conv_thr = 1.0d-8,
+  electron_maxstep = 300,
+  conv_thr = 1.0d-4,
   mixing_beta = 0.3,
   mixing_mode = 'plain',
   diagonalization = 'david',
@@ -3436,20 +3440,70 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     }
     // ----------------------------------------------------------
 
-    const retryConfigs: Array<{ mixingBeta: number; maxSteps: number; diag: string; smearing?: string; degauss?: number; ecutwfcBoost?: number; convThr?: string; forcConvThr?: string; etotConvThr?: string; mixingMode?: string; mixingNdim?: number }> = [
-      // Attempts 1-2: screening-quality plain mixing (degauss=0.02 Ry = wider smearing → faster Fermi,
-      // conv_thr=1e-8 is sufficient for band gaps/energies, saves ~2x per attempt)
-      { mixingBeta: 0.3, maxSteps: 300, diag: "david", degauss: 0.02, convThr: "1.0d-8", forcConvThr: "1.0d-3", etotConvThr: "1.0d-5" },
-      { mixingBeta: 0.2, maxSteps: 400, diag: "david", ecutwfcBoost: 10, degauss: 0.02, convThr: "1.0d-8", forcConvThr: "1.0d-3", etotConvThr: "1.0d-5" },
-      // Attempts 3-4: switch to local-TF mixing — handles charge sloshing in heterogeneous
-      // multi-element systems (e.g. K3CrH7PdN) where plain Pulay mixing oscillates.
-      // mixingNdim=16 stores more history for better Pulay acceleration.
-      { mixingBeta: 0.15, maxSteps: 500, diag: "cg", ecutwfcBoost: 15, degauss: 0.01, convThr: "1.0d-8", forcConvThr: "1.0d-3", etotConvThr: "1.0d-5", mixingMode: "local-TF", mixingNdim: 16 },
-      { mixingBeta: 0.1, maxSteps: 500, diag: "cg", smearing: "mp", degauss: 0.003, ecutwfcBoost: 20, convThr: "1.0d-6", forcConvThr: "1.0d-2", etotConvThr: "1.0d-4", mixingMode: "local-TF", mixingNdim: 16 },
-      // Attempt 5: very low beta + local-TF with extra mixing history — last resort for
-      // pathological cases. Wider degauss to stabilize Fermi surface.
-      { mixingBeta: 0.05, maxSteps: 800, diag: "cg", smearing: "mp", degauss: 0.005, ecutwfcBoost: 25, convThr: "1.0d-5", forcConvThr: "1.0d-2", etotConvThr: "1.0d-4", mixingMode: "local-TF", mixingNdim: 20 },
+    // Pre-classify system complexity so we start with appropriate SCF parameters
+    // rather than wasting attempt 1 on settings that are known to fail.
+    //
+    // Root causes for attempt-1 failure on halogens / quaternary systems:
+    //   1. Fluorine and other halogens create large electronegativity gradients →
+    //      strong charge transfer → plain Pulay sloshing at beta=0.3.
+    //   2. Quaternary systems (4+ elements) have heterogeneous charge regions that
+    //      need local-TF (Thomas-Fermi) preconditioning to suppress oscillations.
+    //      Plain Pulay only helps after several iterations; for complex systems it
+    //      often never stabilises within 300 steps.
+    //
+    // Fix: detect these cases upfront and use local-TF + reduced beta from attempt 1.
+    const hasHalogen = elements.some(el => ["F", "Cl", "Br", "I"].includes(el));
+    const hasFluorine = elements.includes("F");
+    const isQuaternaryPlus = elements.length >= 4;
+    const isPentanaryPlus = elements.length >= 5;
+    // "Very complex": F + quaternary, or 5+ elements, or DFT+U magnetic (nspin=2 doubles state space)
+    const isVeryComplexSystem = (hasFluorine && isQuaternaryPlus) || isPentanaryPlus || dftPlusUNspin2;
+    const isComplexSystem = hasHalogen || isQuaternaryPlus;
+
+    if (isVeryComplexSystem) {
+      console.log(`[QE-Worker] ${formula}: very-complex system (${elements.length} el, F=${hasFluorine}, nspin2=${dftPlusUNspin2}) — using hardened SCF schedule (local-TF from attempt 1)`);
+    } else if (isComplexSystem) {
+      console.log(`[QE-Worker] ${formula}: complex system (${elements.length} el, halogen=${hasHalogen}) — using local-TF SCF schedule`);
+    }
+
+    type RetryConfig = { mixingBeta: number; maxSteps: number; diag: string; smearing?: string; degauss?: number; ecutwfcBoost?: number; convThr?: string; forcConvThr?: string; etotConvThr?: string; mixingMode?: string; mixingNdim?: number };
+
+    // Very complex systems (F + quaternary, 5+ elements, or DFT+U magnetic):
+    // Start immediately with local-TF at beta=0.15. Each attempt also widens
+    // degauss to help the Fermi surface converge before the charge density does.
+    const retryConfigsVeryComplex: RetryConfig[] = [
+      { mixingBeta: 0.15, maxSteps: 400, diag: "david", degauss: 0.02,  convThr: "1.0d-7", forcConvThr: "1.0d-3", etotConvThr: "1.0d-5", mixingMode: "local-TF", mixingNdim: 12 },
+      { mixingBeta: 0.10, maxSteps: 500, diag: "cg",    degauss: 0.02,  convThr: "1.0d-7", forcConvThr: "1.0d-3", etotConvThr: "1.0d-5", mixingMode: "local-TF", mixingNdim: 16, ecutwfcBoost: 10 },
+      { mixingBeta: 0.07, maxSteps: 600, diag: "cg",    degauss: 0.01,  convThr: "1.0d-8", forcConvThr: "1.0d-3", etotConvThr: "1.0d-5", mixingMode: "local-TF", mixingNdim: 16, ecutwfcBoost: 15 },
+      { mixingBeta: 0.05, maxSteps: 600, diag: "cg",    degauss: 0.003, smearing: "mp",     convThr: "1.0d-6", forcConvThr: "1.0d-2", etotConvThr: "1.0d-4", mixingMode: "local-TF", mixingNdim: 20, ecutwfcBoost: 20 },
+      { mixingBeta: 0.03, maxSteps: 800, diag: "cg",    degauss: 0.005, smearing: "mp",     convThr: "1.0d-5", forcConvThr: "1.0d-2", etotConvThr: "1.0d-4", mixingMode: "local-TF", mixingNdim: 24, ecutwfcBoost: 25 },
     ];
+
+    // Complex systems (any halogen OR 4+ elements, but not "very complex"):
+    // Start with local-TF at beta=0.2 to suppress sloshing from attempt 1;
+    // conv_thr relaxed to 1d-7 (vs 1d-8) to give 10× more convergence budget
+    // without sacrificing screening accuracy.
+    const retryConfigsComplex: RetryConfig[] = [
+      { mixingBeta: 0.20, maxSteps: 400, diag: "david", degauss: 0.02, convThr: "1.0d-7", forcConvThr: "1.0d-3", etotConvThr: "1.0d-5", mixingMode: "local-TF", mixingNdim: 12 },
+      { mixingBeta: 0.15, maxSteps: 500, diag: "cg",    degauss: 0.02, convThr: "1.0d-7", forcConvThr: "1.0d-3", etotConvThr: "1.0d-5", mixingMode: "local-TF", mixingNdim: 16, ecutwfcBoost: 10 },
+      { mixingBeta: 0.10, maxSteps: 500, diag: "cg",    degauss: 0.01, convThr: "1.0d-8", forcConvThr: "1.0d-3", etotConvThr: "1.0d-5", mixingMode: "local-TF", mixingNdim: 16, ecutwfcBoost: 15 },
+      { mixingBeta: 0.07, maxSteps: 600, diag: "cg",    degauss: 0.003, smearing: "mp",    convThr: "1.0d-6", forcConvThr: "1.0d-2", etotConvThr: "1.0d-4", mixingMode: "local-TF", mixingNdim: 20, ecutwfcBoost: 20 },
+      { mixingBeta: 0.05, maxSteps: 800, diag: "cg",    degauss: 0.005, smearing: "mp",    convThr: "1.0d-5", forcConvThr: "1.0d-2", etotConvThr: "1.0d-4", mixingMode: "local-TF", mixingNdim: 20, ecutwfcBoost: 25 },
+    ];
+
+    // Simple systems (binary/ternary, no halogens): original plain-Pulay schedule.
+    // These converge well with beta=0.3; switching to local-TF adds overhead for no gain.
+    const retryConfigsSimple: RetryConfig[] = [
+      { mixingBeta: 0.3,  maxSteps: 300, diag: "david", degauss: 0.02, convThr: "1.0d-7", forcConvThr: "1.0d-3", etotConvThr: "1.0d-5" },
+      { mixingBeta: 0.2,  maxSteps: 400, diag: "david", degauss: 0.02, convThr: "1.0d-8", forcConvThr: "1.0d-3", etotConvThr: "1.0d-5", ecutwfcBoost: 10 },
+      { mixingBeta: 0.15, maxSteps: 500, diag: "cg",    degauss: 0.01, convThr: "1.0d-8", forcConvThr: "1.0d-3", etotConvThr: "1.0d-5", mixingMode: "local-TF", mixingNdim: 16, ecutwfcBoost: 15 },
+      { mixingBeta: 0.1,  maxSteps: 500, diag: "cg",    degauss: 0.003, smearing: "mp",   convThr: "1.0d-6", forcConvThr: "1.0d-2", etotConvThr: "1.0d-4", mixingMode: "local-TF", mixingNdim: 16, ecutwfcBoost: 20 },
+      { mixingBeta: 0.05, maxSteps: 800, diag: "cg",    degauss: 0.005, smearing: "mp",   convThr: "1.0d-5", forcConvThr: "1.0d-2", etotConvThr: "1.0d-4", mixingMode: "local-TF", mixingNdim: 20, ecutwfcBoost: 25 },
+    ];
+
+    const retryConfigs = isVeryComplexSystem ? retryConfigsVeryComplex
+      : isComplexSystem ? retryConfigsComplex
+      : retryConfigsSimple;
 
     const firstAttempt = opts?.startAttempt ?? 0;
     let scfConverged = false;

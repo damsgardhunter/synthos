@@ -1,7 +1,6 @@
 import { useQuery, useQueries } from "@tanstack/react-query";
 import { useEffect, useMemo } from "react";
 import { queryClient } from "@/lib/queryClient";
-import { useStartupSafeInterval } from "@/hooks/use-startup-interval";
 import { useWebSocket } from "@/hooks/use-websocket";
 import type { SuperconductorCandidate, SynthesisProcess, ChemicalReaction } from "@shared/schema";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -612,25 +611,24 @@ function ReactionCard({ reaction }: { reaction: ChemicalReaction }) {
 }
 
 export default function SuperconductorLab() {
-  const ri30 = useStartupSafeInterval(30000);
   const { data: scData, isLoading: scLoading } = useQuery<{ candidates: SuperconductorCandidate[]; total: number }>({
     queryKey: ["/api/superconductor-candidates"],
-    refetchInterval: ri30,
+    refetchInterval: false,
   });
 
   const { data: synthData, isLoading: synthLoading } = useQuery<{ processes: SynthesisProcess[]; total: number }>({
     queryKey: ["/api/synthesis-processes"],
-    refetchInterval: ri30,
+    refetchInterval: false,
   });
 
   const { data: rxnData, isLoading: rxnLoading } = useQuery<{ reactions: ChemicalReaction[]; total: number }>({
     queryKey: ["/api/chemical-reactions"],
-    refetchInterval: ri30,
+    refetchInterval: false,
   });
 
   const { data: calibrationData } = useQuery<CalibrationResponse>({
     queryKey: ["/api/ml-calibration"],
-    refetchInterval: ri30,
+    refetchInterval: false,
   });
 
   const { data: engineStatus } = useQuery<{
@@ -640,7 +638,7 @@ export default function SuperconductorLab() {
     cycleCount: number;
   }>({
     queryKey: ["/api/engine/status"],
-    refetchInterval: ri30,
+    refetchInterval: false,
   });
 
   const p90 = calibrationData?.absResidualPercentiles?.p90;
@@ -655,6 +653,8 @@ export default function SuperconductorLab() {
       queryClient.invalidateQueries({ queryKey: ["/api/superconductor-candidates"] });
       queryClient.invalidateQueries({ queryKey: ["/api/synthesis-processes"] });
       queryClient.invalidateQueries({ queryKey: ["/api/chemical-reactions"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/ml-calibration"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/engine/status"] });
     }
   }, [ws.messageCount]);
 

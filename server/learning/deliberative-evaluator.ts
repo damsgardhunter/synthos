@@ -47,6 +47,8 @@ export interface DeliberationStage {
   weight: number;
   reasoning: string[];
   verdict: "strong" | "moderate" | "weak" | "reject";
+  /** 0 = no real data, stage is an abstention; 1 = has real signal. Absent = treated as 1. */
+  dataConfidence?: number;
 }
 
 export interface DeliberationResult {
@@ -219,21 +221,45 @@ async function runPhysicsMerit(formula: string, predictedTc: number, mlFeatures?
   let omegaLog = mlFeatures?.omegaLog ?? 0;
   let dosAtFermi = mlFeatures?.dosAtFermi ?? 0;
   let bandGap = mlFeatures?.bandGap ?? 0;
-
-  try {
-    const features = await extractFeatures(formula);
-    if (features.electronPhononCoupling > 0) lambda = Math.max(lambda, features.electronPhononCoupling);
-    dosAtFermi = Math.max(dosAtFermi, features.densityOfStatesAtFermi ?? 0);
-  } catch {}
+  // Count distinct real-data signals found. Stays at 0 → stage abstains rather
+  // than returning a near-zero score that masquerades as a genuine physics reject.
+  let realDataPoints = 0;
 
   const elements = parseFormulaCounts(formula);
   const totalAtoms = Math.max(1, Array.from(elements.values()).reduce((s, n) => s + n, 0));
 
+  // ── Phase 1: gather all data before scoring ──────────────────────────────
+  // GNN runs first so its λ/DOS outputs can serve as fallbacks when
+  // extractFeatures and computeElectronicStructure have no data (common for
+  // intermetallics and novel compounds not in the training set).
+  let gnnTc = 0;
+  let gnnUncertainty = 1.0;
+  try {
+    const gnn = gnnPredictWithUncertainty(formula);
+    gnnTc = gnn.tc;
+    gnnUncertainty = gnn.uncertainty;
+    if (lambda === 0 && gnn.lambda > 0) { lambda = gnn.lambda; realDataPoints++; }
+    if (dosAtFermi === 0 && gnn.dosProxy > 0) { dosAtFermi = gnn.dosProxy * totalAtoms; realDataPoints++; }
+    if (gnnTc > 0) realDataPoints++;
+  } catch {}
+
+  try {
+    const features = await extractFeatures(formula);
+    if (features.electronPhononCoupling > 0) { lambda = Math.max(lambda, features.electronPhononCoupling); realDataPoints++; }
+    if ((features.densityOfStatesAtFermi ?? 0) > 0) { dosAtFermi = Math.max(dosAtFermi, features.densityOfStatesAtFermi ?? 0); realDataPoints++; }
+  } catch {}
+
+  let electronicMetallicity = 0;
+  let electronicStructureComputed = false;
   try {
     const electronic = computeElectronicStructure(formula);
     dosAtFermi = Math.max(dosAtFermi, electronic.densityOfStatesAtFermi);
     bandGap = electronic.bandGap;
+    electronicMetallicity = electronic.metallicity ?? 0;
+    electronicStructureComputed = true;
+    realDataPoints++;
     if (bandGap > 0.1) {
+      // Confirmed insulating — this is a genuine physics reject, not a data-absence reject.
       score -= 0.5;
       reasoning.push(`Insulating: bandGap=${bandGap.toFixed(2)}eV — no Fermi surface, superconductivity is impossible`);
       return {
@@ -242,13 +268,43 @@ async function runPhysicsMerit(formula: string, predictedTc: number, mlFeatures?
         weight: STAGE_WEIGHTS.physicsMerit,
         reasoning,
         verdict: "reject",
+        dataConfidence: 1,  // real signal — not a data-gap default
       };
     }
-    if (electronic.metallicity > 0.7) {
-      score += 0.1;
-      reasoning.push(`Metallic character: ${(electronic.metallicity * 100).toFixed(0)}% — essential for SC`);
-    }
   } catch {}
+
+  let gbTc = 0;
+  try {
+    const gb = await gbPredict(await extractFeatures(formula));
+    gbTc = gb.tcPredicted;
+    if (gbTc > 0) { reasoning.push(`GB model prediction: Tc=${gbTc.toFixed(1)}K`); realDataPoints++; }
+  } catch {}
+
+  // ── Abstain when no real physics data was found ──────────────────────────
+  // Without λ, DOS, band structure, or any model prediction we have nothing to
+  // score. Returning a near-zero score (old behaviour) produced false rejects that
+  // then poisoned Self-Critique with a spurious −0.2 penalty. Instead we abstain:
+  // neutral score 0.5, dataConfidence=0, verdict "weak" — Self-Critique and the
+  // final deliberation skip these stages in their penalty calculations.
+  if (realDataPoints === 0) {
+    reasoning.push("Insufficient physics data for evaluation — abstaining (no λ, DOS, band structure, or model predictions available)");
+    return {
+      name: "Physics Merit",
+      score: 0.5,
+      weight: STAGE_WEIGHTS.physicsMerit,
+      reasoning,
+      verdict: "weak",
+      dataConfidence: 0,
+    };
+  }
+
+  // ── Phase 2: score with all available data ───────────────────────────────
+  if (electronicMetallicity > 0.7) {
+    score += 0.1;
+    reasoning.push(`Metallic character: ${(electronicMetallicity * 100).toFixed(0)}% — essential for SC`);
+  } else if (electronicStructureComputed && electronicMetallicity > 0) {
+    reasoning.push(`Partial metallic character: ${(electronicMetallicity * 100).toFixed(0)}%`);
+  }
 
   if (lambda > 1.5) {
     score += 0.3;
@@ -266,10 +322,10 @@ async function runPhysicsMerit(formula: string, predictedTc: number, mlFeatures?
   const dosPerAtom = dosAtFermi / totalAtoms;
   if (dosPerAtom > 2.0) {
     score += 0.15;
-    reasoning.push(`High DOS/atom at Fermi: ${dosPerAtom.toFixed(2)} states/eV/atom (raw=${dosAtFermi.toFixed(1)}, ${totalAtoms} atoms) — strong N(Ef)`);
+    reasoning.push(`High DOS/atom at Fermi: ${dosPerAtom.toFixed(2)} states/eV/atom — strong N(Ef)`);
   } else if (dosPerAtom > 0.8) {
     score += 0.05;
-    reasoning.push(`Moderate DOS/atom at Fermi: ${dosPerAtom.toFixed(2)} states/eV/atom (raw=${dosAtFermi.toFixed(1)}, ${totalAtoms} atoms)`);
+    reasoning.push(`Moderate DOS/atom at Fermi: ${dosPerAtom.toFixed(2)} states/eV/atom`);
   } else if (dosAtFermi > 0) {
     reasoning.push(`Low DOS/atom at Fermi: ${dosPerAtom.toFixed(2)} states/eV/atom — limited pairing potential`);
   }
@@ -278,25 +334,9 @@ async function runPhysicsMerit(formula: string, predictedTc: number, mlFeatures?
   score += tcNorm * 0.25;
   reasoning.push(`Predicted Tc: ${predictedTc}K (normalized: ${(tcNorm * 100).toFixed(0)}%)`);
 
-  let gnnTc = 0;
-  let gnnUncertainty = 1.0;
-  try {
-    const gnn = gnnPredictWithUncertainty(formula);
-    gnnTc = gnn.tc;
-    gnnUncertainty = gnn.uncertainty;
-    if (gnnTc > 0) {
-      reasoning.push(`GNN ensemble prediction: Tc=${gnnTc.toFixed(1)}K (uncertainty: ${(gnnUncertainty * 100).toFixed(0)}%)`);
-    }
-  } catch {}
-
-  let gbTc = 0;
-  try {
-    const gb = await gbPredict(await extractFeatures(formula));
-    gbTc = gb.tcPredicted;
-    if (gbTc > 0) {
-      reasoning.push(`GB model prediction: Tc=${gbTc.toFixed(1)}K`);
-    }
-  } catch {}
+  if (gnnTc > 0) {
+    reasoning.push(`GNN ensemble prediction: Tc=${gnnTc.toFixed(1)}K (uncertainty: ${(gnnUncertainty * 100).toFixed(0)}%)`);
+  }
 
   if (gnnTc > 0 && gbTc > 0 && predictedTc > 0) {
     const modelSpread = Math.abs(gnnTc - gbTc) / Math.max(gnnTc, gbTc);
@@ -316,6 +356,7 @@ async function runPhysicsMerit(formula: string, predictedTc: number, mlFeatures?
     weight: STAGE_WEIGHTS.physicsMerit,
     reasoning,
     verdict: stageVerdict(Math.min(1.0, score)),
+    dataConfidence: 1,
   };
 }
 
@@ -604,7 +645,15 @@ function runSelfCritique(formula: string, predictedTc: number, previousStages: D
     reasoning.push("Self-critique: room-temperature prediction in non-conventional family warrants extreme caution");
   }
 
-  const stageScores = previousStages.map(s => s.score);
+  // For disparity, only consider stages that produced a nuanced score.
+  // Reject-verdict stages score near 0 by design — including them in a spread check
+  // causes false "inconsistent" flags when the reject is a data-gap default rather
+  // than a true physics conflict (e.g. Physics Merit=0.10 from missing λ/DOS data
+  // paired with Risk Assessment=0.85 fires spuriously).
+  const gradedStages = previousStages.filter(s => s.verdict !== "reject");
+  const stageScores = gradedStages.length >= 2
+    ? gradedStages.map(s => s.score)
+    : previousStages.map(s => s.score);
   const minStage = Math.min(...stageScores);
   const maxStage = Math.max(...stageScores);
 
@@ -617,17 +666,24 @@ function runSelfCritique(formula: string, predictedTc: number, previousStages: D
     reasoning.push("Consistent assessment across all stages");
   }
 
-  const rejectCount = previousStages.filter(s => s.verdict === "reject").length;
-  const weakCount = previousStages.filter(s => s.verdict === "weak").length;
+  // Only count rejects/weaks from stages that had real data — data-absent stages
+  // abstain (dataConfidence=0) and must not penalise the candidate.
+  const confidentStages = previousStages.filter(s => (s.dataConfidence ?? 1) > 0);
+  const rejectCount = confidentStages.filter(s => s.verdict === "reject").length;
+  const weakCount = confidentStages.filter(s => s.verdict === "weak").length;
+  const absentCount = previousStages.length - confidentStages.length;
+  if (absentCount > 0) {
+    reasoning.push(`${absentCount} stage(s) abstained due to insufficient data — not penalised`);
+  }
   if (rejectCount > 0) {
     score -= 0.2;
     reasoning.push(`${rejectCount} stage(s) flagged as reject — fundamental concerns exist`);
   } else if (weakCount >= 2) {
     score -= 0.1;
-    reasoning.push(`${weakCount} stages rated weak — multiple areas of concern`);
-  } else if (weakCount === 0) {
+    reasoning.push(`${weakCount} confident stages rated weak — multiple areas of concern`);
+  } else if (weakCount === 0 && confidentStages.length > 0) {
     score += 0.15;
-    reasoning.push("No weak stages — balanced candidate");
+    reasoning.push("No weak stages among evaluated dimensions — balanced candidate");
   }
 
   const superconMatches = SUPERCON_TRAINING_DATA.filter(d => {
@@ -686,11 +742,15 @@ export async function deliberateOnCandidate(
     selfCritiqueStage,
   ];
 
+  // Abstaining stages (dataConfidence=0) contribute their weight to the
+  // denominator but use their neutral score (0.5) — they neither boost nor sink
+  // the deliberation score. They are excluded from reject/weak penalty counts.
   const weightedSum = allStages.reduce((sum, s) => sum + s.score * s.weight, 0);
   const totalWeight = allStages.reduce((sum, s) => sum + s.weight, 0);
   const deliberationScore = totalWeight > 0 ? weightedSum / totalWeight : 0;
 
-  const rejectStages = allStages.filter(s => s.verdict === "reject");
+  // Only count rejects from stages that had real data.
+  const rejectStages = allStages.filter(s => s.verdict === "reject" && (s.dataConfidence ?? 1) > 0);
   const rejectCount = rejectStages.length;
   const strongStages = allStages.filter(s => s.verdict === "strong").length;
   const CRITICAL_STAGES = new Set(["Chemistry Reasoning", "Physics Merit", "Self-Critique"]);

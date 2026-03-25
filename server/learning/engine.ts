@@ -389,7 +389,7 @@ const COMMON_OXIDATION_STATES: Record<string, number[]> = {
   Ac: [3], Th: [4], U: [3, 4, 5, 6],
 };
 
-function passesChemistryFilter(formula: string): { pass: boolean; reason: string } {
+function passesChemistryFilter(formula: string, pressureGpa?: number): { pass: boolean; reason: string } {
   const counts = parseFormulaCounts(formula);
   const elements = Object.keys(counts);
   if (elements.length < 2) return { pass: true, reason: "" };
@@ -403,19 +403,33 @@ function passesChemistryFilter(formula: string): { pass: boolean; reason: string
     return { pass: false, reason: `avg valence electrons/atom ${avgValence.toFixed(1)} outside [1,12]` };
   }
 
-  const ens = elements
-    .map(el => ELEMENTAL_DATA[el]?.paulingElectronegativity ?? null)
-    .filter((v): v is number => v !== null);
-  if (ens.length >= 2) {
-    const spread = Math.max(...ens) - Math.min(...ens);
-    if (spread > 2.8) {
-      return { pass: false, reason: `electronegativity spread ${spread.toFixed(2)} > 2.8 (too ionic)` };
-    }
-  }
+  // Ionic oxidation-state rules only apply to compounds that are actually ionic.
+  // Metal alloys (FeMg3, NiCr…), intermetallics, and metallic hydrides under pressure
+  // have metallic/covalent bonding — ionic valence balance is physically meaningless for them.
+  // Only apply EN-spread and oxidation-balance checks to likely-ionic compounds:
+  // those containing a strong EN element (O, F, Cl, N, S, Se, Te, Br, I) at near-ambient pressure.
+  const IONIC_FORMERS = new Set(["O", "F", "Cl", "N", "S", "Se", "Te", "Br", "I"]);
+  const hCount = counts["H"] ?? 0;
+  const isHighHRatio = hCount > 0 && hCount / totalAtoms > 0.6;
+  const isHighPressureHydride = hCount > 0 && (pressureGpa ?? 0) > 20;
+  const hasIonicFormer = elements.some(el => IONIC_FORMERS.has(el));
+  const isLikelyIonic = hasIonicFormer && (pressureGpa ?? 0) < 10 && !isHighHRatio && !isHighPressureHydride;
 
-  const canBalance = checkOxidationBalance(counts);
-  if (!canBalance) {
-    return { pass: false, reason: "no valid oxidation state balance found" };
+  if (isLikelyIonic) {
+    const ens = elements
+      .map(el => ELEMENTAL_DATA[el]?.paulingElectronegativity ?? null)
+      .filter((v): v is number => v !== null);
+    if (ens.length >= 2) {
+      const spread = Math.max(...ens) - Math.min(...ens);
+      if (spread > 2.8) {
+        return { pass: false, reason: `electronegativity spread ${spread.toFixed(2)} > 2.8 (too ionic)` };
+      }
+    }
+
+    const canBalance = checkOxidationBalance(counts);
+    if (!canBalance) {
+      return { pass: false, reason: "no valid oxidation state balance found" };
+    }
   }
 
   return { pass: true, reason: "" };
@@ -1639,7 +1653,7 @@ async function insertCandidateWithStabilityCheck(candidateData: Parameters<typeo
       });
     }
 
-    const chemFilter = passesChemistryFilter(candidateData.formula);
+    const chemFilter = passesChemistryFilter(candidateData.formula, candidateData.pressureGpa ?? 0);
     if (!chemFilter.pass) {
       emit("log", {
         phase: "engine",
@@ -1669,16 +1683,54 @@ async function insertCandidateWithStabilityCheck(candidateData: Parameters<typeo
     try {
       const gnnScreen = gnnPredictWithUncertainty(candidateData.formula, undefined, candidateData.pressureGpa ?? 0);
 
-      // Rule 1: bandgap > 0.5 eV → insulator, cannot superconduct.
-      if (gnnScreen.bandgap > 0.5) {
-        emit("log", {
-          phase: "engine",
-          event: "Bandgap reject",
-          detail: `${candidateData.formula}: bandgap=${gnnScreen.bandgap.toFixed(2)} eV > 0.5 eV — insulator, rejected`,
-          dataSource: "GNN pre-screen",
-        });
-        if (generatorSource) recordGeneratorOutcome(generatorSource, false, 0, 0);
-        return false;
+      // Rule 1: bandgap → insulator gate.
+      // Many exemptions apply — see inline comments.
+      const pressureGpa = candidateData.pressureGpa ?? 0;
+      const pc1 = parseComposition(candidateData.formula);
+      const formulaElements = Object.keys(pc1.counts);
+      const hasH = (pc1.counts["H"] ?? 0) > 0;
+
+      // Rare-earth + actinide hydrides: pressure-metallize; skip bandgap gate entirely
+      // (even ambient-pressure precursors like EuH2 are explored for high-P synthesis).
+      const RARE_EARTHS_BG = new Set(["La","Ce","Pr","Nd","Pm","Sm","Eu","Gd","Tb","Dy","Ho","Er","Tm","Yb","Lu","Sc","Y","Th","U"]);
+      const hasRareEarth = formulaElements.some(el => RARE_EARTHS_BG.has(el));
+      const isREHydride = hasRareEarth && hasH;
+
+      // High-pressure hydrides >20 GPa: metallize under compression.
+      const isHighPressureHydride = hasH && pressureGpa > 20;
+
+      // Iron-based SC families (FeSe, FeAs, FeP, FeTe…): correlated metals where
+      // GGA/GNN systematically overestimates the gap.
+      const hasFe = (pc1.counts["Fe"] ?? 0) > 0;
+      const isFeBasedSC = hasFe && formulaElements.some(el => ["Se","As","P","Te"].includes(el));
+
+      // All-metallic systems (no strong-EN anion): GNN bandgap is unreliable for metals/alloys.
+      const BG_IONIC_FORMERS = new Set(["O","F","Cl","N","S","Se","Te","Br","I"]);
+      const hasIonicFormerBG = formulaElements.some(el => BG_IONIC_FORMERS.has(el));
+      const isAllMetallic = !hasIonicFormerBG && !hasH;
+
+      // GNN bandgap default detection: sigmoid(0)×5 = 2.5 eV when the output head has no
+      // discriminative signal. Normalised bandgap uncertainty near zero means all ensemble
+      // members returned the same stuck value — treat as "unknown", not "insulator".
+      const bgUncNorm = gnnScreen.uncertaintyBreakdown?.perTarget?.bandgap ?? 1.0;
+      const isBandgapDefault = gnnScreen.bandgap > 2.4 && gnnScreen.bandgap < 2.6 && bgUncNorm < 0.05;
+
+      const skipBandgapGate = isREHydride || isHighPressureHydride || isFeBasedSC || isAllMetallic || isBandgapDefault;
+
+      if (!skipBandgapGate) {
+        // Ambient: 0.5 eV — GGA bandgap is roughly calibrated for ionic/covalent insulators.
+        // Under pressure: 1.5 eV — moderate compression can close small gaps.
+        const bgThreshold = pressureGpa > 0 ? 1.5 : 0.5;
+        if (gnnScreen.bandgap > bgThreshold) {
+          emit("log", {
+            phase: "engine",
+            event: "Bandgap reject",
+            detail: `${candidateData.formula}: bandgap=${gnnScreen.bandgap.toFixed(2)} eV > ${bgThreshold} eV — insulator, rejected`,
+            dataSource: "GNN pre-screen",
+          });
+          if (generatorSource) recordGeneratorOutcome(generatorSource, false, 0, 0);
+          return false;
+        }
       }
 
       // Rule 2: Stoner I·N(Ef) > 1.0 → likely ferromagnet, flag and skip e-ph.
@@ -1686,7 +1738,7 @@ async function insertCandidateWithStabilityCheck(candidateData: Parameters<typeo
       const STONER_I: Record<string, number> = {
         Fe: 0.93, Co: 0.99, Ni: 1.01, Mn: 0.72, Cr: 0.58, V: 0.53, Ti: 0.47,
       };
-      const pc = parseComposition(candidateData.formula);
+      const pc = pc1; // reuse composition parsed for Rule 1
       const totalAtoms = Object.values(pc.counts).reduce((s, c) => s + c, 0) || 1;
       let iWeighted = 0;
       for (const [el, I] of Object.entries(STONER_I)) {
@@ -8798,12 +8850,12 @@ async function recalculatePhysics() {
             newTc = Math.round(applyAmbientTcCap(newTc, featureLambda, recalcPressure, metalScore, c.formula));
           }
 
-          const isRoomTemp = (newTc ?? 0) >= ROOM_TEMP_K &&
+          const isRoomTemp = (newTc ?? 0) > 273 &&
             c.zeroResistance === true &&
             c.meissnerEffect === true &&
-            recalcPressure <= 50;
+            recalcPressure < 1;  // ambient-accessible only — must work at <1 GPa
 
-          const isNearMiss = !isRoomTemp && (newTc ?? 0) >= 200 && recalcPressure <= 100;
+          const isNearMiss = !isRoomTemp && (newTc ?? 0) >= 200 && recalcPressure < 10;
           const nearMissFeatures = isNearMiss ? {
             nearMiss: true,
             nearMissTcGap: 293 - (newTc ?? 0),

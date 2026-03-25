@@ -1,0 +1,15 @@
+# GNN service dependencies (install on GCP before starting gcp-worker)
+# CPU-only PyTorch (GCP instance has no GPU):
+#   pip install -r gnn/requirements.txt
+# GPU (CUDA 12.1):
+#   pip install torch --index-url https://download.pytorch.org/whl/cu121
+#   pip install -r gnn/requirements.txt  (skip torch line below)
+
+torch>=2.2.0
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+pydantic>=2.0.0
+
+# PyTorch Geometric for graph pooling helpers (optional but recommended)
+# Install AFTER torch:
+#   pip install torch-geometric

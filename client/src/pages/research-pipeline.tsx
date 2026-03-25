@@ -1,8 +1,7 @@
-import { useQuery } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
+import { useQuery, useInfiniteQuery } from "@tanstack/react-query";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "wouter";
 import { queryClient } from "@/lib/queryClient";
-import { useStartupSafeInterval } from "@/hooks/use-startup-interval";
 import { useWebSocket } from "@/hooks/use-websocket";
 import type { LearningPhase, ResearchLog, NovelInsight, ConvergenceSnapshot, Milestone } from "@shared/schema";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -226,10 +225,9 @@ function computeMomentum(snapshots: ConvergenceSnapshot[]): { icon: typeof Trend
 }
 
 function ConvergenceTracker() {
-  const ri30 = useStartupSafeInterval(30000);
   const { data: snapshots, isLoading } = useQuery<ConvergenceSnapshot[]>({
     queryKey: ["/api/convergence"],
-    refetchInterval: ri30,
+    refetchInterval: false,
   });
 
   if (isLoading) {
@@ -478,10 +476,9 @@ const MILESTONE_ICONS: Record<string, typeof Star> = {
 };
 
 function MilestoneTimeline() {
-  const ri60 = useStartupSafeInterval(60000);
   const { data, isLoading } = useQuery<{ milestones: Milestone[]; total: number }>({
     queryKey: ["/api/milestones"],
-    refetchInterval: ri60,
+    refetchInterval: false,
   });
 
   if (isLoading || !data || data.milestones.length === 0) return null;
@@ -581,7 +578,6 @@ interface CycleCandidate {
 }
 
 function KnowledgeMap({ onFamilyClick, selectedFamily }: { onFamilyClick?: (family: string) => void; selectedFamily?: string | null }) {
-  const ri30 = useStartupSafeInterval(30000);
   const { data: memory, isLoading: memLoading } = useQuery<{
     familyStats: Record<string, { count: number; maxTc: number; avgScore: number }>;
     lastCycleCandidates: CycleCandidate[];
@@ -593,7 +589,7 @@ function KnowledgeMap({ onFamilyClick, selectedFamily }: { onFamilyClick?: (fami
     };
   }>({
     queryKey: ["/api/engine/memory"],
-    refetchInterval: ri30,
+    refetchInterval: false,
   });
 
   const { messages, messageCount } = useWebSocket();
@@ -811,10 +807,9 @@ interface CycleNarrative {
 }
 
 function CycleJournal() {
-  const ri30 = useStartupSafeInterval(30000);
   const { data: memory } = useQuery<{ cycleNarratives: CycleNarrative[] }>({
     queryKey: ["/api/engine/memory"],
-    refetchInterval: ri30,
+    refetchInterval: false,
   });
 
   const narratives = memory?.cycleNarratives ?? [];
@@ -850,18 +845,33 @@ function CycleJournal() {
 }
 
 export default function ResearchPipeline() {
-  const ri30 = useStartupSafeInterval(30000);
   const { data: phases, isLoading: phasesLoading } = useQuery<LearningPhase[]>({
     queryKey: ["/api/learning-phases"],
-    refetchInterval: ri30,
+    refetchInterval: false,
   });
-  const { data: logs, isLoading: logsLoading } = useQuery<ResearchLog[]>({
+  const {
+    data: logsData,
+    isLoading: logsLoading,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+  } = useInfiniteQuery<{ logs: ResearchLog[]; nextCursor: number | null; hasMore: boolean }>({
     queryKey: ["/api/research-logs"],
-    refetchInterval: ri30,
+    queryFn: async ({ pageParam }) => {
+      const url = pageParam
+        ? `/api/research-logs?cursor=${pageParam}&limit=50`
+        : `/api/research-logs?limit=50`;
+      const res = await fetch(url);
+      return res.json();
+    },
+    initialPageParam: null as number | null,
+    getNextPageParam: (lastPage) => lastPage.nextCursor ?? undefined,
+    refetchInterval: false,
   });
+  const logs = useMemo(() => logsData?.pages.flatMap(p => p.logs) ?? [], [logsData]);
   const { data: insightData, isLoading: insightsLoading } = useQuery<{ insights: NovelInsight[]; total: number }>({
     queryKey: ["/api/novel-insights"],
-    refetchInterval: ri30,
+    refetchInterval: false,
   });
   const [familyFilter, setFamilyFilter] = useState<string | null>(null);
 
@@ -885,6 +895,19 @@ export default function ResearchPipeline() {
       queryClient.invalidateQueries({ queryKey: ["/api/milestones"] });
     }
   }, [ws.messageCount]);
+
+  const logSentinelRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const el = logSentinelRef.current;
+    if (!el) return;
+    const observer = new IntersectionObserver(
+      (entries) => { if (entries[0].isIntersecting && hasNextPage && !isFetchingNextPage) fetchNextPage(); },
+      { threshold: 0.1 }
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
 
   const logsByPhase = useMemo(() => {
     const grouped: Record<string, ResearchLog[]> = {};
@@ -1029,7 +1052,7 @@ export default function ResearchPipeline() {
                   </div>
                 ) : (
                   <div className="divide-y divide-border">
-                    {logs?.map((log, i) => (
+                    {logs.map((log, i) => (
                       <div key={i} className="px-4 py-3 flex items-start gap-3" data-testid={`log-row-${i}`}>
                         <div className="mt-1 flex-shrink-0">
                           <Zap className="h-3.5 w-3.5 text-primary" />
@@ -1055,8 +1078,14 @@ export default function ResearchPipeline() {
                         </div>
                       </div>
                     ))}
-                    {logs?.length === 0 && (
+                    {logs.length === 0 && (
                       <div className="py-8 text-center text-muted-foreground text-sm">No research logs yet</div>
+                    )}
+                    <div ref={logSentinelRef} className="py-1" />
+                    {isFetchingNextPage && (
+                      <div className="py-3 flex justify-center">
+                        <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                      </div>
                     )}
                   </div>
                 )}
