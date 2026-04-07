@@ -9,8 +9,11 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { PaginationBar } from "@/components/ui/pagination-bar";
 import { Link } from "wouter";
 import { Database, Search, Zap, Layers, ChevronRight, Info, ExternalLink } from "lucide-react";
+
+const PAGE_SIZE = 25;
 
 const SOURCE_COLORS: Record<string, string> = {
   "NIST": "bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300",
@@ -67,6 +70,7 @@ export default function MaterialsDatabase() {
   const [search, setSearch] = useState("");
   const [sourceFilter, setSourceFilter] = useState("all");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [page, setPage] = useState(1);
 
   const { data, isLoading } = useQuery<{ materials: Material[]; total: number }>({
     queryKey: ["/api/materials"],
@@ -77,7 +81,8 @@ export default function MaterialsDatabase() {
   useEffect(() => {
     const last = ws.messages[ws.messages.length - 1];
     if (!last) return;
-    const relevantTypes = new Set(["phaseUpdate", "progress", "prediction", "insight", "cycleEnd", "log"]);
+    // "log" and "progress" fire many times/sec — excluded to prevent request storms
+    const relevantTypes = new Set(["phaseUpdate", "prediction", "insight", "cycleEnd"]);
     if (relevantTypes.has(last.type)) {
       queryClient.invalidateQueries({ queryKey: ["/api/materials"] });
     }
@@ -92,6 +97,10 @@ export default function MaterialsDatabase() {
     const matchesSource = sourceFilter === "all" || m.source === sourceFilter;
     return matchesSearch && matchesSource;
   });
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const safePage = Math.min(page, totalPages);
+  const pagedMaterials = filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
 
   const selected = materials.find(m => m.id === selectedId);
   const selectedProps = selected?.properties as Record<string, any> ?? {};
@@ -132,12 +141,12 @@ export default function MaterialsDatabase() {
               <Input
                 placeholder="Search materials..."
                 value={search}
-                onChange={e => setSearch(e.target.value)}
+                onChange={e => { setSearch(e.target.value); setPage(1); }}
                 className="pl-9"
                 data-testid="input-material-search"
               />
             </div>
-            <Select value={sourceFilter} onValueChange={setSourceFilter}>
+            <Select value={sourceFilter} onValueChange={v => { setSourceFilter(v); setPage(1); }}>
               <SelectTrigger className="w-36" data-testid="select-source-filter">
                 <SelectValue placeholder="Source" />
               </SelectTrigger>
@@ -150,15 +159,18 @@ export default function MaterialsDatabase() {
               </SelectContent>
             </Select>
           </div>
-          <p className="text-xs text-muted-foreground font-mono">{filtered.length} of {materials.length} materials</p>
-          <ScrollArea className="h-[calc(100vh-320px)]">
+          <p className="text-xs text-muted-foreground font-mono">
+            {filtered.length} of {materials.length} materials
+            {totalPages > 1 && ` · page ${safePage} of ${totalPages}`}
+          </p>
+          <ScrollArea className="h-[calc(100vh-360px)]">
             {isLoading ? (
               <div className="space-y-2">
                 {Array.from({ length: 8 }).map((_, i) => <Skeleton key={i} className="h-20" />)}
               </div>
             ) : (
               <div className="space-y-2 pr-2">
-                {filtered.map(m => (
+                {pagedMaterials.map(m => (
                   <MaterialCard
                     key={m.id}
                     material={m}
@@ -172,6 +184,7 @@ export default function MaterialsDatabase() {
               </div>
             )}
           </ScrollArea>
+          <PaginationBar page={safePage} totalPages={totalPages} onPageChange={setPage} />
         </div>
 
         <div className="lg:col-span-3">

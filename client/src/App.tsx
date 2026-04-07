@@ -6,6 +6,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import NotFound from "@/pages/not-found";
 import { SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
 import { AppSidebar } from "@/components/app-sidebar";
+import { ErrorBoundary } from "@/components/error-boundary";
 import Dashboard from "@/pages/dashboard";
 import AtomicExplorer from "@/pages/atomic-explorer";
 import MaterialsDatabase from "@/pages/materials-database";
@@ -58,7 +59,9 @@ function App() {
                 </div>
               </header>
               <main className="flex-1 overflow-auto">
-                <Router />
+                <ErrorBoundary pageName="App">
+                  <Router />
+                </ErrorBoundary>
               </main>
             </div>
           </div>

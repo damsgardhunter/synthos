@@ -1,0 +1,14 @@
+{
+  "timestamp": "2026-04-05T10:28:56.244392+00:00",
+  "status": "feed_slow",
+  "issue": "Feed quiet 7.0 min.",
+  "action": "monitor",
+  "feedAgeSeconds": 422.134392,
+  "lastLogEvent": "Distribution-based crystal diffusion",
+  "netMaxMs": 0,
+  "netMaxEndpoint": "",
+  "gbInLog": false,
+  "serverUp": true,
+  "detectedErrors": [],
+  "errorCount": 0
+}

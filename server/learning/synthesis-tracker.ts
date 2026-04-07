@@ -5,6 +5,7 @@ import { systemState } from "@shared/schema";
 import { eq } from "drizzle-orm";
 import type { Material } from "@shared/schema";
 import type { EventEmitter } from "./engine";
+import { openaiCircuitOpen, recordOpenAIFail, recordOpenAISuccess } from "./openai-circuit";
 
 const openai = new OpenAI({
   baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
@@ -12,6 +13,11 @@ const openai = new OpenAI({
   timeout: 20_000,
   maxRetries: 0, // Connection errors don't self-resolve; retrying turns a 20s fail into 7 min
 });
+
+// Shared circuit breaker — trips across all OpenAI callers (data-fetcher + synthesis-tracker)
+function aiCircuitOpen(): boolean { return openaiCircuitOpen(); }
+function recordAiFail() { recordOpenAIFail(); }
+function recordAiSuccess() { recordOpenAISuccess(); }
 
 const SYNTHESIS_VALIDATION_BOUNDS = {
   temperature: { min: 0, max: 4000 },
@@ -130,6 +136,10 @@ export async function discoverSynthesisProcesses(
   materials: Material[]
 ): Promise<number> {
   if (materials.length === 0) return 0;
+  if (aiCircuitOpen()) {
+    emit("log", { phase: "phase-8", event: "Synthesis discovery skipped", detail: "AI circuit open — backing off after repeated timeouts", dataSource: "Synthesis Engine" });
+    return 0;
+  }
   let discovered = 0;
 
   emit("log", {
@@ -192,9 +202,12 @@ Return JSON with key 'processes' containing an array of objects:
         },
       ],
       response_format: { type: "json_object" },
-      max_completion_tokens: 3500,
+      // Reduced from 3500: 4 materials × ~10 fields each ≈ 500-700 tokens actual.
+      // 3500 frequently exceeded the 20s client timeout; 2000 is still generous.
+      max_completion_tokens: 2000,
     });
 
+    recordAiSuccess();
     const content = response.choices[0]?.message?.content;
     if (!content) return 0;
 
@@ -257,6 +270,9 @@ Return JSON with key 'processes' containing an array of objects:
       emit("progress", { phase: 8, newItems: discovered });
     }
   } catch (err: any) {
+    if (err.message?.includes("timed out") || err.message?.includes("timeout") || err.message?.includes("ETIMEDOUT")) {
+      recordAiFail();
+    }
     emit("log", {
       phase: "phase-8",
       event: "Synthesis discovery error",
@@ -272,6 +288,10 @@ export async function discoverChemicalReactions(
   emit: EventEmitter,
   focusArea: string = "general materials chemistry"
 ): Promise<number> {
+  if (aiCircuitOpen()) {
+    emit("log", { phase: "phase-9", event: "Reaction discovery skipped", detail: "AI circuit open — backing off after repeated timeouts", dataSource: "Reaction Engine" });
+    return 0;
+  }
   let discovered = 0;
 
   emit("log", {
@@ -330,9 +350,12 @@ Return JSON with 'reactions' array of objects:
         },
       ],
       response_format: { type: "json_object" },
-      max_completion_tokens: 3500,
+      // Reduced from 3500: 5-7 reactions × ~10 fields each ≈ 500-800 tokens actual.
+      // 3500 frequently exceeded the 20s client timeout; 2000 is still generous.
+      max_completion_tokens: 2000,
     });
 
+    recordAiSuccess();
     const content = response.choices[0]?.message?.content;
     if (!content) return 0;
 
@@ -395,6 +418,9 @@ Return JSON with 'reactions' array of objects:
       emit("progress", { phase: 9, newItems: discovered });
     }
   } catch (err: any) {
+    if (err.message?.includes("timed out") || err.message?.includes("timeout") || err.message?.includes("ETIMEDOUT")) {
+      recordAiFail();
+    }
     emit("log", {
       phase: "phase-9",
       event: "Reaction discovery error",

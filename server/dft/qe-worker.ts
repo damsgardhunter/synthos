@@ -2269,15 +2269,30 @@ function parsePhononOutput(stdout: string): QEPhononResult {
     error: null,
   };
 
-  const freqMatches = stdout.matchAll(/freq\s*\(\s*\d+\)\s*=\s*([-\d.]+)\s*\[(?:THz|cm-1)\]\s*=\s*([-\d.]+)\s*\[cm-1\]/g);
-  for (const m of freqMatches) {
-    result.frequencies.push(parseFloat(m[2]));
+  // Primary format (QE 6+, ldisp=.true.):  "omega( N) = X.xxx [THz] =   Y.yyy [cm-1]"
+  // Also covers gamma-only:                 "freq ( N) = X.xxx [THz] =   Y.yyy [cm-1]"
+  // QE 7.x degenerate range format:         "omega(N-M) = X.xxx [THz] =   Y.yyy [cm-1]"
+  // The range form (omega(1-3)) is used when modes are degenerate; the regex must
+  // allow an optional "-N" suffix inside the parentheses to match both forms.
+  const twoUnitMatches = stdout.matchAll(/(?:freq|omega)\s*\(\s*\d+(?:\s*-\s*\d+)?\s*\)\s*=\s*([-\d.]+)\s+\[THz\]\s*=\s*([-\d.]+)\s+\[cm-1\]/g);
+  for (const m of twoUnitMatches) {
+    result.frequencies.push(parseFloat(m[2])); // cm-1 value from group 2
   }
 
   if (result.frequencies.length === 0) {
-    const altFreqMatches = stdout.matchAll(/omega\(\s*\d+\)\s*=\s*([-\d.]+)\s+\[cm-1\]/g);
-    for (const m of altFreqMatches) {
+    // Fallback: some older QE or post-processing outputs only the cm-1 value
+    // "freq ( N) = Y.yyy [cm-1]"  or  "omega( N) = Y.yyy [cm-1]"  or range "omega(N-M) = ..."
+    const singleUnitMatches = stdout.matchAll(/(?:freq|omega)\s*\(\s*\d+(?:\s*-\s*\d+)?\s*\)\s*=\s*([-\d.]+)\s+\[cm-1\]/g);
+    for (const m of singleUnitMatches) {
       result.frequencies.push(parseFloat(m[1]));
+    }
+  }
+
+  if (result.frequencies.length === 0) {
+    // Last-resort: matdyn.x / older ph.x format "     N    freq =   Y.yyy [THz] =  Z.zzz [cm-1]"
+    const matdynMatches = stdout.matchAll(/\d+\s+freq\s*=\s*([-\d.]+)\s+\[THz\]\s*=\s*([-\d.]+)\s+\[cm-1\]/g);
+    for (const m of matdynMatches) {
+      result.frequencies.push(parseFloat(m[2]));
     }
   }
 
@@ -2288,16 +2303,29 @@ function parsePhononOutput(stdout: string): QEPhononResult {
     result.hasImaginary = result.imaginaryCount > 0;
   }
 
-  if (stdout.includes("End of self-consistent calculation") || stdout.includes("PHONON")) {
-    result.converged = true;
-  }
+  // ph.x convergence markers — "End of self-consistent calculation" belongs to pw.x
+  result.converged = (
+    stdout.includes("Phonon calculation on a mesh") ||
+    stdout.includes("Writing dynmat at Gamma") ||
+    stdout.includes("PHONON       :") ||
+    (result.frequencies.length > 0 && !stdout.includes("ERROR") && !stdout.includes("stopping"))
+  );
 
-  const wallMatch = stdout.match(/WALL\s*:\s*(\d+)h?\s*(\d+)m\s*([\d.]+)s/) ||
-                    stdout.match(/WALL\s*:\s*([\d.]+)s/);
+  // QE wall time format: "PHONON       :   2m39.47s CPU   2m52.16s WALL"
+  // Pattern: optional "Xh" then "Xm" then "Y.Ys" then "WALL" (WALL is a suffix, not prefix)
+  const wallMatch =
+    stdout.match(/(\d+)h\s*(\d+)m\s*([\d.]+)s\s+WALL/) ||
+    stdout.match(/(\d+)m\s*([\d.]+)s\s+WALL/) ||
+    stdout.match(/([\d.]+)s\s+WALL/);
   if (wallMatch) {
-    if (wallMatch[3]) {
+    if (wallMatch.length >= 4 && wallMatch[3]) {
+      // Xh Xm Ys form
       result.wallTimeSeconds = parseInt(wallMatch[1]) * 3600 + parseInt(wallMatch[2]) * 60 + parseFloat(wallMatch[3]);
+    } else if (wallMatch.length >= 3 && wallMatch[2]) {
+      // Xm Ys form
+      result.wallTimeSeconds = parseInt(wallMatch[1]) * 60 + parseFloat(wallMatch[2]);
     } else {
+      // Ys form
       result.wallTimeSeconds = parseFloat(wallMatch[1]);
     }
   }
@@ -3064,7 +3092,7 @@ async function runDFPTEPC(
   if (!phConverged && phParsed.lambda === 0) {
     warnings.push(`ph.x exited ${phResult.exitCode}; no lambda parsed from stdout`);
   }
-  console.log(`[QE-Worker] DFPT ph.x for ${formula}: exit=${phResult.exitCode}, λ=${phParsed.lambda.toFixed(3)}, ω_log=${phParsed.omegaLog.toFixed(0)} cm-1`);
+  console.log(`[QE-Worker] DFPT ph.x for ${formula}: exit=${phResult.exitCode}, λ=${phParsed.lambda.toFixed(3)}, ω_log=${phParsed.omegaLog.toFixed(0)} K`);
 
   // --- q2r.x: build interatomic force constants ---
   let q2rDone = false;
@@ -3146,24 +3174,23 @@ async function runDFPTEPC(
   }
 
   // Fallback: Allen-Dynes directly from ph.x stdout lambda/omegaLog.
+  // omegaLog is already in Kelvin (QE reports "Logarithmic average frequency" in K).
   if (tcAllenDynes === 0 && lambda > 0 && omegaLog > 0) {
-    const CM1_TO_K = 1.4388;
     const muStar = 0.10;
-    const omegaLogK = omegaLog * CM1_TO_K;
     const denom = lambda - muStar * (1 + 0.62 * lambda);
     if (denom > 0) {
       const exp = -1.04 * (1 + lambda) / denom;
       if (exp >= -50) {
         const lambdaBar = 2.46 * (1 + 3.8 * muStar);
         const f1 = Math.pow(1 + Math.pow(lambda / lambdaBar, 1.5), 1 / 3);
-        tcAllenDynes = Number(Math.max(0, Math.min(500, (omegaLogK / 1.2) * f1 * Math.exp(exp))).toFixed(2));
+        tcAllenDynes = Number(Math.max(0, Math.min(500, (omegaLog / 1.2) * f1 * Math.exp(exp))).toFixed(2));
       }
     }
     source = "ph.x-stdout";
   }
 
   const tcBest = Math.max(tcAllenDynes, tcEliashberg);
-  console.log(`[QE-Worker] DFPT EPC result for ${formula}: λ=${lambda.toFixed(3)}, ω_log=${omegaLog.toFixed(0)} cm-1, Tc=${tcBest.toFixed(1)} K (source=${source})`);
+  console.log(`[QE-Worker] DFPT EPC result for ${formula}: λ=${lambda.toFixed(3)}, ω_log=${omegaLog.toFixed(0)} K, Tc=${tcBest.toFixed(1)} K (source=${source})`);
 
   return {
     lambda: Number(lambda.toFixed(4)),
@@ -3626,6 +3653,9 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
         const bOverAVal = estimateBOverA(elements, counts);
         const latticeBVal = latticeA * bOverAVal;
 
+        // Use the same PAW/USPP ecutrho multiplier as the SCF to avoid FFT grid OOM.
+        // band-structure-calculator.ts previously hardcoded 8x (too large for PAW).
+        const ecutrhoForBands = baseEcutwfcBands * ecutrhoMultiplier(elements);
         const bandResult = await computeDFTBandStructure(
           formula,
           elements,
@@ -3638,6 +3668,7 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
           baseEcutwfcBands,
           nspinBands,
           latticeBVal,
+          ecutrhoForBands,
         );
 
         result.bandStructure = bandResult;
@@ -3645,15 +3676,15 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
 
         if (!bandResult.converged && bandResult.error) {
           stageFailureCounts.bands++;
-          console.log(`[QE-Worker] Band structure failed for ${formula}: ${bandResult.error.slice(-200)} — cleaning tmp before phonon`);
-          cleanQETmpDir(path.join(jobDir, "tmp"));
+          // Do NOT clean ./tmp here — ph.x needs the SCF .save/ directory that was
+          // written before bands ran. Cleaning it caused phonon to return 0 modes.
+          console.log(`[QE-Worker] Band structure failed for ${formula}: ${bandResult.error.slice(-200)} — continuing to phonon`);
         } else {
           console.log(`[QE-Worker] Band structure done for ${formula}: ${bandResult.nBands} bands, ${bandResult.bandCrossings.length} crossings, flat=${bandResult.flatBandScore.toFixed(3)}`);
         }
       } catch (bandErr: any) {
-        console.log(`[QE-Worker] Band structure error for ${formula}: ${bandErr.message?.slice(-200) ?? bandErr} — cleaning tmp before phonon`);
         stageFailureCounts.bands++;
-        cleanQETmpDir(path.join(jobDir, "tmp"));
+        console.log(`[QE-Worker] Band structure error for ${formula}: ${bandErr.message?.slice(-200) ?? bandErr} — continuing to phonon`);
       }
     }
 

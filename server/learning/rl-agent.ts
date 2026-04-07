@@ -529,10 +529,10 @@ export class RLChemicalSpaceAgent {
   private maxReplaySize = 2000;
   private learningRate = 0.01;
   private gamma = 0.99;
-  private epsilon = 0.15;
+  private epsilon = 0.25;  // raised: early discovery phase benefits from wider exploration
   private epsilonDecay = 0.9995;
   private baseEpsilonDecay = 0.9995;
-  private minEpsilon = 0.05;
+  private minEpsilon = 0.10;  // raised: preserve minimum exploration floor
   private temperature = 1.0;
   private temperatureDecay = 0.999;
   private minTemperature = 0.3;
@@ -1307,12 +1307,12 @@ export class RLChemicalSpaceAgent {
     physicsContext?: PhysicsAwareRewardContext,
     elementPairs?: Array<[string, string]>
   ): number {
-    const W_TC = 0.35;
+    const W_TC = 0.25;           // reduced: was over-rewarding high-Tc predictions regardless of feasibility
     const W_STABILITY = 0.20;
     const W_MOTIF = 0.15;
     const W_ELECTRON_TOPOLOGY = 0.10;
     const W_NOVELTY = 0.10;
-    const W_SYNTHESIS = 0.10;
+    const W_SYNTHESIS = 0.20;   // raised: synthesis feasibility must influence candidate selection
 
     const safeTc = (tcPredicted != null && Number.isFinite(tcPredicted)) ? tcPredicted : 0;
     const safeBestBefore = (bestTcBefore != null && Number.isFinite(bestTcBefore)) ? bestTcBefore : 0;
@@ -1421,13 +1421,22 @@ export class RLChemicalSpaceAgent {
       }
     }
 
+    // Actinide penalty: Th/U/Np/Pu are experimentally difficult due to radioactivity
+    // and regulatory constraints. Apply a modest penalty to steer away unless the
+    // reward signal is extremely strong.
+    const ACTINIDE_ELEMENTS = new Set(["Th", "U", "Np", "Pu"]);
+    const hasActinide = physicsContext?.chemicalFamily === "actinide" ||
+      (elementPairs?.some(([a, b]) => ACTINIDE_ELEMENTS.has(a) || ACTINIDE_ELEMENTS.has(b)) ?? false);
+    const actinidePenalty = hasActinide ? 0.3 : 0;
+
     const reward =
       W_TC * tcScore +
       W_STABILITY * stabilityComponent +
       W_MOTIF * motifScore +
       W_ELECTRON_TOPOLOGY * electronTopologyScore +
       W_NOVELTY * noveltyComponent +
-      W_SYNTHESIS * synthesisComponent;
+      W_SYNTHESIS * synthesisComponent -
+      actinidePenalty;
 
     let pairBonus = 0;
     if (elementPairs && elementPairs.length > 0) {

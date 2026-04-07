@@ -177,10 +177,10 @@ async function trainEnsembleXGB(X: number[][], y: number[]): Promise<GBEnsemble>
     const { X: bsX, y: bsY } = bootstrapSample(X, y);
     const depth = overrides.maxDepth ?? ENSEMBLE_MAX_DEPTHS[i % ENSEMBLE_MAX_DEPTHS.length];
     const lr = overrides.learningRate ?? ENSEMBLE_LEARNING_RATES[i % ENSEMBLE_LEARNING_RATES.length];
-    const nTrees = overrides.nTrees ?? (isOffloaded ? 100 : 300);
+    const nTrees = overrides.nTrees ?? (isOffloaded ? 100 : 150);
     const model = await trainGradientBoosting(bsX, bsY, nTrees, lr, depth, FEATURE_SUBSAMPLE_RATIO);
     models.push(model);
-    await new Promise<void>(r => setTimeout(r, 0)); // yield between each XGB model
+    await new Promise<void>(r => setTimeout(r, 200)); // yield between each XGB model — 200ms for Neon FIN propagation
   }
   return { models, trainedAt: Date.now() };
 }
@@ -204,13 +204,15 @@ async function trainVarianceEnsembleXGB(X: number[][], y: number[], meanEnsemble
     const nTrees = overrides.nTrees ?? (isOffloaded ? 70 : 200);
     const model = await trainGradientBoosting(bsX, bsY, nTrees, lr, depth, FEATURE_SUBSAMPLE_RATIO);
     models.push(model);
-    await new Promise<void>(r => setTimeout(r, 0)); // yield between each variance model
+    await new Promise<void>(r => setTimeout(r, 200)); // yield between each variance model — 200ms for Neon FIN propagation
   }
   return { models, trainedAt: Date.now(), isLogVariance: true };
 }
 
 function predictEnsembleXGB(ensemble: GBEnsemble, x: number[]): { mean: number; std: number; predictions: number[] } {
-  const predictions = ensemble.models.map(m => predictWithModel(m, x));
+  const validModels = ensemble.models.filter(m => m != null);
+  if (validModels.length === 0) return { mean: 0, std: 0, predictions: [] };
+  const predictions = validModels.map(m => predictWithModel(m, x));
   const mean = predictions.reduce((s, v) => s + v, 0) / predictions.length;
   const variance = predictions.reduce((s, v) => s + (v - mean) ** 2, 0) / predictions.length;
   return { mean: Math.max(0, mean), std: Math.sqrt(variance), predictions };
@@ -284,7 +286,7 @@ async function computeCalibration(model: GBModel): Promise<CalibrationData> {
     mse: Math.round(mse * 100) / 100,
     rmse: Math.round(rmse * 100) / 100,
     nSamples: n,
-    nTrees: model.trees.length,
+    nTrees: model?.trees?.length ?? 0,
     residuals,
     percentiles: {
       p5: Math.round(computePercentile(sortedResiduals, 5) * 100) / 100,
@@ -366,8 +368,12 @@ const STATIC_FEATURE_MEANS: Record<string, number> = {
   stability: 0.5,
 };
 
-let computedFeatureMeans: Record<string, number> | null = null;
-let featureMeansComputedAt = 0;
+// Pre-initialize with static means so precomputeFeatureMeans() at T+10min returns early.
+// The T+10min timer iterates 700+ SUPERCON entries calling extractFeatures (~2.3s each),
+// which combined with concurrent GB retraining and SG sweep causes complete event-loop blocks.
+// The backfillPool at T+26min overwrites this with real training-data-derived means anyway.
+let computedFeatureMeans: Record<string, number> | null = { ...STATIC_FEATURE_MEANS };
+let featureMeansComputedAt = Date.now();
 const FEATURE_MEANS_RECOMPUTE_INTERVAL_MS = 3600_000;
 
 function getFeatureMeans(): Record<string, number> {
@@ -549,11 +555,22 @@ const STATIC_CRYSTAL_SYM_ENCODING: Record<string, number> = {
   monoclinic: 22.0, triclinic: 18.0,
 };
 
-let crystalSymTargetEncoding: Map<string, number> | null = null;
+// Pre-initialize with static values so precomputeCrystalSymTargetEncoding() at T+10min returns early.
+// Same rationale as computedFeatureMeans above — prevents 700-entry extractFeatures loop at T+10min.
+// invalidateModel() no longer clears this (crystal sym categories don't change with model weights).
+// Time-based guard (same as featureMeansComputedAt) prevents re-run even if somehow called again.
+let crystalSymTargetEncoding: Map<string, number> | null = new Map(Object.entries(STATIC_CRYSTAL_SYM_ENCODING));
+let crystalSymEncodingComputedAt = Date.now();
 
 async function precomputeCrystalSymTargetEncoding(): Promise<void> {
-  if (crystalSymTargetEncoding) return;
-  crystalSymTargetEncoding = new Map();
+  const now = Date.now();
+  // Time-only guard (no null check) — if it ran within the freshness window, skip regardless
+  // of whether crystalSymTargetEncoding is null. This prevents re-running after invalidateModel()
+  // even in edge cases where the encoding is null but was computed recently.
+  if (now - crystalSymEncodingComputedAt < FEATURE_MEANS_RECOMPUTE_INTERVAL_MS) return;
+  // Build into a local map so that invalidateModel() resetting crystalSymTargetEncoding = null
+  // mid-loop (during yields) cannot cause a null .entries() crash at the end.
+  const localEncoding = new Map<string, number>();
   const symTcSums = new Map<string, { sum: number; count: number }>();
   let globalSum = 0;
   let globalCount = 0;
@@ -592,9 +609,12 @@ async function precomputeCrystalSymTargetEncoding(): Promise<void> {
   const SMOOTHING = 10;
   for (const [cat, data] of Array.from(symTcSums.entries())) {
     const smoothed = (data.sum + SMOOTHING * globalMean) / (data.count + SMOOTHING);
-    crystalSymTargetEncoding.set(cat, smoothed);
+    localEncoding.set(cat, smoothed);
   }
-  console.log(`[GradientBoost] Crystal symmetry target encoding: ${Array.from(crystalSymTargetEncoding.entries()).map(([k, v]) => `${k}=${v.toFixed(1)}K`).join(", ")}`);
+  // Publish the freshly-computed encoding and update the timestamp.
+  crystalSymTargetEncoding = localEncoding;
+  crystalSymEncodingComputedAt = Date.now();
+  console.log(`[GradientBoost] Crystal symmetry target encoding: ${Array.from(localEncoding.entries()).map(([k, v]) => `${k}=${v.toFixed(1)}K`).join(", ")}`);
 }
 
 function getCrystalSymTargetEncoded(sym: string): number | null {
@@ -982,8 +1002,8 @@ export async function trainGradientBoosting(
   let prevTrainMSE = yVariance;
 
   for (let iter = 0; iter < nEstimators; iter++) {
-    if (iter > 0 && iter % 10 === 0) {
-      await new Promise<void>(r => setTimeout(r, 0)); // yield every 10 trees — setTimeout not setImmediate (setImmediate starves timer callbacks)
+    if (iter > 0 && iter % 5 === 0) {
+      await new Promise<void>(r => setTimeout(r, 0)); // yield every 5 trees — halved from 10 to reduce event-loop blocking gaps as training set grows
       if (iter % 20 === 0) process.stdout.write(`\r[GradientBoost] Training... tree ${iter}/${nEstimators} (${X.length} samples)`);
     }
 
@@ -1034,8 +1054,10 @@ export async function trainGradientBoosting(
   };
 }
 
-function predictWithModel(model: GBModel, x: number[]): number {
-  const px = model.featureMask ? model.featureMask.map(fi => x[fi]) : x;
+function predictWithModel(model: GBModel | null | undefined, x: number[]): number {
+  if (model === null || model === undefined) return FALLBACK_MODEL.basePrediction;
+  if (typeof model !== "object") { console.warn("[GB] predictWithModel received non-object model:", typeof model); return FALLBACK_MODEL.basePrediction; }
+  const px = (model as any).featureMask ? (model as any).featureMask.map((fi: number) => x[fi]) : x;
   let prediction = model.basePrediction;
   if (model.flatTrees && model.flatTrees.length > 0) {
     for (const flat of model.flatTrees) {
@@ -1069,6 +1091,12 @@ function getTreeFeatureImportance(tree: TreeNode | number): Map<number, number> 
 }
 
 class TrainingPool {
+  // Hard cap: each cached entry holds a ~50-float feature vector (≈400 bytes).
+  // 6000 entries × 400 bytes ≈ 2.4 MB for the cache; getTrainingData() materialises
+  // a second copy (X[][]), so peak usage ≈ 5 MB — well within safe bounds.
+  // Without this cap the pool grows unboundedly across cycles and causes OOM crashes.
+  private static readonly MAX_SIZE = 6000;
+
   private featureCache = new Map<string, { x: number[]; tc: number }>();
   private X: number[][] = [];
   private y: number[] = [];
@@ -1078,6 +1106,12 @@ class TrainingPool {
   async add(formula: string, tc: number, pressureGPa: number = 0, knownPhysics?: { lambda?: number; omegaLog?: number }): Promise<boolean> {
     const key = `${formula}|${tc}`;
     if (this.featureCache.has(key)) return false;
+    // Evict oldest entry when at capacity (Map preserves insertion order)
+    if (this.featureCache.size >= TrainingPool.MAX_SIZE) {
+      const firstKey = this.featureCache.keys().next().value;
+      if (firstKey !== undefined) this.featureCache.delete(firstKey);
+      this.dirty = true;
+    }
     try {
       const features = await extractFeatures(formula, { pressureGpa: pressureGPa } as any);
       const fArr = featureVectorToArray(features, formula);
@@ -1366,7 +1400,7 @@ export async function getTrainedModel(): Promise<GBModel> {
     return FALLBACK_MODEL;
   }
 
-  const { X, y } = await prepareTrainingData();
+  const { X, y, formulas } = await prepareTrainingData();
 
   if (X.length < 10) {
     cachedModel = {
@@ -1378,6 +1412,15 @@ export async function getTrainedModel(): Promise<GBModel> {
       trainedAt: Date.now(),
     };
     return cachedModel;
+  }
+
+  // When GCP handles training, dispatch and return FALLBACK_MODEL — GCP will push back
+  // trained weights via the poller. Running local training here blocks the event loop
+  // (80 trees + 500-tree ensemble) causing DB connection storms.
+  if (process.env.OFFLOAD_XGB_TO_GCP === "true") {
+    console.log(`[GradientBoost] OFFLOAD_XGB_TO_GCP=true — dispatching getTrainedModel to GCP (${X.length} samples)`);
+    dispatchXGBJobToGCP(X, y, formulas).catch(err => console.warn("[GradientBoost] GCP getTrainedModel dispatch failed:", err.message));
+    return FALLBACK_MODEL;
   }
 
   cachedModel = await trainGradientBoosting(X, y, 80, 0.08, 5);
@@ -1615,12 +1658,12 @@ export async function gbPredictWithUncertainty(features: MLFeatureVector, formul
     }).catch(() => {});
   }
 
-  await getTrainedModel();
+  const resolvedModel = await getTrainedModel();
 
   const x = featureVectorToArray(features, resolvedFormula);
 
   if (!cachedEnsembleXGB) {
-    const singlePred = predictWithModel(cachedModel!, x);
+    const singlePred = predictWithModel(resolvedModel, x);
     const safeTc = Number.isFinite(singlePred) ? Math.max(0, singlePred) : 0;
     const nSamples = cachedTrainingSnapshot?.dataSize ?? 0;
     const coldStartUncertainty = nSamples < 5 ? 0.95 : nSamples < 15 ? 0.85 : nSamples < 30 ? 0.75 : 0.6;
@@ -1735,6 +1778,7 @@ function buildFeatureImportanceCache(): void {
 
   if (cachedEnsembleXGB) {
     for (const ensModel of cachedEnsembleXGB.models) {
+      if (!ensModel) continue;
       for (const tree of ensModel.trees) {
         const imp = getTreeFeatureImportance(tree);
         for (const [k, v] of imp) {
@@ -1772,7 +1816,7 @@ export function getXGBEnsembleStats() {
     bootstrapRatio: BOOTSTRAP_SAMPLE_RATIO,
     trained: cachedEnsembleXGB !== null,
     trainedAt: cachedEnsembleXGB?.trainedAt ?? null,
-    modelTreeCounts: cachedEnsembleXGB?.models.map(m => m.trees.length) ?? [],
+    modelTreeCounts: cachedEnsembleXGB?.models.map(m => m?.trees?.length ?? 0) ?? [],
   };
 }
 
@@ -1807,7 +1851,7 @@ export async function validateModel(): Promise<{ mse: number; r2: number; nTrees
   const result = {
     mse: sse / details.length,
     r2: sst < 1e-6 ? 0 : 1 - sse / sst,
-    nTrees: model.trees.length,
+    nTrees: model?.trees?.length ?? 0,
     details,
   };
 
@@ -1860,6 +1904,19 @@ let surrogateScreenCount = 0;
 let surrogatePassCount = 0;
 let surrogateRejectCount = 0;
 let lastRetrainCycle = 0;
+// Guard: prevent incorporateSuccessData from triggering concurrent or rapid retrains.
+// After AL cycles, many incorporateSuccessData calls fire simultaneously (sequential
+// awaits interleaved with fire-and-forget pressure analysis). Without a guard, each
+// 10th call triggers retrainWithAccumulatedData, causing 3+ back-to-back full retrains
+// that block the event loop for 65+ seconds and exhaust the DB connection pool.
+let _incorporateRetrainLocked = false;
+
+// Global non-reentrant guard for retrainWithAccumulatedData().
+// Multiple code paths call this function (incorporateSuccessData, engine cycle-50 hook,
+// and others). If two invocations overlap via async interleaving the event loop blocks
+// for 60-120s and Neon serverless idle connections drop, exhausting the DB pool.
+// This flag prevents any second call from entering while one is already running.
+let _retrainWithAccumulatedDataActive = false;
 
 let modelVersion = 0;
 const MAX_VERSION_HISTORY = 50;
@@ -1885,7 +1942,7 @@ const versionHistory: ModelVersionRecord[] = [];
 
 async function logModelVersion(trigger: string, datasetSize: number): Promise<ModelVersionRecord> {
   modelVersion++;
-  const cal = cachedCalibration ?? await computeCalibration(cachedModel!);
+  const cal = cachedCalibration ?? await computeCalibration(cachedModel ?? FALLBACK_MODEL);
   const ensembleStats = getXGBEnsembleStats();
 
   let predVariance = 0;
@@ -2236,7 +2293,10 @@ export function invalidateModel(): void {
   cachedGlobalFeatureImportance = null;
   cachedValidation = null;
   poolInitialized = false;
-  crystalSymTargetEncoding = null;
+  // crystalSymTargetEncoding is NOT cleared on model invalidation — it encodes SUPERCON_TRAINING_DATA
+  // crystal symmetry categories, which are independent of model weights and don't need recomputing
+  // on retrain. Clearing it caused the T+10min precompute to re-run the full 700-entry loop after
+  // every training invalidation (when T+10min fired with the encoding null), blocking the event loop.
   miedemaCache.clear();
 }
 
@@ -2248,7 +2308,18 @@ export async function surrogateScreen(formula: string, minTcThreshold: number = 
 }> {
   surrogateScreenCount++;
   try {
+    // Yield before extractFeatures — extractFeatures is synchronous (~350ms-2s) and blocks
+    // the event loop. Yielding here gives HTTP handlers a chance to run between candidates
+    // during the SG sweep (which calls surrogateScreen for 967 candidates sequentially).
+    await new Promise(r => setTimeout(r, 0));
+    const _featStart = Date.now();
     const features = await extractFeatures(formula);
+    // Yield AGAIN after slow extractions (>500ms) so DB keepalive and pending I/O
+    // can recover before the next operation. Without this, consecutive 500ms-4s blocks
+    // exhaust DB pool connections (zombie detection fires after ~3s cumulative blocking).
+    if (Date.now() - _featStart > 500) {
+      await new Promise(r => setTimeout(r, 5));
+    }
 
     if (features.metallicity < 0.05) {
       surrogateRejectCount++;
@@ -2327,26 +2398,66 @@ export async function incorporateSuccessData(formula: string, tc: number): Promi
     pressureGPa: 0,
   });
 
-  if (successExamples.length % 10 === 0) {
-    await retrainWithAccumulatedData();
+  // Retrain every 10 examples, but only if no other retrain is already in progress.
+  // Prevents rapid consecutive retrains after AL cycles (which add 30+ examples at once),
+  // which were blocking the event loop for 65+ seconds and exhausting the DB pool.
+  if (successExamples.length % 10 === 0 && !_incorporateRetrainLocked) {
+    _incorporateRetrainLocked = true;
+    try {
+      await retrainWithAccumulatedData();
+    } finally {
+      _incorporateRetrainLocked = false;
+    }
   }
 }
 
 export async function retrainWithAccumulatedData(): Promise<number> {
+  if (_retrainWithAccumulatedDataActive) {
+    console.log("[GradientBoost] retrainWithAccumulatedData skipped — already running (concurrent call blocked)");
+    return 0;
+  }
+  _retrainWithAccumulatedDataActive = true;
+  try {
+  return await _retrainWithAccumulatedDataInner();
+  } finally {
+    _retrainWithAccumulatedDataActive = false;
+  }
+}
+
+async function _retrainWithAccumulatedDataInner(): Promise<number> {
   await ensurePoolInitialized();
 
   await trainingPool.addBatch(successExamples.map(e => ({ formula: e.formula, tc: e.tc, pressureGPa: e.pressureGPa ?? 0 })));
   await trainingPool.addBatch(failureExamples.map(e => ({ formula: e.formula, tc: e.tc, pressureGPa: e.pressureGPa ?? 0 })));
 
-  const { X, y } = trainingPool.getTrainingData();
+  const { X, y, formulas } = trainingPool.getTrainingData();
 
   if (X.length < 10) return 0;
 
+  // When GCP handles training, dispatch and return immediately — no local tree building.
+  // Local training (150 trees + 500-tree ensemble) blocks the event loop for 2-3 min,
+  // causing DB keepalive timeouts and feed freezes. GCP receives the full dataset and
+  // returns updated weights via the poller.
+  if (process.env.OFFLOAD_XGB_TO_GCP === "true") {
+    if (X.length >= 30) {
+      console.log(`[GradientBoost] OFFLOAD_XGB_TO_GCP=true — dispatching accumulated retrain to GCP (${X.length} samples)`);
+      dispatchXGBJobToGCP(X, y, formulas).catch(err => console.warn("[GradientBoost] GCP accumulated dispatch failed:", err.message));
+    }
+    lastRetrainCycle = Date.now();
+    await logModelVersion("accumulated-retrain-gcp", X.length);
+    return successExamples.length + failureExamples.length;
+  }
+
   invalidateModel();
-  cachedModel = await trainGradientBoosting(X, y, 300, 0.05, 6);
+  // 150 trees — quality retrain without blocking the event loop for multiple seconds
+  cachedModel = await trainGradientBoosting(X, y, 150, 0.05, 6);
   await new Promise<void>(r => setTimeout(r, 0));
   cachedCalibration = await computeCalibration(cachedModel);
-  if (X.length >= 30) {
+  // Only run full ensemble when enough data exists and a failure-retrain hasn't just run
+  // (failure-retrain sets lastRetrainCycle to Date.now() — if it was < 30s ago, skip ensembles
+  //  this cycle to prevent 1500+ trees blocking DB keepalive).
+  const _msSinceLastRetrain = Date.now() - lastRetrainCycle;
+  if (X.length >= 30 && _msSinceLastRetrain > 30_000) {
     cachedEnsembleXGB = await trainEnsembleXGB(X, y);
     await new Promise<void>(r => setTimeout(r, 0));
     cachedVarianceEnsembleXGB = await trainVarianceEnsembleXGB(X, y, cachedEnsembleXGB);
@@ -2358,6 +2469,10 @@ export async function retrainWithAccumulatedData(): Promise<number> {
   lastRetrainCycle = Date.now();
 
   await logModelVersion("accumulated-retrain", X.length);
+
+  // Post-training cool-down: GB training blocks event loop causing DB connection timeouts.
+  console.log("[GradientBoost] Post-retrain cool-down 25s — allowing zombie connection cleanup");
+  await new Promise<void>(r => setTimeout(r, 25_000));
 
   const totalNew = successExamples.length + failureExamples.length;
   return totalNew;
@@ -2393,22 +2508,23 @@ export async function incorporateFailureData(): Promise<number> {
 
     await trainingPool.addBatch(failureExamples.map(e => ({ formula: e.formula, tc: e.tc, pressureGPa: e.pressureGPa ?? 0 })));
 
-    const { X, y } = trainingPool.getTrainingData();
+    const { X, y, formulas } = trainingPool.getTrainingData();
 
     if (X.length >= 10) {
-      cachedModel = await trainGradientBoosting(X, y, 300, 0.05, 6);
-      await new Promise<void>(r => setTimeout(r, 0));
-      cachedCalibration = await computeCalibration(cachedModel);
-      if (X.length >= 30) {
-        cachedEnsembleXGB = await trainEnsembleXGB(X, y);
+      if (process.env.OFFLOAD_XGB_TO_GCP === "true") {
+        // Dispatch failure data to GCP — no local tree building
+        dispatchXGBJobToGCP(X, y, formulas).catch(err => console.warn("[GradientBoost] GCP failure dispatch failed:", err.message));
+        lastRetrainCycle = Date.now();
+        await logModelVersion("failure-retrain-gcp", X.length);
+      } else {
+        // failure-retrain uses a light 45-tree pass — just enough to incorporate new negatives
+        // without blocking the event loop. Ensemble trains are reserved for accumulated-retrain.
+        cachedModel = await trainGradientBoosting(X, y, 45, 0.05, 6);
         await new Promise<void>(r => setTimeout(r, 0));
-        cachedVarianceEnsembleXGB = await trainVarianceEnsembleXGB(X, y, cachedEnsembleXGB);
-        await new Promise<void>(r => setTimeout(r, 0));
-        cachedGlobalFeatureImportance = null;
-        buildFeatureImportanceCache();
-        await new Promise<void>(r => setTimeout(r, 0));
+        cachedCalibration = await computeCalibration(cachedModel);
+        lastRetrainCycle = Date.now();
+        await logModelVersion("failure-retrain", X.length);
       }
-      await logModelVersion("failure-retrain", X.length);
     }
 
     if (failureExamples.length >= 10 && failureExamples.length % 10 === 0) {

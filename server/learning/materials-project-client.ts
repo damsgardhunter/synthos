@@ -194,7 +194,7 @@ function getApiKey(): string | null {
 export interface MPSummaryData {
   mpId: string;
   formula: string;
-  bandGap: number;
+  bandGap: number | null;
   formationEnergyPerAtom: number;
   energyAboveHull: number;
   isStable: boolean;
@@ -408,7 +408,7 @@ export async function fetchSummary(formula: string): Promise<MPSummaryData | nul
   const result: MPSummaryData = {
     mpId: entry.material_id,
     formula: entry.formula_pretty || normalizedFormula,
-    bandGap: entry.band_gap ?? 0,
+    bandGap: entry.band_gap ?? null,
     formationEnergyPerAtom: entry.formation_energy_per_atom ?? 0,
     energyAboveHull: entry.energy_above_hull ?? 0,
     isStable: entry.is_stable ?? false,

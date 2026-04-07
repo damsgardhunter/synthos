@@ -127,7 +127,7 @@ export function parsePhDynmatOutput(stdout: string): DFPTDynmatResult[] {
       parseFloat(qMatch[3]),
     ];
 
-    const freqMatches = block.matchAll(/freq\s*\(\s*\d+\)\s*=\s*([-\d.]+)\s*\[THz\]\s*=\s*([-\d.]+)\s*\[cm-1\]/g);
+    const freqMatches = block.matchAll(/freq\s*\(\s*\d+(?:\s*-\s*\d+)?\s*\)\s*=\s*([-\d.]+)\s*\[THz\]\s*=\s*([-\d.]+)\s*\[cm-1\]/g);
     const frequencies: number[] = [];
     const modes: { frequency: number; irRep: string; activity: string }[] = [];
 
@@ -307,16 +307,28 @@ export function parseLambdaOutput(stdout: string): {
     if (!trimmed) continue;
 
     if (lambda === 0) {
-      const lm = trimmed.match(/lambda\s*=\s*([\d.]+)/i);
+      // ph.x electron_phonon='interpolated': "Electron-phonon coupling constant =   1.234"
+      // lambda.x: "lambda =   1.234"
+      const lm =
+        trimmed.match(/Electron-phonon coupling constant\s*=\s*([\d.]+)/i) ||
+        trimmed.match(/\blambda\s*=\s*([\d.]+)/i);
       if (lm) lambda = parseFloat(lm[1]);
     }
 
     if (omegaLog === 0) {
-      const om = trimmed.match(/omega_log\s*=\s*([\d.]+)/i);
+      // ph.x: "Logarithmic average frequency (t.s.) =   1000.00 K"  (already Kelvin)
+      // lambda.x: "omega_log (K) =   800.0"  (K in parens before =)
+      // older QE: "omega_log =   800.0"
+      const om =
+        trimmed.match(/Logarithmic average frequency[^=]*=\s*([\d.]+)/i) ||
+        trimmed.match(/omega_log\s*(?:\([^)]*\)\s*)?=\s*([\d.]+)/i);
       if (om) omegaLog = parseFloat(om[1]);
     }
 
-    const tcm = trimmed.match(/mu\*?\s*=\s*([\d.]+)\s+Tc\s*=\s*([\d.]+)/i);
+    // lambda.x table: "mu* =  0.10   Tc =   55.5 K" or "0.10  55.5"
+    const tcm =
+      trimmed.match(/mu\*?\s*=\s*([\d.]+)\s+Tc\s*=\s*([\d.]+)/i) ||
+      (muStarValues.length === 0 && trimmed.match(/^(0\.\d+)\s+([\d.]+)\s*K?\s*$/));
     if (tcm) {
       muStarValues.push(parseFloat(tcm[1]));
       tc.push(parseFloat(tcm[2]));
@@ -326,9 +338,8 @@ export function parseLambdaOutput(stdout: string): {
   const strongCoupling = lambda > 1.5;
   const tcCorrected: number[] = [];
 
+  // omegaLog from QE is always in Kelvin — no unit conversion needed.
   if (strongCoupling && omegaLog > 0) {
-    const CM1_TO_K = 1.4388;
-    const omegaLogK = omegaLog * CM1_TO_K;
     const lambdaBar = 2.46 * (1 + 3.8 * 0.13);
     const f1 = Math.pow(1 + Math.pow(lambda / lambdaBar, 1.5), 1 / 3);
 
@@ -337,7 +348,7 @@ export function parseLambdaOutput(stdout: string): {
       if (denom <= 0) { tcCorrected.push(0); continue; }
       const exponent = -1.04 * (1 + lambda) / denom;
       if (exponent < -50) { tcCorrected.push(0); continue; }
-      let tcAD = (omegaLogK / 1.2) * f1 * Math.exp(exponent);
+      let tcAD = (omegaLog / 1.2) * f1 * Math.exp(exponent);
       tcAD = Math.max(0, Math.min(500, tcAD));
       tcCorrected.push(Number(tcAD.toFixed(2)));
     }

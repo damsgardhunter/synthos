@@ -317,6 +317,10 @@ function parseFormulaCounts(formula: string): Record<string, number> {
   return counts;
 }
 
+// d10/d0 elements that contribute metal-like conductivity but no Fermi-level d-DOS.
+// These must NOT inflate the d-electron DOS baseline the way open-shell TMs (Ni, Fe, Co) do.
+const CLOSED_D_SHELL_ELEMENTS = new Set(["Cu","Zn","Ag","Cd","Au","Hg","Ga","In","Tl","Ge","Sn","Pb"]);
+
 function computePhysicsCalibration(formula: string): {
   metallicityHint: number;
   dElectronFraction: number;
@@ -327,6 +331,10 @@ function computePhysicsCalibration(formula: string): {
   avgDebye: number;
   hFraction: number;
   tmCount: number;
+  // NEW: element-class fractions that break degeneracy between structurally similar compounds
+  fElectronFraction: number;      // rare-earth / actinide fraction (4f / 5f character)
+  closedDShellFraction: number;   // Cu/Zn/Ag-family fraction (d10, no active d-DOS at EF)
+  openDShellTmFraction: number;   // open-shell TM fraction (Ni, Fe, Co, Cr, Mn — active d-DOS)
 } {
   const elements = parseFormulaElements(formula);
   const counts = parseFormulaCounts(formula);
@@ -340,6 +348,9 @@ function computePhysicsCalibration(formula: string): {
   let totalDebye = 0;
   let debyeCount = 0;
   let tmCount = 0;
+  let fElectrons = 0;
+  let closedDShell = 0;
+  let openDShellTm = 0;
 
   for (const el of elements) {
     const data = getElementData(el);
@@ -353,7 +364,16 @@ function computePhysicsCalibration(formula: string): {
       totalDebye += data.debyeTemperature * frac;
       debyeCount++;
     }
-    if (isTransitionMetal(el) || isRareEarth(el) || isActinide(el)) {
+    if (isRareEarth(el) || isActinide(el)) {
+      fElectrons += frac;
+      dElectrons += frac;
+      tmCount++;
+    } else if (CLOSED_D_SHELL_ELEMENTS.has(el)) {
+      closedDShell += frac;
+      dElectrons += frac;  // still a metal, but d-band is full/below EF
+      tmCount++;
+    } else if (isTransitionMetal(el)) {
+      openDShellTm += frac;
       dElectrons += frac;
       tmCount++;
     }
@@ -396,6 +416,9 @@ function computePhysicsCalibration(formula: string): {
     avgDebye: debyeCount > 0 ? totalDebye : 300,
     hFraction: hFrac,
     tmCount,
+    fElectronFraction: fElectrons,
+    closedDShellFraction: closedDShell,
+    openDShellTmFraction: openDShellTm,
   };
 }
 
@@ -520,16 +543,34 @@ export function predictBandStructure(formula: string, prototype?: string): BandS
 
   const isMetal = calib.metallicityHint > 0.5 || bandGap < 0.1;
 
+  // ── Element-class corrections ────────────────────────────────────────────────
+  // These break degeneracy between structurally similar formulas (e.g. CuPr vs Ni2Eu)
+  // that produce identical calib.tmCount/dElectronFraction but have very different physics:
+  //   • f-electron REs (Pr, Eu, Ce…): flat localised 4f bands, strong correlation, low FS nesting
+  //   • closed-d-shell TMs (Cu, Zn, Ag…): full d10 band below EF, low d-DOS at EF, no nesting
+  //   • open-d-shell TMs (Ni, Fe, Co…): itinerant d-DOS at EF, strong nesting, high VHS proximity
+  const fFrac = calib.fElectronFraction;
+  const closedFrac = calib.closedDShellFraction;
+  const openFrac = calib.openDShellTmFraction;
+
   let flatBandScore = sigmoid(rawFlatBand);
-  if (calib.dElectronFraction > 0.3) flatBandScore = Math.min(1, flatBandScore * 1.4);
-  if (calib.dElectronFraction > 0.5) flatBandScore = Math.min(1, flatBandScore + 0.15);
+  // f-electron elements enhance flat-band score (localised 4f bands near EF in heavy fermions)
+  if (fFrac > 0.2) flatBandScore = Math.min(1, flatBandScore + fFrac * 0.3);
+  // open-shell TMs get the standard d-electron enhancement
+  if (openFrac > 0.3) flatBandScore = Math.min(1, flatBandScore * 1.4);
+  if (openFrac > 0.5) flatBandScore = Math.min(1, flatBandScore + 0.15);
+  // closed-shell (Cu etc.) gets no d-band flat-band enhancement
+  if (closedFrac > 0.3) flatBandScore = Math.max(0, flatBandScore - closedFrac * 0.15);
   if (calib.lightElementFraction > 0.3 && calib.tmCount === 0) flatBandScore *= 0.7;
   flatBandScore = Number(Math.min(1, flatBandScore).toFixed(4));
 
   let vhsProximity = sigmoid(rawVhs);
   if (isMetal) {
-    vhsProximity = Math.min(1, vhsProximity + calib.dElectronFraction * 0.25);
-    if (calib.tmCount >= 2) vhsProximity = Math.min(1, vhsProximity * 1.3);
+    // VHS proximity driven by itinerant d-DOS: open-shell TMs get full boost, f-electron and
+    // closed-shell TMs get a reduced boost (4f band is not at EF; d10 has no nesting geometry)
+    const itinerantBoost = openFrac * 0.25 + fFrac * 0.05 + closedFrac * 0.05;
+    vhsProximity = Math.min(1, vhsProximity + itinerantBoost);
+    if (openFrac >= 0.4 && calib.tmCount >= 2) vhsProximity = Math.min(1, vhsProximity * 1.3);
   } else {
     vhsProximity *= 0.2;
   }
@@ -537,8 +578,12 @@ export function predictBandStructure(formula: string, prototype?: string): BandS
 
   let nestingFromBands = sigmoid(rawNesting);
   if (isMetal) {
-    if (calib.tmCount >= 2) nestingFromBands = Math.min(1, nestingFromBands + 0.15);
-    if (calib.dElectronFraction > 0.3) nestingFromBands = Math.min(1, nestingFromBands * 1.2);
+    // Fermi-surface nesting requires an itinerant FS: open-shell TMs get full nesting boost;
+    // 4f electrons are localised and do not form a nesting FS; d10 metals have spherical FS
+    if (openFrac >= 0.4 && calib.tmCount >= 2) nestingFromBands = Math.min(1, nestingFromBands + 0.15);
+    if (openFrac > 0.3) nestingFromBands = Math.min(1, nestingFromBands * 1.2);
+    if (fFrac > 0.3) nestingFromBands = Math.max(0, nestingFromBands - fFrac * 0.2);
+    if (closedFrac > 0.3) nestingFromBands = Math.max(0, nestingFromBands - closedFrac * 0.15);
   } else {
     nestingFromBands *= 0.15;
   }
@@ -546,8 +591,15 @@ export function predictBandStructure(formula: string, prototype?: string): BandS
 
   let dosPredicted = Math.max(0.01, Math.abs(rawDos));
   if (isMetal) {
-    const baseDOS = 0.5 + calib.dElectronFraction * 3.0 + calib.tmCount * 0.3;
-    dosPredicted = Math.max(baseDOS, dosPredicted);
+    // Base DOS: only OPEN-shell TMs contribute d-band DOS at EF.
+    // Closed-shell TMs (d10) and f-electron REs contribute less because their
+    // narrow bands are typically below the Fermi level.
+    const dosBase = 0.5
+      + openFrac  * 3.5   // itinerant d-band: Ni, Fe → high N(Ef)
+      + fFrac     * 1.5   // 4f contribution: present but often below EF
+      + closedFrac * 0.8  // d10 metals: DOS at EF comes mainly from sp-band
+      + calib.tmCount * 0.15;  // residual per-element correction
+    dosPredicted = Math.max(dosBase, dosPredicted);
     if (calib.hFraction > 0.3) dosPredicted *= 1.3;
   } else {
     dosPredicted *= 0.05;
@@ -557,8 +609,11 @@ export function predictBandStructure(formula: string, prototype?: string): BandS
   let fsDimensionality: number;
   if (!isMetal) {
     fsDimensionality = 0;
-  } else if (calib.dElectronFraction > 0.4) {
+  } else if (openFrac > 0.4 || calib.dElectronFraction > 0.4) {
+    // Open-shell TM: multi-sheet FS → lower effective dimensionality
     fsDimensionality = 2 + sigmoid(rawFsDim - 3) * 1;
+    // f-electron compounds often have a simpler FS geometry
+    if (fFrac > 0.3) fsDimensionality = Math.min(fsDimensionality, 2.3 + fFrac * 0.3);
   } else if (calib.tmCount >= 1) {
     fsDimensionality = 2.5 + sigmoid(rawFsDim - 3) * 0.5;
   } else {
@@ -568,9 +623,13 @@ export function predictBandStructure(formula: string, prototype?: string): BandS
 
   let multiBandScore = sigmoid(rawMultiBand);
   if (isMetal) {
-    if (calib.tmCount >= 2) multiBandScore = Math.min(1, multiBandScore + 0.25);
-    else if (calib.tmCount >= 1) multiBandScore = Math.min(1, multiBandScore + 0.1);
-    if (calib.dElectronFraction > 0.3) multiBandScore = Math.min(1, multiBandScore * 1.2);
+    // Multi-band SC requires multiple distinct bands crossing EF: open-shell TMs → highest;
+    // f-electron systems → moderate (usually one f-band + one conduction band); closed-d → lower
+    if (openFrac >= 0.4 && calib.tmCount >= 2) multiBandScore = Math.min(1, multiBandScore + 0.25);
+    else if (openFrac >= 0.2 && calib.tmCount >= 1) multiBandScore = Math.min(1, multiBandScore + 0.1);
+    if (fFrac > 0.2) multiBandScore = Math.min(1, multiBandScore + fFrac * 0.15);  // f+c hybridisation
+    if (openFrac > 0.3) multiBandScore = Math.min(1, multiBandScore * 1.2);
+    if (closedFrac > 0.5) multiBandScore = Math.max(0, multiBandScore - closedFrac * 0.1);
   } else {
     multiBandScore *= 0.15;
   }

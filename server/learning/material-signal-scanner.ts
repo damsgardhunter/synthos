@@ -61,11 +61,19 @@ const MATERIAL_SIGNALS: MaterialSignal[] = [
     elementHints: ["Li", "Na", "K", "Pb", "Sn", "I", "Br", "Cl", "Ti", "Zr", "La", "Ce", "Ba", "Sr", "Cs"],
     formulaChecks: (f) => {
       const fam = classifyFamily(f);
-      return fam === "Perovskite" || fam === "Oxide" || /Li|Na/.test(f);
+      // Perovskite family is explicitly classified — accept that.
+      // For "Oxide" alone: require ABO3 stoichiometry (3 oxygens) not just any oxide.
+      // Li/Na compounds accepted only if they also contain O (electrolyte context).
+      if (fam === "Perovskite") return true;
+      if (/O3/.test(f) && /(Ba|Sr|Ca|La|Ce|Pb|Sn|Bi)/.test(f)) return true; // ABO3 perovskite-like
+      if (/(Li|Na).*O/.test(f)) return true; // Li/Na oxide — electrolyte context
+      if (/Li[A-Z]/.test(f) && !f.includes("H")) return true; // Li-metal binary for battery
+      return false;
     },
     datapointChecks: (c) => {
       let score = 0;
       const reasons: string[] = [];
+      const FORMATION_ENERGY_DEFAULT = -5.00;
       const bg = c.bandGap;
       if (bg != null) {
         if (bg >= 1.1 && bg <= 1.8) {
@@ -84,9 +92,11 @@ const MATERIAL_SIGNALS: MaterialSignal[] = [
         score += 0.1;
         reasons.push("Ambient pressure stable");
       }
-      if (c.formationEnergy != null && c.formationEnergy < -0.3) {
+      const formE = c.formationEnergy;
+      const formEValid = formE != null && Math.abs(formE - FORMATION_ENERGY_DEFAULT) > 0.001;
+      if (formEValid && formE! < -0.3) {
         score += 0.05;
-        reasons.push(`Favorable formation energy ${c.formationEnergy.toFixed(2)} eV/atom`);
+        reasons.push(`Favorable formation energy ${formE!.toFixed(2)} eV/atom`);
       }
       return { score, reasons };
     },
@@ -158,24 +168,31 @@ const MATERIAL_SIGNALS: MaterialSignal[] = [
     name: "Biocompatible/Biodegradable Material",
     description: "Materials for medical implants, tissue engineering, and drug delivery that integrate with or safely degrade within the human body",
     keywords: ["biocompatible", "biodegradable", "implant", "scaffold", "hydroxyapatite", "bioglass"],
-    elementHints: ["Ti", "Ca", "P", "Mg", "Zn", "Fe", "Si", "Zr", "Ta", "Nb"],
+    // Fe and Ta removed — Fe is ubiquitous and not specifically biocompatible; Ta needs
+    // Ti/Zr co-presence to be meaningful; Nb same problem. Keep only primary biocompatible elements.
+    elementHints: ["Ti", "Ca", "P", "Mg", "Zn", "Si", "Zr"],
     formulaChecks: (f) => /Ti.*(O|N|Al|V|Zr|Nb|Ta)/.test(f) || /Ca.*P/.test(f) || /Mg.*(Zn|Ca|Sr)/.test(f) || /Zr.*O/.test(f),
     datapointChecks: (c) => {
       let score = 0;
       const reasons: string[] = [];
-      if (c.ambientPressureStable === true || (c.pressureGpa != null && c.pressureGpa < 1)) {
-        score += 0.15;
-        reasons.push("Ambient pressure stable — required for biomedical applications");
-      }
+      // Hard requirement: biomedical materials must be ambient-pressure stable
+      const isAmbient = c.ambientPressureStable === true || (c.pressureGpa != null && c.pressureGpa < 5);
+      if (!isAmbient) return { score: -1, reasons: ["Requires high pressure — not viable for biomedical applications"] };
+      score += 0.15;
+      reasons.push("Ambient pressure stable — required for biomedical applications");
       if (c.stabilityScore != null && c.stabilityScore > 0.7) {
         score += 0.15;
         reasons.push(`High stability ${c.stabilityScore.toFixed(2)} — resists degradation in physiological environment`);
       }
-      const toxic = ["Cd", "Hg", "Tl", "Pb", "As", "Be", "Cr", "Co"];
+      // Elements that make a compound biomedically dangerous — disqualify outright
+      const disqualify = ["Hf", "Re", "Os", "Be", "Cd", "Hg", "Tl", "Pb", "As"];
+      const hasDisqualifying = disqualify.some(e => c.formula.includes(e));
+      if (hasDisqualifying) return { score: -1, reasons: ["Contains elements disqualifying for biomedical use"] };
+      const toxic = ["Cr", "Co", "Ni"];
       const hasToxic = toxic.some(e => c.formula.includes(e));
       if (!hasToxic) {
         score += 0.1;
-        reasons.push("No toxic elements detected — biocompatibility favorable");
+        reasons.push("No toxic transition metals detected — biocompatibility favorable");
       }
       if (c.decompositionEnergy != null && c.decompositionEnergy > 0.1) {
         score += 0.1;
@@ -191,18 +208,31 @@ const MATERIAL_SIGNALS: MaterialSignal[] = [
     name: "High-Temperature Ceramic/Alloy",
     description: "Lightweight materials that withstand extreme heat and environments, crucial for jet engines and space exploration",
     keywords: ["refractory", "ultra-high temperature", "UHTC", "thermal barrier", "superalloy", "turbine"],
-    elementHints: ["Hf", "Zr", "Ta", "W", "Mo", "Re", "Nb", "Ti", "Si", "B", "C", "N"],
-    formulaChecks: (f) => /(Hf|Zr|Ta|W|Mo)(C|B|N|Si)/.test(f) || /(Hf|Zr|Ta)(C|B)\d*$/.test(f) || /Si.*C.*N/.test(f),
+    // B, C, N removed — appear in thousands of non-refractory compounds (e.g. BN ceramics fine,
+    // but B or N alone in Mo2H15N or BeH4N is not refractory). Ti removed too — too broad.
+    // Require actual refractory metals: Hf, Zr, Ta, W, Mo, Re, Nb, Si (in carbide/nitride context).
+    elementHints: ["Hf", "Zr", "Ta", "W", "Mo", "Re", "Nb"],
+    formulaChecks: (f) => {
+      // Must be refractory metal carbide, boride, nitride, or silicide — not a hydride
+      if (/H\d/.test(f)) return false; // hydrides are not refractory ceramics
+      return /(Hf|Zr|Ta|W|Mo)(C|B|N|Si)/.test(f) || /(Hf|Zr|Ta)(C|B)\d*$/.test(f) || /Si.*C.*N/.test(f);
+    },
     datapointChecks: (c) => {
       let score = 0;
       const reasons: string[] = [];
-      if (c.formationEnergy != null && c.formationEnergy < -1.0) {
+      // Guard: -5.00 eV/atom exactly is the uncomputed default — not a real measurement
+      const FORMATION_ENERGY_DEFAULT = -5.00;
+      const formE = c.formationEnergy;
+      const formEValid = formE != null && Math.abs(formE - FORMATION_ENERGY_DEFAULT) > 0.001;
+      if (formEValid && formE! < -1.0) {
         score += 0.2;
-        reasons.push(`Very negative formation energy ${c.formationEnergy.toFixed(2)} eV/atom — strong bonding indicates high melting point`);
-      } else if (c.formationEnergy != null && c.formationEnergy < -0.5) {
+        reasons.push(`Very negative formation energy ${formE!.toFixed(2)} eV/atom — strong bonding indicates high melting point`);
+      } else if (formEValid && formE! < -0.5) {
         score += 0.1;
-        reasons.push(`Negative formation energy ${c.formationEnergy.toFixed(2)} eV/atom — moderate bond strength`);
+        reasons.push(`Negative formation energy ${formE!.toFixed(2)} eV/atom — moderate bond strength`);
       }
+      // Hydrides are not refractory — penalise
+      if (c.formula.includes("H")) return { score: -1, reasons: ["Hydrides are not high-temperature ceramics"] };
       if (c.stabilityScore != null && c.stabilityScore > 0.8) {
         score += 0.15;
         reasons.push(`High thermodynamic stability (${c.stabilityScore.toFixed(2)})`);
@@ -398,10 +428,12 @@ function scoreCandidate(candidate: CandidateData, signal: MaterialSignal): Signa
 
   const elementMatches = signal.elementHints.filter(el => formula.includes(el));
   if (elementMatches.length >= 2) {
-    score += 0.3;
+    score += 0.25;
     reasons.push(`Contains signal elements: ${elementMatches.join(", ")}`);
   } else if (elementMatches.length === 1) {
-    score += 0.1;
+    // Single-element match is a weak signal on its own — reduced weight and does not
+    // alone cross the threshold. It only contributes if corroborated by other signals.
+    score += 0.08;
     reasons.push(`Contains signal element: ${elementMatches[0]}`);
   }
 
@@ -411,6 +443,9 @@ function scoreCandidate(candidate: CandidateData, signal: MaterialSignal): Signa
   }
 
   const dp = signal.datapointChecks(candidate);
+  // datapointChecks returning score < 0 is a hard disqualification (e.g. requires high pressure,
+  // contains disqualifying elements). Bail out immediately without calling AI.
+  if (dp.score < 0) return null;
   if (dp.score > 0) {
     score += Math.min(0.5, dp.score);
     reasons.push(...dp.reasons);
@@ -423,7 +458,9 @@ function scoreCandidate(candidate: CandidateData, signal: MaterialSignal): Signa
     reasons.push(`Keyword matches: ${keywordMatches.join(", ")}`);
   }
 
-  if (score < 0.35) return null;
+  // Raised from 0.35 — single-element presence alone (0.08) now can't cross this threshold,
+  // requiring at least one corroborating signal (formula pattern, datapoints, or keyword match).
+  if (score < 0.45) return null;
 
   return {
     signal,

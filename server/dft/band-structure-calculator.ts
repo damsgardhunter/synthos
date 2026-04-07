@@ -256,6 +256,7 @@ function generateBandsInput(
   crystalSystem: string = "cubic_sc",
   cOverA: number = 1.0,
   latticeB: number = latticeA,
+  ecutrhoOverride?: number,
 ): string {
   const ELEMENT_DATA: Record<string, number> = {
     H: 1.008, He: 4.003, Li: 6.941, Be: 9.012, B: 10.811, C: 12.011,
@@ -276,7 +277,9 @@ function generateBandsInput(
 
   const totalAtoms = positions.length;
   const nTypes = elements.length;
-  const ecutrho = ecutwfc * 8;
+  // Default 4x (PAW/NC). Caller should pass ecutrhoOverride computed via ecutrhoMultiplier()
+  // to use 8x for USPP. The old hardcoded 8x caused FFT OOM for PAW hydrides (LaH10 etc).
+  const ecutrho = ecutrhoOverride ?? ecutwfc * 4;
   const cleanPrefix = formula.replace(/[^a-zA-Z0-9]/g, "");
 
   let atomicSpecies = "";
@@ -1042,6 +1045,7 @@ export async function computeDFTBandStructure(
   ecutwfc: number = 45,
   nspin: number = 1,
   latticeB: number = latticeA,
+  ecutrho?: number,
 ): Promise<DFTBandStructureResult> {
   const startTime = Date.now();
   const crystalSystem = guessCrystalSystem(elements, counts, cOverA);
@@ -1078,7 +1082,7 @@ export async function computeDFTBandStructure(
   };
 
   try {
-    const bandsInput = generateBandsInput(formula, elements, counts, latticeA, positions, kPath, ecutwfc, nspin, crystalSystem, cOverA, latticeB);
+    const bandsInput = generateBandsInput(formula, elements, counts, latticeA, positions, kPath, ecutwfc, nspin, crystalSystem, cOverA, latticeB, ecutrho);
     const bandsInputFile = path.join(jobDir, "bands.in");
     fs.writeFileSync(bandsInputFile, bandsInput);
 

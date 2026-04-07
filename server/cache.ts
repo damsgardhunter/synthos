@@ -3,9 +3,33 @@ interface CacheEntry<T> {
   expiresAt: number;
 }
 
+const MAX_CACHE_ENTRIES = 500;
+
 class MemoryCache {
   private store = new Map<string, CacheEntry<any>>();
   private inflight = new Map<string, Promise<any>>();
+  private sweepTimer: ReturnType<typeof setInterval> | null = null;
+
+  constructor() {
+    // Sweep expired entries every 5 minutes so they don't accumulate
+    // indefinitely for keys that are never read again.
+    this.sweepTimer = setInterval(() => this.sweepExpired(), 5 * 60 * 1000);
+    if (this.sweepTimer?.unref) this.sweepTimer.unref(); // don't block process exit
+  }
+
+  private sweepExpired(): void {
+    const now = Date.now();
+    for (const [key, entry] of this.store) {
+      if (now > entry.expiresAt) this.store.delete(key);
+    }
+    // Hard cap: if still over limit after sweep, evict oldest-expiring entries
+    if (this.store.size > MAX_CACHE_ENTRIES) {
+      const sorted = [...this.store.entries()].sort((a, b) => a[1].expiresAt - b[1].expiresAt);
+      for (const [key] of sorted.slice(0, this.store.size - MAX_CACHE_ENTRIES)) {
+        this.store.delete(key);
+      }
+    }
+  }
 
   get<T>(key: string): T | undefined {
     const entry = this.store.get(key);
@@ -98,19 +122,23 @@ export const cache = new MemoryCache();
 
 export const TTL = {
   ELEMENTS: 60 * 60 * 1000,
-  STATS: 3 * 60 * 1000,          // was 30s — DB hit every 30s was causing 1.1s delays
+  STATS: 10 * 60 * 1000,  // getStats() makes 3 serial DB round-trips — too slow to re-run every 3 min under GB training load
   CRYSTAL_STRUCTURES_BY_FORMULA: 5 * 60 * 1000,
   COMPUTATIONAL_RESULTS_BY_FORMULA: 5 * 60 * 1000,
-  RESEARCH_LOGS: 60 * 1000,      // was 15s
-  LEARNING_PHASES: 3 * 60 * 1000, // was 30s
-  DFT_STATUS: 2 * 60 * 1000,     // was 30s
+  RESEARCH_LOGS: 60 * 1000,
+  LEARNING_PHASES: 3 * 60 * 1000,
+  DFT_STATUS: 2 * 60 * 1000,
   ENGINE_MEMORY: 5 * 60 * 1000,
-  CANDIDATES: 2 * 60 * 1000,     // was 20s
-  STRATEGY: 3 * 60 * 1000,       // was 30s
-  MILESTONES: 5 * 60 * 1000,     // was 60s
-  NOVEL_INSIGHTS: 20 * 60 * 1000, // 20min — data only changes when ENABLE_INSIGHT_NOVELTY=true
-  THEORY_REPORT: 20 * 60 * 1000,  // 20min — in-memory causal/symbolic stats, changes slowly
-  CONVERGENCE: 2 * 60 * 1000,    // was 30s
+  CANDIDATES: 2 * 60 * 1000,
+  STRATEGY: 3 * 60 * 1000,
+  MILESTONES: 5 * 60 * 1000,
+  NOVEL_INSIGHTS: 20 * 60 * 1000,
+  THEORY_REPORT: 20 * 60 * 1000,
+  CONVERGENCE: 2 * 60 * 1000,
+  TSC_CANDIDATES: 2 * 60 * 1000,  // 500-candidate scan + sort — cache for 2 min
+  UNIFIED_CI: 15 * 60 * 1000,    // ML+GNN inference result — expensive, cache for 15 min
+  NOVEL_PREDICTIONS: 2 * 60 * 1000, // novel prediction rows — cache for 2 min
+  PARETO_FRONTIER: 2 * 60 * 1000,  // unused — route serves latestParetoResults directly
 };
 
 export const CACHE_KEYS = {
@@ -128,6 +156,10 @@ export const CACHE_KEYS = {
   NOVEL_INSIGHTS: "novel-insights",
   THEORY_REPORT: "theory-report",
   CONVERGENCE: "convergence",
+  TSC_CANDIDATES: "tsc-candidates",
+  NOVEL_PREDICTIONS: "novel-predictions",
+  PARETO_FRONTIER: "pareto-frontier",
   crystalStructuresByFormula: (formula: string) => `crystal-structures:${formula}`,
   computationalResultsByFormula: (formula: string) => `computational-results:${formula}`,
+  unifiedCI: (formula: string) => `unified-ci:${formula}`,
 };

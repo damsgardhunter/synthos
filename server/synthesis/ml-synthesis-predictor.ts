@@ -555,16 +555,36 @@ let cachedSynthesisModel: SynthesisGBModel | null = null;
 let cachedFeatureImportance: Record<string, number> | null = null;
 let trainingSize = 0;
 let lastTrainingRecordCount = 0;
+let _lastSynthesisRetrainAt = 0;
+let _synthRetrainingPaused = false;
+
+/** Call with true when SG sweep starts, false when it ends.
+ *  Prevents synchronous GB retraining from blocking the event loop
+ *  during the sweep — which would freeze fp-wait timers and prevent
+ *  the 8-min wall-time limit from firing. */
+export function setSynthesisRetrainingPaused(paused: boolean): void {
+  _synthRetrainingPaused = paused;
+}
 // Retrain whenever this many new DFT records have accumulated since the last training run.
-// Low enough to capture early learning signal; high enough to avoid constant retraining.
-const RETRAIN_THRESHOLD = 25;
+// Keep threshold high enough to avoid constant retraining — synthesis GB trains on 2000+
+// samples synchronously, blocking the event loop for 30-60s if triggered too often.
+const RETRAIN_THRESHOLD = 100;
+// Minimum ms between retrains regardless of record count — prevents back-to-back retrains
+// when DFT records grow rapidly (e.g. after a large batch of QE jobs complete).
+const RETRAIN_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes
 
 function getTrainedSynthesisModel(): SynthesisGBModel {
+  // During SG sweep, skip retraining to prevent synchronous GB training from blocking
+  // the event loop — which would freeze fp-wait setTimeout callbacks and prevent the
+  // 8-min wall-time limit from firing, causing the sweep to run indefinitely.
+  if (_synthRetrainingPaused && cachedSynthesisModel) return cachedSynthesisModel;
+
   const currentRecordCount = getLearningDbRecordCount();
   const hasNewRecords = currentRecordCount >= lastTrainingRecordCount + RETRAIN_THRESHOLD;
-  if (cachedSynthesisModel && !hasNewRecords) return cachedSynthesisModel;
+  const cooledDown = Date.now() - _lastSynthesisRetrainAt >= RETRAIN_COOLDOWN_MS;
+  if (cachedSynthesisModel && !(hasNewRecords && cooledDown)) return cachedSynthesisModel;
 
-  if (hasNewRecords) {
+  if (hasNewRecords && cooledDown) {
     cachedSynthesisModel = null; // force full retrain with expanded dataset
     console.log(`[SynthesisPredictor] DFT records grew by ${currentRecordCount - lastTrainingRecordCount} — retraining`);
   }
@@ -585,9 +605,18 @@ function getTrainedSynthesisModel(): SynthesisGBModel {
     }
   }
 
-  trainingSize = X.length;
+  // Cap training set to most recent 300 samples to keep sync training time
+  // bounded (< 1s), preventing event loop stalls that exhaust the DB pool.
+  // Reduced from 1000: even 1000×75 trees blocked the event loop ~10-20s,
+  // long enough for Neon pgBouncer to drop idle connections mid-cycle.
+  // 300 samples × 30 trees keeps the block under 1s.
+  const MAX_TRAIN = 300;
+  const Xfinal = X.length > MAX_TRAIN ? X.slice(X.length - MAX_TRAIN) : X;
+  const yfinal = y.length > MAX_TRAIN ? y.slice(y.length - MAX_TRAIN) : y;
 
-  if (X.length < 5) {
+  trainingSize = Xfinal.length;
+
+  if (Xfinal.length < 5) {
     cachedSynthesisModel = {
       trees: [],
       learningRate: 0.1,
@@ -596,10 +625,11 @@ function getTrainedSynthesisModel(): SynthesisGBModel {
       trainedAt: Date.now(),
     };
     lastTrainingRecordCount = getLearningDbRecordCount();
+    _lastSynthesisRetrainAt = Date.now();
     return cachedSynthesisModel;
   }
 
-  cachedSynthesisModel = trainSynthesisGB(X, y, 150, 0.1, 3);
+  cachedSynthesisModel = trainSynthesisGB(Xfinal, yfinal, 30, 0.1, 3); // 30 trees (down from 75) to keep block < 1s
 
   const importance = new Map<number, number>();
   for (const tree of cachedSynthesisModel.trees) {
@@ -619,6 +649,7 @@ function getTrainedSynthesisModel(): SynthesisGBModel {
   });
 
   lastTrainingRecordCount = getLearningDbRecordCount();
+  _lastSynthesisRetrainAt = Date.now();
   console.log(`[SynthesisPredictor] Trained on ${trainingSize} samples (${lastTrainingRecordCount} DFT records in DB)`);
 
   return cachedSynthesisModel;

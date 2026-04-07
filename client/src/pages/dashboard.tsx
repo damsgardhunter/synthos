@@ -2025,6 +2025,7 @@ export default function Dashboard() {
   const ws = useWebSocket();
 
   const statsHistoryRef = useRef<Record<string, number[]>>({});
+  const cycleEndDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Seed independent component caches (e.g. StrategyCard) from dashboard bundle
   // so they skip their own network requests on first render.
@@ -2078,30 +2079,51 @@ export default function Dashboard() {
     if (!last) return;
     const t = last.type;
 
-    // Core data — refresh on any engine progress or DFT job event
-    if (["phaseUpdate","progress","prediction","insight","cycleEnd","log",
-         "dftJobCompleted","dftJobStarted","dftJobFailed"].includes(t)) {
+    // "log" events only update the activity feed (ws.messages) — no HTTP fetch needed.
+    // Invalidating on every log caused a request storm: engine emits logs many times/sec.
+
+    // Phase and cycle completions — refresh stable state.
+    // "progress" fires per batch item (many/sec) and is intentionally excluded — it caused 1Hz HTTP spam.
+    if (t === "phaseUpdate" || t === "cycleEnd") {
       queryClient.invalidateQueries({ queryKey: ["/api/stats"] });
       queryClient.invalidateQueries({ queryKey: ["/api/learning-phases"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/research-logs"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/novel-predictions"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/materials"] });
       queryClient.invalidateQueries({ queryKey: ["/api/engine/memory"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/dft-status"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/novel-insights"] });
       queryClient.invalidateQueries({ queryKey: ["/api/milestones"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/research-logs"] });
+    }
+    // New predictions or insights — refresh discovery data
+    if (["prediction", "insight"].includes(t)) {
+      queryClient.invalidateQueries({ queryKey: ["/api/novel-predictions"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/novel-insights"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/materials"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/stats"] });
+    }
+    // DFT job events — refresh DFT status and stats
+    if (["dftJobCompleted", "dftJobStarted", "dftJobFailed"].includes(t)) {
+      queryClient.invalidateQueries({ queryKey: ["/api/dft-status"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/stats"] });
     }
     if (t === "strategyUpdate") {
       queryClient.invalidateQueries({ queryKey: ["/api/research-strategy"] });
       queryClient.invalidateQueries({ queryKey: ["/api/research-strategy/history"] });
     }
-    // Bulk-refresh all specialized stats once per cycle — avoids 24 separate polling timers
+    // Bulk-refresh all specialized stats once per cycle — debounced to 3s so rapid
+    // consecutive cycleEnd events don't fire 24 requests multiple times.
     if (t === "cycleEnd") {
-      for (const key of CYCLE_END_KEYS) {
-        queryClient.invalidateQueries({ queryKey: [key] });
-      }
+      if (cycleEndDebounceRef.current) clearTimeout(cycleEndDebounceRef.current);
+      cycleEndDebounceRef.current = setTimeout(() => {
+        for (const key of CYCLE_END_KEYS) {
+          queryClient.invalidateQueries({ queryKey: [key] });
+        }
+        cycleEndDebounceRef.current = null;
+      }, 3000);
     }
   }, [ws.messageCount]);
+
+  // Clear debounce timer on unmount to avoid state updates on an unmounted component
+  useEffect(() => () => {
+    if (cycleEndDebounceRef.current) clearTimeout(cycleEndDebounceRef.current);
+  }, []);
 
   const radarData = phases?.map(p => ({
     subject: p.name.split(" ").slice(0, 2).join(" "),

@@ -235,16 +235,31 @@ function computeHydrideFromParsed(parsed: ParsedFormula): number {
 
   const baseEnergy = weightedEnergy / metalWeight;
   const stoichFactor = Math.min(hFrac / (1 - hFrac + 0.01), 3.0);
-  const energy = baseEnergy * stoichFactor;
+  let energy = baseEnergy * stoichFactor;
 
   if (metalElements.length > 1) {
     const metalMiedema = computeMiedemaFormationEnergy(
       metalElements.map(el => el + (counts[el] ?? 1)).join("")
     );
-    return Math.max(-5.0, Math.min(2.0, energy + 0.3 * metalMiedema));
+    energy = energy + 0.3 * metalMiedema;
   }
 
-  return Math.max(-5.0, Math.min(2.0, energy));
+  // Ambient-pressure destabilization for polyhydrides with H/M > 3.
+  // High-stoichiometry hydrides (LaH6, LaH10, H3S at ambient, etc.) are only
+  // thermodynamically stable under extreme pressure (100–300 GPa). The Miedema
+  // model doesn't capture this: it saturates at stoichFactor=3.0, making all
+  // H/M ≥ 3 appear equally stable. Add a per-excess-H penalty so that the
+  // convex hull gives a physically meaningful (positive) distance for these phases
+  // at ambient conditions. The passesStabilityGate pressure multiplier then
+  // correctly relaxes this threshold at high pressures.
+  const metalCount = totalAtoms - hCount;
+  const hPerMetal = metalCount > 0 ? hCount / metalCount : 0;
+  if (hPerMetal > 3.0) {
+    const excessHAtoms = (hPerMetal - 3.0) * metalCount;
+    energy += excessHAtoms * 0.6;  // +0.6 eV per excess H atom above H/M = 3
+  }
+
+  return Math.max(-5.0, Math.min(5.0, energy));
 }
 
 function isHydrideParsed(parsed: ParsedFormula): boolean {
@@ -499,6 +514,29 @@ export function computeConvexHull(
 
 const PSEUDO_BINARY_ELEMENT_LIMIT = 4;
 
+// Hard-coded reference competing phases for the most common superconductor
+// element systems. Energies are computed via estimateFormationEnergy() at
+// runtime so they stay in the same unit convention as the rest of the hull.
+// Without these entries the DB-backed competing-phases cache may be empty for
+// systems that only have one known candidate, leaving the hull as a trivial
+// straight line and making every candidate appear to be "on hull" (distance=0).
+const STATIC_REFERENCE_FORMULAS: string[] = [
+  // La-H system
+  "LaH2", "LaH3",
+  // Y-H system
+  "YH2", "YH3",
+  // Ce-H system
+  "CeH2", "CeH3",
+  // Other rare-earth hydrides common in SC research
+  "LuH2", "ThH2", "BaH2", "CaH2", "MgH2", "ScH2",
+  // H-S (thio-hydrides)
+  "H2S",
+  // Borides
+  "MgB2",
+  // Cu-oxide cuprate building blocks
+  "CuO", "BaO",
+];
+
 interface CachedCompetingPhases {
   materialEntries: { formula: string; energy: number; elements: string[] }[];
   candidateEntries: { formula: string; energy: number; elements: string[] }[];
@@ -555,6 +593,23 @@ async function getOrBuildCompetingPhasesCache(): Promise<CachedCompetingPhases> 
         }));
     } catch {
       // DB unavailable — candidate hull entries empty, Miedema analytical fallback used
+    }
+
+    // Inject static well-known competing phases so that the hull is non-trivial
+    // even when the DB has no entries for a given element system.
+    const seenStatic = new Set([
+      ...materialEntries.map(m => m.formula),
+      ...candidateEntries.map(c => c.formula),
+    ]);
+    for (const f of STATIC_REFERENCE_FORMULAS) {
+      if (!seenStatic.has(f)) {
+        materialEntries.push({
+          formula: f,
+          energy: estimateFormationEnergy(f),
+          elements: parseFormulaElements(f),
+        });
+        seenStatic.add(f);
+      }
     }
 
     competingPhasesCache = { materialEntries, candidateEntries, builtAt: now };
@@ -701,8 +756,16 @@ export function assessMetastability(
       estimatedLifetime = `${Math.round(lifetimeSeconds / 3600)} hours`;
     } else if (lifetimeSeconds > 60) {
       estimatedLifetime = `${Math.round(lifetimeSeconds / 60)} minutes`;
-    } else {
+    } else if (lifetimeSeconds >= 1) {
       estimatedLifetime = `${lifetimeSeconds.toFixed(1)} seconds`;
+    } else if (lifetimeSeconds >= 1e-3) {
+      estimatedLifetime = `${(lifetimeSeconds * 1e3).toFixed(1)} ms`;
+    } else if (lifetimeSeconds >= 1e-6) {
+      estimatedLifetime = `${(lifetimeSeconds * 1e6).toFixed(1)} µs`;
+    } else if (lifetimeSeconds >= 1e-9) {
+      estimatedLifetime = `${(lifetimeSeconds * 1e9).toFixed(1)} ns`;
+    } else {
+      estimatedLifetime = "< 1 ns (kinetically unstable)";
     }
   }
 

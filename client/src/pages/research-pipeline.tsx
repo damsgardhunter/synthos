@@ -593,12 +593,8 @@ function KnowledgeMap({ onFamilyClick, selectedFamily }: { onFamilyClick?: (fami
   });
 
   const { messages, messageCount } = useWebSocket();
-  useEffect(() => {
-    const last = messages[messages.length - 1];
-    if (last?.type === "log" && last.data?.phase === "engine") {
-      queryClient.invalidateQueries({ queryKey: ["/api/engine/memory"] });
-    }
-  }, [messageCount]);
+  // engine/memory holds cycle-level aggregates — refresh once per cycle, not per candidate log.
+  // "log" events with phase="engine" fire ~100×/cycle during screening; that caused 1Hz HTTP spam.
 
   const familyStats = memory?.familyStats ?? {};
   const cycleCandidates = memory?.lastCycleCandidates ?? [];
@@ -880,13 +876,18 @@ export default function ResearchPipeline() {
   useEffect(() => {
     const last = ws.messages[ws.messages.length - 1];
     if (!last) return;
-    const relevantTypes = new Set(["phaseUpdate", "progress", "insight", "cycleEnd", "log", "convergenceUpdate"]);
-    if (relevantTypes.has(last.type)) {
+    // "progress" fires per batch item (potentially many/sec); "insight" fires per discovery.
+    // Only coarse-grained events (phaseUpdate, cycleEnd) should trigger broad invalidation.
+    if (last.type === "phaseUpdate" || last.type === "cycleEnd") {
       queryClient.invalidateQueries({ queryKey: ["/api/learning-phases"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/research-logs"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/novel-insights"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/superconductor-candidates"] });
       queryClient.invalidateQueries({ queryKey: ["/api/engine/memory"] });
+    }
+    if (last.type === "cycleEnd") {
+      queryClient.invalidateQueries({ queryKey: ["/api/research-logs"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/superconductor-candidates"] });
+    }
+    if (last.type === "insight" || last.type === "cycleEnd") {
+      queryClient.invalidateQueries({ queryKey: ["/api/novel-insights"] });
     }
     if (last.type === "convergenceUpdate") {
       queryClient.invalidateQueries({ queryKey: ["/api/convergence"] });

@@ -70,6 +70,26 @@ export const researchLogs = pgTable("research_logs", {
   index("research_logs_event_idx").on(table.event),
 ]);
 
+export const clientErrors = pgTable("client_errors", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  timestamp: timestamp("timestamp").defaultNow(),
+  type: text("type").notNull(), // "render-crash" | "query-error" | "query-timeout" | "slow-load"
+  page: text("page"),           // URL path where the error occurred
+  message: text("message").notNull(),
+  stack: text("stack"),         // stack trace for render crashes
+  endpoint: text("endpoint"),   // API endpoint for query errors
+  statusCode: integer("status_code"),
+  durationMs: integer("duration_ms"), // response time for slow-load / timeout
+  buildInfo: text("build_info"), // browser UA / context
+}, (table) => [
+  index("client_errors_timestamp_idx").on(table.timestamp),
+  index("client_errors_type_idx").on(table.type),
+]);
+
+export const insertClientErrorSchema = createInsertSchema(clientErrors).omit({ id: true, timestamp: true });
+export type ClientError = typeof clientErrors.$inferSelect;
+export type InsertClientError = z.infer<typeof insertClientErrorSchema>;
+
 export const synthesisProcesses = pgTable("synthesis_processes", {
   id: varchar("id").primaryKey(),
   materialId: varchar("material_id"),
@@ -150,6 +170,7 @@ export const superconductorCandidates = pgTable("superconductor_candidates", {
   index("sc_candidates_predicted_tc_idx").on(table.predictedTc),
   index("sc_candidates_ensemble_score_idx").on(table.ensembleScore),
   index("sc_candidates_data_confidence_idx").on(table.dataConfidence),
+  index("sc_candidates_confidence_tc_idx").on(table.dataConfidence, table.predictedTc),
 ]);
 
 export const crystalStructures = pgTable("crystal_structures", {

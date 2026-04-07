@@ -431,17 +431,19 @@ class XGBPredictResponse(BaseModel):
 async def predict_xgb(req: XGBPredictRequest):
     """
     Predict Tc using the Colab-trained XGBoost model (xgb_model.pkl).
-    Features are derived from the formula via graph_builder's 23-dim global
-    composition vector (matches GLOBAL_COMP_DIM used during Colab training).
+    Features are derived from the formula via graph_builder's global composition
+    vector with pressure_gpa appended as the final column (23+1 = 24 features,
+    matching the Cell 11 extractor used during Colab training).
     """
     if _xgb_model is None:
         raise HTTPException(status_code=503, detail="XGBoost model not loaded")
     try:
         graph = build_crystal_graph(req.formula, pressure_gpa=req.pressure_gpa)
-        feat  = graph.global_features  # shape [23]
         import numpy as np
-        x = np.array(feat, dtype=np.float32).reshape(1, -1)
-        tc_pred = float(_xgb_model.predict(x)[0])
+        base     = np.array(graph.global_features, dtype=np.float32)
+        pressure = np.array([getattr(graph, "pressure_gpa", req.pressure_gpa)], dtype=np.float32)
+        x        = np.concatenate([base, pressure]).reshape(1, -1)
+        tc_pred  = float(_xgb_model.predict(x)[0])
         tc_pred = max(0.0, tc_pred)
         return XGBPredictResponse(
             tc=round(tc_pred, 2),
@@ -701,7 +703,7 @@ if __name__ == "__main__":
     log.info(f"Starting GNN service on port {PORT}")
     uvicorn.run(
         "server:app",
-        host    = "127.0.0.1",
+        host    = "0.0.0.0",
         port    = PORT,
         workers = 1,          # Single worker — GPU state is not fork-safe
         log_level = LOG_LEVEL.lower(),

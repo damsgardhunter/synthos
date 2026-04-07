@@ -124,20 +124,23 @@ async function logComputationalResult(
     passed,
     failureReason,
   };
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 0; attempt < 4; attempt++) {
     try {
       await storage.insertComputationalResult(payload);
       return;
     } catch (logErr) {
       const msg = logErr instanceof Error ? logErr.message.slice(0, 100) : "unknown";
-      if (attempt === 0 && /connection|timeout|ECONNRESET/i.test(msg)) {
-        await new Promise(r => setTimeout(r, 200));
+      const isTransient = /connection|timeout|ECONNRESET|terminated/i.test(msg);
+      if (isTransient && attempt < 3) {
+        // Exponential backoff: 500ms, 1.5s, 4.5s — gives pool time to drain
+        await new Promise(r => setTimeout(r, 500 * Math.pow(3, attempt)));
         continue;
       }
       console.log(`[Pipeline] logComputationalResult failed for ${formula} stage=${stage}: ${msg}`);
       if (!passed) {
         console.log(`[Pipeline] WARNING: Lost negative data for ${formula} (${computationType}) — active learning may miss this sample`);
       }
+      return;
     }
   }
 }
@@ -151,12 +154,49 @@ async function stage0_MLFilter(
   const score = candidate.ensembleScore ?? 0;
   const xgb = candidate.xgboostScore ?? 0;
 
-  const passed = score > 0.55 && xgb > 0.3;
-  const reason = passed ? null : `ML filter: ensemble=${score} xgb=${xgb} below 0.55/0.3`;
+  // Novelty-aware gating: compounds far from training data will score low on
+  // models trained on known materials by construction — that's not a signal of
+  // a bad candidate.  High uncertainty + strong physics engine signal should
+  // prioritise a compound for DFT, not reject it.
+  const uncertainty = candidate.uncertaintyEstimate ?? 0;
+  const physTc = candidate.predictedTc ?? 0;
+  const lambda = candidate.electronPhononCoupling ?? 0;
+  const isHighNovelty = uncertainty >= 0.7;
+  const hasStrongPhysicsSignal = physTc > 50 && lambda > 1.0;
+
+  let passed: boolean;
+  let reason: string | null;
+  let ensembleThreshold: number;
+  let xgbThreshold: number;
+
+  if (isHighNovelty && hasStrongPhysicsSignal) {
+    // Bypass ML filter: far from training distribution but physics engine
+    // confirms strong electron–phonon coupling and elevated Tc.
+    passed = true;
+    reason = null;
+    ensembleThreshold = 0;
+    xgbThreshold = 0;
+  } else if (isHighNovelty) {
+    // Looser thresholds for high-novelty compounds
+    ensembleThreshold = 0.3;
+    xgbThreshold = 0.15;
+    passed = score > ensembleThreshold;
+    reason = passed ? null : `ML filter (novel): ensemble=${score.toFixed(3)} below loose threshold ${ensembleThreshold}`;
+  } else {
+    // Standard thresholds for compounds within training distribution
+    ensembleThreshold = 0.55;
+    xgbThreshold = 0.3;
+    passed = score > ensembleThreshold && xgb > xgbThreshold;
+    reason = passed ? null : `ML filter: ensemble=${score.toFixed(3)} xgb=${xgb.toFixed(3)} below ${ensembleThreshold}/${xgbThreshold}`;
+  }
 
   await logComputationalResult(
     candidate.id, candidate.formula, 0, "ML_filter",
-    { ensembleScore: score, xgboostScore: xgb, ensembleThreshold: 0.55, xgbThreshold: 0.3 },
+    {
+      ensembleScore: score, xgboostScore: xgb,
+      ensembleThreshold, xgbThreshold,
+      uncertainty, isHighNovelty, hasStrongPhysicsSignal,
+    },
     passed, reason, Date.now() - start, passed ? 0.7 : 0.9
   );
 

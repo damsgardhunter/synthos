@@ -12,6 +12,14 @@ import { recordSynthesisResult } from "../synthesis/synthesis-learning-db";
 const POLL_INTERVAL_MS = 30_000;
 const MAX_CONCURRENT = 3;
 const MIN_QUEUE_SIZE = 50;
+
+// Set by engine.ts when the SG prototype sweep starts/ends. While true, the GCP
+// refill loop skips refillQueueIfLow() to avoid competing with 20 concurrent
+// SG sweep DB queries and exhausting the Neon pool.
+let _sgSweepActive = false;
+export function setSGSweepActive(active: boolean): void {
+  _sgSweepActive = active;
+}
 const REFILL_BATCH_SIZE = 100;
 const IMAGINARY_PHONON_THRESHOLD_CM1 = -10.0;
 const EXPLORATION_FRACTION = 0.3;
@@ -401,6 +409,7 @@ async function processNextJob(): Promise<boolean> {
               predictedTc: c.predictedTc,
               decompositionEnergy: c.decompositionEnergy,
               mlFeatures: c.mlFeatures as Record<string, any> | null,
+              ensembleScore: c.ensembleScore,
             }));
           },
           8_000,
@@ -583,7 +592,9 @@ async function refillQueueIfLow(): Promise<number> {
 
     if (queueSize >= MIN_QUEUE_SIZE) return 0;
 
-    const candidates = await storage.getSuperconductorCandidates(REFILL_BATCH_SIZE * 5);
+    // getCandidatesForDFTRefill filters ensemble_score>0 and qeDFT absent in SQL —
+    // avoids the 500-row full scan + in-memory filter that was exhausting the DB pool.
+    const candidates = await storage.getCandidatesForDFTRefill(REFILL_BATCH_SIZE * 5);
     const preFiltered = candidates.filter(c => {
       const mlFeatures = (c.mlFeatures as Record<string, any>) ?? {};
       if (mlFeatures.qeDFT) return false;
@@ -592,6 +603,10 @@ async function refillQueueIfLow(): Promise<number> {
       const counts = parseFormulaCounts(c.formula);
       const totalAtoms = Object.values(counts).reduce((s, v) => s + v, 0);
       if (totalAtoms > 16) return false;
+      // Phonon stability gate — skip candidates already flagged as dynamically unstable
+      // by the surrogate phonon model or prior QE phonon run. Queuing them wastes DFT
+      // slots and produces empty/imaginary frequency results.
+      if (mlFeatures.phononStable === false || mlFeatures.qePhononStable === false) return false;
       return true;
     });
 
@@ -749,6 +764,36 @@ let loopActive = false;
 let watchdogRestarting = false;
 let lastStaleCleanup = 0;
 
+// High-priority compounds that must always be at the front of the queue.
+// These are submitted at priority 9999 on startup if not already running/completed.
+const CRITICAL_PRIORITY_FORMULAS: string[] = [
+  "Li2LaH12", "LaH11Li2", "LaH12", "YH9Na2", "LaH10",
+];
+
+async function bootstrapCriticalCandidates(): Promise<void> {
+  for (const formula of CRITICAL_PRIORITY_FORMULAS) {
+    try {
+      const { activeJob } = await storage.hasActiveOrRecentFailedDftJobs(formula);
+      if (activeJob) {
+        // Already in queue — bump priority if it's lower
+        if ((activeJob.status === "queued") && (activeJob.priority ?? 0) < 9999) {
+          await storage.updateDftJobIfStatus(activeJob.id, "queued", { priority: 9999 } as any);
+          console.log(`[DFT-Queue] Critical bootstrap: promoted existing job #${activeJob.id} for ${formula} to priority 9999`);
+        } else {
+          console.log(`[DFT-Queue] Critical bootstrap: ${formula} already ${activeJob.status}, skipping`);
+        }
+        continue;
+      }
+      const job = await submitDFTJob(formula, null, 9999, "scf", true);
+      if (job) {
+        console.log(`[DFT-Queue] Critical bootstrap: queued ${formula} at priority 9999 (job #${job.id})`);
+      }
+    } catch (err: any) {
+      console.warn(`[DFT-Queue] Critical bootstrap failed for ${formula}: ${err.message?.slice(0, 80)}`);
+    }
+  }
+}
+
 export function startDFTWorkerLoop() {
   if (workerLoopTimer) return;
 
@@ -760,13 +805,30 @@ export function startDFTWorkerLoop() {
     // One-time cleanup of any overstoichiometric jobs already in the queue
     cleanupOverstoichiometricJobs().catch(() => {});
 
+    // Ensure critical candidates are at the front before the regular refill runs
+    setTimeout(() => bootstrapCriticalCandidates().catch(() => {}), 3_000);
+
+    let _gcpRefillFailures = 0;
     async function gcpRefillLoop() {
       try {
-        await refillQueueIfLow();
+        if (_sgSweepActive) {
+          // SG sweep is running — skip refill to avoid competing with its 20 concurrent
+          // DB queries and exhausting the Neon pool. Refill will run next cycle (60s).
+          console.log("[DFT-Queue] GCP refill skipped — SG sweep active");
+        } else {
+          await refillQueueIfLow();
+        }
+        _gcpRefillFailures = 0; // reset on success
       } catch (err: any) {
+        _gcpRefillFailures++;
         console.warn("[DFT-Queue] GCP refill error:", err.message);
       }
-      setTimeout(gcpRefillLoop, 60_000);
+      // Exponential backoff on consecutive failures so a saturated DB pool doesn't
+      // get hammered by repeated refill retries (max 10 min back-off).
+      const delay = _gcpRefillFailures > 0
+        ? Math.min(60_000 * Math.pow(2, _gcpRefillFailures - 1), 600_000)
+        : 60_000;
+      setTimeout(gcpRefillLoop, delay);
     }
     setTimeout(gcpRefillLoop, 5_000); // first refill after 5s
     return;
@@ -780,6 +842,7 @@ export function startDFTWorkerLoop() {
 
   cleanupStaleJobs().then(() => { lastStaleCleanup = Date.now(); }).catch(() => {});
   cleanupOverstoichiometricJobs().catch(() => {});
+  setTimeout(() => bootstrapCriticalCandidates().catch(() => {}), 3_000);
 
   console.log(`[DFT-Queue] Starting DFT worker loop (poll every 30s, max ${MAX_CONCURRENT} concurrent)`);
 
@@ -817,6 +880,11 @@ export function startDFTWorkerLoop() {
       }
     } catch (err: any) {
       console.log(`[DFT-Queue] Worker loop error: ${err.message}`);
+      loopActive = false;
+      // Back off longer on connection errors — pool may be saturated
+      const isConn = /connection|timeout|ECONNRESET|terminated/i.test(err.message ?? "");
+      workerLoopTimer = setTimeout(loop, isConn ? POLL_INTERVAL_MS * 3 : POLL_INTERVAL_MS);
+      return;
     }
     loopActive = false;
     workerLoopTimer = setTimeout(loop, POLL_INTERVAL_MS);

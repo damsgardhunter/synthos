@@ -101,6 +101,29 @@ function computeMetrics(ensemble: any, X: number[][], y: number[]): { r2: number
   };
 }
 
+/**
+ * Split X, y into train and validation sets using a FIXED deterministic rule:
+ * every 5th sample (i % 5 === 0) goes into validation (~20% holdout).
+ *
+ * This replaces random bootstrap OOB evaluation. Because the split rule is
+ * index-based and the dataset ordering is stable (pool returns entries in
+ * consistent insertion order), R² values are comparable across retrains.
+ * New samples appended to the dataset always enter the same fold, so growing
+ * the dataset does not reshuffle which samples land in val vs train.
+ */
+function fixedTrainValSplit(X: number[][], y: number[]): {
+  trainX: number[][];  trainY: number[];
+  valX: number[][];    valY: number[];
+} {
+  const trainX: number[][] = [], trainY: number[] = [];
+  const valX: number[][] = [],   valY: number[] = [];
+  for (let i = 0; i < X.length; i++) {
+    if (i % 5 === 0) { valX.push(X[i]); valY.push(y[i]); }
+    else             { trainX.push(X[i]); trainY.push(y[i]); }
+  }
+  return { trainX, trainY, valX, valY };
+}
+
 async function processNextXgbJob(): Promise<boolean> {
   if (isGNNMajorTrainingActive()) return false; // yield CPU to GNN training
 
@@ -130,17 +153,29 @@ async function processNextXgbJob(): Promise<boolean> {
   setXGBTrainingActive(true);
 
   try {
+    // Fixed 80/20 train/val split — deterministic, index-based.
+    // Train on 4 out of every 5 samples; evaluate on the fixed 1-in-5 holdout.
+    // This ensures R² is comparable across retrains (no random seed variance).
+    const { trainX, trainY, valX, valY } = fixedTrainValSplit(X, y);
+    const nTrain = trainX.length;
+    const nVal = valX.length;
+    console.log(`[XGB-GCP] Fixed split — train=${nTrain}, val=${nVal}`);
+
     console.log(`[XGB-GCP] Training base model (${N_TREES_BASE} trees)...`);
-    const model = await trainGradientBoosting(X, y, N_TREES_BASE, LR_BASE, DEPTH_BASE);
+    const model = await trainGradientBoosting(trainX, trainY, N_TREES_BASE, LR_BASE, DEPTH_BASE);
 
     console.log(`[XGB-GCP] Training mean ensemble (${ENSEMBLE_SIZE} models × ${N_TREES_BASE} trees)...`);
-    const ensembleXGB = await trainEnsemble(X, y);
+    const ensembleXGB = await trainEnsemble(trainX, trainY);
 
     console.log(`[XGB-GCP] Training variance ensemble...`);
-    const varianceEnsembleXGB = await trainVarianceEnsemble(X, y, ensembleXGB);
+    const varianceEnsembleXGB = await trainVarianceEnsemble(trainX, trainY, ensembleXGB);
 
-    const { r2, mae } = computeMetrics(ensembleXGB, X, y);
+    // Evaluate on held-out val set — these samples were NEVER seen during training.
+    const { r2, mae } = computeMetrics(ensembleXGB, valX, valY);
+    const { r2: trainR2 } = computeMetrics(ensembleXGB, trainX, trainY);
     const wallSec = ((Date.now() - startMs) / 1000).toFixed(1);
+    const overfit = trainR2 - r2;
+    console.log(`[XGB-GCP] Holdout R²=${r2.toFixed(3)}, train R²=${trainR2.toFixed(3)}, overfit gap=${overfit.toFixed(3)}`);
 
     await storage.updateXgbTrainingJob(jobId, {
       status: "done",
@@ -153,7 +188,7 @@ async function processNextXgbJob(): Promise<boolean> {
     });
 
     console.log(
-      `[XGB-GCP] Job #${jobId} complete in ${wallSec}s — R²=${r2.toFixed(3)}, MAE=${mae.toFixed(2)}, N=${datasetSize}`
+      `[XGB-GCP] Job #${jobId} complete in ${wallSec}s — holdout R²=${r2.toFixed(3)}, MAE=${mae.toFixed(2)}, overfit=${overfit.toFixed(3)}, N=${datasetSize} (train=${nTrain} val=${nVal})`
     );
   } catch (err: any) {
     console.error(`[XGB-GCP] Job #${jobId} failed: ${err.message}`);

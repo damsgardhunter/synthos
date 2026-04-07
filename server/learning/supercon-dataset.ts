@@ -359,7 +359,7 @@ export const SUPERCON_TRAINING_DATA: SuperconEntry[] = [
   { formula: "CoO", tc: 0, family: "Oxide", isSuperconductor: false, pressureGPa: 0 },
   { formula: "NiO", tc: 0, family: "Oxide", isSuperconductor: false, pressureGPa: 0 },
   { formula: "FeS2", tc: 0, family: "Sulfide", isSuperconductor: false, pressureGPa: 0 },
-  { formula: "WC", tc: 0, family: "Carbide", isSuperconductor: false, pressureGPa: 0 },
+  { formula: "WC", tc: 2.74, family: "Carbide", isSuperconductor: true, lambda: 0.32, pressureGPa: 0 }, // experimental; model should NOT predict ~81K
   { formula: "Bi2Se3", tc: 0, family: "Topological", isSuperconductor: false, pressureGPa: 0 },
   { formula: "MoS2", tc: 0, family: "Chalcogenide", isSuperconductor: false, pressureGPa: 0 },
   { formula: "KCl", tc: 0, family: "Halide", isSuperconductor: false, pressureGPa: 0 },

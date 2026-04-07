@@ -35,12 +35,28 @@ export interface SynthesisGateResult {
   deprioritize: boolean;
 }
 
-// Hard maximum hull distance above convex hull. Anything beyond this is
-// thermodynamically too unstable for automated route generation.
-export const MAX_HULL_DISTANCE_EV = 0.2;
+// Hard maximum hull distance above convex hull — ambient-pressure baseline.
+// High-pressure synthesis uses tiered thresholds (see getHullDistanceMax).
+// Materials Project considers <0.1 eV/atom stable, 0.1-0.2 eV/atom metastable-synthesizable;
+// many known superconductors sit at 0.15-0.3 eV/atom. 0.5 eV/atom is the ambient ceiling.
+export const MAX_HULL_DISTANCE_EV = 0.5;
 
 // Pressure above which a DAC (diamond-anvil cell) synthesis path is required.
 const HIGH_PRESSURE_THRESHOLD_GPA = 50;
+
+/**
+ * Returns the hull-distance ceiling (eV/atom) appropriate for a compound's
+ * synthesis pressure. Ambient-pressure compounds use a tighter bound because
+ * metastability must be kinetically trapped without external pressure. High-
+ * pressure synthesis stabilizes phases that are "above hull" at 0 GPa — the
+ * hull distance computed at the synthesis pressure is what matters, so the
+ * threshold scales with the confidence we have in the ambient-pressure estimate.
+ */
+function getHullDistanceMax(pressureGpa: number): number {
+  if (pressureGpa > 100) return 2.0;  // DAC: ambient hull is unreliable for these phases
+  if (pressureGpa > 20) return 0.8;   // Moderate pressure: generous allowance
+  return MAX_HULL_DISTANCE_EV;         // Ambient: 0.5 eV/atom
+}
 
 interface SynthesisGateStats {
   totalEvaluated: number;
@@ -72,24 +88,39 @@ const TOXIC_ELEMENTS: Record<string, number> = {
 };
 
 const PREFERRED_METHODS_BY_FAMILY: Record<string, string> = {
+  // Pluralized names as returned by classifyFamily() in utils.ts
+  "Hydrides": "high-pressure",
+  "Cuprates": "solid-state",
+  "Pnictides": "solid-state",
+  "Borides": "arc-melting",
+  "Chalcogenides": "solid-state",
+  "Oxides": "solid-state",
+  "Nitrides": "solid-state",
+  "Carbides": "arc-melting",
+  "Silicides": "arc-melting",
+  "Sulfides": "solid-state",
+  "Phosphides": "solid-state",
+  "Alloys": "arc-melting",
+  "Intermetallics": "arc-melting",
+  "Nickelates": "solid-state",
+  "Borocarbides": "arc-melting",
+  "Clathrates": "solid-state",
+  "Kagome": "solid-state",
+  "Layered-chalcogenide": "solid-state",
+  "Layered-pnictide": "solid-state",
+  "Intercalated-layered": "solid-state",
+  "Heavy Fermions": "solid-state",
+  "Mixed-mechanism": "solid-state",
+  // Fallback — also keep legacy singular spellings for any callers that still use them
   "Hydride": "high-pressure",
-  "Cuprate": "solid-state",
-  "Pnictide": "solid-state",
-  "A15": "arc-melting",
-  "Boride": "arc-melting",
-  "Chalcogenide": "solid-state",
-  "Oxide": "solid-state",
-  "Nitride": "solid-state",
-  "Carbide": "arc-melting",
-  "Silicide": "arc-melting",
   "Other": "solid-state",
 };
 
 const ONE_POT_METHODS = new Set(["solid-state", "arc-melting", "ball-milling", "sputtering"]);
 const NOBLE_GASES = new Set(["He", "Ne", "Ar", "Kr", "Xe", "Rn"]);
 
-const HARD_GATE_THRESHOLD = 0.38;
-const DEPRIORITIZE_THRESHOLD = 0.52;
+const HARD_GATE_THRESHOLD = 0.45;
+const DEPRIORITIZE_THRESHOLD = 0.60;
 
 const stats: SynthesisGateStats = {
   totalEvaluated: 0,
@@ -369,7 +400,7 @@ export function evaluateSynthesisGate(
     )) * 10000
   ) / 10000;
 
-  const chemDistThreshold = 0.6 + noveltyBonus * 0.3;
+  const chemDistThreshold = 0.5 + noveltyBonus * 0.3;
   const stepThreshold = 6 + (noveltyBonus > 0.05 ? 1 : 0);
 
   const rejectionReasons: string[] = [];
@@ -399,23 +430,41 @@ export function evaluateSynthesisGate(
   // ────────────────────────────────────────────────────────────────────────────
 
   // ── Physics-based hard gates ────────────────────────────────────────────────
-  // Hull distance cutoff: materials more than MAX_HULL_DISTANCE_EV above the
-  // convex hull are too thermodynamically unstable for automated route planning.
-  if (physicsInput?.hullDistanceEv !== undefined && physicsInput.hullDistanceEv > MAX_HULL_DISTANCE_EV) {
-    rejectionReasons.push(
-      `Hull distance too high: ${physicsInput.hullDistanceEv.toFixed(3)} eV/atom > ${MAX_HULL_DISTANCE_EV} eV/atom max`,
-    );
+  // Hull distance cutoff: materials more than the pressure-appropriate ceiling above
+  // the convex hull are too thermodynamically unstable for automated route planning.
+  // The ceiling scales with synthesis pressure — high-pressure phases are computed
+  // at ambient conditions so their hull distance is artificially inflated relative
+  // to what they would show at the target pressure.
+  //
+  // EXCEPTION: values > 5 eV/atom are physically impossible at any real synthesis
+  // condition and are almost certainly ambient-pressure Miedema estimates for
+  // compounds (e.g. polyhydrides) that are only stable under high pressure.
+  // Applying the gate to these would reject every novel high-pressure hydride
+  // candidate before DFT validates them at the correct pressure.
+  if (physicsInput?.hullDistanceEv !== undefined &&
+      physicsInput.hullDistanceEv <= 5.0) {
+    const hullMax = getHullDistanceMax(physicsInput.requiredPressureGpa ?? 0);
+    if (physicsInput.hullDistanceEv > hullMax) {
+      rejectionReasons.push(
+        `Hull distance too high: ${physicsInput.hullDistanceEv.toFixed(3)} eV/atom > ${hullMax.toFixed(1)} eV/atom (at ${(physicsInput.requiredPressureGpa ?? 0).toFixed(0)} GPa)`,
+      );
+    }
   }
 
-  // Pressure mismatch: flag or reject if the physics engine requires high-pressure
-  // synthesis (e.g. DAC) but the synthesis path assumes ambient conditions.
+  // Pressure mismatch: if the physics engine requires high-pressure synthesis (DAC)
+  // but the family lookup gave an ambient-pressure method, reclassify to "high-pressure"
+  // rather than rejecting. Rejecting would discard every polyhydride whose family
+  // wasn't matched correctly. The pressureFlag records the DAC requirement for
+  // downstream reporting; the compound continues through the gate with updated scoring.
   let pressureFlag: string | null = null;
   if (physicsInput?.requiredPressureGpa !== undefined && physicsInput.requiredPressureGpa > HIGH_PRESSURE_THRESHOLD_GPA) {
-    const isHighPressureMethod = chemDist.preferredMethod === "high-pressure";
-    if (!isHighPressureMethod) {
-      rejectionReasons.push(
-        `Pressure mismatch: physics requires ${physicsInput.requiredPressureGpa.toFixed(0)} GPa but synthesis route is ambient-pressure — reclassify as High-Pressure Path (DAC)`,
-      );
+    if (chemDist.preferredMethod !== "high-pressure") {
+      // Silently reclassify — no rejection reason added.
+      // chemDist.preferredMethod is read-only here; downstream scoring already uses
+      // the pressureFlag to annotate the result and add the DAC step penalty.
+      chemDist.preferredMethod = "high-pressure";
+      chemDist.stepEstimate += 2;  // mirror the +2 DAC penalty from computeChemicalDistance
+      chemDist.isOnePot = false;
     }
     pressureFlag = `High-Pressure Path (DAC): ${physicsInput.requiredPressureGpa.toFixed(0)} GPa required`;
   }
@@ -437,7 +486,7 @@ export function evaluateSynthesisGate(
     rejectionReasons.push(`Severe toxicity hazard: ${chemDist.toxicElements.join(", ")}`);
   }
 
-  if (chemDist.precursorAvailability < 0.30) {
+  if (chemDist.precursorAvailability < 0.40) {
     rejectionReasons.push(`Precursors unavailable: avail=${chemDist.precursorAvailability.toFixed(3)}`);
   }
 

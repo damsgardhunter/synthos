@@ -100,6 +100,14 @@ export interface UnifiedCIResult {
   };
 }
 
+// Guard: when an SG sweep is active, skip heavy extractFeatures computations so the
+// one in-flight fast-path candidate (already past the dynamic guard in runAutonomousDiscoveryCycle)
+// can abort before calling computeElectronicStructure (17-71s synchronous block).
+// surrogateScreen catches the thrown error and returns { pass: false } — harmless during sweep.
+let _sweepGuardActive = false;
+export function setSweepGuardActive(v: boolean) { _sweepGuardActive = v; }
+export function isSweepGuardActive(): boolean { return _sweepGuardActive; }
+
 export async function computeUnifiedCI(formula: string): Promise<UnifiedCIResult> {
   const [gnnResult, { features, xgbResult }] = await Promise.all([
     Promise.resolve(gnnPredictWithUncertainty(formula)),
@@ -402,6 +410,14 @@ export async function extractFeatures(formula: string, mat?: Partial<Material>, 
     if (_hit) return _hit;
   }
 
+  // Abort when SG sweep guard is active and no cache hit. The one fast-path candidate
+  // that slipped past runAutonomousDiscoveryCycle's dynamic guard (already inside
+  // surrogateScreen when isSGSweepActive was set) must not proceed to the 17-71s
+  // computeElectronicStructure call. surrogateScreen's catch returns { pass: false }.
+  if (_sweepGuardActive) {
+    throw new Error("sg-sweep-guard: skip extractFeatures — sweep active, no cache hit");
+  }
+
   const elements = parseFormula(formula);
   const counts = parseFormulaCounts(formula);
   const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
@@ -471,6 +487,11 @@ export async function extractFeatures(formula: string, mat?: Partial<Material>, 
     .reduce((s, e) => s + (counts[e] || 0), 0);
   const hydrogenRatio = metalAtomCount > 0 ? hCount / metalAtomCount : 0;
 
+  const _featT0 = Date.now();
+  const _time = (label: string, t: number) => {
+    const ms = Date.now() - t;
+    if (ms > 5_000) console.warn(`[extractFeatures] SLOW: ${label} took ${ms}ms for ${formula}`);
+  };
   const [
     { electronic, phonon, coupling },
     correlation,
@@ -482,20 +503,21 @@ export async function extractFeatures(formula: string, mat?: Partial<Material>, 
   ] = await Promise.all([
     (async () => {
       await yieldToEventLoop();
-      const electronic = computeElectronicStructure(formula, mat?.spacegroup);
+      const _t = Date.now(); const electronic = computeElectronicStructure(formula, mat?.spacegroup); _time("computeElectronicStructure", _t);
       await yieldToEventLoop();
-      const phonon = computePhononSpectrum(formula, electronic);
+      const _t2 = Date.now(); const phonon = computePhononSpectrum(formula, electronic); _time("computePhononSpectrum", _t2);
       await yieldToEventLoop();
-      const coupling = computeElectronPhononCoupling(electronic, phonon, formula);
+      const _t3 = Date.now(); const coupling = computeElectronPhononCoupling(electronic, phonon, formula); _time("computeElectronPhononCoupling", _t3);
       return { electronic, phonon, coupling };
     })(),
-    yieldToEventLoop().then(() => assessCorrelationStrength(formula)),
-    yieldToEventLoop().then(() => predictLambda(formula, candidatePressureForLambda)),
-    yieldToEventLoop().then(() => { try { return computeMiedemaFormationEnergy(formula); } catch { return null as number | null; } }),
-    yieldToEventLoop().then(() => predictTBProperties(formula)),
-    yieldToEventLoop().then(() => detectStructuralMotifs(formula)),
-    yieldToEventLoop().then(() => computeDimensionalityScore(formula)),
+    yieldToEventLoop().then(() => { const _t = Date.now(); const r = assessCorrelationStrength(formula); _time("assessCorrelationStrength", _t); return r; }),
+    yieldToEventLoop().then(() => { const _t = Date.now(); const r = predictLambda(formula, candidatePressureForLambda); _time("predictLambda", _t); return r; }),
+    yieldToEventLoop().then(() => { try { const _t = Date.now(); const r = computeMiedemaFormationEnergy(formula); _time("computeMiedemaFormationEnergy", _t); return r; } catch { return null as number | null; } }),
+    yieldToEventLoop().then(() => { const _t = Date.now(); const r = predictTBProperties(formula); _time("predictTBProperties", _t); return r; }),
+    yieldToEventLoop().then(() => { const _t = Date.now(); const r = detectStructuralMotifs(formula); _time("detectStructuralMotifs", _t); return r; }),
+    yieldToEventLoop().then(() => { const _t = Date.now(); const r = computeDimensionalityScore(formula); _time("computeDimensionalityScore", _t); return r; }),
   ]);
+  if (Date.now() - _featT0 > 10_000) console.warn(`[extractFeatures] TOTAL ${Date.now() - _featT0}ms for ${formula}`);
   const useLambda = physics?.verifiedLambda ?? lambdaPrediction.lambda;
   const lambdaTier = physics?.verifiedLambda ? "verified" : lambdaPrediction.tier;
   const useCorrelation = physics?.correlationStrength ?? correlation.ratio;
@@ -1008,7 +1030,8 @@ export async function runMLPrediction(
   const uniqueFormulas = [...new Set([...batchFormulas, ...batchNormalized])];
   try {
     if (!context?.physicsData) {
-      const existingSC = await storage.getSuperconductorCandidatesByFormulas(uniqueFormulas);
+      const _scTimeout = new Promise<never>((_, rej) => setTimeout(() => rej(new Error("physicsPredictor SC context timeout")), 8000));
+      const existingSC = await Promise.race([storage.getSuperconductorCandidatesByFormulas(uniqueFormulas), _scTimeout]);
       for (const sc of existingSC) {
         if (sc.electronPhononCoupling != null || (sc.verificationStage != null && sc.verificationStage > 0)) {
           const stage = sc.verificationStage ?? 0;
@@ -1026,7 +1049,8 @@ export async function runMLPrediction(
       }
     }
     if (!context?.crystalData) {
-      const structMap = await storage.getCrystalStructuresByFormulas(uniqueFormulas);
+      const _csTimeout = new Promise<never>((_, rej) => setTimeout(() => rej(new Error("physicsPredictor crystal context timeout")), 8000));
+      const structMap = await Promise.race([storage.getCrystalStructuresByFormulas(uniqueFormulas), _csTimeout]);
       for (const [formula, structs] of structMap) {
         if (structs.length > 0) {
           const cs = structs[0];
@@ -1071,7 +1095,17 @@ export async function runMLPrediction(
       let features = await getCachedFeatures(normKey);
       if (!features) {
         const _t0 = Date.now();
-        features = await extractFeatures(mat.formula, mat, physics, crystal);
+        // Hard 8s cap per formula — prevents event-loop-starved formulas from blocking the whole batch
+        const timeoutPromise = new Promise<never>((_, rej) => setTimeout(() => rej(new Error(`extractFeatures timeout: ${mat.formula}`)), 8000));
+        try {
+          features = await Promise.race([extractFeatures(mat.formula, mat, physics, crystal), timeoutPromise]);
+        } catch (e: any) {
+          if (e?.message?.startsWith("extractFeatures timeout")) {
+            console.warn(`[ML] ${e.message} — skipping`);
+            return null;
+          }
+          throw e;
+        }
         const _elapsed = Date.now() - _t0;
         if (_elapsed > 300) console.log(`[ML] Slow extractFeatures: ${mat.formula} took ${_elapsed}ms`);
         setCachedFeatures(normKey, features);
@@ -1231,7 +1265,7 @@ export async function runMLPrediction(
     });
 
     const abortController = new AbortController();
-    const timeoutId = setTimeout(() => abortController.abort(), 25000);
+    const timeoutId = setTimeout(() => abortController.abort(), 60000);
     console.log(`[ML] OpenAI call starting for ${topCandidates.length} candidates`);
 
     let response;
@@ -1407,7 +1441,7 @@ export async function runMLPrediction(
       phase: "phase-7",
       event: isTimeout ? "Neural network timeout" : "Neural network error",
       detail: isTimeout
-        ? "Neural network timeout -- XGBoost-only results used. OpenAI did not respond within 25 seconds."
+        ? "Neural network timeout -- XGBoost-only results used. OpenAI did not respond within 60 seconds."
         : (err.message?.slice(0, 200) || "Unknown"),
       dataSource: "ML Engine",
     });
@@ -1454,7 +1488,7 @@ export async function runMLPrediction(
           xgboostScore: c.xgb.score,
           neuralNetScore: null,
           ensembleScore,
-          roomTempViable: finalTc >= 293 && fbPressure < 50 && !isCorrelatedFB, // 293K = ROOM_TEMP_K
+          roomTempViable: finalTc > 273 && fbPressure < 1 && !isCorrelatedFB, // >273K, <1 GPa (ambient-accessible)
           status: "theoretical",
           notes: `[XGBoost-only fallback: NN skipped]${isCorrelatedFB ? ' [correlated: Allen-Dynes unreliable]' : ''} ${c.xgb.reasoning[0] || ""}`,
           electronPhononCoupling: c.features.electronPhononLambda,

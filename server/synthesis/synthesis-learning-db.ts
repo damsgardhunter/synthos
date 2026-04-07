@@ -32,6 +32,19 @@ const records: SynthesisRecord[] = [];
 const formulaMap = new Map<string, SynthesisRecord[]>();
 const MAX_RECORDS = 2000;
 
+// Entries seeded at startup from existing DB candidates that have DFT-derived
+// physics data (electronPhononCoupling, stabilityScore) but were computed before
+// this server session — they don't go through recordSynthesisResult because no
+// DFT job fired this session. Kept separate so getLearningDbRecordCount() still
+// reflects only live DFT results (used to gate retraining) while getAllTrainingData
+// benefits from the full history.
+const seededEntries: Array<{
+  formula: string;
+  feasible: number;
+  pressureGpa: number;
+  pressureConditioned: boolean;
+}> = [];
+
 export function recordSynthesisResult(
   formula: string,
   materialClass: string,
@@ -284,8 +297,13 @@ export function getDFTTrainingEntries(): Array<{
 }> {
   // Aggregate per-formula: keep the highest-stability record for each formula
   // to avoid duplicate rows from retried or reprocessed jobs.
-  // Aggregate per-formula: keep the highest-stability record to avoid duplicates.
   const best = new Map<string, { formula: string; feasible: number; pressureGpa: number; pressureConditioned: boolean }>();
+  // Start with seeded entries from previous DB history
+  for (const s of seededEntries) {
+    const prev = best.get(s.formula);
+    if (!prev || s.feasible > prev.feasible) best.set(s.formula, s);
+  }
+  // Live DFT records override seeded entries (higher quality, fresher)
   for (const r of records) {
     const prev = best.get(r.formula);
     if (!prev || r.stability > prev.feasible) {
@@ -298,6 +316,32 @@ export function getDFTTrainingEntries(): Array<{
     }
   }
   return Array.from(best.values());
+}
+
+/**
+ * Seed training entries from existing DB candidates at startup. Call once during
+ * engine initialisation to populate the predictor with data from previous DFT runs
+ * stored in the database, bypassing the live DFT completion path that is unavailable
+ * when GCP pw.x is not installed.
+ */
+export function seedDFTTrainingEntries(entries: Array<{
+  formula: string;
+  feasible: number;
+  pressureGpa: number;
+  pressureConditioned: boolean;
+}>): void {
+  let added = 0;
+  const existing = new Set(seededEntries.map(e => e.formula));
+  for (const e of entries) {
+    if (!existing.has(e.formula)) {
+      seededEntries.push(e);
+      existing.add(e.formula);
+      added++;
+    }
+  }
+  if (added > 0) {
+    console.log(`[SynthesisDB] Seeded ${added} DFT training entries from DB (total seeded: ${seededEntries.length})`);
+  }
 }
 
 /** Number of DFT records currently stored — used to decide when to retrain the predictor. */

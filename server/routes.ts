@@ -1,7 +1,7 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
-import { insertMaterialSchema, insertResearchLogSchema, insertExperimentalValidationSchema } from "@shared/schema";
+import { insertMaterialSchema, insertResearchLogSchema, insertExperimentalValidationSchema, insertClientErrorSchema } from "@shared/schema";
 import { initWebSocket, startEngine, stopEngine, pauseEngine, resumeEngine, getStatus, getAutonomousLoopStats } from "./learning/engine";
 import { getSignalDefinitions } from "./learning/material-signal-scanner";
 import { enumeratePrototypesForFormula } from "./learning/crystal-prototypes";
@@ -346,6 +346,124 @@ const writeLimiter = rateLimit({
   message: { error: "Too many write requests, please try again later." },
 });
 
+// Separate high-capacity limiter for client error reporting.
+// writeLimiter (30/min) is far too low when many queries fail simultaneously
+// (e.g. cycleEnd invalidates 24 keys at once, each failure posts here).
+const errorReportLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 300,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many error reports." },
+});
+
+// ── Dashboard bundle helpers ──────────────────────────────────────────────────
+// Extracted so both the individual endpoints and /api/dashboard share identical
+// fetcher logic — same cache keys guarantee they populate the same cache slots.
+
+async function buildDftStatusResult() {
+  const breakdown = await storage.getConfidenceBreakdown();
+  const analyticalCount = breakdown.total - breakdown.high - breakdown.medium;
+  const dftAvailable = isDFTAvailable();
+  const methodInfo = dftAvailable ? getDFTMethodInfo() : null;
+  const xtbStats = getXTBStats();
+  return {
+    total: breakdown.total,
+    dftEnrichedCount: breakdown.high + breakdown.medium,
+    breakdown: { high: breakdown.high, medium: breakdown.medium, analytical: analyticalCount },
+    recentEnriched: breakdown.recentEnriched.map((c: any) => ({
+      formula: c.formula, confidence: c.dataConfidence,
+      ensembleScore: c.ensembleScore, predictedTc: c.predictedTc,
+    })),
+    xtb: {
+      available: dftAvailable, method: methodInfo?.name ?? "unavailable",
+      version: methodInfo?.version ?? "N/A", level: methodInfo?.level ?? "N/A",
+      totalRuns: xtbStats.runs, successfulRuns: xtbStats.successes,
+      successRate: xtbStats.runs > 0 ? (xtbStats.successes / xtbStats.runs * 100).toFixed(1) + "%" : "N/A",
+      cacheSize: xtbStats.cacheSize, refElements: xtbStats.refElements,
+    },
+  };
+}
+
+async function buildEngineMemoryResult() {
+  // Run queries sequentially to avoid consuming 6 pool connections simultaneously.
+  // The concurrent Promise.all was the primary cause of pool exhaustion and cascade
+  // timeouts when the engine cycle was also running. Results are cached for 5 min
+  // so the extra ~200ms of sequential overhead is negligible.
+  //
+  // AbortController lets the `run` chain stop early once the 12s deadline fires,
+  // instead of continuing to queue DB work after the caller has already timed out.
+  const ac = new AbortController();
+  const run = async () => {
+    const check = () => { if (ac.signal.aborted) throw new Error("engine/memory DB timeout"); };
+    check(); const strategies  = await storage.getStrategyHistory(10);
+    check(); const insights    = await storage.getNovelInsightsOnly(50);
+    check(); const milestones  = await storage.getMilestones(20);
+    check(); const milestoneCount = await storage.getMilestoneCount();
+    check(); const snapshots   = await storage.getConvergenceSnapshots(50);
+    check(); const narratives  = await storage.getResearchLogsByEvent("cycle-narrative", 10);
+    return [strategies, insights, milestones, milestoneCount, snapshots, narratives] as const;
+  };
+  const timeoutHandle = setTimeout(() => ac.abort(), 12_000);
+  const timeout = new Promise<never>((_, reject) =>
+    ac.signal.addEventListener("abort", () => reject(new Error("engine/memory DB timeout")), { once: true })
+  );
+  let result: Awaited<ReturnType<typeof run>>;
+  try {
+    result = await Promise.race([run(), timeout]);
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
+  const [strategies, insights, milestones, milestoneCount, snapshots, narratives] = result!;
+  const latestStrategy = strategies[0] ?? null;
+  const topInsights = insights.slice(0, 5);
+  const latestSnapshot = snapshots[snapshots.length - 1] ?? null;
+  const familyStats = latestStrategy?.performanceSignals
+    ? (latestStrategy.performanceSignals as any).familyStats ?? {}
+    : {};
+  const focusAreas = (latestStrategy?.focusAreas as any[]) ?? [];
+  const currentHypothesis = focusAreas.length > 0
+    ? { family: focusAreas[0].area, priority: focusAreas[0].priority, reasoning: focusAreas[0].reasoning }
+    : null;
+  const abandonedStrategies: string[] = [];
+  if (strategies.length >= 2) {
+    const latestFamilies = new Set(((strategies[0]?.focusAreas as any[]) ?? []).map((f: any) => f.area));
+    for (let i = 1; i < strategies.length; i++) {
+      const oldFamilies = ((strategies[i]?.focusAreas as any[]) ?? []).map((f: any) => f.area);
+      for (const fam of oldFamilies) {
+        if (!latestFamilies.has(fam) && !abandonedStrategies.includes(fam)) abandonedStrategies.push(fam);
+      }
+    }
+  }
+  return {
+    currentHypothesis: currentHypothesis
+      ? { ...currentHypothesis, reasoning: sanitizeForbiddenWords(currentHypothesis.reasoning || "") }
+      : null,
+    familyStats,
+    topInsights: topInsights.map((i: any) => ({
+      text: sanitizeForbiddenWords(i.insightText || ""),
+      noveltyScore: i.noveltyScore, category: i.category, discoveredAt: i.discoveredAt,
+    })),
+    abandonedStrategies,
+    milestoneCount,
+    recentMilestones: milestones.slice(0, 5).map((m: any) => ({
+      ...m,
+      description: sanitizeForbiddenWords(m.description || ""),
+      title: sanitizeForbiddenWords(m.title || ""),
+    })),
+    totalCycles: latestSnapshot?.cycle ?? 0,
+    bestTc: latestSnapshot?.bestTc ?? 0,
+    bestScore: latestSnapshot?.bestScore ?? 0,
+    familyDiversity: latestSnapshot?.familyDiversity ?? 0,
+    pipelinePassRate: latestSnapshot?.pipelinePassRate ?? 0,
+    cycleNarratives: narratives.map((n: any) => ({
+      detail: sanitizeForbiddenWords(n.detail || ""), timestamp: n.timestamp,
+    })),
+    autonomousLoopStats: getAutonomousLoopStats(),
+    designRepresentations: getDesignRepresentationStats(),
+  };
+}
+
 export async function registerRoutes(httpServer: Server, app: Express): Promise<Server> {
   initWebSocket(httpServer);
 
@@ -420,7 +538,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.get("/api/learning-phases", async (_req, res) => {
     try {
       const result = await cache.getOrSetStale(CACHE_KEYS.LEARNING_PHASES, TTL.LEARNING_PHASES, async () => {
-        const phases = await storage.getLearningPhases();
+        const timeoutPromise = new Promise<never>((_, rej) => setTimeout(() => rej(new Error("learning-phases DB timeout")), 15000));
+        const phases = await Promise.race([storage.getLearningPhases(), timeoutPromise]);
         return phases.map(p => ({
           ...p,
           insights: (p.insights ?? []).map((s: string) => sanitizeForbiddenWords(s)),
@@ -428,8 +547,17 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       });
       res.json(result);
     } catch (e: any) {
-      console.error("[learning-phases] ERROR:", e?.message, e?.stack?.slice(0, 500));
-      res.status(500).json({ error: "Failed to fetch learning phases", detail: e?.message });
+      // Before returning 500, check for stale cache — the fetch may have timed out
+      // while the event loop was blocked (e.g. during SG sweep), in which case the
+      // stale data is still valid and avoids a spurious error response.
+      const staleResult = cache.getStale(CACHE_KEYS.LEARNING_PHASES);
+      if (staleResult !== undefined) {
+        console.warn("[learning-phases] DB timeout, serving stale cache:", e?.message);
+        res.json(staleResult);
+        return;
+      }
+      console.warn("[learning-phases] DB timeout with cold cache — returning empty state:", e?.message);
+      res.json([]);
     }
   });
 
@@ -437,7 +565,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     try {
       const limit = Math.min(Number(req.query.limit) || 50, 500);
       const offset = Number(req.query.offset) || 0;
-      const preds = await storage.getNovelPredictions(limit, offset);
+      const cacheKey = `${CACHE_KEYS.NOVEL_PREDICTIONS}:${limit}:${offset}`;
+      const preds = await cache.getOrSetStale(cacheKey, TTL.NOVEL_PREDICTIONS, () =>
+        storage.getNovelPredictions(limit, offset)
+      );
       res.json(preds);
     } catch (e) {
       res.status(500).json({ error: "Failed to fetch predictions" });
@@ -446,15 +577,21 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.get("/api/research-logs", async (req, res) => {
     try {
-      const limit = Math.min(Number(req.query.limit) || 100, 500);
-      const cacheKey = `${CACHE_KEYS.RESEARCH_LOGS}:${limit}`;
+      const limit = Math.min(Number(req.query.limit) || 50, 100);
+      const cursor = req.query.cursor ? Number(req.query.cursor) : undefined;
+      const cacheKey = `${CACHE_KEYS.RESEARCH_LOGS}:${limit}:${cursor ?? ""}`;
       const result = await cache.getOrSetStale(cacheKey, TTL.RESEARCH_LOGS, async () => {
-        const logs = await storage.getResearchLogs(limit);
-        return logs.map(log => ({
+        const logs = await storage.getResearchLogsPaginated(limit, cursor);
+        const sanitized = logs.map(log => ({
           ...log,
           detail: sanitizeForbiddenWords(log.detail || ""),
           event: sanitizeForbiddenWords(log.event || ""),
         }));
+        return {
+          logs: sanitized,
+          nextCursor: sanitized.length === limit ? sanitized[sanitized.length - 1].id : null,
+          hasMore: sanitized.length === limit,
+        };
       });
       res.json(result);
     } catch (e: any) {
@@ -483,6 +620,78 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     } catch (e) {
       res.status(500).json({ error: "Failed to insert log" });
     }
+  });
+
+  // ── Client-side error reporting ──────────────────────────────
+  // Frontend posts here when a page crashes, a query fails, or a load is slow.
+  // The monitor reads GET /api/client-errors each cycle to detect frontend health.
+  // IMPORTANT: respond 204 immediately, then insert asynchronously.
+  // The browser does not need confirmation, and awaiting the insert during DB connection
+  // pressure (e.g. after event-loop block) caused 35-72s hangs before returning 500.
+  app.post("/api/client-errors", errorReportLimiter, (req, res) => {
+    const parsed = insertClientErrorSchema.safeParse({
+      ...req.body,
+      buildInfo: req.headers["user-agent"]?.slice(0, 200) ?? null,
+    });
+    if (!parsed.success) return res.status(400).json({ error: parsed.error });
+    // Respond immediately — the client reporter does not await confirmation
+    res.status(204).end();
+    // Insert in background; silently discard on DB error (the 500 storm was itself
+    // caused by connection timeouts, creating a feedback loop of error-reporting errors)
+    storage.insertClientError(parsed.data).catch(() => {});
+  });
+
+  app.get("/api/client-errors", async (req, res) => {
+    try {
+      const limit = Math.min(Number(req.query.limit) || 50, 200);
+      const errors = await storage.getRecentClientErrors(limit);
+      res.json({ errors, total: errors.length });
+    } catch {
+      res.status(500).json({ error: "Failed to fetch client errors" });
+    }
+  });
+
+  // ── Network performance metrics (in-memory ring buffer, no DB) ───────────────
+  // The frontend batch-posts timing for every fetch here every 30s.
+  // The monitor reads GET /api/network-metrics each cycle to detect slow endpoints,
+  // flooding patterns, and endpoint-specific issues that /api/client-errors misses
+  // (e.g. 204 responses that are still taking 16s, or repeated identical requests).
+  interface NetworkMetricEntry {
+    endpoint: string;
+    status: number;
+    durationMs: number;
+    sizeBytes?: number;
+    ts: number; // unix ms
+  }
+  const NET_METRICS_RING: NetworkMetricEntry[] = [];
+  const NET_METRICS_MAX = 500;
+
+  app.post("/api/network-metrics", (req, res) => {
+    res.sendStatus(204);
+    const entries: NetworkMetricEntry[] = Array.isArray(req.body) ? req.body : [];
+    for (const e of entries) {
+      if (typeof e?.endpoint !== "string" || typeof e?.durationMs !== "number") continue;
+      NET_METRICS_RING.push({
+        endpoint: String(e.endpoint).slice(0, 120),
+        status: Number(e.status) || 0,
+        durationMs: Number(e.durationMs),
+        sizeBytes: e.sizeBytes != null ? Number(e.sizeBytes) : undefined,
+        ts: Date.now(),
+      });
+    }
+    // Trim to max size
+    if (NET_METRICS_RING.length > NET_METRICS_MAX) {
+      NET_METRICS_RING.splice(0, NET_METRICS_RING.length - NET_METRICS_MAX);
+    }
+  });
+
+  app.get("/api/network-metrics", (req, res) => {
+    const limit = Math.min(Number(req.query.limit) || 100, 500);
+    const since = Number(req.query.since) || 0; // filter by unix-ms timestamp
+    const entries = NET_METRICS_RING
+      .filter(e => e.ts >= since)
+      .slice(-limit);
+    res.json({ entries, total: entries.length });
   });
 
   app.post("/api/engine/start", engineLimiter, async (_req, res) => {
@@ -551,10 +760,12 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.get("/api/superconductor-candidates", async (req, res) => {
     try {
       const rawLim = Number(req.query.limit);
-      const limit = Math.min(Number.isFinite(rawLim) && rawLim > 0 ? rawLim : 200, 1000);
-      const cacheKey = `${CACHE_KEYS.CANDIDATES}:${limit}`;
+      const rawOffset = Number(req.query.offset);
+      const limit = Math.min(Number.isFinite(rawLim) && rawLim > 0 ? rawLim : 25, 1000);
+      const offset = Number.isFinite(rawOffset) && rawOffset >= 0 ? rawOffset : 0;
+      const cacheKey = `${CACHE_KEYS.CANDIDATES}:${limit}:${offset}`;
       const result = await cache.getOrSetStale(cacheKey, TTL.CANDIDATES, async () => {
-        const candidates = await storage.getSuperconductorCandidates(limit);
+        const candidates = await storage.getSuperconductorCandidates(limit, offset);
         const total = await storage.getSuperconductorCount();
         return { candidates, total };
       });
@@ -564,55 +775,76 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
-  app.get("/api/pareto-frontier", (_req, res) => {
-    try {
-      res.json(getParetoFrontierData());
-    } catch (e) {
-      res.status(500).json({ error: "Failed to fetch Pareto frontier data" });
-    }
+  // getParetoFrontierData() is synchronous in-memory — no async needed.
+  // The background scheduleParetoRecompute keeps latestParetoResults current.
+  // Limit default to 200 results — full latestParetoResults can be 1000+ entries
+  // and res.json() serializes synchronously, causing 10-70s event-loop blocks
+  // that freeze the frontend. The chart only renders rank-1 candidates anyway.
+  app.get("/api/pareto-frontier", (req, res) => {
+    const limit = Math.min(Number(req.query.limit) || 200, 1000);
+    const data = getParetoFrontierData();
+    const results = data.results
+      .sort((a, b) => a.rank - b.rank)
+      .slice(0, limit);
+    res.json({ ...data, results });
   });
 
   app.get("/api/dft-status", async (_req, res) => {
     try {
-      const result = await cache.getOrSetStale(CACHE_KEYS.DFT_STATUS, TTL.DFT_STATUS, async () => {
-        const breakdown = await storage.getConfidenceBreakdown();
-        const analyticalCount = breakdown.total - breakdown.high - breakdown.medium;
-
-        const dftAvailable = isDFTAvailable();
-        const methodInfo = dftAvailable ? getDFTMethodInfo() : null;
-        const xtbStats = getXTBStats();
-
-        return {
-          total: breakdown.total,
-          dftEnrichedCount: breakdown.high + breakdown.medium,
-          breakdown: {
-            high: breakdown.high,
-            medium: breakdown.medium,
-            analytical: analyticalCount,
-          },
-          recentEnriched: breakdown.recentEnriched.map(c => ({
-            formula: c.formula,
-            confidence: c.dataConfidence,
-            ensembleScore: c.ensembleScore,
-            predictedTc: c.predictedTc,
-          })),
-          xtb: {
-            available: dftAvailable,
-            method: methodInfo?.name ?? "unavailable",
-            version: methodInfo?.version ?? "N/A",
-            level: methodInfo?.level ?? "N/A",
-            totalRuns: xtbStats.runs,
-            successfulRuns: xtbStats.successes,
-            successRate: xtbStats.runs > 0 ? (xtbStats.successes / xtbStats.runs * 100).toFixed(1) + "%" : "N/A",
-            cacheSize: xtbStats.cacheSize,
-            refElements: xtbStats.refElements,
-          },
-        };
-      });
+      const result = await cache.getOrSetStale(CACHE_KEYS.DFT_STATUS, TTL.DFT_STATUS, buildDftStatusResult);
       res.json(result);
     } catch (e: any) {
       console.error("[dft-status] ERROR:", e?.message, e?.stack?.slice(0, 500));
       res.status(500).json({ error: "Failed to fetch DFT status", detail: e?.message });
+    }
+  });
+
+  // Single bundled endpoint replacing 8 parallel startup requests.
+  // All fetchers run concurrently and use the same cache keys as the individual
+  // endpoints — so both this and the individual endpoints share the same cache slots.
+  app.get("/api/dashboard", async (_req, res) => {
+    try {
+      const [stats, learningPhases, researchLogs, milestones, dftStatus, engineMemory, novelInsights, strategy] =
+        await Promise.all([
+          cache.getOrSetStale(CACHE_KEYS.STATS, TTL.STATS, () => storage.getStats()),
+          cache.getOrSetStale(CACHE_KEYS.LEARNING_PHASES, TTL.LEARNING_PHASES, async () => {
+            const phases = await storage.getLearningPhases();
+            return phases.map(p => ({
+              ...p,
+              insights: (p.insights ?? []).map((s: string) => sanitizeForbiddenWords(s)),
+            }));
+          }),
+          cache.getOrSetStale(`${CACHE_KEYS.RESEARCH_LOGS}:100`, TTL.RESEARCH_LOGS, async () => {
+            const logs = await storage.getResearchLogs(100);
+            return logs.map(log => ({
+              ...log,
+              detail: sanitizeForbiddenWords(log.detail || ""),
+              event: sanitizeForbiddenWords(log.event || ""),
+            }));
+          }),
+          cache.getOrSetStale(`${CACHE_KEYS.MILESTONES}:20`, TTL.MILESTONES, async () => {
+            const ms = await storage.getMilestones(20);
+            const total = await storage.getMilestoneCount();
+            return { milestones: ms, total };
+          }),
+          cache.getOrSetStale(CACHE_KEYS.DFT_STATUS, TTL.DFT_STATUS, buildDftStatusResult),
+          cache.getOrSetStale(CACHE_KEYS.ENGINE_MEMORY, TTL.ENGINE_MEMORY, buildEngineMemoryResult),
+          cache.getOrSetStale(`${CACHE_KEYS.NOVEL_INSIGHTS}:all:20`, TTL.NOVEL_INSIGHTS, async () => {
+            const [insights, total] = await Promise.all([
+              storage.getNovelInsights(20),
+              storage.getNovelInsightCount(),
+            ]);
+            return { insights, total };
+          }),
+          cache.getOrSetStale(CACHE_KEYS.STRATEGY_LATEST, TTL.STRATEGY, async () =>
+            (await storage.getLatestStrategy()) || null
+          ),
+        ]);
+
+      res.json({ stats, learningPhases, researchLogs, milestones, dftStatus, engineMemory, novelInsights, strategy, generatedAt: Date.now() });
+    } catch (e: any) {
+      console.error("[dashboard] ERROR:", e?.message);
+      res.status(500).json({ error: "Failed to fetch dashboard data", detail: e?.message });
     }
   });
 
@@ -692,8 +924,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.get("/api/synthesis-processes", async (req, res) => {
     try {
-      const limit = Math.min(Number(req.query.limit) || 200, 1000);
-      const processes = await storage.getSynthesisProcesses(limit);
+      const limit = Math.min(Number(req.query.limit) || 25, 1000);
+      const offset = Math.max(Number(req.query.offset) || 0, 0);
+      const processes = await storage.getSynthesisProcesses(limit, offset);
       let total = _synthesisCountCache.value;
       if (Date.now() - _synthesisCountCache.at > COUNT_CACHE_TTL) {
         storage.getSynthesisCount().then(v => { _synthesisCountCache = { value: v, at: Date.now() }; }).catch(() => {});
@@ -707,8 +940,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.get("/api/chemical-reactions", async (req, res) => {
     try {
-      const limit = Math.min(Number(req.query.limit) || 200, 1000);
-      const reactions = await storage.getChemicalReactions(limit);
+      const limit = Math.min(Number(req.query.limit) || 25, 1000);
+      const offset = Math.max(Number(req.query.offset) || 0, 0);
+      const reactions = await storage.getChemicalReactions(limit, offset);
       let total = _reactionCountCache.value;
       if (Date.now() - _reactionCountCache.at > COUNT_CACHE_TTL) {
         storage.getReactionCount().then(v => { _reactionCountCache = { value: v, at: Date.now() }; }).catch(() => {});
@@ -988,84 +1222,25 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.get("/api/engine/memory", async (_req, res) => {
     try {
-      const result = await cache.getOrSetStale(CACHE_KEYS.ENGINE_MEMORY, TTL.ENGINE_MEMORY, async () => {
-        const timeout = new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error("engine/memory DB timeout")), 9000)
-        );
-        const [strategies, insights, milestones, milestoneCount, snapshots, narratives] = await Promise.race([
-          Promise.all([
-            storage.getStrategyHistory(10),
-            storage.getNovelInsightsOnly(50),
-            storage.getMilestones(20),
-            storage.getMilestoneCount(),
-            storage.getConvergenceSnapshots(50),
-            storage.getResearchLogsByEvent("cycle-narrative", 10),
-          ]),
-          timeout,
-        ]);
-        const latestStrategy = strategies[0] ?? null;
-        const topInsights = insights.slice(0, 5);
-        const latestSnapshot = snapshots[snapshots.length - 1] ?? null;
-
-        const familyStats = latestStrategy?.performanceSignals
-          ? (latestStrategy.performanceSignals as any).familyStats ?? {}
-          : {};
-
-        const focusAreas = (latestStrategy?.focusAreas as any[]) ?? [];
-        const currentHypothesis = focusAreas.length > 0
-          ? { family: focusAreas[0].area, priority: focusAreas[0].priority, reasoning: focusAreas[0].reasoning }
-          : null;
-
-        const abandonedStrategies: string[] = [];
-        if (strategies.length >= 2) {
-          const latestFamilies = new Set(((strategies[0]?.focusAreas as any[]) ?? []).map((f: any) => f.area));
-          for (let i = 1; i < strategies.length; i++) {
-            const oldFamilies = ((strategies[i]?.focusAreas as any[]) ?? []).map((f: any) => f.area);
-            for (const fam of oldFamilies) {
-              if (!latestFamilies.has(fam) && !abandonedStrategies.includes(fam)) {
-                abandonedStrategies.push(fam);
-              }
-            }
-          }
-        }
-
-        const loopStats = getAutonomousLoopStats();
-
-        return {
-          currentHypothesis: currentHypothesis ? {
-            ...currentHypothesis,
-            reasoning: sanitizeForbiddenWords(currentHypothesis.reasoning || ""),
-          } : null,
-          familyStats,
-          topInsights: topInsights.map(i => ({
-            text: sanitizeForbiddenWords(i.insightText || ""),
-            noveltyScore: i.noveltyScore,
-            category: i.category,
-            discoveredAt: i.discoveredAt,
-          })),
-          abandonedStrategies,
-          milestoneCount,
-          recentMilestones: milestones.slice(0, 5).map(m => ({
-            ...m,
-            description: sanitizeForbiddenWords(m.description || ""),
-            title: sanitizeForbiddenWords(m.title || ""),
-          })),
-          totalCycles: latestSnapshot?.cycle ?? 0,
-          bestTc: latestSnapshot?.bestTc ?? 0,
-          bestScore: latestSnapshot?.bestScore ?? 0,
-          familyDiversity: latestSnapshot?.familyDiversity ?? 0,
-          pipelinePassRate: latestSnapshot?.pipelinePassRate ?? 0,
-          cycleNarratives: narratives.map(n => ({ detail: sanitizeForbiddenWords(n.detail || ""), timestamp: n.timestamp })),
-          autonomousLoopStats: loopStats,
-          designRepresentations: getDesignRepresentationStats(),
-        };
-      });
+      const result = await cache.getOrSetStale(CACHE_KEYS.ENGINE_MEMORY, TTL.ENGINE_MEMORY, buildEngineMemoryResult);
       res.json(result);
     } catch (e: any) {
-      console.error("[engine-memory] ERROR:", e?.message, e?.stack?.slice(0, 500));
-      res.status(500).json({ error: "Failed to fetch engine memory", detail: e?.message });
+      const staleResult = cache.getStale(CACHE_KEYS.ENGINE_MEMORY);
+      if (staleResult !== undefined) {
+        console.warn("[engine-memory] DB timeout, serving stale cache:", e?.message);
+        res.json(staleResult);
+        return;
+      }
+      console.warn("[engine-memory] DB timeout with cold cache — returning empty state:", e?.message);
+      res.json({
+        currentHypothesis: null, familyStats: {}, topInsights: [], abandonedStrategies: [],
+        milestoneCount: 0, recentMilestones: [], totalCycles: 0, bestTc: 0, bestScore: 0,
+        familyDiversity: 0, pipelinePassRate: 0, cycleNarratives: [],
+        autonomousLoopStats: getAutonomousLoopStats(), designRepresentations: getDesignRepresentationStats(),
+      });
     }
   });
+
 
   app.post("/api/validations", writeLimiter, async (req, res) => {
     try {
@@ -1278,59 +1453,61 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   // history from tsc-generator-bias.ts) plus database candidates that have
   // topological invariant data.
   app.get("/api/tsc-candidates", async (req, res) => {
+    // Session-level data never touches DB — compute before the try block so the
+    // catch handler can still return it when the DB times out.
+    const limit = Math.min(parseInt((req.query.limit as string) ?? "30", 10), 100);
+    const sessionCandidates = getTopTSCCandidates(limit);
+    const tscStats = getTSCFamilyStats();
     try {
-      const limit = Math.min(parseInt((req.query.limit as string) ?? "30", 10), 100);
-
-      // Session-level TSC history (fast, always available)
-      const sessionCandidates = getTopTSCCandidates(limit);
-      const tscStats = getTSCFamilyStats();
-
-      // Database candidates with computed topological invariants
-      let dbCandidates: {
-        formula: string;
-        predictedTc: number | null;
-        tscScore: number;
-        tscClass: string;
-        z2Index: number[] | null;
-        chernNumber: number | null;
-        weylNodeCount: number;
-        phase: string | null;
-        isInProximityToTI: boolean;
-      }[] = [];
-
-      try {
-        const timeout = new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error("tsc db timeout")), 5_000)
-        );
-        const candidates = await Promise.race([storage.getSuperconductorCandidates(500), timeout]);
-        for (const c of candidates) {
-          const ml = (c.mlFeatures as Record<string, any>) ?? {};
-          const inv = ml.topologicalInvariants as Record<string, any> | undefined;
-          if (!inv) continue;
-          const tsc = inv.tscScore as Record<string, any> | undefined;
-          if (!tsc?.isTSCCandidate) continue;
-
-          dbCandidates.push({
-            formula: c.formula,
-            predictedTc: c.predictedTc ?? null,
-            tscScore: typeof tsc.score === "number" ? tsc.score : 0,
-            tscClass: typeof tsc.tscClass === "string" ? tsc.tscClass : "TSC candidate",
-            z2Index: Array.isArray((inv.z2 as any)?.index) ? (inv.z2 as any).index : null,
-            chernNumber: typeof (inv.chern as any)?.number === "number" ? (inv.chern as any).number : null,
-            weylNodeCount: typeof (inv.weylNodes as any)?.count === "number" ? (inv.weylNodes as any).count : 0,
-            phase: typeof inv.phase === "string" ? inv.phase : null,
-            isInProximityToTI: typeof inv.phase === "string" && inv.phase.toLowerCase().includes("topological"),
-          });
+      // DB scan (500 candidates + filter + sort) is expensive — cache for 2 min.
+      const dbCandidates = await cache.getOrSetStale(
+        `${CACHE_KEYS.TSC_CANDIDATES}:${limit}`,
+        TTL.TSC_CANDIDATES,
+        async () => {
+          const timeout = new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error("tsc db timeout")), 15_000)
+          );
+          // getTopologicalCandidates uses a JSONB filter — only fetches rows that already
+          // have topologicalInvariants.tscScore.isTSCCandidate=true, no full-table scan.
+          const candidates = await Promise.race([storage.getTopologicalCandidates(limit * 3), timeout]);
+          const result: {
+            formula: string; predictedTc: number | null; tscScore: number;
+            tscClass: string; z2Index: number[] | null; chernNumber: number | null;
+            weylNodeCount: number; phase: string | null; isInProximityToTI: boolean;
+          }[] = [];
+          for (const c of candidates) {
+            const ml = (c.mlFeatures as Record<string, any>) ?? {};
+            const inv = ml.topologicalInvariants as Record<string, any> | undefined;
+            if (!inv) continue;
+            const tsc = inv.tscScore as Record<string, any> | undefined;
+            if (!tsc?.isTSCCandidate) continue;
+            result.push({
+              formula: c.formula,
+              predictedTc: c.predictedTc ?? null,
+              tscScore: typeof tsc.score === "number" ? tsc.score : 0,
+              tscClass: typeof tsc.tscClass === "string" ? tsc.tscClass : "TSC candidate",
+              z2Index: Array.isArray((inv.z2 as any)?.index) ? (inv.z2 as any).index : null,
+              chernNumber: typeof (inv.chern as any)?.number === "number" ? (inv.chern as any).number : null,
+              weylNodeCount: typeof (inv.weylNodes as any)?.count === "number" ? (inv.weylNodes as any).count : 0,
+              phase: typeof inv.phase === "string" ? inv.phase : null,
+              isInProximityToTI: typeof inv.phase === "string" && inv.phase.toLowerCase().includes("topological"),
+            });
+          }
+          result.sort((a, b) => b.tscScore - a.tscScore);
+          return result.slice(0, limit);
         }
-        dbCandidates.sort((a, b) => b.tscScore - a.tscScore);
-        dbCandidates = dbCandidates.slice(0, limit);
-      } catch {
-        // DB query failure is non-fatal — return session data only
-      }
+      );
 
-      res.json({ sessionCandidates, dbCandidates, stats: tscStats });
-    } catch (e) {
-      res.status(500).json({ error: "Failed to fetch TSC candidates" });
+      res.json({ sessionCandidates, dbCandidates: dbCandidates ?? [], stats: tscStats });
+    } catch (e: any) {
+      const staleDb = cache.getStale<unknown[]>(`${CACHE_KEYS.TSC_CANDIDATES}:${limit}`);
+      if (staleDb !== undefined) {
+        console.warn("[tsc-candidates] DB timeout, serving stale cache:", e?.message);
+        res.json({ sessionCandidates, dbCandidates: staleDb, stats: tscStats });
+        return;
+      }
+      console.warn("[tsc-candidates] DB timeout with cold cache — returning session-only data:", e?.message);
+      res.json({ sessionCandidates, dbCandidates: [], stats: tscStats });
     }
   });
 
@@ -3871,7 +4048,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         });
         return;
       }
-      const job = await submitDFTJob(formula, null, 80, "phonon");
+      // Explicit DFPT trigger bypasses the stability gate — the caller knows
+      // what they want. Priority 90 > standard 80 to run before regular SCF jobs.
+      const pressureGpa = typeof req.query.pressure === "string" ? parseFloat(req.query.pressure) : undefined;
+      const job = await submitDFTJob(formula, null, 90, "phonon", /* skipStabilityGate */ true, pressureGpa);
       if (!job) {
         res.status(400).json({ error: "Could not submit DFPT job", detail: `Formula ${formula} may be blocked or invalid` });
         return;
@@ -3981,8 +4161,12 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   }, 660000);
 
   setTimeout(() => {
+    // Delayed to T+30min (from T+12min): StructurePredictor training takes 160s and
+    // previously overlapped with the T+15min SG sweep, causing the server to crash
+    // (2GB RSS, event loop blocked). T+30min fires after the sweep (T+15min) +
+    // sweep duration (8min) + guard period (2min) + 5min safety margin = T+30min.
     try { initStructurePredictorML(); } catch {}
-  }, 720000);
+  }, 1800000);
 
   app.get("/api/phonon-surrogate/stats", async (_req, res) => {
     try {
@@ -5000,13 +5184,39 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
+  // Concurrency limiter: prevents event-loop starvation when the candidate list
+  // page fires 20–50 parallel unified-ci requests (each does ML+GNN inference).
+  // At most 4 computations run simultaneously; extras await in a lightweight queue.
+  let _uciActive = 0;
+  const _uciQueue: Array<() => void> = [];
+  const UCI_CONCURRENCY = 4;
+  function runUnifiedCI(formula: string): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+      const run = () => {
+        _uciActive++;
+        computeUnifiedCI(formula)
+          .then(resolve, reject)
+          .finally(() => {
+            _uciActive--;
+            if (_uciQueue.length > 0) (_uciQueue.shift()!)();
+          });
+      };
+      if (_uciActive < UCI_CONCURRENCY) run();
+      else _uciQueue.push(run);
+    });
+  }
+
   app.get("/api/unified-ci/:formula", generalLimiter, async (req, res) => {
     try {
       const formula = decodeURIComponent(req.params.formula);
       if (!formula || formula.length < 2 || formula.length > 100) {
         return res.status(400).json({ error: "Invalid formula" });
       }
-      const result = await computeUnifiedCI(formula);
+      const result = await cache.getOrSetStale(
+        CACHE_KEYS.unifiedCI(formula),
+        TTL.UNIFIED_CI,
+        () => runUnifiedCI(formula),
+      );
       res.json(result);
     } catch (e: any) {
       res.status(500).json({ error: "Failed to compute unified CI", detail: e.message });
@@ -5070,7 +5280,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       if (!formula || formula.length < 2 || formula.length > 100) {
         return res.status(400).json({ error: "Invalid formula" });
       }
-      const ci = await computeUnifiedCI(formula);
+      const ci = await cache.getOrSetStale(
+        CACHE_KEYS.unifiedCI(formula),
+        TTL.UNIFIED_CI,
+        () => runUnifiedCI(formula),
+      ) as Awaited<ReturnType<typeof computeUnifiedCI>>;
       const conformalResult = {
         formula,
         rawCI95: ci.tcCI95,

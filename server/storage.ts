@@ -4,11 +4,13 @@ import {
   synthesisProcesses, chemicalReactions, superconductorCandidates,
   crystalStructures, computationalResults, novelInsights,
   researchStrategies, convergenceSnapshots, milestones,
-  experimentalValidations, inverseDesignCampaigns, dftJobs, gnnTrainingJobs, xgbTrainingJobs, mlTrainingJobs
+  experimentalValidations, inverseDesignCampaigns, dftJobs, gnnTrainingJobs, xgbTrainingJobs, mlTrainingJobs,
+  clientErrors
 } from "@shared/schema";
 import type {
   Element, Material, LearningPhase, NovelPrediction, ResearchLog,
   InsertElement, InsertMaterial, InsertLearningPhase, InsertNovelPrediction, InsertResearchLog,
+  ClientError, InsertClientError,
   SynthesisProcess, ChemicalReaction, SuperconductorCandidate,
   InsertSynthesisProcess, InsertChemicalReaction, InsertSuperconductorCandidate,
   CrystalStructure, ComputationalResult, NovelInsight,
@@ -22,7 +24,7 @@ import type {
   XgbTrainingJob, InsertXgbTrainingJob,
   MlTrainingJob, InsertMlTrainingJob
 } from "@shared/schema";
-import { eq, desc, asc, sql, ilike, isNull, inArray, and, or, gt } from "drizzle-orm";
+import { eq, desc, asc, sql, ilike, isNull, inArray, and, or, gt, lt } from "drizzle-orm";
 
 
 export interface IStorage {
@@ -46,19 +48,21 @@ export interface IStorage {
   getResearchLogsByEvent(event: string, limit?: number): Promise<ResearchLog[]>;
   insertResearchLog(log: InsertResearchLog): Promise<ResearchLog>;
 
-  getSynthesisProcesses(limit?: number): Promise<SynthesisProcess[]>;
+  getSynthesisProcesses(limit?: number, offset?: number): Promise<SynthesisProcess[]>;
   insertSynthesisProcess(proc: InsertSynthesisProcess): Promise<SynthesisProcess>;
   getSynthesisCount(): Promise<number>;
 
-  getChemicalReactions(limit?: number): Promise<ChemicalReaction[]>;
+  getChemicalReactions(limit?: number, offset?: number): Promise<ChemicalReaction[]>;
   insertChemicalReaction(rxn: InsertChemicalReaction): Promise<ChemicalReaction>;
   getReactionCount(): Promise<number>;
 
-  getSuperconductorCandidates(limit?: number): Promise<SuperconductorCandidate[]>;
+  getSuperconductorCandidates(limit?: number, offset?: number): Promise<SuperconductorCandidate[]>;
   getSuperconductorCandidatesByTc(limit?: number): Promise<SuperconductorCandidate[]>;
   getTopCandidatesMerged(scoreLimit: number, tcLimit: number): Promise<SuperconductorCandidate[]>;
   getUnscoredCandidates(limit?: number): Promise<SuperconductorCandidate[]>;
   getCandidatesNeedingPhysicsRecalc(physicsVersion: number, limit?: number): Promise<SuperconductorCandidate[]>;
+  getTopologicalCandidates(limit?: number): Promise<SuperconductorCandidate[]>;
+  getCandidatesForDFTRefill(limit?: number): Promise<SuperconductorCandidate[]>;
   insertSuperconductorCandidate(sc: InsertSuperconductorCandidate): Promise<SuperconductorCandidate>;
   bulkInsertSuperconductorCandidates(candidates: InsertSuperconductorCandidate[]): Promise<number>;
   updateSuperconductorCandidate(id: string, updates: Partial<InsertSuperconductorCandidate>): Promise<void>;
@@ -168,6 +172,9 @@ export interface IStorage {
   getRecentDftJobs(limit?: number): Promise<DftJob[]>;
 
   trimOldData(opts?: { keepLogs?: number; keepComputations?: number; keepSynthesis?: number; keepReactions?: number }): Promise<{ logsDeleted: number; computationsDeleted: number; synthesisDeleted: number; reactionsDeleted: number }>;
+
+  insertClientError(err: InsertClientError): Promise<ClientError>;
+  getRecentClientErrors(limit?: number): Promise<ClientError[]>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -241,6 +248,18 @@ export class DatabaseStorage implements IStorage {
     return db.select().from(researchLogs).orderBy(desc(researchLogs.timestamp)).limit(limit);
   }
 
+  async getResearchLogsPaginated(limit = 50, cursor?: number): Promise<ResearchLog[]> {
+    if (cursor !== undefined) {
+      return db.select().from(researchLogs)
+        .where(lt(researchLogs.id, cursor))
+        .orderBy(desc(researchLogs.id))
+        .limit(limit);
+    }
+    return db.select().from(researchLogs)
+      .orderBy(desc(researchLogs.id))
+      .limit(limit);
+  }
+
   async getResearchLogsByEvent(event: string, limit = 10): Promise<ResearchLog[]> {
     return db.select().from(researchLogs)
       .where(eq(researchLogs.event, event))
@@ -253,13 +272,22 @@ export class DatabaseStorage implements IStorage {
     return l;
   }
 
+  async insertClientError(err: InsertClientError): Promise<ClientError> {
+    const [row] = await db.insert(clientErrors).values(err).returning();
+    return row;
+  }
+
+  async getRecentClientErrors(limit = 50): Promise<ClientError[]> {
+    return db.select().from(clientErrors).orderBy(desc(clientErrors.timestamp)).limit(limit);
+  }
+
   async bulkInsertResearchLogs(logs: InsertResearchLog[]): Promise<void> {
     if (logs.length === 0) return;
     await db.insert(researchLogs).values(logs);
   }
 
-  async getSynthesisProcesses(limit = 50): Promise<SynthesisProcess[]> {
-    return db.select().from(synthesisProcesses).orderBy(desc(synthesisProcesses.discoveredAt)).limit(limit);
+  async getSynthesisProcesses(limit = 50, offset = 0): Promise<SynthesisProcess[]> {
+    return db.select().from(synthesisProcesses).orderBy(desc(synthesisProcesses.discoveredAt)).limit(limit).offset(offset);
   }
 
   async insertSynthesisProcess(proc: InsertSynthesisProcess): Promise<SynthesisProcess> {
@@ -272,8 +300,8 @@ export class DatabaseStorage implements IStorage {
     return Number(count);
   }
 
-  async getChemicalReactions(limit = 50): Promise<ChemicalReaction[]> {
-    return db.select().from(chemicalReactions).orderBy(desc(chemicalReactions.relevanceToSuperconductor)).limit(limit);
+  async getChemicalReactions(limit = 50, offset = 0): Promise<ChemicalReaction[]> {
+    return db.select().from(chemicalReactions).orderBy(desc(chemicalReactions.relevanceToSuperconductor)).limit(limit).offset(offset);
   }
 
   async insertChemicalReaction(rxn: InsertChemicalReaction): Promise<ChemicalReaction> {
@@ -291,16 +319,24 @@ export class DatabaseStorage implements IStorage {
   private hullGuardOk(c: SuperconductorCandidate): boolean {
     const notes = c.notes ?? "";
     const m = notes.match(/eAboveHull=([0-9]+(?:\.[0-9]*)?)/);
-    return !m || parseFloat(m[1]) <= 0.5;
+    if (!m) return true;
+    const dist = parseFloat(m[1]);
+    // Values > 5 eV/atom are physically impossible at any real synthesis condition.
+    // They indicate an ambient-pressure Miedema estimate for a compound that is
+    // only stable under high pressure (e.g. polyhydrides at 100-300 GPa).
+    // These must NOT be filtered out — they are valid candidates awaiting DFT
+    // validation at the correct pressure.
+    if (dist > 5.0) return true;
+    return dist <= 0.5;
   }
 
-  async getSuperconductorCandidates(limit = 50): Promise<SuperconductorCandidate[]> {
+  async getSuperconductorCandidates(limit = 50, offset = 0): Promise<SuperconductorCandidate[]> {
     // Fetch with index-friendly query, then apply hull guard in memory.
-    // Over-fetch by 20% to account for filtered rows (hull violations are rare).
+    // Over-fetch to account for filtered rows (hull violations are rare).
     const rows = await db.select().from(superconductorCandidates)
       .orderBy(desc(superconductorCandidates.predictedTc))
-      .limit(Math.ceil(limit * 1.2));
-    return rows.filter(c => this.hullGuardOk(c)).slice(0, limit);
+      .limit(Math.ceil((offset + limit) * 1.3));
+    return rows.filter(c => this.hullGuardOk(c)).slice(offset, offset + limit);
   }
 
   async getSuperconductorCandidatesByTc(limit = 10): Promise<SuperconductorCandidate[]> {
@@ -337,6 +373,34 @@ export class DatabaseStorage implements IStorage {
     ).limit(limit);
   }
 
+  async getTopologicalCandidates(limit = 50): Promise<SuperconductorCandidate[]> {
+    // JSONB-filtered query — only rows that have topological invariant data with isTSCCandidate=true.
+    // Avoids full-table scan of 650+ rows that getSuperconductorCandidates(500) was doing.
+    const rows = await db.execute(sql`
+      SELECT * FROM superconductor_candidates
+      WHERE ml_features ? 'topologicalInvariants'
+        AND (ml_features->'topologicalInvariants'->'tscScore'->>'isTSCCandidate')::boolean = true
+      ORDER BY predicted_tc DESC NULLS LAST
+      LIMIT ${limit}
+    `);
+    const all = rows.rows as unknown as SuperconductorCandidate[];
+    return all.filter(c => this.hullGuardOk(c));
+  }
+
+  async getCandidatesForDFTRefill(limit = 500): Promise<SuperconductorCandidate[]> {
+    // Server-side filter: ensemble_score > 0 and no DFT result yet.
+    // Replaces getSuperconductorCandidates(500) + in-memory filter in refillQueueIfLow.
+    const rows = await db.execute(sql`
+      SELECT * FROM superconductor_candidates
+      WHERE ensemble_score > 0
+        AND (ml_features->>'qeDFT' IS NULL OR ml_features->>'qeDFT' = 'false')
+      ORDER BY ensemble_score DESC NULLS LAST
+      LIMIT ${limit}
+    `);
+    const all = rows.rows as unknown as SuperconductorCandidate[];
+    return all.filter(c => this.hullGuardOk(c));
+  }
+
   async insertSuperconductorCandidate(sc: InsertSuperconductorCandidate): Promise<SuperconductorCandidate> {
     const sanitized: Record<string, any> = {};
     for (const [key, val] of Object.entries(sc)) {
@@ -364,10 +428,21 @@ export class DatabaseStorage implements IStorage {
 
   async bulkInsertSuperconductorCandidates(candidates: InsertSuperconductorCandidate[]): Promise<number> {
     if (candidates.length === 0) return 0;
+    // Deduplicate by formula before chunking — ON CONFLICT DO UPDATE cannot
+    // update the same row twice within a single batch statement. Keep the entry
+    // with the highest ensembleScore so the upsert logic has the best candidate.
+    const byFormula = new Map<string, InsertSuperconductorCandidate>();
+    for (const c of candidates) {
+      const existing = byFormula.get(c.formula as string);
+      if (!existing || ((c.ensembleScore ?? 0) > (existing.ensembleScore ?? 0))) {
+        byFormula.set(c.formula as string, c);
+      }
+    }
+    const deduped = [...byFormula.values()];
     let inserted = 0;
     const CHUNK_SIZE = 25;
-    for (let i = 0; i < candidates.length; i += CHUNK_SIZE) {
-      const chunk = candidates.slice(i, i + CHUNK_SIZE);
+    for (let i = 0; i < deduped.length; i += CHUNK_SIZE) {
+      const chunk = deduped.slice(i, i + CHUNK_SIZE);
       const sanitizedChunk = chunk.map(sc => {
         const sanitized: Record<string, any> = {};
         for (const [key, val] of Object.entries(sc)) {

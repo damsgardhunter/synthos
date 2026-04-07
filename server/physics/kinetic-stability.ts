@@ -285,7 +285,7 @@ function computeDiffusionBarriers(formula: string, pressureGpa: number = 0): Dif
   };
 }
 
-function computeNucleationBarrier(formula: string, eAboveHull: number): NucleationBarrierAnalysis {
+function computeNucleationBarrier(formula: string, eAboveHull: number, pressureGpa: number = 0): NucleationBarrierAnalysis {
   const elements = parseFormulaElements(formula);
   const counts = parseFormulaCounts(formula);
   const totalAtoms = getTotalAtoms(counts);
@@ -310,7 +310,14 @@ function computeNucleationBarrier(formula: string, eAboveHull: number): Nucleati
   const nucleationBarrier = (16 * Math.PI * Math.pow(surfaceEnergy, 3)) /
     (3 * Math.pow(deltaGv * 10 + 0.01, 2));
 
-  const effectiveBarrier = Math.min(5.0, Math.max(0.05, nucleationBarrier * 0.1));
+  // Pressure-aware minimum floor: high-pressure synthesized compounds are kinetically
+  // trapped by slow atomic diffusion after pressure release. The classical CNT formula
+  // underestimates this barrier because it uses the ambient-pressure hull distance
+  // (large for any high-pressure phase) rather than the synthesis-pressure stability.
+  // Known synthesized high-pressure hydrides (LaH10, H3S) persist for hours to days
+  // after quench — consistent with barriers well above 0.3 eV.
+  const minNucleationBarrier = pressureGpa > 100 ? 0.45 : pressureGpa > 20 ? 0.30 : 0.05;
+  const effectiveBarrier = Math.min(5.0, Math.max(minNucleationBarrier, nucleationBarrier * 0.1));
 
   const attemptFreq = 1e13;
   const nucleationRate = attemptFreq * Math.exp(-effectiveBarrier / (kB * 300));
@@ -583,13 +590,22 @@ function lifetimeToString(seconds: number): string {
   if (seconds > 60) {
     return `${Math.round(seconds / 60)} minutes`;
   }
-  return `${seconds.toFixed(1)} seconds`;
+  if (seconds >= 0.001) {
+    return `${seconds.toFixed(3)} seconds`;
+  }
+  if (seconds >= 1e-6) {
+    return `${(seconds * 1000).toFixed(3)} ms`;
+  }
+  if (seconds >= 1e-9) {
+    return `${(seconds * 1e6).toFixed(2)} µs`;
+  }
+  return `< 1 ns (kinetically unstable)`;
 }
 
-export function predictKineticStability(formula: string, eAboveHull: number): KineticStabilityResult {
+export function predictKineticStability(formula: string, eAboveHull: number, pressureGpa: number = 0): KineticStabilityResult {
   const gb = computeGrainBoundaryEnergy(formula);
-  const diffusion = computeDiffusionBarriers(formula);
-  const nucleation = computeNucleationBarrier(formula, eAboveHull);
+  const diffusion = computeDiffusionBarriers(formula, pressureGpa);
+  const nucleation = computeNucleationBarrier(formula, eAboveHull, pressureGpa);
   const pressure = computePressureStabilization(formula, eAboveHull);
 
   const metastability = assessMetastability(formula, eAboveHull);

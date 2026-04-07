@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { queryClient } from "@/lib/queryClient";
 import { useWebSocket } from "@/hooks/use-websocket";
 import type { NovelPrediction } from "@shared/schema";
@@ -8,8 +8,11 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Progress } from "@/components/ui/progress";
+import { PaginationBar } from "@/components/ui/pagination-bar";
 import { Link } from "wouter";
 import { FlaskConical, Zap, Star, CheckCircle2, Clock, Eye, Atom, ExternalLink, BookOpen } from "lucide-react";
+
+const PAGE_SIZE = 12;
 
 const STATUS_CONFIG: Record<string, { label: string; color: string; icon: any }> = {
   "predicted": {
@@ -110,6 +113,30 @@ function PredictionCard({ prediction }: { prediction: NovelPrediction }) {
   );
 }
 
+function PagedSection({ items, isLoading, skeletonCount = 2 }: { items: NovelPrediction[]; isLoading: boolean; skeletonCount?: number }) {
+  const [page, setPage] = useState(1);
+  const totalPages = Math.max(1, Math.ceil(items.length / PAGE_SIZE));
+  const safePage = Math.min(page, totalPages);
+  const paged = items.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
+
+  if (isLoading) {
+    return (
+      <div className="grid gap-4 md:grid-cols-2">
+        {Array.from({ length: skeletonCount }).map((_, i) => <Skeleton key={i} className="h-64" />)}
+      </div>
+    );
+  }
+  if (items.length === 0) return null;
+  return (
+    <>
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+        {paged.map(p => <PredictionCard key={p.id} prediction={p} />)}
+      </div>
+      <PaginationBar page={safePage} totalPages={totalPages} onPageChange={setPage} />
+    </>
+  );
+}
+
 export default function NovelDiscovery() {
   const { data: predictions, isLoading } = useQuery<NovelPrediction[]>({
     queryKey: ["/api/novel-predictions"],
@@ -120,7 +147,8 @@ export default function NovelDiscovery() {
   useEffect(() => {
     const last = ws.messages[ws.messages.length - 1];
     if (!last) return;
-    const relevantTypes = new Set(["phaseUpdate", "progress", "prediction", "cycleEnd", "log"]);
+    // "log" and "progress" fire many times/sec — excluded to prevent request storms
+    const relevantTypes = new Set(["phaseUpdate", "prediction", "cycleEnd"]);
     if (relevantTypes.has(last.type)) {
       queryClient.invalidateQueries({ queryKey: ["/api/novel-predictions"] });
     }
@@ -179,13 +207,8 @@ export default function NovelDiscovery() {
           <Badge variant="secondary" className="bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300 border-0">{literatureReported.length}</Badge>
         </div>
         <p className="text-xs text-muted-foreground">Known materials from published research, included as reference data. Not predictions by this platform.</p>
-        {isLoading ? (
-          <div className="grid gap-4 md:grid-cols-2"><Skeleton className="h-64" /><Skeleton className="h-64" /></div>
-        ) : literatureReported.length > 0 ? (
-          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-            {literatureReported.map(p => <PredictionCard key={p.id} prediction={p} />)}
-          </div>
-        ) : (
+        <PagedSection items={literatureReported} isLoading={isLoading} />
+        {!isLoading && literatureReported.length === 0 && (
           <Card><CardContent className="py-6 text-center text-muted-foreground text-sm">No literature-reported materials indexed yet</CardContent></Card>
         )}
       </div>
@@ -196,13 +219,8 @@ export default function NovelDiscovery() {
           <h2 className="text-base font-semibold">Under Scientific Review</h2>
           <Badge variant="secondary" className="bg-yellow-100 text-yellow-700 dark:bg-yellow-950 dark:text-yellow-300 border-0">{underReview.length}</Badge>
         </div>
-        {isLoading ? (
-          <div className="grid gap-4 md:grid-cols-2"><Skeleton className="h-64" /><Skeleton className="h-64" /></div>
-        ) : underReview.length > 0 ? (
-          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-            {underReview.map(p => <PredictionCard key={p.id} prediction={p} />)}
-          </div>
-        ) : (
+        <PagedSection items={underReview} isLoading={isLoading} />
+        {!isLoading && underReview.length === 0 && (
           <Card><CardContent className="py-6 text-center text-muted-foreground text-sm">No materials under review</CardContent></Card>
         )}
       </div>
@@ -213,13 +231,8 @@ export default function NovelDiscovery() {
           <h2 className="text-base font-semibold">Predicted — Awaiting Synthesis</h2>
           <Badge variant="secondary" className="bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300 border-0">{predicted.length}</Badge>
         </div>
-        {isLoading ? (
-          <div className="grid gap-4 md:grid-cols-2"><Skeleton className="h-64" /><Skeleton className="h-64" /></div>
-        ) : predicted.length > 0 ? (
-          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-            {predicted.map(p => <PredictionCard key={p.id} prediction={p} />)}
-          </div>
-        ) : (
+        <PagedSection items={predicted} isLoading={isLoading} />
+        {!isLoading && predicted.length === 0 && (
           <Card><CardContent className="py-6 text-center text-muted-foreground text-sm">No pending predictions</CardContent></Card>
         )}
       </div>

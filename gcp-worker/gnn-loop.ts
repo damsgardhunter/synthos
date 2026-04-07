@@ -11,111 +11,135 @@
 import { db, isConnectionError } from "../server/db";
 import { storage } from "../server/storage";
 import { acquireGNNTrainingSlot, releaseGNNTrainingSlot, waitForXGBIdle, isGNNTrainingSlotFree } from "./training-priority";
-import { Worker } from "worker_threads";
 import { fileURLToPath } from "url";
 import path from "path";
+import { spawn, ChildProcess } from "child_process";
 import {
-  trainEnsemble, GNNPredict, buildCrystalGraph,
-  ENSEMBLE_SIZE, ENSEMBLE_SEEDS, BOOTSTRAP_RATIOS,
-  splitTrainValidation, setCachedEnsemble,
+  ENSEMBLE_SIZE,
+  splitTrainValidation,
 } from "../server/learning/graph-neural-net";
 import type { TrainingSample } from "../server/learning/graph-neural-net";
-import type { GNNWeights } from "../server/learning/graph-neural-net";
 import { fetchMPBatchFromAPI } from "../server/learning/materials-project-client";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const WORKER_SCRIPT = path.join(__dirname, "gnn-worker-thread.ts");
+// ── Python GNN service (FastAPI on localhost:8765) ────────────────────────────
+const GNN_SERVICE_URL  = process.env.GNN_SERVICE_URL ?? "http://127.0.0.1:8765";
+const GNN_SERVICE_PORT = process.env.GNN_SERVICE_PORT ?? "8765";
+const GNN_PY_SCRIPT    = path.join(path.dirname(fileURLToPath(import.meta.url)), "../gnn/server.py");
 
-// ── Parallel ensemble training via worker threads ────────────────────────────
-// Each of the 5 ensemble models trains in its own worker thread so the full
-// ensemble is trained in the time it takes to train one model sequentially.
-//
-// TypeScript loading in workers: tsx may start the main process via NODE_OPTIONS,
-// internal patching, or other means that do NOT add flags to process.execArgv.
-// Passing execArgv flags is therefore unreliable. Instead we use eval:true with
-// a tiny CJS bootstrap string that calls require('tsx/cjs') then loads the worker
-// script. Plain .js eval content has no extension problem; tsx/cjs then handles
-// the subsequent require() of the .ts file.
+let _pythonProcess: ChildProcess | null = null;
 
-function spawnModelWorker(
-  trainingData: TrainingSample[],
-  modelIndex: number,
-  maxPretrainEpochs: number,
-  label?: string,
-): Promise<GNNWeights> {
-  // Inline CJS bootstrap: enable tsx TypeScript loading, then run the worker.
-  // Uses eval:true so Node sees a plain JS string — no ".ts extension" rejection.
-  const bootstrapCode = `
-require('tsx/cjs');
-require(${JSON.stringify(WORKER_SCRIPT)});
-`;
-  return new Promise((resolve, reject) => {
-    const worker = new Worker(bootstrapCode, {
-      eval: true,
-      workerData: {
-        trainingData,
-        seed: ENSEMBLE_SEEDS[modelIndex],
-        bootstrapRatio: BOOTSTRAP_RATIOS[modelIndex],
-        maxPretrainEpochs,
-        modelIndex,
-        label: label ?? `M${modelIndex}`,
-      },
-    });
-    worker.once("message", (msg: { ok: boolean; model?: GNNWeights; error?: string }) => {
-      if (msg.ok && msg.model) {
-        resolve(msg.model);
-      } else {
-        reject(new Error(msg.error ?? `Worker ${modelIndex} returned no model`));
-      }
-    });
-    worker.once("error", reject);
-    worker.once("exit", (code) => {
-      if (code !== 0) reject(new Error(`Worker ${modelIndex} exited with code ${code}`));
-    });
+/** Spawn the FastAPI GNN service and wait until it responds to /health. */
+async function spawnPythonGNNService(): Promise<void> {
+  if (_pythonProcess && !_pythonProcess.killed) return; // already running
+
+  const python = process.env.PYTHON_BIN ?? "python3";
+  console.log(`[GNN-GCP] Spawning Python GNN service: ${python} ${GNN_PY_SCRIPT}`);
+
+  _pythonProcess = spawn(python, [GNN_PY_SCRIPT], {
+    env: {
+      ...process.env,
+      GNN_SERVICE_PORT,
+      GNN_WEIGHTS_DIR: process.env.GNN_WEIGHTS_DIR ?? "/opt/qae/gnn_weights",
+      GNN_LOG_LEVEL: "INFO",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
   });
-}
 
-async function trainEnsembleParallel(
-  trainingData: TrainingSample[],
-  maxPretrainEpochs = 15,
-  label?: string,
-  valSet?: TrainingSample[],
-  onModelComplete?: (model: GNNWeights, modelIndex: number) => Promise<void>,
-  indicesToTrain?: number[],
-): Promise<GNNWeights[]> {
-  const allIndices = Array.from({ length: Math.min(ENSEMBLE_SIZE, ENSEMBLE_SEEDS.length) }, (_, i) => i);
-  const indices = indicesToTrain ?? allIndices;
-  console.log(`[GNN-GCP] Launching ${indices.length} worker threads for parallel ensemble training${label ? ` [${label}]` : ''}${indicesToTrain ? ` (indices: ${indices.join(',')})` : ''}`);
+  _pythonProcess.stdout?.on("data", (d: Buffer) => process.stdout.write(`[py-gnn] ${d}`));
+  _pythonProcess.stderr?.on("data", (d: Buffer) => process.stderr.write(`[py-gnn] ${d}`));
+  _pythonProcess.on("exit", (code) => {
+    console.warn(`[GNN-GCP] Python GNN service exited with code ${code}`);
+    _pythonProcess = null;
+  });
 
-  // Fan out: all requested models start simultaneously
-  const promises = indices.map(i =>
-    spawnModelWorker(trainingData, i, maxPretrainEpochs, label).then(async model => {
-      if (valSet && valSet.length >= 5) {
-        const { r2, mae, rmse } = computeMetrics([model], valSet);
-        console.log(`[GNN-Worker-${i}] R²=${r2.toFixed(3)} MAE=${mae.toFixed(1)}K RMSE=${rmse.toFixed(1)}K`);
+  // Wait up to 90 s for the service to start accepting requests
+  const deadline = Date.now() + 90_000;
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 2000));
+    try {
+      const res = await fetch(`${GNN_SERVICE_URL}/health`);
+      if (res.ok) {
+        const body = await res.json() as any;
+        console.log(`[GNN-GCP] Python GNN service ready — device=${body.device} models_loaded=${body.models_loaded}`);
+        return;
       }
-      if (onModelComplete) await onModelComplete(model, i).catch(() => {});
-      return { model, i };
-    }).catch((err: Error) => {
-      console.warn(`[GNN-GCP] Worker ${i} failed (${err.message}) — will use sequential fallback for this model`);
-      return null;
-    }),
-  );
-
-  const results = await Promise.all(promises);
-  const models = results.filter((r): r is { model: GNNWeights; i: number } => r !== null).map(r => r.model);
-
-  if (models.length === 0) {
-    console.warn("[GNN-GCP] All worker threads failed — falling back to sequential trainEnsemble");
-    return trainEnsemble(trainingData);
+    } catch { /* not ready yet */ }
   }
-
-  if (models.length < indices.length) {
-    console.warn(`[GNN-GCP] Only ${models.length}/${indices.length} workers succeeded — ensemble will be smaller`);
-  }
-
-  return models;
+  throw new Error("Python GNN service did not become ready within 90s");
 }
+
+/** POST training data to the Python service, returns parsed response. */
+async function callPythonTrain(
+  jobId:             number,
+  trainingData:      TrainingSample[],
+  startupValR2?:     number,
+  maxPretrainEpochs: number = 15,
+): Promise<{
+  status: "done" | "discarded" | "failed";
+  reason?: string;
+  r2: number; mae: number; rmse: number;
+  trainR2: number; trainMae: number;
+  valN: number;
+  ci95Coverage: number; ci95Width: number;
+  wallSeconds: number;
+  modelPath?: string;
+  nSamples: number;
+}> {
+  const body = {
+    job_id:              jobId,
+    training_data:       trainingData.map(s => ({
+      ...s,
+      lambda: (s as any).lambda,   // preserve field name for Python
+    })),
+    max_pretrain_epochs: maxPretrainEpochs,
+    startup_val_r2:      startupValR2 ?? null,
+  };
+
+  const res = await fetch(`${GNN_SERVICE_URL}/train`, {
+    method:  "POST",
+    headers: { "Content-Type": "application/json" },
+    body:    JSON.stringify(body),
+    signal:  AbortSignal.timeout(60 * 60_000), // 60-min timeout for large corpus
+  });
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => "(no body)");
+    throw new Error(`Python /train failed ${res.status}: ${text.slice(0, 200)}`);
+  }
+
+  const data = await res.json() as any;
+  const m    = data.metrics ?? {};
+  return {
+    status:       data.status,
+    reason:       data.reason,
+    r2:           m.r2        ?? 0,
+    mae:          m.mae       ?? 0,
+    rmse:         m.rmse      ?? 0,
+    trainR2:      m.train_r2  ?? 0,
+    trainMae:     m.train_mae ?? 0,
+    valN:         m.val_n     ?? 0,
+    ci95Coverage: m.ci95_coverage ?? 0,
+    ci95Width:    m.ci95_width    ?? 0,
+    wallSeconds:  m.wall_seconds  ?? 0,
+    modelPath:    m.model_path,
+    nSamples:     m.n_samples ?? trainingData.length,
+  };
+}
+
+/** Store the PyTorch model path in system_state for observability. */
+async function recordPytorchModelPath(jobId: number, modelPath: string): Promise<void> {
+  try {
+    await db.execute(
+      `INSERT INTO system_state (key, value, updated_at)
+       VALUES ('gnn_pytorch_model_path', '{"jobId":${jobId},"path":${JSON.stringify(modelPath)}}', NOW())
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`
+    );
+  } catch { /* non-fatal */ }
+}
+
+// trainEnsembleParallel and spawnModelWorker removed —
+// training is now delegated to the Python FastAPI service (gnn/server.py)
+// via callPythonTrain() defined above.
 
 const POLL_INTERVAL_MS = 10_000;
 const MP_BATCH_SIZE = 500;          // records per progressive fetch
@@ -206,101 +230,13 @@ async function fetchNextMPBatch(): Promise<void> {
   }
 }
 
-// ── Metrics ──────────────────────────────────────────────────────────────────
-// IMPORTANT: always pass a HELD-OUT split — never the training set.
-// Evaluating on training data gives inflated R² that is meaningless for
-// assessing generalisation quality.
+// computeMetrics and computeCalibration removed —
+// metrics are now computed inside the Python service (gnn/server.py)
+// and returned directly in the callPythonTrain() response.
 
-function computeMetrics(
-  models: GNNWeights[],
-  evalData: TrainingSample[],
-): { r2: number; mae: number; rmse: number; n: number } {
-  if (models.length === 0 || evalData.length === 0) return { r2: 0, mae: 0, rmse: 0, n: 0 };
-
-  const actuals = evalData.map(d => d.tc);
-  const meanActual = actuals.reduce((a, b) => a + b, 0) / actuals.length;
-
-  let ssTot = 0, ssRes = 0, sumAbs = 0, sumSq = 0, counted = 0;
-  for (const sample of evalData) {
-    try {
-      const graph = buildCrystalGraph(sample.formula, sample.structure);
-      const preds = models.map(m => GNNPredict(graph, m).predictedTc);
-      const pred = preds.reduce((a, b) => a + b, 0) / preds.length;
-      if (!Number.isFinite(pred) || pred > 500) continue; // guard: predictions >500K are unphysical
-      const diff = sample.tc - pred;
-      ssTot += (sample.tc - meanActual) ** 2;
-      ssRes += diff ** 2;
-      sumAbs += Math.abs(diff);
-      sumSq += diff ** 2;
-      counted++;
-    } catch { /* skip malformed samples */ }
-  }
-
-  if (counted === 0) return { r2: 0, mae: 0, rmse: 0, n: 0 };
-  const r2 = ssTot > 0 ? 1 - ssRes / ssTot : 0;
-  const mae = sumAbs / counted;
-  const rmse = Math.sqrt(sumSq / counted);
-  // Diagnostic: log prediction range so we can detect collapsed/saturated outputs
-  if (evalData.length > 0) {
-    const allPreds: number[] = [];
-    for (const sample of evalData.slice(0, 20)) {
-      try {
-        const graph = buildCrystalGraph(sample.formula, sample.structure);
-        const p = models.map(m => GNNPredict(graph, m).predictedTc);
-        allPreds.push(p.reduce((a, b) => a + b, 0) / p.length);
-      } catch { /* skip */ }
-    }
-    if (allPreds.length > 0) {
-      const predMin = Math.min(...allPreds).toFixed(1);
-      const predMax = Math.max(...allPreds).toFixed(1);
-      const predMean = (allPreds.reduce((a,b)=>a+b,0)/allPreds.length).toFixed(1);
-      const actualMean = meanActual.toFixed(1);
-      console.log(`[GNN-diag] sample preds(n=${allPreds.length}): min=${predMin}K max=${predMax}K mean=${predMean}K | actualMean=${actualMean}K`);
-    }
-  }
-  return { r2, mae, rmse, n: counted };
-}
-
-// ── CI95 calibration check ────────────────────────────────────────────────────
-// A well-calibrated model should have ~95% of true Tc values fall inside its
-// predicted 95% confidence interval. We check this empirically on the held-out
-// SC validation set and log it after every training job.
-
-function computeCalibration(
-  models: GNNWeights[],
-  valData: TrainingSample[],
-): { coverage: number; meanWidth: number; n: number } {
-  if (models.length === 0 || valData.length === 0) return { coverage: 0, meanWidth: 0, n: 0 };
-
-  let inside = 0, totalWidth = 0, counted = 0;
-  for (const sample of valData) {
-    try {
-      const graph = buildCrystalGraph(sample.formula, sample.structure);
-      const preds = models.map(m => GNNPredict(graph, m).predictedTc);
-      const meanTc = preds.reduce((a, b) => a + b, 0) / preds.length;
-
-      // Ensemble variance (epistemic uncertainty)
-      const variance = preds.reduce((s, p) => s + (p - meanTc) ** 2, 0) / preds.length;
-      const ensembleStd = Math.sqrt(variance);
-
-      // CI95: mean ± 1.96σ  (Gaussian approximation)
-      const lo = meanTc - 1.96 * ensembleStd;
-      const hi = meanTc + 1.96 * ensembleStd;
-
-      if (!Number.isFinite(lo) || !Number.isFinite(hi)) continue;
-      if (sample.tc >= lo && sample.tc <= hi) inside++;
-      totalWidth += hi - lo;
-      counted++;
-    } catch { /* skip malformed samples */ }
-  }
-
-  if (counted === 0) return { coverage: 0, meanWidth: 0, n: 0 };
-  return {
-    coverage: inside / counted,   // empirical fraction — should be ~0.95
-    meanWidth: totalWidth / counted,
-    n: counted,
-  };
-}
+// Kept only for the CI95 calibration metric storage helper below.
+// ── CI95 stub (values come from Python service) ───────────────────────────────
+// (calibration values come from Python service response)
 
 async function storeCalibrationMetric(
   jobId: number,
@@ -622,100 +558,82 @@ async function processNextGnnJob(): Promise<boolean> {
   );
   const startMs = Date.now();
 
+  // Load startup R² for quality gate comparison
+  let startupValR2 = -Infinity;
+  try {
+    const stateRow = await db.execute(
+      `SELECT value FROM system_state WHERE key = '${STARTUP_CORPUS_STATE_KEY}'`
+    );
+    const stateVal = (stateRow as any).rows?.[0]?.value ?? (Array.isArray(stateRow) ? stateRow[0]?.value : undefined);
+    if (stateVal) {
+      const parsed = typeof stateVal === 'string' ? JSON.parse(stateVal) : stateVal;
+      startupValR2 = parsed.valR2 ?? -Infinity;
+    }
+  } catch { /* non-fatal */ }
+
   try {
     await waitForXGBIdle();
     if (!acquireGNNTrainingSlot(`Job#${jobId}`)) {
-      // Another GNN training is already running — requeue this job and retry later
       await db.execute(`UPDATE gnn_training_jobs SET status = 'queued', started_at = NULL WHERE id = ${jobId}`);
       return false;
     }
-    let models: GNNWeights[];
+    let pyResult: Awaited<ReturnType<typeof callPythonTrain>>;
     try {
-      models = await trainEnsembleParallel(trainSet, 15, `Job#${jobId}`, valSet);
+      console.log(`[GNN-GCP] Delegating job #${jobId} to Python GNN service…`);
+      pyResult = await callPythonTrain(
+        jobId, trainingData, Number.isFinite(startupValR2) ? startupValR2 : undefined,
+      );
     } finally {
       releaseGNNTrainingSlot(`Job#${jobId}`);
     }
 
-    // Evaluate on HELD-OUT validation set — these R²/MAE/RMSE are honest.
-    const valMetrics = valSet.length >= 5
-      ? computeMetrics(models, valSet)
-      : { r2: 0, mae: 0, rmse: 0, n: 0 };
-    // Also compute training-set metrics separately so overfitting is visible.
-    const trainMetrics = computeMetrics(models, scTrain.slice(0, 200)); // sample to avoid slow eval
-    // CI95 calibration: empirical fraction of true Tc values inside the predicted interval.
-    // A well-calibrated ensemble should yield ~0.95; values << 0.95 mean intervals are too narrow.
-    const calibration = valSet.length >= 5
-      ? computeCalibration(models, valSet)
-      : { coverage: 0, meanWidth: 0, n: 0 };
-    const { r2, mae, rmse, n: valN } = valMetrics;
-    const wallSec = ((Date.now() - startMs) / 1000).toFixed(1);
+    const { r2, mae, rmse, trainR2, trainMae, valN, ci95Coverage, ci95Width, wallSeconds } = pyResult;
+    const wallSec = wallSeconds.toFixed(1);
 
-    // trainEnsembleParallel() uses worker threads and awaits them, so the event
-    // loop stays responsive throughout. Still yield briefly and warm the DB pool
-    // before writing since worker threads may have let idle connections go stale.
+    // Yield + warm DB pool before writing (Python service may have held the connection idle)
     await new Promise(r => setTimeout(r, 50));
-    try { await db.execute("SELECT 1"); } catch { /* ignore — pool will reconnect */ }
+    try { await db.execute("SELECT 1"); } catch { /* pool will reconnect */ }
 
-    // Quality gate 1: reject catastrophically collapsed models.
-    // R²<-5 means worse than a constant baseline; MAE>200K means all predictions ≈ 0.
-    // Quality gate 2: don't overwrite startup weights with worse dispatched results.
-    // Startup trains on the full corpus (~15k); dispatched jobs use a smaller payload
-    // and naturally produce lower R². Only store if the dispatched job beats startup.
-    let startupValR2 = -Infinity;
-    try {
-      const stateRow = await db.execute(
-        `SELECT value FROM system_state WHERE key = '${STARTUP_CORPUS_STATE_KEY}'`
-      );
-      const stateVal = (stateRow as any).rows?.[0]?.value ?? (Array.isArray(stateRow) ? stateRow[0]?.value : undefined);
-      if (stateVal) {
-        const parsed = typeof stateVal === 'string' ? JSON.parse(stateVal) : stateVal;
-        startupValR2 = parsed.valR2 ?? -Infinity;
-      }
-    } catch { /* non-fatal — proceed without guard */ }
-
-    if (r2 < -5 || mae > 200 || rmse > 100) {
-      console.warn(
-        `[GNN-GCP] Job #${jobId} quality below threshold (R²=${r2.toFixed(3)}, MAE=${mae.toFixed(1)}K, RMSE=${rmse.toFixed(1)}K) — discarding to preserve working weights`
-      );
+    if (pyResult.status === "discarded") {
+      console.warn(`[GNN-GCP] Job #${jobId} discarded by Python service: ${pyResult.reason}`);
       await db.execute(`UPDATE gnn_training_jobs SET status = 'discarded' WHERE id = ${jobId}`);
-    } else if (Number.isFinite(startupValR2) && r2 < startupValR2 - 0.05) {
-      console.warn(
-        `[GNN-GCP] Job #${jobId} val R²=${r2.toFixed(3)} is worse than startup R²=${startupValR2.toFixed(3)} — discarding to keep startup weights`
-      );
-      await db.execute(`UPDATE gnn_training_jobs SET status = 'discarded' WHERE id = ${jobId}`);
+    } else if (pyResult.status === "failed") {
+      throw new Error(pyResult.reason ?? "Python service returned status=failed");
     } else {
+      // PyTorch weights live in a .pt file on disk; TS DB stores metadata only.
+      if (pyResult.modelPath) await recordPytorchModelPath(jobId, pyResult.modelPath);
       await storage.updateGnnTrainingJob(jobId, {
-        status: "done",
-        weights: models as any,
+        status:      "done",
+        weights:     [] as any,  // PyTorch weights stored in .pt file, not DB JSON
         r2,
         mae,
         rmse,
-        trainR2: trainMetrics.r2,
-        trainMae: trainMetrics.mae,
+        trainR2,
+        trainMae,
         valN,
         completedAt: new Date(),
       } as any);
     }
 
-    const coverageStr = calibration.n > 0
-      ? `CI95-cov=${(calibration.coverage * 100).toFixed(1)}% width=${calibration.meanWidth.toFixed(1)}K`
+    const coverageStr = ci95Coverage > 0
+      ? `CI95-cov=${(ci95Coverage * 100).toFixed(1)}% width=${ci95Width.toFixed(1)}K`
       : "CI95-cov=N/A";
 
     console.log(
       `[GNN-GCP] Job #${jobId} complete in ${wallSec}s` +
       ` | VAL(n=${valN}): R²=${r2.toFixed(3)} MAE=${mae.toFixed(1)}K RMSE=${rmse.toFixed(1)}K` +
-      ` | TRAIN(sample): R²=${trainMetrics.r2.toFixed(3)} MAE=${trainMetrics.mae.toFixed(1)}K` +
-      ` | overfit-gap=${(trainMetrics.r2 - r2).toFixed(3)}` +
+      ` | TRAIN(sample): R²=${trainR2.toFixed(3)} MAE=${trainMae.toFixed(1)}K` +
+      ` | overfit-gap=${(trainR2 - r2).toFixed(3)}` +
       ` | ${coverageStr}`
     );
 
-    if (calibration.n > 0) {
-      if (calibration.coverage < 0.80) {
-        console.warn(`[GNN-GCP] ⚠ CI95 under-coverage (${(calibration.coverage * 100).toFixed(1)}%) — ensemble uncertainty is underestimated`);
-      } else if (calibration.coverage > 0.99) {
-        console.warn(`[GNN-GCP] ⚠ CI95 over-coverage (${(calibration.coverage * 100).toFixed(1)}%) — ensemble intervals are too wide`);
+    if (ci95Coverage > 0) {
+      if (ci95Coverage < 0.80) {
+        console.warn(`[GNN-GCP] ⚠ CI95 under-coverage (${(ci95Coverage * 100).toFixed(1)}%) — ensemble uncertainty is underestimated`);
+      } else if (ci95Coverage > 0.99) {
+        console.warn(`[GNN-GCP] ⚠ CI95 over-coverage (${(ci95Coverage * 100).toFixed(1)}%) — ensemble intervals are too wide`);
       }
-      await storeCalibrationMetric(jobId, calibration.coverage, calibration.meanWidth, calibration.n);
+      await storeCalibrationMetric(jobId, ci95Coverage, ci95Width, valN);
     }
 
     // Fetch next MP batch after every successful training job so the next
@@ -914,10 +832,11 @@ async function runStartupFullCorpusTraining(): Promise<void> {
 
 
   console.log(`[GNN-GCP]  Dataset: ${scSamples.length} SC + ${cappedNonSc.length} contrast | train=${trainSet.length} val=${valSet.length}`);
-  console.log(`[GNN-GCP]  Starting 5-model parallel ensemble training...`);
+  console.log(`[GNN-GCP]  Delegating startup training to Python GNN service…`);
 
-  const startMs = Date.now();
-  let models: GNNWeights[];
+  let r2 = 0, mae = 0, rmse = 0, trainR2 = 0, trainMae = 0, valN = 0;
+  let startupModelPath: string | undefined;
+  let pyResult: Awaited<ReturnType<typeof callPythonTrain>> | undefined;
   try {
     await waitForXGBIdle();
     if (!acquireGNNTrainingSlot('STARTUP')) {
@@ -929,29 +848,20 @@ async function runStartupFullCorpusTraining(): Promise<void> {
       }
     }
     try {
-      if (indicesToTrain.length === 0) {
-        // All models were checkpointed — nothing to train.
-        console.log('[GNN-GCP] All models restored from checkpoints — skipping training');
-        models = allIndices.map(i => checkpointedModels.get(i)!);
-      } else {
-        // Train only missing model indices; checkpoint each one as it finishes.
-        const newModels = await trainEnsembleParallel(
-          trainSet, 15, 'STARTUP', valSet,
-          saveStartupModelCheckpoint,
-          indicesToTrain,
-        );
-        // Merge checkpointed + newly trained, preserving original ensemble order.
-        const modelMap = new Map<number, GNNWeights>(checkpointedModels);
-        indicesToTrain.forEach((idx, pos) => {
-          if (newModels[pos]) modelMap.set(idx, newModels[pos]);
-        });
-        models = allIndices.map(i => modelMap.get(i)).filter((m): m is GNNWeights => !!m);
-      }
+      // Insert a placeholder job so the Python service result has a job ID to reference
+      const placeholderJob = await storage.insertGnnTrainingJob({
+        status: "running" as any,
+        trainingData: [] as any,
+        datasetSize: trainSet.length,
+        dftSamples: qeSamples.length,
+      });
+      const startupJobId = placeholderJob.id;
+
+      pyResult = await callPythonTrain(startupJobId, trainingData, undefined, 15);
+      ({ r2, mae, rmse, trainR2, trainMae, valN, startupModelPath } = {
+        ...pyResult, startupModelPath: pyResult.modelPath,
+      });
     } finally {
-      // Delete queued jobs WHILE holding the slot so the job poller cannot
-      // mark one as 'running' between the slot release and the delete query.
-      // This eliminates the race condition that let dispatched jobs overwrite
-      // startup results even after we added the post-completion cleanup.
       try {
         const deleted = await db.execute(
           `DELETE FROM gnn_training_jobs WHERE status IN ('queued', 'running') RETURNING id`
@@ -960,7 +870,7 @@ async function runStartupFullCorpusTraining(): Promise<void> {
         if (deletedIds.length > 0) {
           console.log(`[GNN-GCP] Cleared ${deletedIds.length} stale job(s) before slot release — startup weights preserved`);
         }
-      } catch { /* non-fatal — slot must still be released */ }
+      } catch { /* non-fatal */ }
       releaseGNNTrainingSlot('STARTUP');
     }
   } catch (err: any) {
@@ -968,50 +878,41 @@ async function runStartupFullCorpusTraining(): Promise<void> {
     return;
   }
 
-  const wallSec = ((Date.now() - startMs) / 1000).toFixed(1);
-  const valMetrics = valSet.length >= 5 ? computeMetrics(models, valSet) : { r2: 0, mae: 0, rmse: 0, n: 0 };
-  const trainMetrics = computeMetrics(models, scTrain.slice(0, 200));
-  const { r2, mae, rmse, n: valN } = valMetrics;
+  const wallSec = pyResult ? pyResult.wallSeconds.toFixed(1) : "?";
+  const trainMaeV = trainMae;
 
   console.log('[GNN-GCP] ────────────────────────────────────────────────────────');
   console.log(`[GNN-GCP]  Startup training complete in ${wallSec}s`);
   console.log(`[GNN-GCP]  VAL  (n=${valN}): R²=${r2.toFixed(3)}  MAE=${mae.toFixed(1)}K  RMSE=${rmse.toFixed(1)}K`);
-  console.log(`[GNN-GCP]  TRAIN(sample): R²=${trainMetrics.r2.toFixed(3)}  MAE=${trainMetrics.mae.toFixed(1)}K  overfit-gap=${(trainMetrics.r2 - r2).toFixed(3)}`);
+  console.log(`[GNN-GCP]  TRAIN(sample): R²=${trainR2.toFixed(3)}  MAE=${trainMaeV.toFixed(1)}K  overfit-gap=${(trainR2 - r2).toFixed(3)}`);
+  if (startupModelPath) console.log(`[GNN-GCP]  PyTorch ensemble saved: ${startupModelPath}`);
   console.log('[GNN-GCP] ════════════════════════════════════════════════════════');
 
-  // Quality gate: only store weights if the model is not catastrophically bad.
-  // R²<-5 or MAE>200K means predictions collapsed (e.g. all-zero gate), which
-  // would overwrite the current working model with useless weights on the local server.
-  const MIN_STORE_R2 = -5;
-  const MAX_STORE_MAE = 200;
-  const MAX_STORE_RMSE = 100;
-  if (r2 < MIN_STORE_R2 || mae > MAX_STORE_MAE || rmse > MAX_STORE_RMSE) {
-    console.warn(`[GNN-GCP] Startup weights NOT stored — model quality below threshold (R²=${r2.toFixed(3)}, MAE=${mae.toFixed(1)}K, RMSE=${rmse.toFixed(1)}K). Existing weights on local server preserved.`);
-  } else {
-    // Store the trained weights as a completed job so the local server's GCP
-    // weight poller picks them up and applies them.
+  if (pyResult?.status === "discarded") {
+    console.warn(`[GNN-GCP] Startup weights NOT stored — ${pyResult.reason}`);
+  } else if (pyResult?.status === "done") {
+    // Record metrics in DB as a completed job (weights: [] since .pt lives on disk)
     try {
-      await db.execute("SELECT 1"); // warm pool before large write
+      await db.execute("SELECT 1");
       const insertedJob = await storage.insertGnnTrainingJob({
         status: "queued" as any,
-        trainingData: [] as any, // payload stored on GCP side — not needed by local server
+        trainingData: [] as any,
         datasetSize: trainSet.length,
         dftSamples: qeSamples.length,
       });
       await storage.updateGnnTrainingJob(insertedJob.id, {
         status: "done",
-        weights: models as any,
-        r2,
-        mae,
-        rmse,
-        trainR2: trainMetrics.r2,
-        trainMae: trainMetrics.mae,
+        weights: [] as any,   // PyTorch weights live in .pt file on disk
+        r2, mae, rmse,
+        trainR2,
+        trainMae,
         valN,
         completedAt: new Date(),
       } as any);
-      console.log(`[GNN-GCP] Startup weights stored as job #${insertedJob.id} — local server poller will apply them`);
+      if (startupModelPath) await recordPytorchModelPath(insertedJob.id, startupModelPath);
+      console.log(`[GNN-GCP] Startup metrics stored as job #${insertedJob.id}`);
     } catch (err: any) {
-      console.warn(`[GNN-GCP] Failed to store startup weights in DB: ${err.message?.slice(0, 120)}`);
+      console.warn(`[GNN-GCP] Failed to store startup metrics in DB: ${err.message?.slice(0, 120)}`);
     }
   }
 
@@ -1033,6 +934,18 @@ async function runStartupFullCorpusTraining(): Promise<void> {
 export async function startGNNLoop(): Promise<void> {
   console.log(`[GNN-GCP] GNN training worker started — poll every ${POLL_INTERVAL_MS / 1000}s`);
   console.log(`[GNN-GCP] Progressive MP fetch: ${MP_BATCH_SIZE} records/cycle, max cache ${MP_MAX_CACHE}`);
+
+  // ── Start Python GNN service ──────────────────────────────────────────────
+  console.log("[GNN-GCP] Starting Python GNN service (FastAPI)…");
+  try {
+    await spawnPythonGNNService();
+  } catch (err: any) {
+    console.error(`[GNN-GCP] FATAL: Could not start Python GNN service: ${err.message}`);
+    console.error("[GNN-GCP] Ensure gnn/server.py dependencies are installed:");
+    console.error("  pip install fastapi uvicorn torch torch-geometric");
+    throw err;
+  }
+  console.log("[GNN-GCP] Python GNN service ready on " + GNN_SERVICE_URL);
 
   // Reset any jobs left in 'running' state from a previous crashed/restarted process.
   // Without this, the local server sees an active job and won't dispatch new ones.
@@ -1096,4 +1009,8 @@ export async function startGNNLoop(): Promise<void> {
 
 export function stopGNNLoop() {
   running = false;
+  if (_pythonProcess && !_pythonProcess.killed) {
+    console.log("[GNN-GCP] Stopping Python GNN service…");
+    _pythonProcess.kill("SIGTERM");
+  }
 }

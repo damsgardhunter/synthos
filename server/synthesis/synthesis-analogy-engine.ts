@@ -565,11 +565,17 @@ export async function proposeAnalogousRoutes(
     reactionsApplied: [],
   };
 
-  const analogues = await findAnalogousSyntheses(formula);
+  const targetFamily = classifyFamily(formula);
+  const analogues = await findAnalogousSyntheses(formula, targetFamily);
 
   const processedFormulas = new Set<string>();
   for (const analogue of analogues.slice(0, 5)) {
-    if (analogue.score < 0.2) continue;
+    // Raised threshold (was 0.2): element overlap alone is insufficient — require
+    // meaningful structural similarity so hydride routes don't pull in cuprate analogies.
+    if (analogue.score < 0.35) continue;
+    // Hard rule: hydrides must match hydrides. Cross-family transfers (oxide→hydride) give
+    // chemically nonsensical precursor lists (BaO/CuO appearing in La2H6 routes).
+    if (targetFamily === "Hydride" && !analogue.familyMatch) continue;
     if (processedFormulas.has(analogue.formula)) continue;
     processedFormulas.add(analogue.formula);
 

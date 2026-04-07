@@ -1401,7 +1401,8 @@ function DFTQueuePanel() {
 
 export default function ComputationalPhysics() {
   const { data: scData, isLoading: scLoading } = useQuery<{ candidates: SuperconductorCandidate[]; total: number }>({
-    queryKey: ["/api/superconductor-candidates", { limit: 100 }],
+    queryKey: ["/api/superconductor-candidates", "limit100"],
+    queryFn: () => fetch("/api/superconductor-candidates?limit=100").then(r => r.json()),
   });
 
   const { data: pipelineData } = useQuery<{ pipelineStages: { stage: number; count: number; passed: number }[]; crystalStructures: number; computationalResults: number }>({
@@ -1483,19 +1484,24 @@ export default function ComputationalPhysics() {
   useEffect(() => {
     const last = ws.messages[ws.messages.length - 1];
     if (!last) return;
-    const relevantTypes = new Set(["phaseUpdate", "progress", "prediction", "insight", "cycleEnd", "log"]);
+    // "log" and "progress" fire many times/sec — excluded to prevent request storms
+    const relevantTypes = new Set(["phaseUpdate", "prediction", "insight", "cycleEnd", "dftJobCompleted", "dftJobFailed", "scCandidate"]);
     if (relevantTypes.has(last.type)) {
-      queryClient.invalidateQueries({ queryKey: ["/api/superconductor-candidates"] });
       queryClient.invalidateQueries({ queryKey: ["/api/pipeline-stats"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/dft-queue/stats"] });
+    }
+    if (last.type === "cycleEnd" || last.type === "scCandidate") {
+      queryClient.invalidateQueries({ queryKey: ["/api/superconductor-candidates"] });
       queryClient.invalidateQueries({ queryKey: ["/api/computational-results/failed"] });
       queryClient.invalidateQueries({ queryKey: ["/api/crystal-structures"] });
+    }
+    if (last.type === "cycleEnd") {
       queryClient.invalidateQueries({ queryKey: ["/api/synthesis-variables/stats"] });
       queryClient.invalidateQueries({ queryKey: ["/api/synthesis-simulator/stats"] });
       queryClient.invalidateQueries({ queryKey: ["/api/next-gen-pipeline/stats"] });
       queryClient.invalidateQueries({ queryKey: ["/api/self-improving-lab/stats"] });
       queryClient.invalidateQueries({ queryKey: ["/api/design-representations/stats"] });
       queryClient.invalidateQueries({ queryKey: ["/api/doping-engine/stats"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/dft-queue/stats"] });
     }
   }, [ws.messageCount]);
 

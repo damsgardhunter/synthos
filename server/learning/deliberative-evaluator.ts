@@ -1,6 +1,6 @@
 import { storage } from "../storage";
 import { classifyFamily, normalizeFormula, isValidFormula } from "./utils";
-import { extractFeatures } from "./ml-predictor";
+import { extractFeatures, isSweepGuardActive } from "./ml-predictor";
 import { gbPredict } from "./gradient-boost";
 import { gnnPredictWithUncertainty } from "./graph-neural-net";
 import { computeMiedemaFormationEnergy } from "./phase-diagram-engine";
@@ -251,27 +251,33 @@ async function runPhysicsMerit(formula: string, predictedTc: number, mlFeatures?
 
   let electronicMetallicity = 0;
   let electronicStructureComputed = false;
-  try {
-    const electronic = computeElectronicStructure(formula);
-    dosAtFermi = Math.max(dosAtFermi, electronic.densityOfStatesAtFermi);
-    bandGap = electronic.bandGap;
-    electronicMetallicity = electronic.metallicity ?? 0;
-    electronicStructureComputed = true;
-    realDataPoints++;
-    if (bandGap > 0.1) {
-      // Confirmed insulating — this is a genuine physics reject, not a data-absence reject.
-      score -= 0.5;
-      reasoning.push(`Insulating: bandGap=${bandGap.toFixed(2)}eV — no Fermi surface, superconductivity is impossible`);
-      return {
-        name: "Physics Merit",
-        score: Math.max(0, score),
-        weight: STAGE_WEIGHTS.physicsMerit,
-        reasoning,
-        verdict: "reject",
-        dataConfidence: 1,  // real signal — not a data-gap default
-      };
-    }
-  } catch {}
+  if (!isSweepGuardActive()) {
+    // Skip during SG sweep and post-sweep cooldown: computeElectronicStructure blocks 17-71s
+    // synchronously. insertCandidateWithStabilityCheck calls deliberateOnCandidate for every
+    // insert — with hundreds of inserts during the sweep fast-path, this cascades into
+    // sequential 17-71s blocks that completely freeze the event loop.
+    try {
+      const electronic = computeElectronicStructure(formula);
+      dosAtFermi = Math.max(dosAtFermi, electronic.densityOfStatesAtFermi);
+      bandGap = electronic.bandGap;
+      electronicMetallicity = electronic.metallicity ?? 0;
+      electronicStructureComputed = true;
+      realDataPoints++;
+      if (bandGap > 0.1) {
+        // Confirmed insulating — this is a genuine physics reject, not a data-absence reject.
+        score -= 0.5;
+        reasoning.push(`Insulating: bandGap=${bandGap.toFixed(2)}eV — no Fermi surface, superconductivity is impossible`);
+        return {
+          name: "Physics Merit",
+          score: Math.max(0, score),
+          weight: STAGE_WEIGHTS.physicsMerit,
+          reasoning,
+          verdict: "reject",
+          dataConfidence: 1,  // real signal — not a data-gap default
+        };
+      }
+    } catch {}
+  }
 
   let gbTc = 0;
   try {
@@ -348,6 +354,168 @@ async function runPhysicsMerit(formula: string, predictedTc: number, mlFeatures?
       score -= 0.05;
       reasoning.push(`Model disagreement: GNN=${gnnTc.toFixed(0)}K vs GB=${gbTc.toFixed(0)}K (${(modelSpread * 100).toFixed(0)}% spread) — uncertain`);
     }
+  }
+
+  // ── Magnetic pair-breaking (Abrikosov-Gor'kov) ───────────────────────────
+  // Magnetic rare earths (4f spin ≠ 0: Ce, Pr, Nd, Sm, Eu, Gd, Tb, Dy, Ho,
+  // Er, Tm) act as pair-breaking impurities. Their concentration enters the
+  // AG depairing integral non-linearly: Tc suppression ~ exp(-π/(2τ·Δ₀)).
+  // For concentrated rare-earth sublattices this is a hard superconductivity
+  // barrier — Gd and Dy fully suppress SC; Nd/Sm/Er give partial suppression.
+  // This penalty makes stoichiometric CuNd2 vs CuNd3 vs CuNd4 diverge
+  // non-linearly rather than inheriting ML Tc predictions unchanged.
+  const MAGNETIC_RE: Record<string, number> = {
+    Ce: 0.20,  // J=5/2, strong pair-breaking
+    Pr: 0.25,
+    Nd: 0.30,  // moderate magnetic moment
+    Sm: 0.25,
+    Eu: 0.35,  // nearly half-filled, large moment
+    Gd: 0.50,  // maximum spin (S=7/2) — most destructive
+    Tb: 0.45,
+    Dy: 0.40,
+    Ho: 0.35,
+    Er: 0.25,
+    Tm: 0.20,
+  };
+  let agPenalty = 0;
+  let agReasons: string[] = [];
+  for (const [re, strength] of Object.entries(MAGNETIC_RE)) {
+    const reCount = (elements.get(re) ?? 0);
+    if (reCount > 0) {
+      const reFrac = reCount / totalAtoms;
+      // AG depairing is non-linear: penalty scales as reFrac^0.6 to capture
+      // the concentrated-impurity regime without fully saturating at low doping
+      const penalty = strength * Math.pow(reFrac, 0.6);
+      agPenalty += penalty;
+      agReasons.push(`${re} (frac=${reFrac.toFixed(2)}, AG penalty=${penalty.toFixed(3)})`);
+    }
+  }
+  if (agPenalty > 0) {
+    const clampedPenalty = Math.min(0.50, agPenalty);
+    score -= clampedPenalty;
+    reasoning.push(`Magnetic pair-breaking (AG): ${agReasons.join(", ")} — total penalty ${clampedPenalty.toFixed(3)}`);
+  }
+
+  // ── Advanced physics signals from mlFeatures ─────────────────────────────
+  // Lifshitz transitions (van Hove singularity at Fermi level), quantum critical
+  // points, and soft phonon modes are strong SC enhancers that the above scalar
+  // calculations may miss entirely. Use them when present.
+  const lifshitzScore: number = (mlFeatures?.lifshitz ?? mlFeatures?.lifshitzProximity ?? mlFeatures?.vanHoveProximity ?? 0);
+  const qcpScore: number = (mlFeatures?.qcp ?? mlFeatures?.qcpScore ?? mlFeatures?.quantumCriticality?.score ?? 0);
+  const softModeScore: number = (mlFeatures?.softMode ?? mlFeatures?.softModePresent ?? 0);
+  const stonerRatio: number = (mlFeatures?.stonerRatio ?? mlFeatures?.stonerParameter ?? 0);
+
+  if (lifshitzScore >= 0.8) {
+    score += 0.15;
+    reasoning.push(`Lifshitz transition: score=${lifshitzScore.toFixed(2)} — van Hove singularity at Fermi level strongly enhances pairing`);
+  } else if (lifshitzScore >= 0.4) {
+    score += 0.07;
+    reasoning.push(`Moderate Lifshitz signal: score=${lifshitzScore.toFixed(2)} — partial van Hove enhancement`);
+  }
+
+  if (qcpScore >= 0.6) {
+    score += 0.10;
+    reasoning.push(`Quantum critical point: score=${qcpScore.toFixed(2)} — QCP enhances pairing through critical fluctuations`);
+  } else if (qcpScore >= 0.3) {
+    score += 0.05;
+    reasoning.push(`Near quantum critical: score=${qcpScore.toFixed(2)} — moderate QCP-driven pairing enhancement`);
+  }
+
+  if (softModeScore >= 0.4) {
+    score += 0.08;
+    reasoning.push(`Soft phonon modes: score=${softModeScore.toFixed(2)} — anharmonic softening enhances electron-phonon coupling`);
+  }
+
+  // When Stoner > 1.0 AND a quantum critical point is present, this is NOT a
+  // ferromagnetic insulator — it is a near-QCP spin-fluctuation SC candidate.
+  // Stoner > 1.0 with QCP means the system sits just below the magnetic instability
+  // boundary where critical spin fluctuations mediate Cooper pairing (e.g. MnSi family).
+  // Only apply the ferromagnet-rejection penalty when QCP evidence is absent.
+  if (stonerRatio > 3.0 && qcpScore < 0.3) {
+    const stonerPenalty = Math.min(0.15, (stonerRatio - 3.0) * 0.03);
+    score -= stonerPenalty;
+    reasoning.push(`High Stoner parameter (${stonerRatio.toFixed(2)}) without QCP — ferromagnetic tendency suppresses conventional phonon-mediated SC (penalty ${stonerPenalty.toFixed(3)})`);
+  } else if (stonerRatio > 1.0 && qcpScore >= 0.3) {
+    reasoning.push(`Stoner=${stonerRatio.toFixed(2)} > 1 but QCP confirmed — spin-fluctuation SC near magnetic QCP; conventional BCS Tc estimate is a lower bound`);
+  }
+
+  // ── d-band filling penalty (Stoner / Matthias rule) ───────────────────────
+  // Transition metals with d-bands near full (d9, d10) or near empty (d1, d2)
+  // have low N(Ef) and low DOS × I (Stoner exchange) — poor SC candidates.
+  // The effect is non-linear: SC peaks near d4-d7 filling.
+  // This breaks uniformity for stoichiometric variants of the same TM (e.g.
+  // NiSr4 vs NiSr5 vs Ni2Sr4) because the effective d filling per formula unit
+  // changes as the alkaline-earth fraction changes (charge transfer to TM d-band).
+  // Cu and Ni are SC-active in their oxidized forms (Cu2+ = d9, Ni1+/Ni2+ = d8/d9).
+  // Using the ground-state count (Cu=d10, Ni=d10) falsely marks all Cu/Ni compounds
+  // as near-full-band — this rejects cuprates and nickelates which are well-known SC families.
+  // Use d9 for Cu (matches Cu2+ in cuprates, CuO-plane chemistry) and d8 for Ni
+  // (matches Ni2+ in nickelates). Pd in hydride context is also d9-active.
+  //
+  // HYDRIDE EXCEPTION: in H-rich hydrides (H:metal > 3), superconductivity is driven
+  // by H-H phonon modes and the H-sublattice coupling, not TM d-band filling. Rare-earth
+  // metals like La (formally d0/d1) act as electron donors to the H cage. The d-band
+  // filling model is physically inapplicable here and produces severe false penalties
+  // (La d0 → max penalty → Physics Merit = 0 for LaH7, LaH10 etc.). Skip for hydrides.
+  const hAtoms = elements.get("H") ?? 0;
+  const metalAtoms = Array.from(elements.entries())
+    .filter(([el]) => !["H","He","N","O","F","Cl","Br","I","At","Ne","Ar","Kr","Xe","Rn"].includes(el))
+    .reduce((s, [, n]) => s + n, 0);
+  const isHRichHydride = hAtoms > 0 && metalAtoms > 0 && (hAtoms / metalAtoms) > 3;
+
+  const family = classifyFamily(formula);
+  const isCuprateOrNi = family === "Cuprate" || family === "Nickelate" || family === "Chalcogenide";
+  const D_ELECTRONS: Record<string, number> = {
+    Sc:1,Ti:2,V:3,Cr:5,Mn:5,Fe:6,Co:7,
+    Ni: isCuprateOrNi ? 8 : 10,  // Ni2+ (d8) in layered SC vs Ni0/Ni1+ (d10) in alloys
+    Cu: isCuprateOrNi ? 9 : 10,  // Cu2+ (d9) in cuprates/chalcogenides vs Cu1+ (d10) in pure metals
+    Zn:10,
+    Y:1, Zr:2,Nb:4,Mo:5,Tc:5,Ru:7,Rh:8,Pd:10,Ag:10,Cd:10,
+    Hf:2,Ta:3,W:4, Re:5,Os:6,Ir:7,Pt:9,Au:10,Hg:10,
+    La:0,Ce:1,Pr:2,Nd:3,Sm:5,Eu:6,Gd:7,Tb:8,Dy:9,Ho:10,Er:11,Tm:12,Yb:13,Lu:14,
+  };
+  // Electron donors that fill TM d-band via charge transfer
+  const CHARGE_DONORS: Record<string, number> = {
+    Li:1,Na:1,K:1,Rb:1,Cs:1,
+    Be:2,Mg:2,Ca:2,Sr:2,Ba:2,
+    Al:3,Ga:3,In:3,
+    Si:4,Ge:4,Sn:4,
+  };
+  let tmCount = 0;
+  let tmDElectrons = 0;
+  let donorElectrons = 0;
+  for (const [el, count] of elements.entries()) {
+    if (D_ELECTRONS[el] !== undefined) {
+      tmCount += count;
+      tmDElectrons += D_ELECTRONS[el] * count;
+    }
+    if (CHARGE_DONORS[el] !== undefined) {
+      donorElectrons += CHARGE_DONORS[el] * count * 0.3; // ~30% donation efficiency
+    }
+  }
+  if (tmCount > 0 && !isHRichHydride) {
+    const effectiveDPerTM = Math.min(10, (tmDElectrons + donorElectrons) / tmCount);
+    // SC is suppressed when d-band is near-full (>8.5) or near-empty (<2.5)
+    // Peak region: d4–d8 (Mn-Ni range). Use a triangular-ish penalty curve.
+    let dBandPenalty = 0;
+    if (effectiveDPerTM > 9.0) {
+      // d9-d10: nearly full band, very few holes, N(Ef) collapses
+      dBandPenalty = (effectiveDPerTM - 9.0) * 0.15;
+    } else if (effectiveDPerTM > 8.0) {
+      // d8-d9: filling up, modest penalty
+      dBandPenalty = (effectiveDPerTM - 8.0) * 0.08;
+    } else if (effectiveDPerTM < 2.0) {
+      // d0-d2: too few d electrons for SC
+      dBandPenalty = (2.0 - effectiveDPerTM) * 0.10;
+    }
+    if (dBandPenalty > 0) {
+      score -= Math.min(0.20, dBandPenalty);
+      reasoning.push(`d-band filling: ${effectiveDPerTM.toFixed(2)} d-electrons/TM — ${dBandPenalty > 0.12 ? "suppressed" : "reduced"} SC potential (penalty ${Math.min(0.20, dBandPenalty).toFixed(3)})`);
+    } else {
+      reasoning.push(`d-band filling: ${effectiveDPerTM.toFixed(2)} d-electrons/TM — favorable SC range`);
+    }
+  } else if (isHRichHydride) {
+    reasoning.push(`H-rich hydride (H:metal=${(hAtoms/metalAtoms).toFixed(1)}): d-band filling model not applicable — SC driven by H-sublattice phonons, not TM d-band`);
   }
 
   return {
@@ -539,12 +707,17 @@ function runRiskAssessment(formula: string, predictedTc: number, mlFeatures?: an
   } catch {}
 
   const hullDistance = mlFeatures?.stabilityGate?.hullDistance ?? 0;
+  const riskPressureGpa: number = mlFeatures?.pressureGpa ?? 0;
   if (hullDistance > 0) {
     if (hullDistance < 0.02) {
       score += 0.05;
       reasoning.push(`Near convex hull: ${(hullDistance * 1000).toFixed(1)} meV/atom — competitive with stable phases`);
     } else if (hullDistance < 0.05) {
       reasoning.push(`Moderately above hull: ${(hullDistance * 1000).toFixed(1)} meV/atom`);
+    } else if (riskPressureGpa > 50) {
+      // Ambient convex hull distance is not physically meaningful at high pressure —
+      // the pressure-stabilized hull is completely different. Skip the penalty.
+      reasoning.push(`Ambient hull distance ${(hullDistance * 1000).toFixed(1)} meV/atom — not penalised at ${riskPressureGpa.toFixed(0)} GPa (pressure-stabilized hull applies)`);
     } else {
       score -= 0.1;
       reasoning.push(`Far from hull: ${(hullDistance * 1000).toFixed(1)} meV/atom — synthesis challenging`);
@@ -555,8 +728,13 @@ function runRiskAssessment(formula: string, predictedTc: number, mlFeatures?: an
   const hasH = elements.has("H");
   const hCount = elements.get("H") ?? 0;
   if (hasH && hCount >= 6) {
-    score -= 0.1;
-    reasoning.push(`High hydrogen content (H${hCount}) — likely requires extreme pressure for stabilization`);
+    if (riskPressureGpa > 20) {
+      // Pressure is already accounted for — note the requirement without penalising
+      reasoning.push(`High hydrogen content (H${hCount}) — pressure requirement (${riskPressureGpa.toFixed(0)} GPa) already incorporated`);
+    } else {
+      score -= 0.1;
+      reasoning.push(`High hydrogen content (H${hCount}) — likely requires extreme pressure for stabilization`);
+    }
   }
 
   return {

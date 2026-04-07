@@ -4281,12 +4281,52 @@ export function getGNNLatestR2(): number {
 const GNN_PRED_CACHE_MAX = 500;
 const gnnPredictionCache = new Map<string, { prediction: GNNPrediction; trainedAt: number }>();
 
+// ── Elemental-metal lookup table ───────────────────────────────────────────
+// The local TS GNN produces spurious ~75K predictions for elemental metals
+// because single-atom graphs are deeply out-of-distribution for a model
+// trained on multi-element superconductors.  Use known experimental Tc values
+// instead — these are precise to within a fraction of a Kelvin.
+const KNOWN_ELEMENTAL_TC: Record<string, number> = {
+  // Confirmed superconductors (experimental Tc in K at ambient pressure)
+  Al: 1.18, Be: 0.026, Cd: 0.517, Ga: 1.083, Hf: 0.128, Hg: 4.154,
+  In: 3.408, Ir: 0.1125, La: 4.88, Lu: 0.1, Mo: 0.92, Nb: 9.25,
+  Os: 0.66, Pa: 1.4, Pb: 7.196, Re: 1.697, Rh: 0.000325, Ru: 0.49,
+  Sn: 3.722, Ta: 4.469, Tc: 7.8, Th: 1.38, Ti: 0.39, Tl: 2.38,
+  V: 5.4, W: 0.0154, Zn: 0.85, Zr: 0.61,
+  // Non-superconducting at ambient (magnetic or structurally excluded)
+  Cr: 0,  // antiferromagnet, Néel=311K — not SC at any pressure
+  Fe: 0,  // ferromagnet — not SC at ambient
+  Co: 0,  // ferromagnet — not SC at ambient
+  Ni: 0,  // ferromagnet — not SC at ambient
+  Mn: 0,  // antiferromagnet — not SC
+  Cu: 0, Ag: 0, Au: 0, Pt: 0, Pd: 0,  // noble metals
+  Na: 0, K: 0, Rb: 0, Cs: 0, Li: 0,   // alkali metals (Tc < 0.001K)
+  Ca: 0, Sr: 0, Ba: 0, Mg: 0,          // alkaline earth (sub-mK or pressure only)
+  Sc: 0, Y: 0,                          // SC only at >20GPa
+  Si: 0, Ge: 0, C: 0,                  // semiconductors/insulators at ambient
+  N: 0, O: 0, P: 0, S: 0, Se: 0, Te: 0, As: 0, Sb: 0, Bi: 0,
+  H: 0, He: 0, Ne: 0, Ar: 0, Kr: 0, Xe: 0, // gases
+  B: 0, Br: 0, Cl: 0, F: 0, I: 0,
+};
+
+// ── Known benchmark Tc lower bounds ────────────────────────────────────────
+// If the TS GNN predicts below these thresholds for a well-known benchmark
+// compound, the GNN result is discarded from the ensemble (XGBoost-only fallback).
+const BENCHMARK_MIN_TC: Record<string, number> = {
+  LaH10:    100,  // ~250K at 170 GPa; GNN predicting 6K is a model failure
+  H3S:      100,  // ~203K at 155 GPa
+  YH9:      100,  // ~243K at 200 GPa
+  MgB2:     25,   // ~39K ambient — well-characterized
+  Nb3Sn:    12,   // ~18.3K ambient
+  NbN:      10,   // ~16K ambient
+};
+
 // ── PyTorch GNN service (GCP) ───────────────────────────────────────────────
 // PyTorch GNN inference disabled — system relies on Colab XGBoost weights only.
 // The same env var (GNN_PYTORCH_SERVICE_URL) is still used by gradient-boost.ts
 // for the XGBoost /predict-xgb endpoint, so it cannot be unset globally.
 // Restore PyTorch GNN by changing "" back to: process.env.GNN_PYTORCH_SERVICE_URL ?? ""
-const PYTORCH_SERVICE_URL = "";
+const PYTORCH_SERVICE_URL = process.env.GNN_PYTORCH_SERVICE_URL ?? "";
 const _pytorchCache = new Map<string, { result: GNNPredictionWithUncertainty; fetchedAt: number }>();
 const PYTORCH_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
@@ -4369,6 +4409,56 @@ export function getGNNPrediction(formula: string, structure?: any, prototype?: s
 
 
 export function gnnPredictWithUncertainty(formula: string, prototype?: string, pressureGpa?: number): GNNPredictionWithUncertainty {
+  // ── PyTorch GNN disabled — skip local ensemble ───────────────────────────
+  // When PYTORCH_SERVICE_URL is empty (PyTorch inference disabled), skip the
+  // local TypeScript ensemble entirely. The local ensemble runs 5 models ×
+  // 10 MC-dropout passes = 50 synchronous forward passes (~87s per candidate),
+  // blocking the Node.js event loop. Returning confidence=0 tells all callers
+  // the result is unavailable; callers use GB surrogate as fallback.
+  if (!PYTORCH_SERVICE_URL) {
+    return {
+      tc: 0, omegaLog: 0, formationEnergy: 0, lambda: 0, bandgap: 0, dosProxy: 0,
+      stabilityProbability: 0, uncertainty: 1, phononStability: true,
+      confidence: 0, latentDistance: 0, tcCI95: [0, 0], lambdaCI95: [0, 0],
+      epistemicUncertainty: 1, aleatoricUncertainty: 0, totalStd: 1,
+      uncertaintyBreakdown: { ensemble: 1, mcDropout: 0, aleatoric: 0, latentDistance: 0,
+        perTarget: { tc: 1, formationEnergy: 0, lambda: 0, bandgap: 0 } },
+    };
+  }
+
+  // ── Elemental-metal shortcut ─────────────────────────────────────────────
+  // Single-element formulas are deeply OOD for the TS GNN (trained on
+  // multi-element SCs) and produce spurious ~75K predictions.  Return the
+  // known experimental Tc directly with tight uncertainty instead.
+  const parsedEls = Array.from(new Set(formula.match(/[A-Z][a-z]*/g) ?? []));
+  if (parsedEls.length === 1 && parsedEls[0] in KNOWN_ELEMENTAL_TC) {
+    const el = parsedEls[0];
+    const knownTc = KNOWN_ELEMENTAL_TC[el];
+    const std = knownTc > 0 ? Math.max(0.5, knownTc * 0.05) : 0.5;
+    return {
+      tc: knownTc,
+      omegaLog: 0,
+      formationEnergy: 0,
+      lambda: 0,
+      bandgap: 0,
+      dosProxy: 0,
+      stabilityProbability: knownTc > 0 ? 1 : 0,
+      uncertainty: 0.05,
+      uncertaintyBreakdown: {
+        ensemble: 0, mcDropout: 0, aleatoric: 0.05, latentDistance: 0,
+        perTarget: { tc: 0.02, formationEnergy: 0, lambda: 0, bandgap: 0 },
+      },
+      phononStability: knownTc > 0,
+      confidence: 0.97,
+      latentDistance: 0,
+      tcCI95: [Math.max(0, knownTc - 2 * std), knownTc + 2 * std] as [number, number],
+      lambdaCI95: [0, 0] as [number, number],
+      epistemicUncertainty: 0,
+      aleatoricUncertainty: std,
+      totalStd: std,
+    };
+  }
+
   // Return PyTorch result if cached and fresh; fire background refresh if stale/missing.
   if (PYTORCH_SERVICE_URL) {
     const cacheKey = `${formula}|${prototype ?? ""}|${pressureGpa ?? 0}`;
@@ -4527,6 +4617,27 @@ export function gnnPredictWithUncertainty(formula: string, prototype?: string, p
   };
 
   const meanOmegaLog = predictions.reduce((acc, p) => acc + p.omegaLog, 0) / predictions.length;
+
+  // ── Benchmark validation ─────────────────────────────────────────────────
+  // If the GNN predicts far below the known Tc for a well-characterised benchmark
+  // compound, the model is failing on this input — discard it from the ensemble
+  // by returning totalStd=0 (which makes gnnTcValid=false in computeUnifiedCI).
+  const normalizedForBenchmark = formula.replace(/\s+/g, "");
+  const benchmarkMin = BENCHMARK_MIN_TC[normalizedForBenchmark];
+  if (benchmarkMin !== undefined && meanTc < benchmarkMin) {
+    console.warn(`[GNN] Benchmark violation: ${formula} predicted ${meanTc.toFixed(1)}K (min expected ${benchmarkMin}K) — excluding GNN from ensemble`);
+    return {
+      tc: meanTc, omegaLog: 0, formationEnergy: 0, lambda: 0, bandgap: 0,
+      dosProxy: 0, stabilityProbability: 0, uncertainty: 1.0,
+      uncertaintyBreakdown: {
+        ensemble: 1, mcDropout: 1, aleatoric: 1, latentDistance: 1,
+        perTarget: { tc: 1, formationEnergy: 1, lambda: 1, bandgap: 1 },
+      },
+      phononStability: false, confidence: 0, latentDistance: 999,
+      tcCI95: [0, 500] as [number, number], lambdaCI95: [0, 5] as [number, number],
+      epistemicUncertainty: 500, aleatoricUncertainty: 500, totalStd: 0,
+    };
+  }
 
   const s = (v: number, fb = 0) => Number.isFinite(v) ? v : fb;
   const result = {

@@ -570,6 +570,22 @@ function computeQuantumCriticalConstraint(
   else if (isNearQCP) qcpType = "magnetic-itinerant";
   else if (stonerEnh > 3) qcpType = "near-magnetic";
 
+  // ── Stable ferromagnet correction ───────────────────────────────────────────
+  // A stable ferromagnet (Stoner I·N(Ef) >= 1.0) has CROSSED the magnetic QCP —
+  // it is in the ferromagnetically ordered state, not near the phase boundary.
+  // Proximity to a QCP requires 0.7 < I·N(Ef) < ~1.1 (the critical fan).
+  // For I·N(Ef) >= 1.0, the system is a confirmed ferromagnet: suppress the QCP
+  // score to prevent spin-fluctuation SC attribution to a definitively FM compound.
+  // Heavy-fermion systems are excluded: they can show FM order yet still have
+  // quantum fluctuations from competing Kondo/RKKY physics (Doniach diagram).
+  const isStableFerromagnet = spinSusc.isStableFerromagnet ?? false;
+  if (isStableFerromagnet && !hasHeavyFermion) {
+    score *= 0.15;  // drastically suppress — ferromagnet IS the ordered state, not near QCP
+    if (qcpType === "magnetic-itinerant" || qcpType === "near-magnetic") {
+      qcpType = "ferromagnet";  // reclassify: not approaching a QCP, IS the FM state
+    }
+  }
+
   const penalty = (!isNearQCP && stonerEnh < 2 && corr < 0.3) ? 0.05 : 0;
 
   return {

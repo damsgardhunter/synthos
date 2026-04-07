@@ -18,6 +18,8 @@ export interface ParetoCandidate {
   predictedTc: number | null;
   decompositionEnergy?: number | null;
   mlFeatures?: Record<string, any> | null;
+  /** ML quality score [0,1] — used as a proxy Tc source when predictedTc is absent */
+  ensembleScore?: number | null;
 }
 
 export interface ParetoObjectives {
@@ -27,6 +29,12 @@ export interface ParetoObjectives {
   stability: number;
   /** Synthesis feasibility in [0,1] from synthesis-planner bestRoute */
   synthesizability: number;
+  /**
+   * True when tc was derived from the ensemble-score proxy rather than the
+   * physics-engine predictedTc.  Shown in the UI tooltip so users know the
+   * Tc value is an estimate, not a physics calculation.
+   */
+  tcIsProxy?: boolean;
 }
 
 export interface ParetoResult {
@@ -73,10 +81,23 @@ async function getSynthScore(formula: string, formationEnergyEv?: number | null)
   }
 }
 
+/**
+ * Scale factor mapping ensembleScore=1.0 → TC_PROXY_REF_K when no physics-engine
+ * Tc is available.  Ensemble scores are Tc-quality proxies, not temperature values,
+ * so this is a rough calibration only; it is strictly better than treating all
+ * unscored candidates as tc=0 on the Pareto front.
+ */
+const TC_PROXY_REF_K = 200;
+
 export async function computeParetoObjectives(c: ParetoCandidate): Promise<ParetoObjectives> {
-  // f1 — Tc
-  const rawTc = c.predictedTc ?? 0;
+  // f1 — Tc: prefer the physics-engine predictedTc; fall back to an ensemble-score
+  // proxy when predictedTc is null or 0 (candidate not yet through physics pipeline).
+  const hasDftTc = c.predictedTc != null && c.predictedTc > 0;
+  const rawTc = hasDftTc
+    ? c.predictedTc!
+    : (c.ensembleScore ?? 0) * TC_PROXY_REF_K;
   const tc = Math.max(0, Math.min(1, rawTc / 400));
+  const tcIsProxy = !hasDftTc;
 
   // f2 — stability (prefer small |formation energy|)
   let ef: number;
@@ -94,7 +115,7 @@ export async function computeParetoObjectives(c: ParetoCandidate): Promise<Paret
   // f3 — synthesizability
   const synthesizability = await getSynthScore(c.formula, ef);
 
-  return { tc, stability, synthesizability };
+  return { tc, stability, synthesizability, tcIsProxy };
 }
 
 // ── Dominance and sorting ─────────────────────────────────────────────────────
@@ -127,20 +148,34 @@ export async function nonDominatedSort(
   const n = candidates.length;
   if (n === 0) return [];
 
-  const objs: ParetoObjectives[] = await Promise.all(
-    candidates.map(c =>
-      precomputedObjectives?.has(c.formula)
-        ? Promise.resolve(precomputedObjectives.get(c.formula)!)
-        : computeParetoObjectives(c)
-    )
-  );
+  // Compute objectives with a concurrency limit so we don't fire N simultaneous
+  // planSynthesisRoutes calls (each does DB queries) and exhaust the pg pool.
+  // Cache-hits resolve instantly; cache-misses do DB work — limiting to 20 concurrent
+  // matches the pool size and prevents cascade connection timeouts.
+  const CONCURRENCY = 20;
+  const objs: ParetoObjectives[] = new Array(n);
+  for (let start = 0; start < n; start += CONCURRENCY) {
+    const batch = candidates.slice(start, start + CONCURRENCY);
+    const batchObjs = await Promise.all(
+      batch.map(c =>
+        precomputedObjectives?.has(c.formula)
+          ? Promise.resolve(precomputedObjectives.get(c.formula)!)
+          : computeParetoObjectives(c)
+      )
+    );
+    for (let k = 0; k < batchObjs.length; k++) objs[start + k] = batchObjs[k];
+  }
 
   // dominationCount[i]: how many candidates dominate i
   const dominationCount = new Int32Array(n);
   // dominatedSet[i]: indices dominated by i
   const dominatedSet: number[][] = Array.from({ length: n }, () => []);
 
+  // O(n²) domination sweep — yield every 25 outer iterations so the event loop
+  // stays responsive. With n capped at 200 this is ~8 yields total (negligible overhead).
+  // Previously yielded every 100 which at n=500 still caused 10-120s freezes between yields.
   for (let i = 0; i < n; i++) {
+    if (i > 0 && i % 25 === 0) await new Promise<void>(r => setTimeout(r, 0));
     for (let j = i + 1; j < n; j++) {
       if (dominates(objs[i], objs[j])) {
         dominatedSet[i].push(j);
@@ -213,6 +248,12 @@ export async function recomputeParetoFrontier(candidates: ParetoCandidate[]): Pr
  * Multiple DFT completions in quick succession collapse into a single run.
  * Optional `onComplete` receives results so the caller can write ranks back to storage.
  */
+// Maximum candidates fed into a recompute. O(n²) domination sweep with n=500
+// does 125k comparisons and blocks the event loop for 10-120s even with yields.
+// 200 candidates covers the meaningful Pareto front while keeping the sweep to
+// ~20k comparisons — roughly 6× cheaper and stays well under 5s.
+const MAX_PARETO_CANDIDATES = 200;
+
 export function scheduleParetoRecompute(
   loadCandidates: () => Promise<ParetoCandidate[]>,
   delayMs = 8_000,
@@ -222,8 +263,11 @@ export function scheduleParetoRecompute(
   recomputeTimer = setTimeout(async () => {
     recomputeTimer = null;
     try {
-      const candidates = await loadCandidates();
-      if (candidates.length === 0) return;
+      const all = await loadCandidates();
+      if (all.length === 0) return;
+      // Cap at MAX_PARETO_CANDIDATES — loader returns candidates sorted by Tc desc
+      // so we keep the highest-Tc candidates which are the most relevant for the front.
+      const candidates = all.slice(0, MAX_PARETO_CANDIDATES);
       const results = await recomputeParetoFrontier(candidates);
       if (onComplete) await onComplete(results);
     } catch (err: any) {

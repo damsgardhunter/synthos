@@ -1,7 +1,7 @@
 import OpenAI from "openai";
 import { storage } from "../storage";
 import type { EventEmitter } from "./engine";
-import { extractFeatures, runMLPrediction } from "./ml-predictor";
+import { extractFeatures, runMLPrediction, isSweepGuardActive } from "./ml-predictor";
 import { gbPredict } from "./gradient-boost";
 import { classifyFamily, getPrototypeHash, normalizeFormula, isValidFormula } from "./utils";
 import { applyAmbientTcCap, computeElectronicStructure, computePhononSpectrum, computeElectronPhononCoupling, parseFormulaElements, computeDimensionalityScore, detectStructuralMotifs, evaluateCompetingPhases } from "./physics-engine";
@@ -60,8 +60,16 @@ function determineStatus(candidate: any): string {
     return "promising";
   }
 
-  if (tc > 100 && hasZeroResistance) {
+  if (tc >= 150 && hasZeroResistance && hasMeissner) {
     return "high-tc-candidate";
+  }
+
+  if (tc >= 77 && hasZeroResistance && hasMeissner) {
+    return "high-tc-candidate";
+  }
+
+  if (tc >= 20 && hasZeroResistance && hasMeissner && ensembleScore > 0.5) {
+    return "promising";
   }
 
   if (ensembleScore > 0.5) {
@@ -84,9 +92,15 @@ function buildVerificationNotes(candidate: any): string {
   }
 
   if (tc >= ROOM_TEMP_K) {
-    checks.push(`Room temperature: Tc=${tc}K >= ${ROOM_TEMP_K}K (20C)`);
+    checks.push(`Room temperature: Tc=${tc}K >= ${ROOM_TEMP_K}K (20°C) — ambient operation possible`);
+  } else if (tc >= 150) {
+    checks.push(`Very high Tc: ${tc}K (above half room temp — technologically exceptional)`);
+  } else if (tc >= 77) {
+    checks.push(`High Tc: ${tc}K (above liquid nitrogen — practical cooling possible)`);
+  } else if (tc >= 20) {
+    checks.push(`Significant Tc: ${tc}K (above 20K threshold — technologically relevant)`);
   } else if (tc > 0) {
-    failures.push(`NOT room temperature: Tc=${tc}K < 293K required`);
+    checks.push(`Low Tc: ${tc}K (below 20K — requires liquid helium cooling)`);
   } else {
     failures.push("MISSING: No Tc prediction available");
   }
@@ -134,7 +148,7 @@ export async function runSuperconductorResearch(
   emit("log", {
     phase: "phase-7",
     event: "Superconductor research cycle started",
-    detail: "XGBoost+NN ensemble with strict verification: both zero resistance AND room temperature required",
+    detail: "XGBoost+NN ensemble: surfacing candidates with Tc > 20K, metallic character, and Cooper pair signatures",
     dataSource: "SC Research",
   });
 
@@ -366,13 +380,13 @@ export async function runSuperconductorResearch(
   }
 
   if (generated > 0) {
-    const roomTempCount = mlResult.candidates.filter(c =>
-      (c.predictedTc ?? 0) >= ROOM_TEMP_K && c.zeroResistance === true && c.meissnerEffect === true
-    ).length;
+    const roomTempCount = mlResult.candidates.filter(c => (c.predictedTc ?? 0) >= ROOM_TEMP_K && c.zeroResistance === true && c.meissnerEffect === true).length;
+    const highTcCount = mlResult.candidates.filter(c => (c.predictedTc ?? 0) >= 77 && c.zeroResistance === true).length;
+    const significantTcCount = mlResult.candidates.filter(c => (c.predictedTc ?? 0) >= 20 && c.zeroResistance === true).length;
     emit("log", {
       phase: "phase-7",
       event: "Superconductor candidates evaluated",
-      detail: `${generated} candidates scored. ${roomTempCount} meet both zero-resistance AND room-temperature criteria (pending verification). ${mlResult.candidates.filter(c => c.meissnerEffect).length} with Meissner effect predicted.`,
+      detail: `${generated} candidates stored. Tc tiers: ${roomTempCount} room-temp (≥293K), ${highTcCount} high-Tc (≥77K), ${significantTcCount} significant (≥20K). ${mlResult.candidates.filter(c => c.meissnerEffect).length} with Meissner effect predicted.`,
       dataSource: "SC Research",
     });
   }
@@ -384,6 +398,7 @@ export async function runSuperconductorResearch(
       generated += novelResult;
     }
   } catch (err: any) {
+    if (err?.message?.includes("sg-sweep-guard")) return { generated: 0, insights: newInsights, duplicatesSkipped: 0 };
     console.error(`[SC Research] Top-level novel SC error:`, err);
     emit("log", { phase: "phase-7", event: "Novel SC generation error", detail: err.message?.slice(0, 200), dataSource: "SC Research" });
   }
@@ -702,6 +717,7 @@ Return JSON 'candidates' array: 'name', 'formula', 'predictedTc' (K, realistic),
       });
     }
   } catch (err: any) {
+    if (err?.message?.includes("sg-sweep-guard")) return 0;
     console.error(`[SC Research] Novel SC generation error:`, err);
     emit("log", { phase: "phase-7", event: "Novel SC generation error", detail: err.message?.slice(0, 200), dataSource: "SC Research" });
   }
@@ -745,6 +761,13 @@ export async function computePairingSusceptibility(formula: string): Promise<Pai
   const cached = pairingSusceptibilityCache.get(formula);
   if (cached && (Date.now() - cached.ts) < PAIRING_CACHE_TTL_MS) {
     return cached.result;
+  }
+
+  if (isSweepGuardActive()) {
+    // Skip during SG sweep and 120s post-sweep cooldown — computeElectronicStructure blocks
+    // 17-71s synchronously. If Phase 7 is already running when the sweep fires, subsequent
+    // calls here would freeze the event loop for many sequential 18s blocks.
+    return { score: 0, rawScore: 0, lambda: 0, nestingFactor: 0, dosAtEf: 0, phononSoftness: 0 };
   }
 
   const electronic = computeElectronicStructure(formula);

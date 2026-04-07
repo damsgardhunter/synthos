@@ -694,7 +694,23 @@ export function detectQuantumCriticality(
     lindhard = undefined;
   }
 
-  const mottScore = computeMottChannel(elements, counts, electronic);
+  // Compute spin susceptibility first — needed to gate the Mott channel.
+  // A stable ferromagnet (Stoner I·N >= 1.0) has magnetically ordered itinerant electrons.
+  // This is physically incompatible with Mott-proximity (which requires a metal-insulator
+  // transition driven by on-site correlations, not by exchange). If a compound is both
+  // non-metallic (mottProximityScore high from low metallicity) AND a stable ferromagnet,
+  // the Mott score is an artifact of the low-metallicity formula — not real Mott physics.
+  const spinForGating = computeDynamicSpinSusceptibility(formula, electronic);
+  const isStableFerromagnetForGating = spinForGating.isStableFerromagnet ?? false;
+
+  let mottScore = computeMottChannel(elements, counts, electronic);
+  // Suppress Mott channel for stable ferromagnets: a confirmed ferromagnet is NOT near a
+  // Mott transition. The Mott score fires on (1 - metallicity), which is high for
+  // non-metallic ferromagnets — but these are exchange insulators, not Mott-Hubbard insulators.
+  if (isStableFerromagnetForGating) {
+    mottScore = Math.min(mottScore, 0.15);
+  }
+
   const sdwScore = computeSDWChannel(formula, elements, counts, electronic, lindhard);
   const cdwScore = computeCDWChannel(elements, electronic, phonon, lindhard);
   const nematicScore = computeNematicChannel(elements, electronic);
@@ -723,7 +739,7 @@ export function detectQuantumCriticality(
     pressureGpa, structTransP > 0 ? structTransP : undefined,
   );
 
-  const spin = computeDynamicSpinSusceptibility(formula, electronic);
+  const spin = spinForGating;  // reuse already-computed susceptibility
   const stonerEnhancement = guardedStonerEnhancement(spin.stonerEnhancement);
   const mottProximity = electronic.mottProximityScore ?? 0;
   const nestingScore = electronic.nestingScore ?? 0;

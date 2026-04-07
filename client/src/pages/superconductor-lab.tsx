@@ -1,5 +1,5 @@
 import { useQuery, useQueries } from "@tanstack/react-query";
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { queryClient } from "@/lib/queryClient";
 import { useWebSocket } from "@/hooks/use-websocket";
 import type { SuperconductorCandidate, SynthesisProcess, ChemicalReaction } from "@shared/schema";
@@ -8,8 +8,11 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { PaginationBar } from "@/components/ui/pagination-bar";
 import { safeNum, safeDisplay } from "@/lib/utils";
 import { Link } from "wouter";
+
+const PAGE_SIZE = 25;
 import {
   Zap, Thermometer, Shield, Atom, FlaskConical, Beaker, Target,
   CheckCircle2, XCircle, ArrowRight, Gauge, Magnet, ExternalLink,
@@ -611,18 +614,29 @@ function ReactionCard({ reaction }: { reaction: ChemicalReaction }) {
 }
 
 export default function SuperconductorLab() {
+  const [candidatePage, setCandidatePage] = useState(1);
+  const [synthPage, setSynthPage] = useState(1);
+  const [rxnPage, setRxnPage] = useState(1);
+
+  const candidateOffset = (candidatePage - 1) * PAGE_SIZE;
+  const synthOffset = (synthPage - 1) * PAGE_SIZE;
+  const rxnOffset = (rxnPage - 1) * PAGE_SIZE;
+
   const { data: scData, isLoading: scLoading } = useQuery<{ candidates: SuperconductorCandidate[]; total: number }>({
-    queryKey: ["/api/superconductor-candidates"],
+    queryKey: ["/api/superconductor-candidates", candidatePage],
+    queryFn: () => fetch(`/api/superconductor-candidates?limit=${PAGE_SIZE}&offset=${candidateOffset}`).then(r => r.json()),
     refetchInterval: false,
   });
 
   const { data: synthData, isLoading: synthLoading } = useQuery<{ processes: SynthesisProcess[]; total: number }>({
-    queryKey: ["/api/synthesis-processes"],
+    queryKey: ["/api/synthesis-processes", synthPage],
+    queryFn: () => fetch(`/api/synthesis-processes?limit=${PAGE_SIZE}&offset=${synthOffset}`).then(r => r.json()),
     refetchInterval: false,
   });
 
   const { data: rxnData, isLoading: rxnLoading } = useQuery<{ reactions: ChemicalReaction[]; total: number }>({
-    queryKey: ["/api/chemical-reactions"],
+    queryKey: ["/api/chemical-reactions", rxnPage],
+    queryFn: () => fetch(`/api/chemical-reactions?limit=${PAGE_SIZE}&offset=${rxnOffset}`).then(r => r.json()),
     refetchInterval: false,
   });
 
@@ -648,13 +662,18 @@ export default function SuperconductorLab() {
   useEffect(() => {
     const last = ws.messages[ws.messages.length - 1];
     if (!last) return;
-    const relevantTypes = new Set(["phaseUpdate", "progress", "prediction", "insight", "cycleEnd", "log"]);
+    // "log" and "progress" fire many times/sec and don't change SC data — excluded to prevent request storms
+    const relevantTypes = new Set(["phaseUpdate", "prediction", "insight", "cycleEnd", "scCandidate"]);
     if (relevantTypes.has(last.type)) {
       queryClient.invalidateQueries({ queryKey: ["/api/superconductor-candidates"] });
       queryClient.invalidateQueries({ queryKey: ["/api/synthesis-processes"] });
       queryClient.invalidateQueries({ queryKey: ["/api/chemical-reactions"] });
       queryClient.invalidateQueries({ queryKey: ["/api/ml-calibration"] });
       queryClient.invalidateQueries({ queryKey: ["/api/engine/status"] });
+      // Reset to page 1 on new data so users see fresh results
+      setCandidatePage(1);
+      setSynthPage(1);
+      setRxnPage(1);
     }
   }, [ws.messageCount]);
 
@@ -662,7 +681,11 @@ export default function SuperconductorLab() {
   const processes = synthData?.processes ?? [];
   const reactions = rxnData?.reactions ?? [];
 
-  // Batch-fetch consensus Tc for all candidates
+  const candidateTotalPages = Math.max(1, Math.ceil((scData?.total ?? 0) / PAGE_SIZE));
+  const synthTotalPages = Math.max(1, Math.ceil((synthData?.total ?? 0) / PAGE_SIZE));
+  const rxnTotalPages = Math.max(1, Math.ceil((rxnData?.total ?? 0) / PAGE_SIZE));
+
+  // Batch-fetch consensus Tc only for the current page's candidates
   const consensusResults = useQueries({
     queries: candidates.map(c => ({
       queryKey: ["/api/unified-ci", c.formula],
@@ -680,7 +703,7 @@ export default function SuperconductorLab() {
     return map;
   }, [candidates, consensusResults]);
 
-  // Sort all candidates by consensus tcMean (desc), falling back to predictedTc
+  // Sort current page candidates by consensus tcMean (desc), falling back to predictedTc
   const sortedCandidates = useMemo(() =>
     [...candidates].sort((a, b) => {
       const tcA = consensusMap[a.formula]?.tcMean ?? a.predictedTc ?? 0;
@@ -788,15 +811,15 @@ export default function SuperconductorLab() {
         <TabsList data-testid="tabs-sc-lab">
           <TabsTrigger value="candidates" data-testid="tab-candidates">
             <Target className="h-3.5 w-3.5 mr-1.5" />
-            SC Candidates ({candidates.length})
+            SC Candidates ({scData?.total ?? 0})
           </TabsTrigger>
           <TabsTrigger value="synthesis" data-testid="tab-synthesis">
             <FlaskConical className="h-3.5 w-3.5 mr-1.5" />
-            Synthesis ({processes.length})
+            Synthesis ({synthData?.total ?? 0})
           </TabsTrigger>
           <TabsTrigger value="reactions" data-testid="tab-reactions">
             <Beaker className="h-3.5 w-3.5 mr-1.5" />
-            Reactions ({reactions.length})
+            Reactions ({rxnData?.total ?? 0})
           </TabsTrigger>
         </TabsList>
 
@@ -825,12 +848,13 @@ export default function SuperconductorLab() {
               <div className="flex items-center gap-2">
                 <Atom className="h-4 w-4 text-primary" />
                 <h2 className="text-base font-semibold">All Candidates</h2>
-                <Badge variant="secondary">{sortedCandidates.length}</Badge>
-                <span className="text-[10px] text-muted-foreground ml-1">ranked by consensus Tc</span>
+                <Badge variant="secondary">{scData?.total ?? 0}</Badge>
+                <span className="text-[10px] text-muted-foreground ml-1">ranked by consensus Tc · page {candidatePage} of {candidateTotalPages}</span>
               </div>
               <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
                 {sortedCandidates.map(c => <CandidateCard key={c.id} candidate={c} p90={p90} consensusCi={consensusMap[c.formula]} />)}
               </div>
+              <PaginationBar page={candidatePage} totalPages={candidateTotalPages} onPageChange={setCandidatePage} />
             </div>
           ) : (
             <Card>
@@ -889,9 +913,12 @@ export default function SuperconductorLab() {
               {[...Array(4)].map((_, i) => <Skeleton key={i} className="h-64" />)}
             </div>
           ) : processes.length > 0 ? (
-            <div className="grid gap-4 md:grid-cols-2">
-              {processes.map(p => <SynthesisCard key={p.id} process={p} />)}
-            </div>
+            <>
+              <div className="grid gap-4 md:grid-cols-2">
+                {processes.map(p => <SynthesisCard key={p.id} process={p} />)}
+              </div>
+              <PaginationBar page={synthPage} totalPages={synthTotalPages} onPageChange={setSynthPage} />
+            </>
           ) : (
             <Card>
               <CardContent className="py-12 text-center space-y-2">
@@ -909,9 +936,12 @@ export default function SuperconductorLab() {
               {[...Array(4)].map((_, i) => <Skeleton key={i} className="h-48" />)}
             </div>
           ) : reactions.length > 0 ? (
-            <div className="grid gap-4 md:grid-cols-2">
-              {reactions.map(r => <ReactionCard key={r.id} reaction={r} />)}
-            </div>
+            <>
+              <div className="grid gap-4 md:grid-cols-2">
+                {reactions.map(r => <ReactionCard key={r.id} reaction={r} />)}
+              </div>
+              <PaginationBar page={rxnPage} totalPages={rxnTotalPages} onPageChange={setRxnPage} />
+            </>
           ) : (
             <Card>
               <CardContent className="py-12 text-center space-y-2">

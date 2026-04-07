@@ -900,10 +900,11 @@ const DEFAULT_WEIGHTS: ClassifierWeights = {
 };
 
 let trainedWeights: ClassifierWeights = { ...DEFAULT_WEIGHTS };
-// Default weights are physically grounded (bond variance, strain, displacement).
-// Mark as trained from startup so the classifier is immediately usable.
-// Will be retrained on real DFT data once CLASSIFIER_RETRAIN_THRESHOLD records accumulate.
-let classifierTrained = true;
+// Default weights are physically grounded (bond variance, strain, displacement)
+// and are used for predictions immediately. classifierTrained is set to false
+// until real DFT-derived examples reach CLASSIFIER_RETRAIN_THRESHOLD, at which
+// point trainClassifier() sets it to true and updates trainedWeights.
+let classifierTrained = false;
 let classifierTrainCount = 0;
 let classifierAccuracy = 0;
 let classifierLastTrainedAt = 0;

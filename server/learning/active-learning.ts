@@ -1685,6 +1685,16 @@ export async function runActiveLearningCycle(
   enrichmentLogCount = 0;
   const enrichedFormulaPressures = new Set<string>();
 
+  // Announce which candidates are entering the quantum engine — this fires
+  // immediately so the frontend feed doesn't go silent during the 30-90s
+  // concurrent xTB computation that follows.
+  emit("log", {
+    phase: "active-learning",
+    event: "Quantum engine pipeline running",
+    detail: `Running xTB/phonon pipeline concurrently for ${selected.length} candidates: ${selected.map(r => r.candidate.formula).join(", ")}`,
+    dataSource: "Active Learning",
+  });
+
   // Run all selected candidates concurrently — xTB takes 30-90s each so
   // sequential execution would block the engine cycle for 10-30 minutes.
   await Promise.allSettled(selected.map(async (ranked) => {
@@ -2251,10 +2261,6 @@ function parseFormulaCountsLocal(formula: string): Record<string, number> {
  * the weights locally. Call once at engine startup when OFFLOAD_GNN_TO_GCP=true.
  */
 export function startGCPWeightPoller(): void {
-  // PyTorch GNN weight application is disabled — system relies on Colab XGBoost weights.
-  // Re-enable by removing this early return when the GNN pipeline is repaired.
-  console.log("[GCP-Poller] PyTorch GNN weight poller DISABLED — using Colab XGBoost weights only");
-  return;
   if (process.env.OFFLOAD_GNN_TO_GCP !== "true") return;
 
   let lastAppliedJobId = 0;

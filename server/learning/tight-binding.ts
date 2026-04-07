@@ -210,15 +210,12 @@ const CRYSTAL_SYSTEM_TO_LATTICE: Record<string, string> = {
 };
 
 function guessLatticeType(elements: string[], formula?: string): string {
-  if (formula && isStructurePredictorReady()) {
-    try {
-      const pred = predictStructure(formula);
-      if (pred && pred.confidence > 0.3 && pred.crystalSystem?.predicted) {
-        const mapped = CRYSTAL_SYSTEM_TO_LATTICE[pred.crystalSystem.predicted];
-        if (mapped) return mapped;
-      }
-    } catch {}
-  }
+  // NOTE: predictStructure intentionally NOT called here. computeElectronicStructure
+  // calls computeFullTightBinding which calls this function ~1000s/day. After
+  // StructurePredictor training completes, V8 GC from the newly allocated ~100k+
+  // TreeNode objects caused 20-45s stalls inside computeElectronicStructure. Use
+  // heuristic rules only; call predictStructure from dedicated structure-prediction
+  // endpoints where the latency is acceptable.
 
   if (elements.length === 1) {
     const el = elements[0];
@@ -736,20 +733,9 @@ function computeTbConfidence(
     structurePrototypeScore = 0.75;
   }
 
-  if (isStructurePredictorReady()) {
-    try {
-      const pred = predictStructure(formula);
-      if (pred && pred.confidence > 0.3) {
-        const proto = pred.prototype?.predicted;
-        const protoProb = proto ? (pred.prototype.probabilities[proto] ?? 0) : 0;
-        if (protoProb > 0.5) {
-          structurePrototypeScore = Math.min(1.0, structurePrototypeScore + 0.15);
-        } else if (protoProb > 0.3) {
-          structurePrototypeScore = Math.min(1.0, structurePrototypeScore + 0.08);
-        }
-      }
-    } catch {}
-  }
+  // NOTE: predictStructure intentionally NOT called here — same reason as guessLatticeType.
+  // The slight accuracy boost (+0.08-0.15 to structurePrototypeScore) is not worth
+  // triggering V8 GC-induced 20-45s stalls inside computeElectronicStructure.
 
   const elementsWithParams = elements.filter(el => KNOWN_SK_ELEMENTS.has(el));
   const elementsWithData = elements.filter(el => getElementData(el) !== undefined);

@@ -12,3 +12,10 @@ server/dft/pseudo/
 !server/dft/pseudo/Ir.UPF
 !server/dft/pseudo/Te.UPF
 .env
+
+# Monitor loop runtime files (logs and reports)
+logs/*.log
+logs/health-report.json
+logs/server.pid
+# Keep monitor-state.json and any archived logs out of git too
+logs/server-*.log

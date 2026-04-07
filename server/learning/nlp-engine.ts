@@ -194,7 +194,8 @@ function significanceLabel(p: number): string {
 }
 
 function formatCorrelation(label: string, r: number, n: number): string | null {
-  if (!Number.isFinite(r)) return `${label}: INVARIANT (zero variance in data, n=${n})`;
+  if (!Number.isFinite(r)) return null; // invariant data is meaningless noise, skip it
+  if (Math.abs(r) < 0.4) return null; // r²<0.16 — explains <16% of variance, not actionable
   const p = approxPValue(r, n);
   const sig = significanceLabel(p);
   return `${label}: r=${r.toFixed(3)}, p=${p < 0.001 ? "<0.001" : p.toFixed(3)} ${sig} (n=${n})`;
@@ -473,7 +474,8 @@ CRITICAL INSTRUCTIONS:
 - Each insight must describe a relationship between two or more physical properties.
 - Reference specific material families, dimensionalities, or pairing mechanisms when data supports it.
 - Include quantitative evidence (r values, p-values, Tc thresholds) from the provided statistics.
-- Only cite correlations that are statistically significant (p < 0.05). Ignore n.s. correlations.
+- Only cite correlations with |r| >= 0.4 (r²>=0.16, explaining ≥16% of variance). Weak correlations (|r|<0.4) are not actionable even if p<0.001 due to large n.
+- Do NOT report tautologies (e.g. "lower formation energy = more stable" is the definition of formation energy, not a discovery).
 - VARY topics across: phonon softening, Fermi surface nesting, charge transfer layers, structural motifs, electron density redistribution, spin-orbit coupling, pressure-dependent phonon hardening, Debye/bulk modulus ratios.
 
 PHYSICS RULES:

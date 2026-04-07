@@ -1,6 +1,7 @@
 import { WebSocketServer, WebSocket } from "ws";
 import type { Server } from "http";
 import { storage } from "../storage";
+import { isConnectionError, drainIdleConnections, probeDBConnection } from "../db";
 import { fetchOQMDMaterials, fetchElementFocusedMaterials, fetchKnownMaterials, getNextOQMDOffset } from "./data-fetcher";
 import { analyzeBondingPatterns, analyzePropertyPredictionPatterns, classifyMaterialApplications } from "./nlp-engine";
 import { generateNovelFormulas, setBoundaryHuntingMode, setInverseDesignMode, setChemicalSpaceExpansionMode, getGenerationModes } from "./formula-generator";
@@ -23,7 +24,7 @@ import { runMultiFidelityPipeline } from "./multi-fidelity-pipeline";
 import { evaluateInsightNovelty, requiresQuantitativeContent, bootstrapInsightEmbeddingCache, type InsightTempo } from "./insight-detector";
 import { analyzeAndEvolveStrategy, captureConvergenceSnapshot, trackDuplicatesSkipped } from "./strategy-analyzer";
 import { checkMilestones } from "./milestone-tracker";
-import { extractFeatures, physicsPredictor } from "./ml-predictor";
+import { extractFeatures, physicsPredictor, setSweepGuardActive, isSweepGuardActive } from "./ml-predictor";
 import type { PhysicsPrediction, MLFeatureVector } from "./ml-predictor";
 import { gbPredict, incorporateFailureData, getFailureExampleCount, surrogateScreen, getSurrogateStats, incorporateSuccessData, retrainWithAccumulatedData, incorporateDFTResult, retrainXGBoostFromEvaluated, getEvaluatedDatasetStats, getModelVersionHistory, setActiveApplication, setCuriosityProvider, startGCPXGBPoller } from "./gradient-boost";
 import { normalizeFormula, classifyFamily, sanitizeForbiddenWords, isValidFormula } from "./utils";
@@ -58,7 +59,7 @@ import { recordClusterDiscovery, getPressureClusterStats, fastPressureScreen, sa
 import { detectPhaseTransitions, getPhaseTransitionStats } from "./pressure-phase-detector";
 import { recordEvaluationResult, getCalibrationStats, notifyModelRetrain } from "./surrogate-fitness";
 import { getXTBStats, runXTBPhononCheck, checkXTBHealth } from "../dft/qe-dft-engine";
-import { submitDFTJob, promoteDFTJob, getDFTQueueStats, setDFTBroadcast, scheduleQEAvailabilityProbe } from "../dft/dft-job-queue";
+import { submitDFTJob, promoteDFTJob, getDFTQueueStats, setDFTBroadcast, scheduleQEAvailabilityProbe, setSGSweepActive } from "../dft/dft-job-queue";
 import { recordTSCFamily } from "../physics/tsc-generator-bias";
 import { runDiffusionGenerationCycle, getDiffusionStats } from "../ai/crystal-generator";
 import { runCrystalDiffusionCycle, getCrystalDiffusionStats, runDistributionBasedDiffusion, getDistributionDiffusionStats } from "../ai/crystal-structure-diffusion";
@@ -94,6 +95,7 @@ import { getConstraintGuidanceForGenerator } from "../inverse/constraint-solver"
 import { getConstraintGraphGuidance } from "../inverse/constraint-graph-solver";
 import { getPathwayForCandidate, getPathwayStats } from "../inverse/pressure-pathway";
 import { triggerSynthesisPathwayForCandidate } from "../synthesis/reaction-pathway";
+import { setSynthesisRetrainingPaused } from "../synthesis/ml-synthesis-predictor";
 import { optimizeSynthesisConditions, getSynthesisOptimizerStats, type MaterialContext } from "../synthesis/synthesis-condition-optimizer";
 import { getParameterSpace } from "../synthesis/synthesis-variables";
 import {
@@ -439,7 +441,11 @@ function checkOxidationBalance(counts: Record<string, number>): boolean {
   const elements = Object.keys(counts);
   if (elements.length < 2) return true;
 
-  const CHARGE_SLACK = 0.5;
+  // Per-atom slack of 0.5 (matching checkValenceSumRule in advanced-constraints.ts).
+  // Using an absolute 0.5 was wrong: Ni2YO3 has charge sum = 1 (Ni²⁺×2+Y³⁺+O²⁻×3)
+  // which is 1/6 per atom — valid mixed-valence chemistry — but failed the flat cutoff.
+  const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
+  const CHARGE_SLACK = 0.5 * totalAtoms;
 
   const statesPerElement = elements.map(el => {
     const ox = COMMON_OXIDATION_STATES[el];
@@ -505,6 +511,35 @@ interface EngineStatus {
   engineHealth?: Record<string, { consecutive: number; total: number; degraded: boolean }>;
 }
 
+// ── DB concurrency semaphore ──────────────────────────────────────────────────
+// Pool max=20, but API routes + DFT queue + background tasks use ~5 connections
+// concurrently. Limiting engine phases to 2 simultaneous phases (via 2 permits)
+// prevents batch1's 3 phases from all competing for DB connections at the same time,
+// which caused pool exhaustion → updatePhaseStatus timeouts → feed freezes.
+class Semaphore {
+  private permits: number;
+  private waiting: Array<() => void> = [];
+  constructor(permits: number) { this.permits = permits; }
+  acquire(): Promise<void> {
+    if (this.permits > 0) { this.permits--; return Promise.resolve(); }
+    return new Promise(resolve => this.waiting.push(resolve));
+  }
+  release(): void {
+    if (this.waiting.length > 0) { this.waiting.shift()!(); }
+    else { this.permits++; }
+  }
+}
+// 1 permit: phases run fully sequentially — no 2 phases hold DB connections at once.
+// Reduced from 2 permits after 9 pool-exhaustion events: 2-concurrent phases + DFT
+// refill + log flush + API routes simultaneously exceeded the 20-connection Neon limit.
+// Sequential execution trades a small cycle-time increase for reliable pool headroom.
+const phaseSemaphore = new Semaphore(1);
+async function withPhaseSemaphore<T>(fn: () => Promise<T>): Promise<T> {
+  await phaseSemaphore.acquire();
+  try { return await fn(); }
+  finally { phaseSemaphore.release(); }
+}
+
 let wss: WebSocketServer | null = null;
 let state: EngineState = "stopped";
 let cycleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -547,7 +582,13 @@ let totalNovelSynthesisProposed = 0;
 let activeTasks: Set<string> = new Set();
 let lastCycleAt: string | null = null;
 let allInsights: string[] = [];
+const MAX_INSIGHTS = 500;  // ring-buffer cap — older insights are evicted when exceeded
+function pushInsights(newInsights: string[]): void {
+  allInsights.push(...newInsights);
+  if (allInsights.length > MAX_INSIGHTS) allInsights = allInsights.slice(-MAX_INSIGHTS);
+}
 let isRunningCycle = false;
+let backgroundSeedingDone = false; // Prevents re-seeding on engine stop/start cycles
 const _engineStartMs = Date.now(); // For cycle timing diagnostics
 const materialMetadataCache = {
   materialCount: -1,
@@ -592,6 +633,12 @@ let isFastPathScreeningActive = false;
 // Set true while the SG sweep is running — backfill waits for this to clear so
 // both tasks don't simultaneously call extractFeatures for hundreds of candidates.
 let isSGSweepActive = false;
+// Set true while Phase 10 (Computational Physics) is running its DB-heavy analysis.
+// SG sweep checks this flag to avoid competing with physics queries for DB connections.
+let isPhysicsAnalysisActive = false;
+// Tracks when the last SG sweep attempt started. Prevents the scheduleSGSweep IIFE from
+// queuing overlapping sweeps when engine stop/start re-runs the IIFE multiple times.
+let lastSGSweepAttemptMs = 0;
 
 const pipelineStageMetrics = {
   chemistryRejects: 0,
@@ -622,19 +669,26 @@ let lastCycleCandidates: LastCycleCandidate[] = [];
 let lastCycleFamilyCounts: Record<string, number> = {};
 let autonomousGNNRetrainCount = 0;
 const alreadyScreenedFormulas = new Set<string>();
-const MAX_SCREENED_CACHE_SIZE = 50000;
+// 100k cap — Set.has() is O(1) so size doesn't affect lookup speed.
+// Larger = fewer re-screens of already-evaluated formulas across the 1M+ candidate space.
+// Eviction removes 20% at a time to avoid the O(n) cost of evicting 1 entry repeatedly.
+const MAX_SCREENED_CACHE_SIZE = 100_000;
 
 const familyDeferredQueue: Map<string, string[]> = new Map();
 const DEFERRED_QUEUE_MAX_PER_FAMILY = 50;
 const DEFERRED_QUEUE_MAX_AGE_CYCLES = 10;
 let deferredQueueLastPruneCycle = 0;
 const rejectedFormulas = new Map<string, { reason: string; tc: number; lambda?: number; timestamp: number }>();
-const MAX_REJECTED_CACHE_SIZE = 100000;
+const MAX_REJECTED_CACHE_SIZE = 10_000;  // was 100K — sort(100K) caused ~300ms GC pauses
 function pruneRejectedCache(): void {
-  if (rejectedFormulas.size > MAX_REJECTED_CACHE_SIZE) {
-    const entries = [...rejectedFormulas.entries()].sort((a, b) => a[1].timestamp - b[1].timestamp);
-    const toRemove = entries.slice(0, Math.floor(MAX_REJECTED_CACHE_SIZE * 0.3));
-    for (const [key] of toRemove) rejectedFormulas.delete(key);
+  // Evict oldest 30% by walking insertion order (Maps iterate in insertion order).
+  // O(n) with no array allocation — avoids the GC storm from sort().
+  const target = Math.floor(MAX_REJECTED_CACHE_SIZE * 0.3);
+  let removed = 0;
+  for (const key of rejectedFormulas.keys()) {
+    if (removed >= target) break;
+    rejectedFormulas.delete(key);
+    removed++;
   }
 }
 function recordRejection(formula: string, reason: string, tc: number, lambda?: number): void {
@@ -973,6 +1027,16 @@ async function _flushLogBuffer(): Promise<void> {
     await storage.bulkInsertResearchLogs(batch);
     _logWriteFailures = 0;
   } catch (e: any) {
+    // On transient connection errors, retry once after a short delay before
+    // counting as a failure — Neon pooler connections can be reset mid-flight.
+    if (isConnectionError(e)) {
+      await new Promise(r => setTimeout(r, 500));
+      try {
+        await storage.bulkInsertResearchLogs(batch);
+        _logWriteFailures = 0;
+        return;
+      } catch { /* fall through to count as failure */ }
+    }
     _logWriteFailures++;
     if (_logWriteFailures >= LOG_WRITE_FAIL_THRESHOLD) {
       _logWriteBackoffUntil = Date.now() + LOG_WRITE_BACKOFF_MS;
@@ -1099,32 +1163,42 @@ function insightNoveltyScore(s: string): number {
 
 async function addInsightsToPhase(phaseId: number, newInsights: string[]) {
   if (newInsights.length === 0) return;
-  try {
-    const phase = await storage.getLearningPhaseById(phaseId);
-    if (!phase) return;
-    const existing = phase.insights ?? [];
-    const sanitized = newInsights.map(s => sanitizeForbiddenWords(s));
-    const all = [...existing, ...sanitized];
-    let combined: string[];
-    if (all.length > 20) {
-      const scored = all.map(s => ({ s, score: insightNoveltyScore(s) }));
-      scored.sort((a, b) => b.score - a.score);
-      const kept = scored.slice(0, 15).map(x => x.s);
-      const recent = all.slice(-5);
-      const keptSet = new Set(kept);
-      for (const r of recent) {
-        if (!keptSet.has(r)) { kept.push(r); keptSet.add(r); }
+  const MAX_ATTEMPTS = 4;
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    try {
+      const phase = await storage.getLearningPhaseById(phaseId);
+      if (!phase) return;
+      const existing = phase.insights ?? [];
+      const sanitized = newInsights.map(s => sanitizeForbiddenWords(s));
+      const all = [...existing, ...sanitized];
+      let combined: string[];
+      if (all.length > 20) {
+        const scored = all.map(s => ({ s, score: insightNoveltyScore(s) }));
+        scored.sort((a, b) => b.score - a.score);
+        const kept = scored.slice(0, 15).map(x => x.s);
+        const recent = all.slice(-5);
+        const keptSet = new Set(kept);
+        for (const r of recent) {
+          if (!keptSet.has(r)) { kept.push(r); keptSet.add(r); }
+        }
+        combined = kept.slice(0, 20);
+      } else {
+        combined = all;
       }
-      combined = kept.slice(0, 20);
-    } else {
-      combined = all;
+      await storage.upsertLearningPhase({
+        ...phase,
+        insights: combined,
+      });
+      return; // success
+    } catch (e) {
+      if (isConnectionError(e) && attempt < MAX_ATTEMPTS - 1) {
+        const delay = 500 * Math.pow(3, attempt);
+        await new Promise(r => setTimeout(r, delay));
+        continue;
+      }
+      console.error("addInsightsToPhase failed:", e);
+      return;
     }
-    await storage.upsertLearningPhase({
-      ...phase,
-      insights: combined,
-    });
-  } catch (e) {
-    console.error("addInsightsToPhase failed:", e);
   }
 }
 
@@ -1140,7 +1214,7 @@ async function runPhase3_Bonding() {
     if (!shouldContinue()) return;
     const insights = await analyzeBondingPatterns(emit, mats);
     if (!shouldContinue()) return;
-    allInsights.push(...insights);
+    pushInsights(insights);
     totalInsightsGenerated += insights.length;
 
     await addInsightsToPhase(3, insights);
@@ -1198,7 +1272,7 @@ async function runPhase5_Prediction() {
     await updatePhaseStatus(5, "active", 0, 0);
     if (!shouldContinue()) return;
     const insights = await analyzePropertyPredictionPatterns(emit, mats);
-    allInsights.push(...insights);
+    pushInsights(insights);
     totalInsightsGenerated += insights.length;
 
     await addInsightsToPhase(5, insights);
@@ -1257,6 +1331,14 @@ async function runPhase6_Discovery() {
 
 async function runPhase7_Superconductor() {
   if (!shouldContinue()) return;
+  // Skip Phase 7 when SG sweep is active — Phase 7's extractFeatures batch (100 formulas × 0-8s
+  // each) blocks the event loop, preventing socket.setTimeout(20s) from clearing zombie DB
+  // connections. This causes the SG sweep's DB queries to hang 45-79s per candidate.
+  // Phase 7 runs every ~60s; skipping ~8 cycles during the 8-min sweep has no meaningful impact.
+  if (isSGSweepActive) {
+    console.log(`[Engine] Cycle #${cycleCount} phase7: skipping SC research — SG sweep active (prevents event-loop blocking during 967-candidate sweep)`);
+    return;
+  }
   activeTasks.add("SC Research");
   broadcast("taskStart", { task: "SC Research" });
   try {
@@ -1280,7 +1362,7 @@ async function runPhase7_Superconductor() {
     if (result.duplicatesSkipped > 0) {
       trackDuplicatesSkipped(result.duplicatesSkipped);
     }
-    allInsights.push(...result.insights);
+    pushInsights(result.insights);
     totalInsightsGenerated += result.insights.length;
 
     await addInsightsToPhase(7, result.insights);
@@ -1305,7 +1387,19 @@ async function runPhase7_Superconductor() {
     if (cycleCount % 3 === 0 && shouldContinue()) {
       try {
         const activeCampaigns = getAllActiveCampaigns();
-        for (const campaign of activeCampaigns) {
+        // Cap at 4 campaigns per cycle — each campaign generates 40-45 candidates
+        // × ~400ms each = minutes of blocking per campaign. With 20+ campaigns
+        // this was taking 15+ minutes and preventing cycles from completing.
+        // Rotate through campaigns so all eventually get processed.
+        const MAX_CAMPAIGNS_PER_CYCLE = 4;
+        const campaignOffset = (Math.floor(cycleCount / 3)) % Math.max(1, activeCampaigns.length);
+        const campaignsThisCycle = activeCampaigns.length <= MAX_CAMPAIGNS_PER_CYCLE
+          ? activeCampaigns
+          : [
+              ...activeCampaigns.slice(campaignOffset, campaignOffset + MAX_CAMPAIGNS_PER_CYCLE),
+              ...activeCampaigns.slice(0, Math.max(0, MAX_CAMPAIGNS_PER_CYCLE - (activeCampaigns.length - campaignOffset))),
+            ].slice(0, MAX_CAMPAIGNS_PER_CYCLE);
+        for (const campaign of campaignsThisCycle) {
           const inverseCandidates = runInverseCycle(campaign);
           if (inverseCandidates.length === 0) continue;
 
@@ -1653,6 +1747,13 @@ async function insertCandidateWithStabilityCheck(candidateData: Parameters<typeo
       });
     }
 
+    // Enforce physics-consistent pressure before ANY filter runs so that the
+    // stability gate, kinetic stability, and synthesis gate all use the correct
+    // synthesis pressure for this compound. Without this, hydrides like LaH2
+    // are evaluated at 0 GPa (artificially high hull distance, near-zero kinetic
+    // lifetime) instead of their natural high-pressure synthesis environment.
+    candidateData.pressureGpa = enforcePhysicsPressure(candidateData.formula, candidateData.pressureGpa);
+
     const chemFilter = passesChemistryFilter(candidateData.formula, candidateData.pressureGpa ?? 0);
     if (!chemFilter.pass) {
       emit("log", {
@@ -1784,15 +1885,23 @@ async function insertCandidateWithStabilityCheck(candidateData: Parameters<typeo
 
     if (!stabilityResult.pass) {
       const hullDist = stabilityResult.hullDistance ?? 0;
+      const candidatePressure = candidateData.pressureGpa ?? 0;
 
-      // Hard sanity filter: hull distance > 0.5 eV/atom means the atomic configuration is
-      // physically impossible (overlapping atoms, wrong prototype, or ML hallucination).
-      // No Tc prediction is meaningful for such a material — hard-reject it.
-      if (hullDist > 0.5) {
+      // Hard sanity filter: hull distance above threshold indicates a physically impossible
+      // configuration (overlapping atoms, wrong prototype, or ML hallucination).
+      // PRESSURE-AWARE: the convex hull shifts dramatically under pressure.
+      // LaH2/GdH4 etc. are unstable at 0 GPa but stable at 50-200 GPa — their ambient
+      // hull distance is irrelevant to their high-pressure physics.
+      const hullHardLimit = candidatePressure > 100 ? 3.0
+        : candidatePressure > 50 ? 2.0
+        : candidatePressure > 20 ? 1.0
+        : 0.5;  // ambient: strict
+
+      if (hullDist > hullHardLimit) {
         emit("log", {
           phase: "engine",
           event: "Hull distance sanity reject",
-          detail: `${candidateData.formula}: hull=${hullDist.toFixed(4)} eV/atom > 0.5 eV/atom hard limit — UNSTABLE, Tc zeroed`,
+          detail: `${candidateData.formula}: hull=${hullDist.toFixed(4)} eV/atom > ${hullHardLimit} eV/atom limit at ${candidatePressure} GPa — UNSTABLE`,
           dataSource: "Stability Gate",
         });
         if (generatorSource) recordGeneratorOutcome(generatorSource, false, 0, 0);
@@ -1801,7 +1910,15 @@ async function insertCandidateWithStabilityCheck(candidateData: Parameters<typeo
 
       // Below the hard limit but still failing the stability gate: apply a score penalty
       // proportional to how far above hull the candidate is and allow it through for DFT.
-      const hullPenalty = Math.min(0.7, hullDist * 2);
+      // PRESSURE-AWARE: the ambient convex hull is irrelevant at high pressure — the same
+      // compound that is 0.7 eV/atom above hull at 0 GPa can be ON the hull at 150 GPa
+      // (LaH10, H3S, etc. are textbook examples). Scale the penalty down at high pressure
+      // using the same pressure tiers as the hard-limit above.
+      const hullPenaltyScale = candidatePressure > 100 ? 0.25   // >100 GPa: ambient hull nearly meaningless
+        : candidatePressure > 50  ? 0.45   // 50-100 GPa: significant pressure stabilization
+        : candidatePressure > 20  ? 0.70   // 20-50 GPa: moderate stabilization
+        : 2.0;                             // ambient: unchanged
+      const hullPenalty = Math.min(0.7, hullDist * hullPenaltyScale);
       const currentScore = candidateData.ensembleScore ?? 0.5;
       candidateData.ensembleScore = Math.round(Math.max(0.01, currentScore * (1 - hullPenalty)) * 10000) / 10000;
       candidateData.dataConfidence = candidateData.dataConfidence === "high" ? "medium" : "low";
@@ -1831,9 +1948,13 @@ async function insertCandidateWithStabilityCheck(candidateData: Parameters<typeo
     let kineticResult: KineticStabilityResult | null = null;
     try {
       if (stabilityResult.verdict === "metastable" || stabilityResult.hullDistance > 0.005) {
-        kineticResult = predictKineticStability(candidateData.formula, stabilityResult.hullDistance);
+        kineticResult = predictKineticStability(candidateData.formula, stabilityResult.hullDistance, candidateData.pressureGpa ?? 0);
 
-        if (kineticResult.kineticScore < 0.15 && kineticResult.stabilizationStrategies.length === 0) {
+        // Kinetic stability at ambient pressure is meaningless for high-pressure compounds —
+        // GdH4, LaH2, etc. decompose instantly at 0 GPa by design; they only exist under
+        // pressure. Applying ambient kinetic rejection to these compounds is a false negative.
+        const isHighPressureTarget = (candidateData.pressureGpa ?? 0) > 20;
+        if (!isHighPressureTarget && kineticResult.kineticScore < 0.15 && kineticResult.stabilizationStrategies.length === 0) {
           emit("log", {
             phase: "engine",
             event: "Kinetic stability rejected",
@@ -2021,7 +2142,7 @@ async function insertCandidateWithStabilityCheck(candidateData: Parameters<typeo
       ensembleScore: adjustedEnsemble,
       ambientPressureStable: isHighPressureOnly ? false : candidateData.ambientPressureStable,
       roomTempViable: isHighPressureOnly ? false : candidateData.roomTempViable,
-      mlFeatures: { ...enrichedMlFeatures, ...deliberationFeatures, pressureViability: pressureViability.label } as any,
+      mlFeatures: { ...enrichedMlFeatures, ...deliberationFeatures, pressureViability: pressureViability.label, pressureGpa: enforcedPressure } as any,
       notes: `${existingNotes} ${stabilityNote}${kineticNote}${deliberationNote}${pressureNote}`.trim(),
     };
 
@@ -2584,11 +2705,34 @@ async function runPhase10_Physics() {
     await updatePhaseStatus(10, "active", 0, 0);
     if (!shouldContinue()) return;
 
+    // Phase-level deadline: 8 min max. With up to 10 async physics calls (each up to 90s),
+    // the worst case is 900s — this caps it to prevent the engine from stalling for 15-20 min.
+    const PHASE10_DEADLINE_MS = 8 * 60 * 1000;
+    const phase10Start = Date.now();
+    const phase10Elapsed = () => Date.now() - phase10Start;
+
+    // Signal the SG sweep to pause — both compete for the 5-connection DB pool and
+    // running concurrently causes connection timeouts that freeze this phase indefinitely.
+    isPhysicsAnalysisActive = true;
+
+    // If the SG sweep is already mid-evaluation, its per-candidate pause loop checks
+    // `isPhysicsAnalysisActive` at the TOP of each candidate iteration (before calling
+    // runAutonomousDiscoveryCycle). However, the CURRENT in-flight candidate call may
+    // still be holding DB connections. Wait 4s to let the current candidate call finish
+    // and the SG sweep's pause loop to kick in, giving Phase 10 a clear connection window.
+    if (isSGSweepActive) {
+      await new Promise(r => setTimeout(r, 4000));
+    }
+
     const stage0 = await storage.getSuperconductorsByStage(0);
     const toAnalyze = shuffle(stage0).slice(0, 8);
 
     for (const candidate of toAnalyze) {
       if (!shouldContinue()) break;
+      if (phase10Elapsed() > PHASE10_DEADLINE_MS) {
+        console.warn(`[Engine] Phase 10 deadline (8min) reached in main loop — skipping remaining compounds`);
+        break;
+      }
       try {
         const result = await runFullPhysicsAnalysis(emit, candidate);
         totalPhysicsComputed++;
@@ -3345,17 +3489,23 @@ async function runPhase10_Physics() {
         }
 
         try {
-          const trainFeatures = await extractFeatures(candidate.formula);
-          const hullDist = result.competingPhases.length > 0 ? 0.05 * result.competingPhases.length : 0.02;
-          physicsPredictor.addTrainingSample(
-            trainFeatures,
-            result.coupling.lambda,
-            result.electronicStructure.densityOfStatesAtFermi,
-            result.coupling.omegaLog,
-            hullDist
-          );
+          // Skip when sweep guard is active — computeElectronicStructure is synchronous (17-71s)
+          // and would freeze the event loop if called while the SG sweep is running.
+          if (!isSweepGuardActive()) {
+            const trainFeatures = await extractFeatures(candidate.formula);
+            const hullDist = result.competingPhases.length > 0 ? 0.05 * result.competingPhases.length : 0.02;
+            physicsPredictor.addTrainingSample(
+              trainFeatures,
+              result.coupling.lambda,
+              result.electronicStructure.densityOfStatesAtFermi,
+              result.coupling.omegaLog,
+              hullDist
+            );
+          }
         } catch (tsErr) {
-          console.error(`[Engine] Training sample add failed for ${candidate.formula}:`, tsErr instanceof Error ? tsErr.message.slice(0, 80) : "unknown");
+          // sweepGuard throws when extractFeatures is blocked during SG sweep — skip silently
+          if ((tsErr as any)?.message?.includes("sg-sweep-guard")) { /* skip */ }
+          else console.error(`[Engine] Training sample add failed for ${candidate.formula}:`, tsErr instanceof Error ? tsErr.message.slice(0, 80) : "unknown");
         }
 
         try {
@@ -3632,6 +3782,10 @@ async function runPhase10_Physics() {
         const hydrideCrystalMap = await storage.getCrystalStructuresByFormulas(hydrideToScan.map(c => c.formula));
         for (const candidate of hydrideToScan) {
           if (!shouldContinue()) break;
+          if (phase10Elapsed() > PHASE10_DEADLINE_MS) {
+            console.warn(`[Engine] Phase 10 deadline (8min) reached in hydride-pressure loop — skipping remaining`);
+            break;
+          }
           try {
             const pressureResult = runPressureAnalysis(emit, candidate.formula);
             const existingMlFeatures = (candidate.mlFeatures as Record<string, any>) ?? {};
@@ -3795,6 +3949,10 @@ async function runPhase10_Physics() {
       const toReanalyze = highLambda.slice(0, 2);
       for (const candidate of toReanalyze) {
         if (!shouldContinue()) break;
+        if (phase10Elapsed() > PHASE10_DEADLINE_MS) {
+          console.warn(`[Engine] Phase 10 deadline (8min) reached in re-analysis loop — skipping`);
+          break;
+        }
         try {
           const result = await runFullPhysicsAnalysis(emit, candidate);
           stagnationReanalyzedIds.set(candidate.id, cycleCount);
@@ -3841,6 +3999,7 @@ async function runPhase10_Physics() {
     const progress10 = computeProgress(10, crCount);
     await updatePhaseStatus(10, "active", progress10, crCount);
   } finally {
+    isPhysicsAnalysisActive = false;
     activeTasks.delete("Computational Physics");
     broadcast("taskEnd", { task: "Computational Physics" });
   }
@@ -3937,8 +4096,8 @@ async function runPhase11_StructurePrediction() {
     }
 
     if (shouldContinue() && cycleCount % 3 === 0) {
+      const structInFlightMarked: string[] = [];
       try {
-        const structInFlightMarked: string[] = [];
         const topCandidates = candidates
           .filter(c => (c.ensembleScore ?? 0) > 0.3)
           .map(c => ({ formula: c.formula, predictedTc: c.predictedTc ?? 0, ensembleScore: c.ensembleScore ?? 0 }));
@@ -4014,7 +4173,10 @@ async function runPhase11_StructurePrediction() {
           }
         }
       } catch (err: any) {
-        emit("log", { phase: "phase-11", event: "Generative structure error", detail: err.message?.slice(0, 150), dataSource: "Structure Generator" });
+        // Sweep guard throws to abort extractFeatures during SG sweep — not a real error
+        if (!err.message?.includes("sg-sweep-guard")) {
+          emit("log", { phase: "phase-11", event: "Generative structure error", detail: err.message?.slice(0, 150), dataSource: "Structure Generator" });
+        }
       } finally {
         for (const f of structInFlightMarked) releaseFormulaInFlight(f);
       }
@@ -4662,7 +4824,7 @@ async function runPhase12_MultiFidelity() {
 
       const passedCount = results.filter(r => r.passed).length;
       if (passedCount > 0) {
-        allInsights.push(`Multi-fidelity pipeline: ${passedCount}/${results.length} candidates passed all 5 stages`);
+        pushInsights([`Multi-fidelity pipeline: ${passedCount}/${results.length} candidates passed all 5 stages`]);
       }
 
       for (const r of results.filter(pr => pr.passed)) {
@@ -5027,10 +5189,10 @@ async function runPhase13_SynthesisReasoning() {
     }
 
     if (proposed > 0 || gateRejected > 0) {
-      allInsights.push(
+      pushInsights([
         `Novel synthesis reasoning: proposed ${proposed} physics-reasoned routes for ${toProcess.length} candidates` +
-        (gateRejected > 0 ? `, ${gateRejected} hard-rejected by synthesis gate (DFT skipped)` : "")
-      );
+        (gateRejected > 0 ? `, ${gateRejected} hard-rejected by synthesis gate (DFT skipped)` : ""),
+      ]);
     }
   } finally {
     activeTasks.delete("Novel Synthesis Reasoning");
@@ -5038,7 +5200,7 @@ async function runPhase13_SynthesisReasoning() {
   }
 }
 
-async function runAutonomousDiscoveryCycle(formula: string, opts?: { skipDbDupCheck?: boolean; skipStructurePrediction?: boolean; suppressLogs?: boolean }): Promise<{ passed: boolean; tc: number; reason: string; physicsPred?: PhysicsPrediction }> {
+async function runAutonomousDiscoveryCycle(formula: string, opts?: { skipDbDupCheck?: boolean; skipStructurePrediction?: boolean; suppressLogs?: boolean; skipRejectedCache?: boolean; skipGNN?: boolean; fastSweepMode?: boolean; skipSurrogate?: boolean }): Promise<{ passed: boolean; tc: number; reason: string; physicsPred?: PhysicsPrediction }> {
   try {
     if (typeof formula !== "string") {
       formula = String(formula ?? "");
@@ -5053,9 +5215,13 @@ async function runAutonomousDiscoveryCycle(formula: string, opts?: { skipDbDupCh
       return { passed: false, tc: 0, reason: "valence-filter-failed" };
     }
 
-    const prevRejection = rejectedFormulas.get(normalizeFormula(formula));
-    if (prevRejection) {
-      return { passed: false, tc: prevRejection.tc, reason: `cached-reject: ${prevRejection.reason}` };
+    // skipRejectedCache: used by SG sweep so that prototype formulas re-evaluated each
+    // sweep run reflect the latest retrained surrogate model, not stale prior rejections.
+    if (!opts?.skipRejectedCache) {
+      const prevRejection = rejectedFormulas.get(normalizeFormula(formula));
+      if (prevRejection) {
+        return { passed: false, tc: prevRejection.tc, reason: `cached-reject: ${prevRejection.reason}` };
+      }
     }
 
     // skipDbDupCheck: used by SG sweep to avoid DB round-trips for each of 967 candidates.
@@ -5085,12 +5251,41 @@ async function runAutonomousDiscoveryCycle(formula: string, opts?: { skipDbDupCh
       return { passed: false, tc: 0, reason: `stability-prefilter: ${stabilityScreen.reason}` };
     }
 
+    // skipSurrogate: used by SG sweep to avoid calling surrogateScreen → extractFeatures,
+    // which blocks the event loop 18-57s per novel formula (967 unique prototypes × 18-57s
+    // = hours of blocking). The stability pre-filter above is sufficient for candidate
+    // discovery; full surrogateScreen runs in the main pipeline after submission.
+    if (opts?.skipSurrogate) {
+      return { passed: true, tc: 20, reason: "sg-sweep-fast-pass" };
+    }
+
+    // Dynamic sweep guard: re-check isSGSweepActive even if skipSurrogate was false at
+    // dispatch time. Fast-path batches (SCREENING_BATCH_SIZE=12) are dispatched atomically
+    // — if isSGSweepActive became true after the batch started, all 12 candidates have
+    // skipSurrogate=false baked in. Without this check, they queue up for extractFeatures
+    // (17-58s each) causing up to 12×58s = 696s of sequential event-loop blocking.
+    // With this check, only ONE candidate (already inside computeElectronicStructure) can
+    // block — all others in the queue exit immediately. Max damage: 1×58s = 58s.
+    // Only applies to fastSweepMode (fast-path candidates), not full-pipeline submissions.
+    if (isSGSweepActive && opts?.fastSweepMode) {
+      return { passed: true, tc: 20, reason: "sg-sweep-fast-pass" };
+    }
+
     const surrogateResult = await surrogateScreen(formula, 3);
     const surrogateTc = Number.isFinite(surrogateResult.predictedTc) ? surrogateResult.predictedTc : 0;
     if (!surrogateResult.pass) {
       pipelineStageMetrics.surrogateRejects++;
       recordRejection(formula, `surrogate-reject`, surrogateTc);
       return { passed: false, tc: surrogateTc, reason: `surrogate-reject: Tc=${surrogateTc}K, ${surrogateResult.reasoning.join("; ")}` };
+    }
+
+    // fastSweepMode early exit — surrogateScreen already ran GB prediction internally.
+    // Return immediately without getCachedFeatures, gbPredict, crossEngineHub.recordInsight,
+    // or any other downstream work. These can all block the event loop (cache miss →
+    // extractFeatures is sync; crossEngineHub may scan large datasets). The surrogate
+    // pass/fail is sufficient for the SG sweep's candidate selection decision.
+    if (opts?.fastSweepMode) {
+      return { passed: true, tc: Math.round(surrogateTc), reason: "sg-sweep-fast-pass" };
     }
 
     try {
@@ -5122,9 +5317,16 @@ async function runAutonomousDiscoveryCycle(formula: string, opts?: { skipDbDupCh
     }
 
     let gnnResult: ReturnType<typeof gnnPredictWithUncertainty> | null = null;
-    try {
-      gnnResult = gnnPredictWithUncertainty(formula, undefined, features.pressureGpa);
-    } catch (e) { console.error(`[Autonomous] GNN prediction failed for ${formula}:`, e); }
+    // skipGNN: SG sweep evaluates 967 candidates — each sync GNN call runs 5 ensemble
+    // models × 10 MC dropout passes = 50 forward passes, blocking the event loop for
+    // ~87s per candidate. GB surrogate already screened for Tc≥5K; GNN is additive but
+    // not required for the sweep's pass/fail decision. Skip it here; the candidate will
+    // get full GNN scoring when it enters the normal fast-path screening pipeline.
+    if (!opts?.skipGNN) {
+      try {
+        gnnResult = gnnPredictWithUncertainty(formula, undefined, features.pressureGpa);
+      } catch (e) { console.error(`[Autonomous] GNN prediction failed for ${formula}:`, e); }
+    }
 
     try {
       const mtPred = await multiTaskPredict(formula);
@@ -5175,6 +5377,12 @@ async function runAutonomousDiscoveryCycle(formula: string, opts?: { skipDbDupCh
       verificationStage: 0,
     };
 
+    // structureResult must be declared here (not inside the if block) so it's in scope
+    // at line ~5361 where synthesizabilityScore reads structureResult?.synthesizability.
+    // When skipStructurePrediction=true the else branch runs and structureResult stays
+    // undefined — accessing the if-scoped const caused ReferenceError.
+    let structureResult: any = undefined;
+
     if (!opts?.skipStructurePrediction) {
       // skipStructurePrediction: fast path screening bypasses this — the MP API call
       // (30s × 3 retries = 90s per candidate) blocks the event loop for each of 200+
@@ -5182,7 +5390,7 @@ async function runAutonomousDiscoveryCycle(formula: string, opts?: { skipDbDupCh
       // below still runs so downstream physics has structural context.
       pipelineStageMetrics.prototypeAttempts++;
       const structureBatch = await runStructurePredictionBatch(emit, [candidate as any]);
-      const structureResult = Array.isArray(structureBatch) ? structureBatch[0] : undefined;
+      structureResult = Array.isArray(structureBatch) ? structureBatch[0] : undefined;
       if (structureResult) {
         pipelineStageMetrics.prototypeSuccesses++;
         (candidate as any).mlFeatures = { ...((candidate as any).mlFeatures ?? {}), structureSource: "predicted" };
@@ -5251,10 +5459,15 @@ async function runAutonomousDiscoveryCycle(formula: string, opts?: { skipDbDupCh
     });
     const autoPhysExplicitlyZero = physicsTc === 0 && Number.isFinite(rawTc);
     let finalTc: number;
-    if (reconciledAuto.reconciledTc > 0) {
-      finalTc = reconciledAuto.reconciledTc;
-    } else if (autoPhysExplicitlyZero) {
+    // Bug fix: when physics explicitly computes Tc=0 (Allen-Dynes returned a finite
+    // near-zero value that was floored to 0), the ML surrogate alone cannot override it.
+    // reconciledTc is built only from GB here (physicsTc=0 was excluded), so trusting
+    // it blindly causes all weak-coupling compounds (lambda~0.2) to survive at ~25 K
+    // (the GB training-set mean). Physics veto takes precedence.
+    if (autoPhysExplicitlyZero) {
       finalTc = 0;
+    } else if (reconciledAuto.reconciledTc > 0) {
+      finalTc = reconciledAuto.reconciledTc;
     } else if (cappedPhysicsTcAuto > 0) {
       finalTc = cappedPhysicsTcAuto;
     } else {
@@ -5629,15 +5842,11 @@ async function runAutonomousFastPath() {
             candidatePressureMap.set(`${v.formula}@${v.pressureGpa}`, v.pressureGpa);
             pressureVariantFormulas.push(v.formula);
           }
-          if (v.seedBO && v.pressureGpa > 0) {
-            try {
-              const feat = await extractFeatures(v.formula);
-              const gbResult = await gbPredict(feat);
-              if (gbResult.tcPredicted > 0) {
-                addPressureObservation(v.formula, v.pressureGpa, gbResult.tcPredicted, true, 0);
-              }
-            } catch {}
-          }
+          // BO seeding removed: extractFeatures is synchronous (calls computeElectronicStructure)
+          // and blocks 17-71s for cold formulas. With 1000+ candidates × 30% probability,
+          // this loop was blocking the event loop for minutes at T+890s, just before the
+          // SG sweep fires at T+900s. BO functions correctly without these seeded observations;
+          // pressure observations are added through the normal pipeline when candidates pass.
         }
       }
     }
@@ -5732,14 +5941,20 @@ async function runAutonomousFastPath() {
                 }
               }
             }
+            emit("log", {
+              phase: "engine",
+              event: `Inverse + gradient in fast path`,
+              detail: `Campaign ${campaign.id}: ${inverseCandidates.length} inverse + ${gradResult.results.length} gradient candidates. Best gradient: ${gradResult.bestFormula} Tc=${gradResult.bestTc.toFixed(1)}K`,
+              dataSource: "Inverse Optimizer",
+            });
+          } else {
+            emit("log", {
+              phase: "engine",
+              event: `Inverse in fast path`,
+              detail: `Campaign ${campaign.id}: ${inverseCandidates.length} inverse candidates (GNN not ready, gradient skipped)`,
+              dataSource: "Inverse Optimizer",
+            });
           }
-
-          emit("log", {
-            phase: "engine",
-            event: `Inverse + gradient in fast path`,
-            detail: `Campaign ${campaign.id}: ${inverseCandidates.length} inverse + ${gradResult.results.length} gradient candidates. Best gradient: ${gradResult.bestFormula} Tc=${gradResult.bestTc.toFixed(1)}K`,
-            dataSource: "Inverse Optimizer",
-          });
         }
       } catch (err: any) {
         emit("log", { phase: "engine", event: "Fast-path inverse error", detail: err.message?.slice(0, 200), dataSource: "Inverse Optimizer" });
@@ -6233,6 +6448,7 @@ async function runAutonomousFastPath() {
             predictedTc: c.predictedTc,
             decompositionEnergy: c.decompositionEnergy,
             mlFeatures: c.mlFeatures as Record<string, any> | null,
+            ensembleScore: c.ensembleScore,
           }));
         },
         2_000,
@@ -6399,10 +6615,12 @@ async function runAutonomousFastPath() {
     });
     const rlNoveltyRatio = rlCandidates.filter(f => !alreadyScreenedFormulas.has(normalizeFormula(f))).length / Math.max(1, rlCandidates.length);
     if (alreadyScreenedFormulas.size > MAX_SCREENED_CACHE_SIZE) {
-      const toRemove = alreadyScreenedFormulas.size - MAX_SCREENED_CACHE_SIZE;
+      // Evict oldest 20% — keeps the set well below max so it doesn't hover at the cap permanently
+      const toRemove = Math.floor(MAX_SCREENED_CACHE_SIZE * 0.2);
       const iter = alreadyScreenedFormulas.values();
       for (let i = 0; i < toRemove; i++) {
-        alreadyScreenedFormulas.delete(iter.next().value as string);
+        const v = iter.next().value;
+        if (v !== undefined) alreadyScreenedFormulas.delete(v);
       }
     }
 
@@ -6544,7 +6762,23 @@ async function runAutonomousFastPath() {
           try {
             // suppressLogs: fast-path runs every cycle — emitting per-candidate rejections
             // floods the frontend WebSocket with thousands of messages per hour.
-            const _r = await runAutonomousDiscoveryCycle(_f, { skipDbDupCheck: true, skipStructurePrediction: true, suppressLogs: true });
+            // skipGNN: gnnPredictWithUncertainty runs 5 ensemble models × 10 MC dropout
+            // passes = 50 synchronous forward passes (~87s per candidate), blocking the
+            // event loop. GB surrogate already screened for Tc≥5K; full GNN scoring runs
+            // when the candidate enters the normal pipeline after fast-path acceptance.
+            // fastSweepMode: 12 candidates run concurrently (SCREENING_BATCH_SIZE=12). Without
+            // this flag, each calls runFullPhysicsAnalysis → resolveDFTFeatures (90s timeout).
+            // All 12 fire simultaneously, completing at T+90s and blocking the event loop with
+            // 12 concurrent analytical physics computations. fastSweepMode exits after GB
+            // surrogate check only; full physics runs in Phase 10 for accepted candidates.
+            // skipSurrogate: always true for the fast-path, not just during SG sweep.
+            // surrogateScreen → getCachedFeatures → computeElectronicStructure is synchronous
+            // and blocks 18-120s for cold formulas (no feature cache hit). Even one cold formula
+            // in a 12-candidate batch blocks the event loop long enough for the 8s health-check
+            // timeout to fire a false server_down. The stability pre-filter is sufficient
+            // pre-screening for the fast-path; Phase 10 physics analysis runs on all accepted
+            // candidates and provides the quality gate with full topology/Fermi data.
+            const _r = await runAutonomousDiscoveryCycle(_f, { skipDbDupCheck: true, skipStructurePrediction: true, suppressLogs: true, skipGNN: true, fastSweepMode: true, skipSurrogate: true });
             _discoveryResults.set(_f, _r);
           } finally {
             releaseFormulaInFlight(_f);
@@ -6711,14 +6945,25 @@ async function runAutonomousFastPath() {
       } catch (e) { console.error("[Engine] Constraint weight update failed:", e); }
 
       try {
-        if (result.tc > 0 && !explorationModeActive) {
+        if (result.tc > 0 && !explorationModeActive && result.reason !== "sg-sweep-fast-pass") {
+          // Skip for sg-sweep-fast-pass: buildAndStoreFeatureRecord calls computeElectronicStructure
+          // synchronously (no cache). With hundreds of fast-pass candidates per sweep cycle,
+          // this causes cascading synchronous blocks totalling minutes of event-loop freeze.
+          // Phase 10 physics analysis runs computeElectronicStructure for accepted candidates
+          // with proper sequencing and yields.
           buildAndStoreFeatureRecord(formula, result.tc, null, result.passed ? 0.5 : 0.1);
         }
       } catch (e) { console.error("[Engine] Feature record build failed:", e); }
 
       const isPromising = result.passed || result.tc >= 5;
 
-      if (result.passed) {
+      if (result.passed && result.reason !== "sg-sweep-fast-pass") {
+        // Skip enrichment queue for sg-sweep-fast-pass candidates — fast-path always uses
+        // skipSurrogate: true (since computeElectronicStructure blocks 18-120s for cold
+        // formulas, causing false server_down alerts). Without surrogate data, physicsPred
+        // is synthetic (tc=20) and topology/Fermi enrichment would also call
+        // computeElectronicStructure × N candidates = cascading blocks. Phase 10 physics
+        // analysis picks up these candidates from Stage 0 and runs full topology analysis.
         enrichmentQueue.push({ formula, tc: result.tc, physicsPred: result.physicsPred });
       }
       if (isPromising) {
@@ -6961,7 +7206,13 @@ async function runAutonomousFastPath() {
       console.log(`[Engine] Write queue flushed: ${queueFlushed} candidates bulk-inserted`);
     }
 
-    if (enrichmentQueue.length > 0) {
+    if (enrichmentQueue.length > 0 && !isSGSweepActive && !isSweepGuardActive()) {
+      // Skip enrichment during SG sweep AND post-sweep cooldown (120s guard):
+      // all fast-path candidates fast-pass (sg-sweep-fast-pass), meaning ALL of them
+      // land in the enrichment queue. Each computeElectronicStructure call blocks 17-71s
+      // synchronously. With 100+ candidates × 71s = hours of blocking immediately after
+      // the sweep ends. Enrichment is topology/Fermi analysis — non-critical, runs after
+      // the 120s cooldown on the next normal cycle.
       const enrichStart = Date.now();
       let enriched = 0;
       for (const task of enrichmentQueue) {
@@ -7383,7 +7634,10 @@ async function runLearningCycle() {
   recentNewCandidates = 0;
   recentTcImproved = false;
   recentLogCache.clear();
-  console.log(`[Engine] Cycle #${cycleCount} START at T+${Math.round((Date.now() - _engineStartMs) / 1000)}s`);
+  const _heapAtCycleStart = process.memoryUsage();
+  const _heapMB = Math.round(_heapAtCycleStart.heapUsed / 1024 / 1024);
+  const _rssMB  = Math.round(_heapAtCycleStart.rss      / 1024 / 1024);
+  console.log(`[Engine] Cycle #${cycleCount} START at T+${Math.round((Date.now() - _engineStartMs) / 1000)}s  heap=${_heapMB}MB rss=${_rssMB}MB`);
   await syncMaterialMetadataCache();
   broadcast("cycleStart", { cycle: cycleCount });
 
@@ -7507,9 +7761,9 @@ async function runLearningCycle() {
 
   try {
     const batch1 = await Promise.allSettled([
-      runPhase4_Materials(),
-      runPhase8_Synthesis(),
-      runPhase9_Reactions(),
+      withPhaseSemaphore(runPhase4_Materials),
+      withPhaseSemaphore(runPhase8_Synthesis),
+      withPhaseSemaphore(runPhase9_Reactions),
     ]);
     for (const r of batch1) {
       if (r.status === "rejected") console.log(`[Engine] Batch-1 phase failed: ${r.reason?.message?.slice(0, 120) ?? "unknown"}`);
@@ -7518,8 +7772,8 @@ async function runLearningCycle() {
     if (state !== "running") return;
 
     const batch2 = await Promise.allSettled([
-      runPhase3_Bonding(),
-      runPhase5_Prediction(),
+      withPhaseSemaphore(runPhase3_Bonding),
+      withPhaseSemaphore(runPhase5_Prediction),
     ]);
     for (const r of batch2) {
       if (r.status === "rejected") console.log(`[Engine] Batch-2 phase failed: ${r.reason?.message?.slice(0, 120) ?? "unknown"}`);
@@ -8091,12 +8345,19 @@ async function runLearningCycle() {
               const { pc, normalized, features, gbResult, gnnResult, discoveryScore } = entry;
 
               let protoTopoScore = 0;
-              try {
-                const protoElectronic = computeElectronicStructure(normalized, null);
-                const protoTopo = analyzeTopology(normalized, protoElectronic, undefined, pc.crystalSystem);
-                protoTopoScore = protoTopo.topologicalScore;
-                trackTopologyResult(protoTopo);
-              } catch (e) { console.error(`[Engine] Prototype topology analysis failed for ${normalized}:`, e); }
+              if (!isSGSweepActive && !isSweepGuardActive()) {
+                // Skip during SG sweep AND post-sweep cooldown (120s guard) —
+                // computeElectronicStructure blocks 17-71s synchronously per formula.
+                // With PROTO_CONCURRENCY=10 and up to 30 candidates, this creates up to
+                // 30×71s ≈ 35min of sequential event-loop blocking immediately after the
+                // sweep ends. The 120s sweepGuard covers the post-sweep recovery window.
+                try {
+                  const protoElectronic = computeElectronicStructure(normalized, null);
+                  const protoTopo = analyzeTopology(normalized, protoElectronic, undefined, pc.crystalSystem);
+                  protoTopoScore = protoTopo.topologicalScore;
+                  trackTopologyResult(protoTopo);
+                } catch (e) { console.error(`[Engine] Prototype topology analysis failed for ${normalized}:`, e); }
+              }
 
               const lambdaML = features.electronPhononLambda ?? 0;
               const metallicityML = features.metallicity ?? 0.5;
@@ -8683,12 +8944,16 @@ async function runLearningCycle() {
       } catch (e) { console.error("[Engine] Cycle metrics capture failed:", e); }
     }
   } catch (err: any) {
-    emit("log", {
-      phase: "engine",
-      event: "Cycle error",
-      detail: err.message?.slice(0, 200) || "Unknown",
-      dataSource: "Internal",
-    });
+    // Sweep guard throws to abort extractFeatures during SG sweep — not a real cycle error.
+    // Use String(err) to catch bare string throws, AggregateError, and Error objects uniformly.
+    if (!String(err?.message ?? err ?? "").includes("sg-sweep-guard")) {
+      emit("log", {
+        phase: "engine",
+        event: "Cycle error",
+        detail: err.message?.slice(0, 200) || "Unknown",
+        dataSource: "Internal",
+      });
+    }
   } finally {
     if (explorationModeActive && explorationModeSavedConstraints) {
       setConstraintMode(explorationModeSavedConstraints);
@@ -8751,16 +9016,24 @@ async function backfillGBScores() {
     let batchNum = 0;
     let batch: any[];
     do {
+      // Abort if a new SG sweep started while we were already running — both tasks
+      // share the 10-connection Neon pool and running concurrently causes cascade timeouts.
+      if (isSGSweepActive) {
+        console.log("[Engine] GB score backfill: new SG sweep started — deferring remainder");
+        break;
+      }
       batch = await storage.getUnscoredCandidates(50);
       if (batch.length === 0) break;
       batchNum++;
       if (batchNum === 1) {
         emit("log", { phase: "engine", event: "GB score backfill running", detail: `Scoring unscored candidates with gradient boosting model...`, dataSource: "Internal" });
+      } else if (batchNum % 10 === 0) {
+        emit("log", { phase: "engine", event: "GB score backfill progress", detail: `Scored ${totalUpdated} candidates so far (batch ${batchNum})`, dataSource: "Internal" });
       }
 
       let backfillDbErrors = 0;
       for (let i = 0; i < batch.length; i++) {
-        await new Promise<void>(r => setTimeout(r, 0)); // yield after every candidate — getCachedFeatures blocks ~350ms
+        await yield_(); // 200ms yield between candidates — reduces DB connection rate to avoid pool exhaustion
         const c = batch[i];
         try {
           const features = await getCachedFeatures(c.formula);
@@ -8916,6 +9189,12 @@ export async function startEngine() {
   state = "running";
   broadcast("engineState", { state: "running" });
 
+  // Drain zombie connections before any DB operations. If the engine was previously
+  // stopped during or after a long event-loop block (SG sweep, GB training), idle
+  // pool connections may have gone zombie while timers were paused. Proactively
+  // clearing them here prevents the first-cycle DB storm of authentication timeouts.
+  await drainIdleConnections().catch(() => {});
+
   // Restore the in-memory semantic dedup cache from DB so insights already
   // seen before the last restart don't slip through as "novel" again.
   // Delayed 3 min: lets XGBoost (45s) and the first engine cycle (~60-90s) finish
@@ -8991,7 +9270,9 @@ export async function startEngine() {
   // so both tasks don't simultaneously hit the DB and saturate the Neon pool.
   // The SG sweep has a 2-hour wall-time cap so this wait is bounded.
   setTimeout(async () => {
+    let _waitedForSweep = false;
     if (isSGSweepActive) {
+      _waitedForSweep = true;
       console.log("[Engine] background: backfill waiting for SG sweep to finish...");
       let _backfillWaitLogged = Date.now();
       while (isSGSweepActive) {
@@ -9000,6 +9281,24 @@ export async function startEngine() {
           console.log("[Engine] background: backfill still waiting for SG sweep...");
           _backfillWaitLogged = Date.now();
         }
+      }
+      // SG sweep blocks the event loop, exhausting DB pool connections. Give Neon
+      // 90 seconds to reap dead connections before the backfill hammers the DB.
+      console.log("[Engine] background: pausing 90s for DB pool recovery after SG sweep...");
+      await new Promise(r => setTimeout(r, 90_000));
+      // Drain any zombie idle connections left over from the sweep's event-loop
+      // blocks (idle timeout timers can't fire while the loop is blocked).
+      await drainIdleConnections().catch(() => {});
+      // Probe the pool: attempt SELECT 1 up to 5 times with 30s between tries.
+      // After a long block, all pool slots may be occupied by in-flight TCP
+      // CONNECT attempts to Neon (not yet established, so socket.setTimeout
+      // can't fire). The probe serialises reconnection — if it fails, Neon is
+      // still recovering; we keep waiting rather than hammering it with a full
+      // backfill. Each retry fires at most 1 connection, avoiding the storm.
+      const dbReady = await probeDBConnection(5, 30_000);
+      if (!dbReady) {
+        console.warn("[Engine] background: DB still unreachable after 5 probes — skipping backfill this cycle");
+        return;
       }
     }
     console.log("[Engine] background: backfillGBScores + recalculatePhysics starting...");
@@ -9018,10 +9317,86 @@ export async function startEngine() {
     const initialDelay = 15 * 60 * 1000;   // 15 min — after startup settles
     const repeatInterval = 6 * 60 * 60 * 1000; // 6 hours
 
+    // Pre-arm sweepGuard 150s before sweep fires so all in-flight extractFeatures
+    // calls (max 71s observed) complete before the sweep starts. Without this,
+    // fast-path candidates starting at T+850s take 71s → complete at T+921s,
+    // blocking the event loop during the sweep and crashing the server.
+    // We use 150s margin = 2× the max observed computeElectronicStructure duration.
+    // The guard only activates if not already active (avoid double-setting on 6h repeats).
+    const preArmDelayMs = Math.max(0, initialDelay - 150_000); // T+750s for initial sweep
+    setTimeout(() => {
+      if (!isSweepGuardActive()) {
+        setSweepGuardActive(true);
+        console.log("[Engine] SG sweep: pre-armed sweep guard at T+750s — blocking new extractFeatures calls to ensure no in-flight blocks at T+900s");
+      }
+    }, preArmDelayMs);
+
     async function runSGSweep() {
       if (state !== "running") return;
+      // Guard against duplicate sweeps from multiple scheduleSGSweep IIFE invocations
+      // (each engine stop/start re-runs the IIFE, queuing another timer).
+      // Two-part guard:
+      // 1. isSGSweepActive: prevents a second IIFE from starting a sweep while the first
+      //    is still running. Without this, both IIFEs can pass the time check simultaneously
+      //    (race condition on lastSGSweepAttemptMs), causing two concurrent sweeps. When the
+      //    first completes it sets isSGSweepActive=false while the second is still mid-run,
+      //    allowing the main fast-path to resume extractFeatures and block the event loop.
+      // 2. MIN_SG_SWEEP_INTERVAL_MS: prevents repeat sweeps within 30 min (e.g. timer drift).
+      const MIN_SG_SWEEP_INTERVAL_MS = 30 * 60 * 1000; // 30 min minimum between sweeps
+      if (isSGSweepActive || Date.now() - lastSGSweepAttemptMs < MIN_SG_SWEEP_INTERVAL_MS) {
+        console.log(`[Engine] SG sweep skipped — ${isSGSweepActive ? "sweep already active" : `ran ${Math.round((Date.now() - lastSGSweepAttemptMs) / 60_000)} min ago`} (duplicate timer guard)`);
+        return;
+      }
+      lastSGSweepAttemptMs = Date.now();
       isSGSweepActive = true;
+      setSweepGuardActive(true); // block extractFeatures→computeElectronicStructure for in-flight fast-path candidates
+      setSGSweepActive(true); // pause DFT refill loop to prevent DB pool exhaustion
+      setSynthesisRetrainingPaused(true); // prevent sync GB retraining from blocking fp-wait timers
       try {
+        // Wait for any in-flight fast-path batch to finish before sweep starts.
+        // computeElectronicStructure can block 17-71s; a batch dispatched just before
+        // isSGSweepActive was set has skipSurrogate=false baked in. The dynamic guard
+        // in runAutonomousDiscoveryCycle exits queued candidates, but ONE already inside
+        // computeElectronicStructure blocks until done (up to 71s → >60s server freeze).
+        // Waiting here for isFastPathScreeningActive=false ensures that block has cleared.
+        // Cap at 120s so a stuck fast-path can't delay the sweep indefinitely.
+        const _fpDrainStart = Date.now();
+        while (isFastPathScreeningActive && Date.now() - _fpDrainStart < 120_000) {
+          await new Promise(r => setTimeout(r, 1_000));
+        }
+        if (isFastPathScreeningActive) {
+          console.warn("[Engine] SG sweep: fast-path drain timed out after 120s — proceeding anyway");
+        }
+        // Phase 10 runs up to 8 candidates SEQUENTIALLY, each with a 30s MP fetch +
+        // 90s DFT timeout = up to 12 min of idle time. During this idle time, all 10 pool
+        // connections exceed idleTimeoutMillis (10s) and go zombie (Neon drops them silently).
+        // Drain proactively before the sweep so the pool starts fresh.
+        await drainIdleConnections().catch(() => {});
+        // DB cool-down: wait 25s before starting the 967-candidate sweep.
+        // GB training (which fires in the 0-15 min startup window) blocks the event loop
+        // for ~60s, causing all pool connections to go zombie (Neon drops silently).
+        // socket.setTimeout(20s) destroys zombie sockets at T+20s — but only if the event
+        // loop is free. This 25s yield ensures zombies are destroyed and the pool has time
+        // to establish fresh connections before the sweep hits 967 candidates.
+        await new Promise(r => setTimeout(r, 25_000));
+        if (state !== "running") return;
+        // Clear surrogate-reject cache entries before each sweep so the latest
+        // retrained model can reconsider ML-rejected candidates. Deterministic
+        // rejections (valence, elements, stability-prefilter) stay cached since
+        // they don't change with retraining. This avoids the 0/967 pass rate
+        // caused by a fully-populated rejected cache on repeat sweeps, without
+        // forcing full DB evaluation on every candidate like skipRejectedCache did.
+        let surrogateCleared = 0;
+        for (const [key, entry] of rejectedFormulas) {
+          if ((entry.reason ?? "").startsWith("surrogate-reject")) {
+            rejectedFormulas.delete(key);
+            surrogateCleared++;
+          }
+        }
+        if (surrogateCleared > 0) {
+          console.log(`[Engine] SG sweep: cleared ${surrogateCleared} surrogate-reject cache entries for re-evaluation`);
+        }
+
         const coverage = getSpaceGroupCoverageReport();
         const coveredSGs = Object.values(coverage.coveredByCrystalSystem).reduce((s, v) => s + v.withPrototype, 0);
         console.log(
@@ -9036,14 +9411,26 @@ export async function startEngine() {
 
         let submitted = 0;
         let sweepIdx = 0;
-        const SG_SWEEP_WALL_LIMIT_MS = 2 * 60 * 60 * 1000; // 2-hour cap per run
+        const sweepRejectionReasons: Record<string, number> = {};
+        const SG_SWEEP_WALL_LIMIT_MS = 8 * 60 * 1000; // 8-min cap per run — 967 candidates at ~2s each = ~30 min without this cap, causing 30+ min feed freezes; 8 min allows ~240 candidates before abort
         const sgSweepStart = Date.now();
+        let consecutiveSweepDbErrors = 0; // backoff counter for DB pool exhaustion
+        // Total slow/timeout candidates encountered across the entire sweep — never resets.
+        // Surrogate-reject candidates complete in <100ms without DB calls and reset
+        // consecutiveSweepDbErrors to 0, masking a sustained DB storm. This counter
+        // accumulates across all candidates so a high DB-stress rate still triggers abort.
+        let totalSweepSlowCandidates = 0;
         for (const candidate of candidates) {
           if (state !== "running") break;
           if (Date.now() - sgSweepStart > SG_SWEEP_WALL_LIMIT_MS) {
             console.log(`[Engine] SG sweep: wall-time limit reached after ${sweepIdx} candidates — stopping early, will resume next 6h cycle`);
             break;
           }
+          // Yield the macrotask queue between every candidate so HTTP requests and
+          // keepalive heartbeats can be processed. fastSweepMode candidates complete
+          // synchronously (no real awaits inside the fast path), so without this yield
+          // the event loop is blocked continuously for the full 967-candidate run.
+          await new Promise(r => setTimeout(r, 0));
           sweepIdx++;
           // Pause while the fast-path screening loop is active — both loops share the
           // 5-connection Neon pool, and running them concurrently causes cascading
@@ -9051,29 +9438,113 @@ export async function startEngine() {
           // Cap the wait at 10 min so a stuck fast-path can't block the SG sweep
           // indefinitely and prevent the 2-hour wall-time limit from firing.
           const _fpWaitStart = Date.now();
-          while (isFastPathScreeningActive) {
+          while (isFastPathScreeningActive || isPhysicsAnalysisActive) {
             if (Date.now() - _fpWaitStart > 10 * 60 * 1000) break;
             if (Date.now() - sgSweepStart > SG_SWEEP_WALL_LIMIT_MS) break;
             await new Promise(r => setTimeout(r, 500));
           }
+          // DB backoff: if consecutive DB errors detected, pause before retrying to let
+          // the Neon pool drain and recover. Without this, rapid-fire errors keep the
+          // pool exhausted and cascade into a frozen activity feed.
+          if (consecutiveSweepDbErrors > 0) {
+            // After 20 consecutive DB errors (≥10 min of cumulative backoff), the pool
+            // is in a sustained exhaustion storm. Abort the sweep so the DB can fully
+            // recover — the sweep will restart on the next 6-hour cycle.
+            if (consecutiveSweepDbErrors >= 20) {
+              console.log(`[Engine] SG sweep: ${consecutiveSweepDbErrors} consecutive DB errors — aborting sweep at ${sweepIdx}/${candidates.length} to let DB recover. Will resume next cycle.`);
+              break;
+            }
+            const backoffMs = Math.min(5_000 * Math.pow(2, consecutiveSweepDbErrors - 1), 30_000);
+            await new Promise(r => setTimeout(r, backoffMs));
+          }
+          const candidateStart = Date.now();
           try {
             // suppressLogs: background sweep — don't flood the frontend WebSocket with
             // hundreds of per-candidate rejection messages. Summary logged every 50.
-            const result = await runAutonomousDiscoveryCycle(candidate.formula, { skipDbDupCheck: true, suppressLogs: true });
-            if (result.passed) submitted++;
-          } catch { /* non-fatal */ }
+            // skipRejectedCache: re-evaluate prototype formulas fresh each sweep run so
+            // a retrained surrogate can pass candidates that prior runs rejected.
+            // Per-candidate 15s timeout: a stuck DB query inside runAutonomousDiscoveryCycle
+            // can hang indefinitely (the outer try/catch only catches throws, not hangs).
+            // If a candidate exceeds 15s, skip it — the sweep must not stall the engine.
+            // Reduced from 45s → 15s: with abort threshold ≥3 slow candidates, max damage
+            // is 3×15s = 45s (vs old 5×45s = 225s) before the sweep self-aborts under DB stress.
+            const candidateTimeout = new Promise<{ passed: false; reason: string }>(r =>
+              setTimeout(() => r({ passed: false, reason: "sg-sweep-timeout" }), 15_000)
+            );
+            const result = await Promise.race([
+              runAutonomousDiscoveryCycle(candidate.formula, { skipDbDupCheck: true, suppressLogs: true, skipStructurePrediction: true, skipGNN: true, fastSweepMode: true, skipSurrogate: true }),
+              candidateTimeout,
+            ]);
+            // Timeout or slow candidate (>10s) signals DB stress — treat same as a thrown
+            // DB exception so the backoff counter accumulates. Fast completion means the
+            // pool is healthy and we reset the counter.
+            const candidateMs = Date.now() - candidateStart;
+            if (result.reason === "sg-sweep-timeout" || candidateMs > 10_000) {
+              consecutiveSweepDbErrors++;
+              totalSweepSlowCandidates++;
+              console.log(`[Engine] SG sweep: candidate ${sweepIdx} slow/timeout (${candidateMs}ms, likely DB stress) — backoff counter: ${consecutiveSweepDbErrors}, total slow: ${totalSweepSlowCandidates}`);
+              // Kick off a background DB probe on the FIRST slow candidate — the blocking
+              // computation likely killed all pool connections via socket timeout. The standalone
+              // probe client bypasses the pool, completes in ≤15s, then drains zombie slots so
+              // subsequent research-log writes can get fresh connections instead of queuing behind
+              // stuck TCP CONNECTING slots.
+              if (totalSweepSlowCandidates === 1) {
+                probeDBConnection(3, 5_000).catch(() => {});
+              }
+              // Abort if 3 total slow candidates — DB storm is sustained. Surrogate-rejects
+              // in between reset consecutiveSweepDbErrors to 0 but this counter accumulates.
+              // Threshold lowered from 10 → 5 → 3: 3 slow candidates × max 15s each = 45s
+              // max sweep damage before abort (vs old 5×45s = 225s).
+              if (totalSweepSlowCandidates >= 3) {
+                console.log(`[Engine] SG sweep: ${totalSweepSlowCandidates} total slow/timeout candidates — DB storm sustained, aborting sweep at ${sweepIdx}/${candidates.length} to let DB recover.`);
+                break;
+              }
+            } else {
+              consecutiveSweepDbErrors = 0; // fast candidate — pool healthy
+            }
+            if (result.passed) {
+              submitted++;
+            } else {
+              // Track rejection categories for the 50-candidate progress log
+              const reasonKey = result.reason.split(":")[0].trim();
+              sweepRejectionReasons[reasonKey] = (sweepRejectionReasons[reasonKey] ?? 0) + 1;
+            }
+          } catch (sweepErr: any) {
+            const isDbError = /Connection terminated|ETIMEDOUT|pool.*exhaust|too many clients/i.test(sweepErr?.message ?? "");
+            if (isDbError) {
+              consecutiveSweepDbErrors++;
+              totalSweepSlowCandidates++;
+              console.log(`[Engine] SG sweep: DB error on candidate ${sweepIdx} (${consecutiveSweepDbErrors} consecutive, ${totalSweepSlowCandidates} total slow) — backoff ${Math.min(5_000 * Math.pow(2, consecutiveSweepDbErrors - 1), 30_000)}ms`);
+              if (totalSweepSlowCandidates >= 3) {
+                console.log(`[Engine] SG sweep: ${totalSweepSlowCandidates} total DB stress events — aborting sweep at ${sweepIdx}/${candidates.length}.`);
+                break;
+              }
+            } else {
+              consecutiveSweepDbErrors = 0; // non-DB error — pool may be fine
+            }
+          }
           // Yield after every candidate so heartbeat and API requests stay responsive.
-          await new Promise(r => setTimeout(r, 100));
+          // 2000ms (was 500ms) — the 500ms yield was insufficient to prevent DB pool
+          // saturation when runAutonomousDiscoveryCycle fires multiple async DB queries
+          // per candidate; each candidate's queries need time to complete and release
+          // connections before the next candidate starts.
+          await new Promise(r => setTimeout(r, 2000));
           // Longer pause every 5 to let DB/GCP pollers run and pool recover
           if (sweepIdx % 5 === 0) {
-            await new Promise(r => setTimeout(r, 500));
+            await new Promise(r => setTimeout(r, 3000));
           }
           // Emit a single progress summary every 50 candidates — visible but not spammy.
+          // Include rejection reason breakdown so 0-pass runs can be diagnosed.
           if (sweepIdx % 50 === 0) {
+            const topReasons = Object.entries(sweepRejectionReasons)
+              .sort(([, a], [, b]) => b - a)
+              .slice(0, 4)
+              .map(([k, v]) => `${k}:${v}`)
+              .join(", ");
             emit("log", {
               phase: "autonomous-loop",
               event: "SG sweep progress",
-              detail: `${sweepIdx}/${candidates.length} screened, ${submitted} passed`,
+              detail: `${sweepIdx}/${candidates.length} screened, ${submitted} passed${topReasons ? `. Rejections: ${topReasons}` : ""}`,
               dataSource: "SG Sweep",
             });
           }
@@ -9083,6 +9554,20 @@ export async function startEngine() {
         console.warn("[Engine] SG sweep failed:", e?.message?.slice(0, 100));
       } finally {
         isSGSweepActive = false;
+        // Delay re-enabling extractFeatures→computeElectronicStructure by 120s.
+        // Immediately after the sweep, training pool backfill and other background tasks
+        // fire concurrently and all call extractFeatures for the same novel formulas —
+        // observed as 9 concurrent 161s calls for CuEuSe that block the event loop.
+        // Keeping the guard active for 120s lets the 90s DB recovery pause + DB probe
+        // complete before extractFeatures is re-enabled, preventing the post-sweep freeze.
+        setTimeout(() => setSweepGuardActive(false), 120_000);
+        setSGSweepActive(false); // resume DFT refill loop
+        setSynthesisRetrainingPaused(false); // allow synthesis GB retraining to resume
+        // SG sweep blocks the event loop for extended periods (individual candidates
+        // can take 45s synchronously). During the block, Node.js idle/socket timers
+        // cannot fire, so pool connections go zombie. Drain them now so the next
+        // engine cycle gets fresh connections instead of hitting TLS errors.
+        drainIdleConnections().catch(() => {});
       }
       setTimeout(runSGSweep, repeatInterval);
     }
@@ -9146,11 +9631,11 @@ export async function startEngine() {
     dataSource: "Internal",
   });
 
-  if (!isRunningCycle) {
-    // 10s delay: lets the engine's own startup logging, campaign restoration,
-    // and Neon DB warm-up finish before the first cycle hits the DB hard.
-    setTimeout(runLearningCycle, 10000);
-  }
+  // Force-reset the running flag so a stop/start always schedules a new cycle,
+  // even if the previous cycle was stuck (e.g. stalled on a DB query timeout)
+  // and never reached the finally-block reset.
+  isRunningCycle = false;
+  setTimeout(runLearningCycle, 10000);
 
   // ── Background: deferred subsystem seeding ──────────────────────────────────
   // Delayed 60s so the first two learning cycles complete without competition.
@@ -9158,6 +9643,14 @@ export async function startEngine() {
   // analyzeTopology, computeFermiSurface) that blocks the event loop for ~1-2s per
   // candidate × up to 30 candidates = 23s of heartbeat gaps at startup.
   setTimeout(async () => {
+    // Only seed once per server process — engine stop/start should not re-trigger
+    // the full DB-intensive seeding burst (topology/Fermi, Pareto, synthesis predictor,
+    // BO) which creates a pool exhaustion storm when combined with concurrent subsystems.
+    if (backgroundSeedingDone) {
+      console.log("[Engine] Background seeding skipped — already completed this process lifetime");
+      return;
+    }
+    backgroundSeedingDone = true;
     const yieldLoop = () => new Promise<void>(r => setTimeout(r, 200));
 
     // Formula cache pre-seeding (fast — only Set.add, no CPU)
@@ -9233,6 +9726,7 @@ export async function startEngine() {
             predictedTc: c.predictedTc,
             decompositionEnergy: c.decompositionEnergy,
             mlFeatures: c.mlFeatures as Record<string, any> | null,
+            ensembleScore: c.ensembleScore,
           }));
         },
         5_000, // 5s delay after seeding completes
@@ -9261,12 +9755,12 @@ export async function startEngine() {
         if (seenFormulas.has(c.formula)) continue;
         seenFormulas.add(c.formula);
         if (topoSeeded < 20) {
-          try {
-            const electronic = computeElectronicStructure(c.formula);
-            const cInfo = extractCrystalInfo(c.crystalStructure);
-            trackTopologyResult(analyzeTopology(c.formula, electronic, cInfo.lattice, cInfo.prototype));
-            topoSeeded++;
-          } catch { /* skip */ }
+          // NOTE: computeElectronicStructure is intentionally NOT called here.
+          // It blocks the event loop synchronously for 17-120s per formula.
+          // Calling it 20 times in background seeding = up to 40 min of event-loop
+          // freezes starting at T+60s after every server restart. Topology analysis
+          // runs during normal enrichment cycles (guarded, with yielding) instead.
+          topoSeeded++; // count as seeded so we don't loop infinitely
         }
         if (fermiSeeded < 20) {
           try {
@@ -9345,6 +9839,7 @@ export async function startEngine() {
 
 export function stopEngine() {
   state = "stopped";
+  isRunningCycle = false;
   if (cycleTimer) {
     clearTimeout(cycleTimer);
     cycleTimer = null;

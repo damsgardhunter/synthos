@@ -3498,8 +3498,11 @@ export function computeInstabilityProximity(
       const stonerProduct = I * electronic.densityOfStatesAtFermi;
       if (stonerProduct > 0.5) {
         const chi = 1 / Math.max(0.01, 1 - stonerProduct);
-        magneticSusceptibilityPeak = Math.max(magneticSusceptibilityPeak,
-          Math.min(1.0, chi / 10));
+        // Use 1 - 1/chi normalisation: maps chi=1→0, chi=2→0.5, chi=10→0.9, chi→∞→<1.
+        // The old chi/10 cap caused all high-DOS hydrides to saturate at exactly 1.00;
+        // this formula preserves differentiation across the full range.
+        const normalised = Math.min(0.99, 1 - 1 / Math.max(1.001, chi));
+        magneticSusceptibilityPeak = Math.max(magneticSusceptibilityPeak, normalised);
       }
     }
   }
@@ -3623,31 +3626,67 @@ export function simulatePressureEffects(
     };
   }
 
+  // Optimal pressure by compound type — above P_opt, lambda decreases as phonons over-harden
+  // and Tc turns over. Data anchors: LaH10 ~160 GPa, H3S ~150 GPa, YH4 ~120 GPa.
+  // Y (Z=39) is a TM in isRareEarth() but behaves like RE for hydride pressure physics.
+  const isRELike = elements.some(e => isRareEarth(e) || e === "Y" || e === "Sc");
+  const isLightMetal = elements.some(e => ["Li","Na","Be","Mg","Al","Ca","K"].includes(e));
+  let P_opt: number;
+  if (hRatio >= 8) {
+    P_opt = isLightMetal ? 220 : 160; // Li2MgH16-like vs LaH10-like
+  } else if (hRatio >= 5) {
+    P_opt = 140; // YH6, CeH6-type
+  } else if (hRatio >= 3) {
+    P_opt = isRELike ? 110 : 100; // LaH6/Y2H7-type
+  } else if (hRatio >= 1.5) {
+    P_opt = isRELike ? 80 : 60; // lower hydrides
+  } else if (hasH && elements.some(e => ["S","Se"].includes(e))) {
+    P_opt = 150; // H3S / H3Se type
+  } else {
+    P_opt = 50; // RE without H, S/Se compounds
+  }
+
+  // lambdaBase: fraction of coupling.lambda active at P=0.
+  // High-H compounds need pressure to metallize — lambda is suppressed at ambient.
+  const lambdaBase = hRatio >= 5 ? 0.25 : hRatio >= 3 ? 0.45 : hRatio >= 1 ? 0.65 : 0.85;
+  // Max phonon stiffening factor at P_opt (calibrated to ~2x omegaLog for superhydrides)
+  const phonBoostAtPopt = hRatio >= 5 ? 0.80 : hRatio >= 2 ? 0.50 : 0.25;
+
   const pressures = [0, 10, 25, 50, 100, 150, 200];
   const curve: { pressure: number; tc: number }[] = [];
   let bestTc = 0;
   let bestP = 0;
 
   for (const p of pressures) {
-    const bwFactor = 1 + p * 0.008;
-    const phononBoost = 1 + p * 0.012;
-    const lambdaFromBW = Math.max(0.5, 1.0 / bwFactor);
+    let lambdaFactor: number;
+    let phononFactor: number;
 
-    let adjLambda = coupling.lambda * lambdaFromBW;
-    if (hRatio >= 6 && p >= 50) {
-      adjLambda = coupling.lambda * (1 + (p - 50) * 0.005);
-      adjLambda = Math.min(adjLambda, coupling.lambda * 1.8);
+    if (p <= P_opt) {
+      // Rising branch: H metallization + phonon stiffening up to P_opt.
+      const frac = p / Math.max(1, P_opt);
+      lambdaFactor = lambdaBase + (1 - lambdaBase) * frac;
+      phononFactor = 1 + phonBoostAtPopt * frac;
+    } else {
+      // Falling branch: phonons over-harden past pairing cutoff, lambda drops as 1/P^1.5.
+      // This is the turnover missing from the old model.
+      const overRatio = P_opt / p; // < 1 above P_opt
+      lambdaFactor = Math.pow(overRatio, 1.5);
+      // omega_log continues modest growth past P_opt, limited to +15% beyond P_opt value
+      const overshootFrac = Math.min((p - P_opt) / P_opt, 1.0);
+      phononFactor = (1 + phonBoostAtPopt) * (1 + 0.15 * overshootFrac);
     }
 
-    const adjOmegaLog = coupling.omegaLog * phononBoost;
+    const adjLambda = Math.max(0.01, coupling.lambda * lambdaFactor);
+    const adjOmegaLog = Math.min(coupling.omegaLog * phononFactor, 2000);
     const adjCoupling: ElectronPhononCoupling = {
       ...coupling,
       lambda: adjLambda,
-      omegaLog: Math.min(adjOmegaLog, 2000),
+      omegaLog: adjOmegaLog,
     };
 
     const result = predictTcEliashberg(adjCoupling, phonon);
-    const tc = result.predictedTc;
+    // Cap each curve point — prevents runaway values at the ceiling from boosting bestTc
+    const tc = applyAmbientTcCap(result.predictedTc, adjLambda, p, electronic.metallicity, formula);
     curve.push({ pressure: p, tc });
 
     if (tc > bestTc) {
@@ -3895,17 +3934,41 @@ export async function runFullPhysicsAnalysis(
   try {
     const mpClient = await getMPClient();
     if (mpClient.isApiAvailable()) {
-      const mpData = await mpClient.fetchAllData(formula);
+      // 30s overall timeout: fetchAllData makes 6 serial MP API calls (summary, elasticity,
+      // magnetism, phonon, electronicStructure, thermo). Each has a 60s per-request timeout
+      // but with retries the total can reach 5+ minutes with no guard. On timeout we fall
+      // through with mpSummary=null and rely on analytical fallbacks — same as no MP key.
+      const mpData = await Promise.race([
+        mpClient.fetchAllData(formula),
+        new Promise<never>((_, reject) => setTimeout(
+          () => reject(new Error(`[Physics] mpClient.fetchAllData timeout (30s) for ${formula}`)),
+          30_000
+        )),
+      ]);
       mpSummary = mpData.summary;
       mpElasticity = mpData.elasticity;
     }
-  } catch {}
+  } catch (err: unknown) {
+    if (err instanceof Error && err.message.startsWith("[Physics] mpClient.fetchAllData timeout")) {
+      console.warn(err.message, "— using analytical fallback");
+    }
+  }
 
   try {
     const dftResolver = await getDFTResolver();
     // skipXTB=true: inline xTB takes 30-90s; DFT queue handles it asynchronously.
-    dftData = await dftResolver.resolveDFTFeatures(formula, candidate.pressureGpa ?? 0, true);
-    if (dftData.dftCoverage > 0) {
+    // 90s overall timeout guards against serial MP API fence pile-ups (fetchElasticity +
+    // fetchElectronicStructure each call fetchSummary internally, creating 5-10 serial
+    // MP calls × 30s timeout = potential 5-16 min hang with no timeout).  On timeout we
+    // fall through with dftData=null and rely on analytical fallbacks.
+    dftData = await Promise.race([
+      dftResolver.resolveDFTFeatures(formula, candidate.pressureGpa ?? 0, true),
+      new Promise<null>(r => setTimeout(() => {
+        console.warn(`[Physics] resolveDFTFeatures timeout (90s) for ${formula} — using analytical fallback`);
+        r(null);
+      }, 90_000)),
+    ]);
+    if (dftData && dftData.dftCoverage > 0) {
       const desc = dftResolver.describeDFTSources(dftData);
       emit("log", {
         phase: "phase-10",
@@ -4287,15 +4350,31 @@ export async function runFullPhysicsAnalysis(
     dataSource: "Physics Engine",
   });
 
-  const manyBodyCorrections = applyManyBodyCorrections(electronicStructure, coupling, formula);
+  // GW many-body corrections must use the physically-computed alpha2F lambda as the
+  // base, not coupling.lambda (the analytical estimate). coupling.lambda can be 10-15×
+  // higher than integratedLambda for weakly-coupled systems, producing a correctedLambda
+  // wildly inconsistent with alpha2F (e.g. corrected=2.257 vs integratedLambda=0.147).
+  const mbBaseLambda = alpha2FResult.integratedLambda > 0 ? alpha2FResult.integratedLambda : coupling.lambda;
+  const mbCoupling = mbBaseLambda !== coupling.lambda ? { ...coupling, lambda: mbBaseLambda } : coupling;
+  const manyBodyCorrections = applyManyBodyCorrections(electronicStructure, mbCoupling, formula);
   emitDetail("log", {
     phase: "phase-10",
     event: "GW many-body corrections applied",
-    detail: `${formula}: Z=${manyBodyCorrections.quasiparticleWeight.toFixed(3)}, DOS renorm=${manyBodyCorrections.gwDOSRenormalization.toFixed(3)}, BW corr=${manyBodyCorrections.gwBandwidthCorrection.toFixed(3)}, vertex λ-corr=${manyBodyCorrections.vertexCorrectionLambda.toFixed(3)}, corrected λ=${manyBodyCorrections.correctedLambda.toFixed(3)}`,
+    detail: `${formula}: Z=${manyBodyCorrections.quasiparticleWeight.toFixed(3)}, DOS renorm=${manyBodyCorrections.gwDOSRenormalization.toFixed(3)}, BW corr=${manyBodyCorrections.gwBandwidthCorrection.toFixed(3)}, vertex λ-corr=${manyBodyCorrections.vertexCorrectionLambda.toFixed(3)}, corrected λ=${manyBodyCorrections.correctedLambda.toFixed(3)} (α²F base λ=${mbBaseLambda.toFixed(4)})`,
     dataSource: "Physics Engine",
   });
 
-  if (eliashberg.predictedTc > 0 && Math.abs(manyBodyCorrections.vertexCorrectionLambda - 1.0) > 0.02) {
+  // Guard: skip many-body Tc feedback if compound is ferromagnetically unstable.
+  // Stoner product >= 1.0 means FM ordering destroys singlet SC — applying a GW
+  // vertex-corrected phonon Tc boost would be unphysical.
+  const N_EF_mb = electronicStructure.densityOfStatesAtFermi;
+  const isNearFerroStoner = formulaEls.some(el => {
+    const I = getStonerParameter(el);
+    return I !== null && I * N_EF_mb >= 1.0;
+  });
+  if (eliashberg.predictedTc > 0
+    && Math.abs(manyBodyCorrections.vertexCorrectionLambda - 1.0) > 0.02
+    && !isNearFerroStoner) {
     const preMBTc = eliashberg.predictedTc;
     const mbTc = allenDynesTcRaw(
       manyBodyCorrections.correctedLambda,

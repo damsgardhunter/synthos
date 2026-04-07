@@ -3,6 +3,7 @@ import { storage } from "../storage";
 import type { EventEmitter } from "./engine";
 import { fetchSummary, isApiAvailable } from "./materials-project-client";
 import { normalizeFormula } from "./utils";
+import { openaiCircuitOpen, recordOpenAIFail, recordOpenAISuccess } from "./openai-circuit";
 
 const openai = new OpenAI({
   baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
@@ -10,6 +11,31 @@ const openai = new OpenAI({
   timeout: 20_000,
   maxRetries: 0, // Connection errors don't self-resolve; retrying turns a 20s fail into 7 min
 });
+
+// Shared circuit breaker — trips across all OpenAI callers (data-fetcher + synthesis-tracker)
+function aiCircuitOpen(): boolean { return openaiCircuitOpen(); }
+function recordAiFail(emit: EventEmitter, phase: string) {
+  recordOpenAIFail();
+  if (openaiCircuitOpen()) {
+    emit("log", { phase, event: "AI circuit opened", detail: "2 consecutive timeouts — skipping all OpenAI calls for 20 min", dataSource: "Data Fetcher" });
+  }
+}
+function recordAiSuccess() { recordOpenAISuccess(); }
+
+// Separate circuit breaker for OQMD (external REST API, unrelated to OpenAI quota).
+// OQMD has no circuit breaker so it retried every cycle even when oqmd.org is down.
+const OQMD_CIRCUIT: { fails: number; backoffUntil: number } = { fails: 0, backoffUntil: 0 };
+const OQMD_FAIL_THRESHOLD = 3;
+const OQMD_BACKOFF_MS = 15 * 60 * 1000; // 15 minutes — external site may be slow to recover
+function oqmdCircuitOpen(): boolean { return Date.now() < OQMD_CIRCUIT.backoffUntil; }
+function recordOqmdFail() {
+  OQMD_CIRCUIT.fails++;
+  if (OQMD_CIRCUIT.fails >= OQMD_FAIL_THRESHOLD) {
+    OQMD_CIRCUIT.backoffUntil = Date.now() + OQMD_BACKOFF_MS;
+    OQMD_CIRCUIT.fails = 0;
+  }
+}
+function recordOqmdSuccess() { OQMD_CIRCUIT.fails = 0; OQMD_CIRCUIT.backoffUntil = 0; }
 
 type DataSourceTag = "dft-computed" | "experimental" | "llm-estimated";
 
@@ -117,11 +143,13 @@ async function crossValidateWithMP(
       // Don't zero-out a known insulator/semiconductor band gap — MP returning 0 likely
       // means it matched a metallic polymorph or an incorrect phase. Only accept MP's
       // band gap if it's non-zero, or if the existing value is already near zero.
-      const existingBgIsReasonable = corrected.bandGap != null && corrected.bandGap > 0.5;
+      const existingBgIsNull = corrected.bandGap === null || corrected.bandGap === undefined;
+      const existingBgIsReasonable = !existingBgIsNull && corrected.bandGap > 0.5;
       const mpBgIsZero = mpData.bandGap === 0;
-      if (!(mpBgIsZero && existingBgIsReasonable)) {
-        if (corrected.bandGap === null || corrected.bandGap === undefined ||
-            Math.abs(corrected.bandGap - mpData.bandGap) > 0.5) {
+      // Guard: skip MP bandgap=0 when existing is null (null=unknown; 0=metallic — these are not equivalent)
+      // and when existing is a known non-zero gap (don't downgrade to metallic on a polymorph mismatch).
+      if (!(mpBgIsZero && (existingBgIsNull || existingBgIsReasonable))) {
+        if (existingBgIsNull || Math.abs(corrected.bandGap - mpData.bandGap) > 0.5) {
           corrections.push(`bandGap: ${corrected.bandGap} -> ${mpData.bandGap} (MP)`);
           corrected.bandGap = mpData.bandGap;
         }
@@ -129,11 +157,13 @@ async function crossValidateWithMP(
     }
 
     if (mpData.formationEnergyPerAtom !== undefined && mpData.formationEnergyPerAtom !== null) {
-      // Don't overwrite a non-zero formation energy with 0 — MP returning 0 likely means
-      // a failed lookup or wrong phase match, not a genuinely zero-energy compound.
-      const existingFeIsReasonable = corrected.formationEnergy != null && Math.abs(corrected.formationEnergy) > 0.3;
+      // Don't overwrite null or non-zero formation energy with 0 — MP returning 0 likely means
+      // elemental reference phase, failed lookup, or wrong phase match.
+      // null = unknown; 0 = specifically zero eV/atom (elemental reference). These are not equivalent.
+      const existingFeIsNull = corrected.formationEnergy === null || corrected.formationEnergy === undefined;
+      const existingFeIsReasonable = !existingFeIsNull && Math.abs(corrected.formationEnergy) > 0.3;
       const mpFeIsZero = mpData.formationEnergyPerAtom === 0;
-      if (!(mpFeIsZero && existingFeIsReasonable)) {
+      if (!(mpFeIsZero && (existingFeIsNull || existingFeIsReasonable))) {
         if (corrected.formationEnergy === null || corrected.formationEnergy === undefined ||
             Math.abs(corrected.formationEnergy - mpData.formationEnergyPerAtom) > 0.3) {
           corrections.push(`formationEnergy: ${corrected.formationEnergy} -> ${mpData.formationEnergyPerAtom} (MP)`);
@@ -200,6 +230,10 @@ export async function fetchOQMDMaterials(
   limit = 10,
   offset = 0
 ): Promise<number> {
+  if (oqmdCircuitOpen()) {
+    // Don't emit a log — this fires every cycle and would spam the feed
+    return 0;
+  }
   let indexed = 0;
   try {
     emit("log", { phase: "phase-4", event: "OQMD fetch started", detail: `Requesting ${limit} entries from OQMD API (offset ${offset})`, dataSource: "OQMD" });
@@ -208,10 +242,12 @@ export async function fetchOQMDMaterials(
     const resp = await fetchWithTimeout(url, 20000);
 
     if (!resp.ok) {
+      recordOqmdFail();
       emit("log", { phase: "phase-4", event: "OQMD fetch failed", detail: `HTTP ${resp.status}: ${resp.statusText}`, dataSource: "OQMD" });
       return 0;
     }
 
+    recordOqmdSuccess();
     const data = await resp.json() as any;
     const entries: OQMDEntry[] = data?.data ?? [];
 
@@ -261,6 +297,7 @@ export async function fetchOQMDMaterials(
       emit("progress", { phase: 4, newItems: indexed });
     }
   } catch (err: any) {
+    recordOqmdFail();
     emit("log", { phase: "phase-4", event: "OQMD fetch error", detail: err.message?.slice(0, 200) || "Unknown error", dataSource: "OQMD" });
   }
   return indexed;
@@ -293,6 +330,10 @@ let elementTopicIndex = 0;
 export async function fetchElementFocusedMaterials(
   emit: EventEmitter
 ): Promise<number> {
+  if (aiCircuitOpen()) {
+    emit("log", { phase: "phase-4", event: "Material fetch skipped", detail: "AI circuit open — backing off after repeated timeouts", dataSource: "Materials Science DB" });
+    return 0;
+  }
   let indexed = 0;
   const topic = ELEMENT_FOCUSED_TOPICS[elementTopicIndex % ELEMENT_FOCUSED_TOPICS.length];
   elementTopicIndex++;
@@ -336,6 +377,7 @@ Return JSON with 'materials' array containing exactly 5 materials. Only real com
       max_completion_tokens: 1200,
     });
 
+    recordAiSuccess();
     const content = response.choices[0]?.message?.content;
     if (!content) return 0;
 
@@ -410,6 +452,9 @@ Return JSON with 'materials' array containing exactly 5 materials. Only real com
       emit("progress", { phase: 4, newItems: indexed });
     }
   } catch (err: any) {
+    if (err.message?.includes("timed out") || err.message?.includes("timeout") || err.message?.includes("ETIMEDOUT")) {
+      recordAiFail(emit, "phase-4");
+    }
     emit("log", {
       phase: "phase-4",
       event: "Material DB fetch error",
@@ -488,6 +533,10 @@ let knownMaterialIndex = 0;
 export async function fetchKnownMaterials(
   emit: EventEmitter
 ): Promise<number> {
+  if (aiCircuitOpen()) {
+    // Circuit open — AI is timing out, skip silently to avoid feed spam
+    return 0;
+  }
   let indexed = 0;
   const topic = KNOWN_MATERIAL_TOPICS[knownMaterialIndex % KNOWN_MATERIAL_TOPICS.length];
   knownMaterialIndex++;
@@ -577,6 +626,12 @@ Return JSON with 'materials' array containing exactly 5 materials. Only include 
           props.mpCorrected = true;
           props.corrections = corrections;
         }
+        // Beginner/common materials (water, salt, steel, etc.) are knowledge-base
+        // entries only — they must never enter ML training data since they would
+        // skew the distribution away from superconductor-relevant compounds.
+        if (topic.category === "beginner") {
+          props.mlExclude = true;
+        }
 
         await storage.insertMaterial({
           id,
@@ -610,6 +665,7 @@ Return JSON with 'materials' array containing exactly 5 materials. Only include 
       emit("progress", { phase: 4, newItems: indexed });
     }
   } catch (err: any) {
+    recordAiFail(emit, "phase-4");
     emit("log", {
       phase: "phase-4",
       event: "Known materials import error",

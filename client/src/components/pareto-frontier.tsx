@@ -12,6 +12,7 @@ interface ParetoObjectives {
   tc: number;
   stability: number;
   synthesizability: number;
+  tcIsProxy?: boolean;
 }
 
 interface ParetoResult {
@@ -35,6 +36,7 @@ interface PlotPoint {
   synthesizability: number;
   rank: number;
   isFront: boolean;
+  isTcProxy: boolean;
 }
 
 /** Map synthesizability [0,1] → a CSS hsl colour green→yellow→red */
@@ -58,7 +60,10 @@ function CustomTooltip({ active, payload }: any) {
   return (
     <div className="bg-popover border border-border rounded-md px-3 py-2 text-xs shadow-md space-y-1">
       <p className="font-semibold font-mono text-foreground">{d.formula}</p>
-      <p className="text-muted-foreground">Tc: <span className="text-foreground font-mono">{(d.tcK).toFixed(0)} K</span></p>
+      <p className="text-muted-foreground">
+        Tc: <span className="text-foreground font-mono">{(d.tcK).toFixed(0)} K</span>
+        {d.isTcProxy && <span className="ml-1 text-amber-500">(ML proxy)</span>}
+      </p>
       <p className="text-muted-foreground">Stability: <span className="text-foreground font-mono">{(d.stability * 100).toFixed(0)}%</span></p>
       <p className="text-muted-foreground">Synthesizability: <span className="text-foreground font-mono">{(d.synthesizability * 100).toFixed(0)}%</span></p>
       <p className="text-muted-foreground">Pareto rank: <span className="font-mono" style={{ color: rankColor(d.rank) }}>{d.rank}</span></p>
@@ -81,6 +86,7 @@ export function ParetoFrontierChart() {
       synthesizability: r.objectives.synthesizability,
       rank: r.rank,
       isFront: r.isFront,
+      isTcProxy: r.objectives.tcIsProxy ?? false,
     }));
 
   // Split into front (rank-1) and others for layering

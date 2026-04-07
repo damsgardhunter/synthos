@@ -291,7 +291,10 @@ function buildStepsFromTemplate(
         reactants: i === 0 ? precursorFormulas : [intermediateRoute[i - 1].split(" → ")[1].trim()],
         products: [product],
         temperature: stepTemp,
-        pressure: template.method === "high-pressure" ? pressure : 0,
+        // Always propagate the thermodynamic pressure requirement.  Non-high-pressure
+        // templates that happen to be selected for a high-pressure compound will
+        // still carry the correct pressure rather than silently reporting 0 GPa.
+        pressure: pressure > 0 ? pressure : 0,
         atmosphere: template.atmosphere[0] || "Ar",
         reactionType: template.method,
         duration: `${Math.round(template.durationRange[0] + (template.durationRange[1] - template.durationRange[0]) * 0.3)} hours`,
@@ -372,7 +375,7 @@ function buildStepsFromTemplate(
         reactants: ["pellet"],
         products: [formula],
         temperature: synthTemp,
-        pressure: 0,
+        pressure: pressure > 0 ? pressure : 0,
         atmosphere: elements.includes("O") ? "flowing O2" : "Ar/5% H2",
         reactionType: "sintering",
         duration: `${Math.round(template.durationRange[0] + (template.durationRange[1] - template.durationRange[0]) * 0.4)} hours`,
@@ -384,7 +387,7 @@ function buildStepsFromTemplate(
         reactants: precursorFormulas,
         products: ["arc-melted button"],
         temperature: 3000,
-        pressure: 0,
+        pressure: pressure > 0 ? pressure : 0,
         atmosphere: "ultra-high purity Ar",
         reactionType: "arc-melting",
         duration: "5 minutes per melt, 4 flips",
@@ -396,7 +399,7 @@ function buildStepsFromTemplate(
         reactants: ["arc-melted button"],
         products: [formula],
         temperature: Math.round(synthTemp * 0.6),
-        pressure: 0,
+        pressure: pressure > 0 ? pressure : 0,
         atmosphere: "sealed quartz tube under Ar",
         reactionType: "annealing",
         duration: "7 days",

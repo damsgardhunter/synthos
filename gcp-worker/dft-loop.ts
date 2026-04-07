@@ -84,12 +84,20 @@ async function claimAndRunJob(): Promise<boolean> {
       }
     } catch { /* non-fatal */ }
 
+    // Explicit phonon jobs must run DFPT regardless of ensembleScore.
+    // The DFPT gate (opts.ensembleScore > 0.7) would otherwise skip e-ph
+    // if the DB score hasn't been updated yet.
+    const forcePhonon = jobType === "phonon";
+    if (forcePhonon) {
+      console.log(`[DFT-GCP] Job #${jobId} is phonon type — forcing DFPT EPC (ensembleScore override: 1.0)`);
+    }
+
     const dftResult = await runFullDFT(formula, {
       startAttempt,
       pressureGpa: jobPressureGpa,
-      ensembleScore,
+      ensembleScore: forcePhonon ? 1.0 : ensembleScore,
       forceSpin: isTSCJob,
-      skipEph,
+      skipEph: forcePhonon ? false : skipEph,
     });
 
     const scfSuccess = dftResult.scf?.converged || false;
@@ -168,9 +176,31 @@ async function claimAndRunJob(): Promise<boolean> {
   return true;
 }
 
+async function resetZombieJobs(): Promise<void> {
+  try {
+    const result = await db.execute(
+      `UPDATE dft_jobs
+       SET status = 'queued',
+           error_message = 'Auto-reset: zombie job from previous worker session',
+           started_at = NULL,
+           worker_node = NULL
+       WHERE status = 'running'
+       AND started_at < NOW() - INTERVAL '2 hours'`
+    );
+    const count = (result as any).rowCount ?? (result as any).rows?.length ?? 0;
+    if (count > 0) {
+      console.log(`[DFT-GCP] Zombie cleanup: reset ${count} stale running job(s) to queued`);
+    }
+  } catch (err: any) {
+    console.warn(`[DFT-GCP] Zombie cleanup failed (non-fatal): ${err.message}`);
+  }
+}
+
 export async function startDFTLoop(): Promise<void> {
   console.log(`[DFT-GCP] Worker started — max ${MAX_CONCURRENT} concurrent jobs, poll every ${POLL_INTERVAL_MS / 1000}s`);
   console.log(`[DFT-GCP] QE_BIN_DIR=${process.env.QE_BIN_DIR ?? "(auto)"}`);
+
+  await resetZombieJobs();
 
   // Probe for pw.x before starting the job loop. Failing early with a clear
   // message is better than silently failing 1000+ jobs with ENOENT.
