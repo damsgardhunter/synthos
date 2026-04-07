@@ -47,7 +47,9 @@ process.env.OFFLOAD_GNN_TO_GCP = "true";
 
 const ENABLE_DFT = process.env.ENABLE_DFT_WORKER !== "false";
 const ENABLE_GNN = process.env.ENABLE_GNN_WORKER !== "false";
-const ENABLE_XGB = process.env.ENABLE_XGB_WORKER !== "false";
+// XGBoost is now trained in Python alongside GNN (matching Colab pipeline).
+// The JS gradient boosting fallback is disabled — Python XGBoost is the primary model.
+const ENABLE_XGB = process.env.ENABLE_XGB_WORKER === "true";
 const ENABLE_ML  = process.env.ENABLE_ML_WORKER  !== "false";
 
 console.log("=".repeat(60));

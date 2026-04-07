@@ -29,6 +29,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import numpy as np
 import torch
 import torch.nn as nn
 import uvicorn
@@ -674,7 +675,134 @@ async def train(req: TrainRequest):
         )
         _last_metrics = metrics.model_dump()
 
+        # ── Train XGBoost (matching Colab Cell 11 exactly) ────────────────────
+        try:
+            xgb_metrics = await loop.run_in_executor(None, lambda: _train_xgboost(
+                all_graphs, pressure_graphs=None, job_id=job_id
+            ))
+            if xgb_metrics:
+                log.info(
+                    f"[Job#{job_id}] XGBoost trained — "
+                    f"R²={xgb_metrics['r2']:.4f} MAE={xgb_metrics['mae']:.2f}K "
+                    f"RMSE={xgb_metrics['rmse']:.2f}K "
+                    f"n_train={xgb_metrics['n_train']} n_val={xgb_metrics['n_val']} "
+                    f"pressure_importance={xgb_metrics['pressure_importance']:.4f}"
+                )
+        except Exception as e:
+            log.warning(f"[Job#{job_id}] XGBoost training failed (GNN still saved): {e}")
+
         return TrainResponse(job_id=job_id, status="done", metrics=metrics)
+
+
+def _graph_to_features(g: SuperconGraph) -> np.ndarray:
+    """Extract tabular features from a graph for XGBoost.
+    Returns global_features + pressure_gpa as the final column.
+    Matches Colab Cell 11 graph_to_features() exactly.
+    """
+    base = g.global_features.numpy().astype(np.float32)
+    pressure = np.array([getattr(g, 'pressure_gpa', 0.0)], dtype=np.float32)
+    return np.concatenate([base, pressure])
+
+
+def _train_xgboost(
+    all_graphs: List[SuperconGraph],
+    pressure_graphs: Optional[List[SuperconGraph]] = None,
+    job_id: int = 0,
+) -> Optional[Dict[str, float]]:
+    """
+    Train XGBoost on the same data as GNN, matching Colab Cell 11 exactly.
+    Saves xgb_model.pkl to WEIGHTS_DIR.
+    """
+    global _xgb_model
+    try:
+        import xgboost as xgb
+        from sklearn.model_selection import train_test_split
+        from sklearn.metrics import r2_score
+    except ImportError:
+        log.warning("xgboost/sklearn not installed — skipping XGBoost training")
+        return None
+
+    # Collect SC graphs with Tc >= 1.0 (same filter as Colab)
+    sc_graphs = [g for g in all_graphs if g.target_tc and g.target_tc >= 1.0]
+
+    if len(sc_graphs) < 20:
+        log.warning(f"[XGB] Only {len(sc_graphs)} SC graphs — need ≥20, skipping")
+        return None
+
+    # Deduplicate by (formula, pressure) — same as Colab
+    seen = set()
+    deduped = []
+    for g in sc_graphs:
+        key = (getattr(g, 'formula', ''), round(getattr(g, 'pressure_gpa', 0.0), 1))
+        if key not in seen:
+            seen.add(key)
+            deduped.append(g)
+
+    X = np.array([_graph_to_features(g) for g in deduped])
+    y = np.array([g.target_tc for g in deduped])
+
+    log.info(f"[XGB] Training on {len(deduped)} SC samples, {X.shape[1]} features "
+             f"(last=pressure_gpa), Tc range {y.min():.1f}-{y.max():.1f}K, "
+             f"samples with P>0: {int((X[:, -1] > 0).sum())}")
+
+    X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)
+
+    # Exact Colab hyperparams
+    xgb_model = xgb.XGBRegressor(
+        n_estimators=600,
+        max_depth=7,
+        learning_rate=0.04,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        min_child_weight=3,
+        gamma=0.1,
+        random_state=42,
+        tree_method="hist",
+        device="cuda" if torch.cuda.is_available() else "cpu",
+    )
+    xgb_model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
+
+    xgb_preds = xgb_model.predict(X_val)
+    xgb_r2   = float(r2_score(y_val, xgb_preds))
+    xgb_mae  = float(np.mean(np.abs(xgb_preds - y_val)))
+    xgb_rmse = float(np.sqrt(np.mean((xgb_preds - y_val) ** 2)))
+
+    pressure_importance = float(xgb_model.feature_importances_[-1])
+
+    # Save model
+    with open(XGB_PATH, "wb") as f:
+        pickle.dump(xgb_model, f)
+    _xgb_model = xgb_model
+
+    # Save metadata
+    xgb_meta = {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "r2": round(xgb_r2, 4),
+        "mae_K": round(xgb_mae, 2),
+        "rmse_K": round(xgb_rmse, 2),
+        "n_train": len(X_train),
+        "n_val": len(X_val),
+        "n_features": X_train.shape[1],
+        "pressure_aware": True,
+        "pressure_col_idx": int(X_train.shape[1] - 1),
+        "pressure_importance": round(pressure_importance, 4),
+        "tc_range_min": float(y_train.min()),
+        "tc_range_max": float(y_train.max()),
+        "n_estimators": 600,
+        "sc_for_xgb": len(deduped),
+        "sc_with_pressure": int((X[:, -1] > 0).sum()),
+    }
+    meta_path = WEIGHTS_DIR / "xgb_metadata.json"
+    with open(meta_path, "w") as f:
+        json.dump(xgb_meta, f, indent=2)
+
+    log.info(f"[XGB] Saved model to {XGB_PATH} and metadata to {meta_path}")
+
+    return {
+        "r2": xgb_r2, "mae": xgb_mae, "rmse": xgb_rmse,
+        "n_train": len(X_train), "n_val": len(X_val),
+        "pressure_importance": pressure_importance,
+    }
 
 
 @app.post("/predict", response_model=PredictResponse)
