@@ -13,10 +13,10 @@ import { isGNNMajorTrainingActive, setXGBTrainingActive } from "./training-prior
 const POLL_INTERVAL_MS = 15_000;
 let running = true;
 
-// XGB hyperparameters — match what the local server uses
-const N_TREES_BASE = 300;
-const LR_BASE = 0.05;
-const DEPTH_BASE = 6;
+// XGB hyperparameters — aligned with Colab training pipeline
+const N_TREES_BASE = 600;
+const LR_BASE = 0.04;
+const DEPTH_BASE = 7;
 const ENSEMBLE_SIZE = 5;
 const BOOTSTRAP_RATIO = 0.8;
 

@@ -45,6 +45,7 @@ from superconductor_gnn import (
     SuperconGraph, ENSEMBLE_SIZE, TC_MAX_K,
 )
 from graph_builder import build_crystal_graph
+from training_data import KNOWN_TC, HYDRIDE_PRESSURE_GPA, PRESSURE_TC_DATA
 
 # ── Config ────────────────────────────────────────────────────────────────────
 PORT          = int(os.environ.get("GNN_SERVICE_PORT", "8765"))
@@ -489,6 +490,44 @@ async def train(req: TrainRequest):
 
         log.info(f"[Job#{job_id}] Built {len(all_graphs)} valid graphs "
                  f"({len(req.training_data) - len(all_graphs)} skipped)")
+
+        # ── Augment with curated pressure-Tc sweep data (matches Colab) ──────
+        existing_keys = set()
+        for g in all_graphs:
+            f = getattr(g, "formula", "")
+            p = round(getattr(g, "pressure_gpa", 0.0), 1)
+            existing_keys.add((f, p))
+
+        pressure_added = 0
+        for formula, pressure, tc in PRESSURE_TC_DATA:
+            if (formula, round(pressure, 1)) in existing_keys:
+                continue
+            try:
+                g = build_crystal_graph(formula=formula, pressure_gpa=pressure)
+                g.target_tc  = tc if tc > 0 else None
+                g.target_psc = 1.0 if tc > 0 else 0.0
+                g.formula    = formula
+                all_graphs.append(g)
+                existing_keys.add((formula, round(pressure, 1)))
+                pressure_added += 1
+            except Exception:
+                pass
+
+        # Apply KNOWN_TC labels to any unlabeled graphs matching curated formulas
+        known_labeled = 0
+        for g in all_graphs:
+            f = getattr(g, "formula", "")
+            if f in KNOWN_TC and g.target_tc is None:
+                tc = KNOWN_TC[f]
+                g.target_tc  = tc if tc > 0 else None
+                g.target_psc = 1.0 if tc > 0 else 0.0
+                known_labeled += 1
+            if f in HYDRIDE_PRESSURE_GPA and getattr(g, "pressure_gpa", 0.0) == 0.0:
+                g.pressure_gpa = HYDRIDE_PRESSURE_GPA[f]
+
+        if pressure_added > 0 or known_labeled > 0:
+            log.info(f"[Job#{job_id}] Augmented: +{pressure_added} pressure sweeps, "
+                     f"{known_labeled} KNOWN_TC labels applied")
 
         if len(all_graphs) < 10:
             return TrainResponse(

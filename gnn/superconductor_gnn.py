@@ -927,7 +927,7 @@ class MultitaskLoss(nn.Module):
 # Training utilities
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def make_optimizer(model: SuperconductorGNN, lr: float = 1e-3) -> torch.optim.Optimizer:
+def make_optimizer(model: SuperconductorGNN, lr: float = 3e-4) -> torch.optim.Optimizer:
     """
     AdamW with per-group learning rates matching the TS training loop:
       - Graph layers (CGCNN, attention, 3-body): 0.3× base LR
@@ -954,7 +954,7 @@ def make_optimizer(model: SuperconductorGNN, lr: float = 1e-3) -> torch.optim.Op
     )
 
 
-def cosine_annealing_lr(optimizer, epoch: int, n_epochs: int, lr_init: float = 1e-3):
+def cosine_annealing_lr(optimizer, epoch: int, n_epochs: int, lr_init: float = 3e-4):
     """
     Cosine annealing: lr(t) = lr_init * (0.1 + 0.9 * 0.5 * (1 + cos(π*t/T)))
     Matches the TS cosine schedule.
@@ -965,8 +965,8 @@ def cosine_annealing_lr(optimizer, epoch: int, n_epochs: int, lr_init: float = 1
 
 
 def compute_n_epochs(n_samples: int) -> int:
-    """Epoch schedule from graph-neural-net.ts."""
-    return max(30, min(150, math.ceil(60_000 / max(n_samples, 1))))
+    """Fixed 80 epochs to match Colab training pipeline."""
+    return 80
 
 
 def curriculum_difficulty(tc: float, n_elements: int) -> float:
@@ -999,7 +999,7 @@ class GNNTrainer:
         self,
         model:   SuperconductorGNN,
         device:  Optional[torch.device] = None,
-        lr:      float = 1e-3,
+        lr:      float = 3e-4,
     ):
         self.model  = model
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
