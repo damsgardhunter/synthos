@@ -464,6 +464,57 @@ async function loadMPContrastSamples(existingFormulas: Set<string>, scCount: num
   }
 }
 
+// ── MP Cuprate + Hydride fetch (matches Colab Cell 6) ─────────────────────────
+// Fetches cuprate (Cu+O) and hydride (H) metallic materials from the MP cache.
+// These get KNOWN_TC labels applied in server.py for Tc supervision, or serve
+// as unlabeled structural training examples.
+
+async function loadMPCuprateHydrideSamples(existingFormulas: Set<string>): Promise<TrainingSample[]> {
+  try {
+    const rows = await db.execute(
+      `SELECT formula, data FROM mp_material_cache
+       WHERE data_type = 'summary'
+         AND (formula LIKE '%Cu%' OR formula LIKE '%H%')
+       LIMIT 5000`
+    );
+    const items: any[] = (rows as any).rows ?? (Array.isArray(rows) ? rows : []);
+    const samples: TrainingSample[] = [];
+    for (const row of items) {
+      const formula = row.formula as string;
+      if (!formula || existingFormulas.has(formula)) continue;
+      const d = row.data as any;
+      if (!d) continue;
+      // Skip insulators — only metallic cuprates/hydrides are SC candidates
+      if (d.bandGap != null && d.bandGap > 0.1) continue;
+      // Skip high energy-above-hull (unstable)
+      if (d.energyAboveHull != null && d.energyAboveHull > 0.15) continue;
+      const isCuprate = /Cu/.test(formula) && /O/.test(formula);
+      const isHydride = /H/.test(formula);
+      if (!isCuprate && !isHydride) continue;
+      const spaceGroup = d.symmetry?.symbol ?? undefined;
+      const crystalSystem = d.symmetry?.crystal_system?.toLowerCase() ?? undefined;
+      samples.push({
+        formula,
+        tc: 0, // unlabeled — KNOWN_TC in server.py will override if matched
+        formationEnergy: d.formationEnergyPerAtom ?? undefined,
+        bandgap: d.bandGap != null && d.bandGap >= 0 ? d.bandGap : undefined,
+        structure: spaceGroup || crystalSystem
+          ? { spaceGroup, crystalSystem, dimensionality: undefined }
+          : undefined,
+        prototype: undefined,
+        sourceTag: isCuprate ? 'mp-cuprate' : 'mp-hydride',
+      });
+    }
+    const cuprates = samples.filter(s => s.sourceTag === 'mp-cuprate').length;
+    const hydrides = samples.filter(s => s.sourceTag === 'mp-hydride').length;
+    console.log(`[GNN-GCP] loadMPCuprateHydrideSamples: ${samples.length} total (${cuprates} cuprates, ${hydrides} hydrides)`);
+    return samples;
+  } catch (err: any) {
+    console.warn(`[GNN-GCP] loadMPCuprateHydrideSamples failed: ${err.message?.slice(0, 120)}`);
+    return [];
+  }
+}
+
 // ── Job processing ────────────────────────────────────────────────────────────
 
 async function processNextGnnJob(): Promise<boolean> {
@@ -563,6 +614,16 @@ async function processNextGnnJob(): Promise<boolean> {
   if (mpContrast.length > 0) {
     trainingData = [...trainingData, ...mpContrast];
     console.log(`[GNN-GCP] Augmented job #${jobId} with ${mpContrast.length} MP contrast samples (Tc=0) — total ${trainingData.length}`);
+  }
+
+  // Augment with MP cuprates + hydrides (matches Colab Cell 6).
+  // These get KNOWN_TC labels applied in server.py; unlabeled ones serve
+  // as structural training examples.
+  const mpCuprateHydride = await loadMPCuprateHydrideSamples(existingFormulas);
+  if (mpCuprateHydride.length > 0) {
+    trainingData = [...trainingData, ...mpCuprateHydride];
+    mpCuprateHydride.forEach(s => existingFormulas.add(s.formula));
+    console.log(`[GNN-GCP] Augmented job #${jobId} with ${mpCuprateHydride.length} MP cuprate/hydride samples — total ${trainingData.length}`);
   }
 
   // Split BEFORE training so validation data is never seen by the models.

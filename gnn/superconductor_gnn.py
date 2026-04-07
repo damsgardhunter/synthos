@@ -954,14 +954,16 @@ def make_optimizer(model: SuperconductorGNN, lr: float = 3e-4) -> torch.optim.Op
     )
 
 
-def cosine_annealing_lr(optimizer, epoch: int, n_epochs: int, lr_init: float = 3e-4):
+def cosine_annealing_lr(optimizer, epoch: int, n_epochs: int, lr_init: float = 3e-4, eta_min: float = 3e-6):
     """
-    Cosine annealing: lr(t) = lr_init * (0.1 + 0.9 * 0.5 * (1 + cos(π*t/T)))
-    Matches the TS cosine schedule.
+    Cosine annealing matching Colab: CosineAnnealingLR(T_max=80, eta_min=3e-6).
+    lr(t) = eta_min + (lr_init - eta_min) * 0.5 * (1 + cos(π*t/T))
     """
-    scale = 0.1 + 0.9 * 0.5 * (1.0 + math.cos(math.pi * epoch / max(n_epochs, 1)))
+    cos_val = 0.5 * (1.0 + math.cos(math.pi * epoch / max(n_epochs, 1)))
     for g in optimizer.param_groups:
-        g["lr"] = g.get("_base_lr", g["lr"]) * scale
+        base_lr = g.get("_base_lr", g["lr"])
+        g_eta_min = eta_min * (base_lr / lr_init)  # scale eta_min proportionally for per-group LRs
+        g["lr"] = g_eta_min + (base_lr - g_eta_min) * cos_val
 
 
 def compute_n_epochs(n_samples: int) -> int:

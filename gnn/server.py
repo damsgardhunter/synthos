@@ -206,23 +206,25 @@ def sample_to_graph(s: TrainingSample) -> Optional[SuperconGraph]:
         return None
 
 
-def _split_train_val(
+def _split_train_val_test(
     graphs: List[SuperconGraph],
-    val_frac: float = 0.20,
+    val_frac: float = 0.15,
+    test_frac: float = 0.15,
     seed: int = 42,
-) -> tuple[List[SuperconGraph], List[SuperconGraph]]:
+) -> tuple[List[SuperconGraph], List[SuperconGraph], List[SuperconGraph]]:
     """
-    Tc-stratified split: bin SC samples by Tc range so val covers
-    all temperature regimes (including high-Tc hydrides >200K).
-    Tc=0 contrast graphs go entirely to train.
+    Tc-stratified train/val/test split matching Colab Cell 8:
+    15% test, 15% val, 70% train from SC samples.
+    Each Tc bin [0-10, 10-30, 30-77, 77-150, 150-200, 200-400]K gets
+    proportional coverage in val AND test.
+    Tc=0 contrast goes entirely to train.
     """
-    import random
-    rng = random.Random(seed)
+    import random as _random
+    rng = _random.Random(seed)
 
     sc  = [g for g in graphs if g.target_tc and g.target_tc >= 1.0]
     nsc = [g for g in graphs if not g.target_tc or g.target_tc < 1.0]
 
-    # Bin SC graphs into Tc strata for proportional splitting
     TC_BINS = [0, 10, 30, 77, 150, 200, 400]
     strata: List[List[SuperconGraph]] = [[] for _ in range(len(TC_BINS) - 1)]
     for g in sc:
@@ -231,17 +233,23 @@ def _split_train_val(
                 strata[i].append(g)
                 break
 
+    test_graphs:  List[SuperconGraph] = []
     val_graphs:   List[SuperconGraph] = []
     train_sc:     List[SuperconGraph] = []
 
-    for bucket in strata:
+    for i, bucket in enumerate(strata):
         rng.shuffle(bucket)
-        n_val_i = max(1, int(len(bucket) * val_frac)) if len(bucket) >= 5 else 0
-        val_graphs += bucket[:n_val_i]
-        train_sc   += bucket[n_val_i:]
+        n = len(bucket)
+        n_test_i = max(1, int(n * test_frac)) if n >= 5 else 0
+        n_val_i  = max(1, int(n * val_frac))  if n >= 5 else 0
+        test_graphs += bucket[:n_test_i]
+        val_graphs  += bucket[n_test_i:n_test_i + n_val_i]
+        train_sc    += bucket[n_test_i + n_val_i:]
+        lo, hi = TC_BINS[i], TC_BINS[i + 1]
+        log.debug(f"  Stratum {lo:>3}-{hi:<4}K: {n} total -> {n_test_i} test, {n_val_i} val, {n - n_test_i - n_val_i} train")
 
     train = train_sc + nsc
-    return train, val_graphs
+    return train, val_graphs, test_graphs
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -536,8 +544,9 @@ async def train(req: TrainRequest):
                 metrics=MetricsResponse(),
             )
 
-        # ── Fix 2: Tc-stratified split (covers all Tc ranges in val) ─────────
-        train_graphs, val_graphs = _split_train_val(all_graphs, val_frac=0.20, seed=42)
+        # ── Tc-stratified split matching Colab (15% val, 15% test) ────────────
+        train_graphs, val_graphs, test_graphs = _split_train_val_test(all_graphs, val_frac=0.15, test_frac=0.15, seed=42)
+        log.info(f"[Job#{job_id}] Split: {len(test_graphs)} test, {len(val_graphs)} val held out")
 
         # Collect val formulas to prevent data leakage from pressure augmentation
         val_formulas = {getattr(g, "formula", None) for g in val_graphs} - {None}
@@ -608,8 +617,9 @@ async def train(req: TrainRequest):
 
         wall_sec = time.perf_counter() - t0
 
-        # ── Evaluate on held-out val set ──────────────────────────────────────
+        # ── Evaluate on held-out val + test sets ──────────────────────────────
         val_m   = await loop.run_in_executor(None, lambda: compute_metrics(models, val_graphs))
+        test_m  = await loop.run_in_executor(None, lambda: compute_metrics(models, test_graphs))
         train_m = await loop.run_in_executor(
             None, lambda: compute_metrics(models, sc_train[:200])
         )
@@ -623,6 +633,7 @@ async def train(req: TrainRequest):
         log.info(
             f"[Job#{job_id}] {wall_sec:.0f}s | "
             f"VAL(n={val_n}) R²={r2:.3f} MAE={mae:.1f}K RMSE={rmse:.1f}K | "
+            f"TEST(n={test_m['n']}) R²={test_m['r2']:.3f} MAE={test_m['mae']:.1f}K | "
             f"TRAIN R²={train_m['r2']:.3f} MAE={train_m['mae']:.1f}K | "
             f"CI95-cov={cal['coverage']*100:.1f}% width={cal['mean_width']:.1f}K"
         )
