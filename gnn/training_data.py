@@ -61,6 +61,28 @@ KNOWN_TC = {
     "UBe13": 0.85, "UPt3": 0.54, "CeCoIn5": 2.3, "CeRhIn5": 2.1, "PuCoGa5": 18.5,
     # Other notable
     "Sr2RuO4": 1.5, "K3C60": 19.0, "Rb3C60": 29.0, "Cs3C60": 38.0, "CaC6": 11.5,
+    # Binary hydrides (low/zero Tc — important negatives for MP matching)
+    "ScH2": 0.0, "ZrH2": 4.0, "YH2": 0.0, "LaH2": 0.0, "CeH3": 0.0, "PrH3": 0.0,
+    "NdH3": 0.0, "SmH2": 0.0, "GdH3": 0.0, "DyH3": 0.0, "HoH3": 0.0, "ErH3": 0.0,
+    "TmH3": 0.0, "LuH3": 0.0, "VH": 0.0, "NbH": 1.0, "TaH": 0.0, "CrH": 0.0,
+    # More cuprate parents / non-SC variants (MP matching)
+    "LaCuO3": 0.0, "YCuO3": 0.0, "BiCuO3": 0.0, "CuO2": 0.0,
+    "LiCuO2": 0.0, "LiCu2O2": 0.0, "CuCrO2": 0.0, "ScCuO2": 0.0,
+    "Gd2CuO4": 0.0, "Eu2CuO4": 20.0, "Sm2CuO4": 0.0,
+    # Elemental superconductors
+    "Nb": 9.3, "V": 5.4, "Pb": 7.2, "Sn": 3.7, "In": 3.4, "Al": 1.2,
+    "Ta": 4.5, "La": 6.0, "Hg": 4.15, "Re": 1.7, "Mo": 0.92,
+    "Zr": 0.61, "Ti": 0.4, "W": 0.015, "Ir": 0.11, "Os": 0.66,
+    # More A15 and intermetallics
+    "Nb3Si": 19.0, "V3Ge": 6.0, "Cr3Si": 0.0, "Mo3Si": 1.3,
+    "NbTi": 10.0, "NbZr": 11.0,
+    # Chalcogenides
+    "NbSe2": 7.2, "NbS2": 6.0, "TaS2": 0.8, "TaSe2": 0.15,
+    "MoS2": 0.0, "WS2": 0.0, "PdTe2": 1.7,
+    # Nickelate superconductors
+    "NdNiO2": 15.0, "LaNiO2": 0.0, "PrNiO2": 12.0,
+    # Bismuthides
+    "NiBi3": 4.25, "PtBi2": 1.2, "RhBi": 2.06,
 }
 
 HYDRIDE_PRESSURE_GPA = {

@@ -267,7 +267,7 @@ async function loadQEDatasetSamples(existingFormulas: Set<string>): Promise<Trai
     const rows = await db.execute(
       `SELECT material, tc, formation_energy, band_gap, lambda, omega_log, mu_star
        FROM quantum_engine_dataset
-       WHERE scf_converged = true AND tc > 0 AND tier IN ('full-dft', 'xtb')
+       WHERE tc >= 1.0 AND lambda IS NOT NULL AND lambda > 0
        ORDER BY tc DESC
        LIMIT 5000`
     );
@@ -289,7 +289,7 @@ async function loadQEDatasetSamples(existingFormulas: Set<string>): Promise<Trai
         lambda: row.lambda != null ? Number(row.lambda) : undefined,
         omegaLog: omegaLogK != null && Number.isFinite(omegaLogK) ? omegaLogK : undefined,
         muStar: muStar != null && Number.isFinite(muStar) && muStar > 0 ? muStar : undefined,
-        dataConfidence: "dft-verified", // QE entries are real DFT — unlock 5× loss weight
+        dataConfidence: "physics-enriched", // QE entries with lambda/omega_log/mu_star
         structure: undefined,
         prototype: undefined,
         sourceTag: 'qe-dft',
@@ -521,6 +521,31 @@ async function processNextGnnJob(): Promise<boolean> {
     trainingData = [...trainingData, ...qeSamples];
     qeSamples.forEach(s => existingFormulas.add(s.formula));
     console.log(`[GNN-GCP] Augmented job #${jobId} with ${qeSamples.length} QE dataset SC entries — total ${trainingData.length}`);
+  }
+
+  // ── Fix #6: Cross-reference BCS physics from quantum_engine_dataset ────
+  // supercon_external_entries has 0 omega_log/mu_star, but quantum_engine_dataset
+  // has 2000 entries with all BCS parameters. Enrich by formula match.
+  const physicsMap = new Map<string, { lambda?: number; omegaLog?: number; muStar?: number }>();
+  for (const s of qeSamples) {
+    if (s.lambda || s.omegaLog || s.muStar) {
+      physicsMap.set(s.formula, { lambda: s.lambda, omegaLog: s.omegaLog, muStar: s.muStar });
+    }
+  }
+  let enrichedCount = 0;
+  for (const s of trainingData) {
+    if (!s.lambda && !s.omegaLog && !s.muStar) {
+      const physics = physicsMap.get(s.formula);
+      if (physics) {
+        if (physics.lambda && !s.lambda) s.lambda = physics.lambda;
+        if (physics.omegaLog && !s.omegaLog) s.omegaLog = physics.omegaLog;
+        if (physics.muStar && !s.muStar) s.muStar = physics.muStar;
+        enrichedCount++;
+      }
+    }
+  }
+  if (enrichedCount > 0) {
+    console.log(`[GNN-GCP] BCS physics enrichment: ${enrichedCount} samples gained lambda/omegaLog/muStar from QE dataset`);
   }
 
   // Augment with Tc=0 contrast: JARVIS DFT3D metallic negatives (structure-enriched)

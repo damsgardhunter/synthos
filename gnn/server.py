@@ -192,12 +192,12 @@ def sample_to_graph(s: TrainingSample) -> Optional[SuperconGraph]:
             physics_hints = hints,
             pressure_gpa  = 0.0,
         )
-        g.target_tc     = s.tc       if s.tc > 0 else None
+        g.target_tc     = s.tc       if s.tc >= 1.0 else None
         g.target_fe     = s.formationEnergy
         g.target_lambda = s.lam
         g.target_omega  = s.omegaLog
         g.target_bg     = s.bandgap
-        g.target_psc    = 1.0 if s.tc > 0 else 0.0
+        g.target_psc    = 1.0 if s.tc >= 1.0 else 0.0
         g.formula       = s.formula
         return g
     except Exception as e:
@@ -211,20 +211,36 @@ def _split_train_val(
     seed: int = 42,
 ) -> tuple[List[SuperconGraph], List[SuperconGraph]]:
     """
-    Stratified 80/20 split: SC samples stratified, Tc=0 all into train.
-    Matches splitTrainValidation() in graph-neural-net.ts.
+    Tc-stratified split: bin SC samples by Tc range so val covers
+    all temperature regimes (including high-Tc hydrides >200K).
+    Tc=0 contrast graphs go entirely to train.
     """
     import random
     rng = random.Random(seed)
 
-    sc  = [g for g in graphs if g.target_tc and g.target_tc > 0]
-    nsc = [g for g in graphs if not g.target_tc or g.target_tc <= 0]
+    sc  = [g for g in graphs if g.target_tc and g.target_tc >= 1.0]
+    nsc = [g for g in graphs if not g.target_tc or g.target_tc < 1.0]
 
-    rng.shuffle(sc)
-    split = max(1, int(len(sc) * val_frac))
-    val   = sc[:split]
-    train = sc[split:] + nsc
-    return train, val
+    # Bin SC graphs into Tc strata for proportional splitting
+    TC_BINS = [0, 10, 30, 77, 150, 200, 400]
+    strata: List[List[SuperconGraph]] = [[] for _ in range(len(TC_BINS) - 1)]
+    for g in sc:
+        for i, (lo, hi) in enumerate(zip(TC_BINS, TC_BINS[1:])):
+            if lo < g.target_tc <= hi:
+                strata[i].append(g)
+                break
+
+    val_graphs:   List[SuperconGraph] = []
+    train_sc:     List[SuperconGraph] = []
+
+    for bucket in strata:
+        rng.shuffle(bucket)
+        n_val_i = max(1, int(len(bucket) * val_frac)) if len(bucket) >= 5 else 0
+        val_graphs += bucket[:n_val_i]
+        train_sc   += bucket[n_val_i:]
+
+    train = train_sc + nsc
+    return train, val_graphs
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -242,7 +258,7 @@ def compute_metrics(
 
     actuals, preds = [], []
     for g in graphs[:max_n]:
-        if g.target_tc is None or g.target_tc <= 0:
+        if g.target_tc is None or g.target_tc < 1.0:
             continue
         try:
             out = models[0].predict(g, device, mc_passes=1)
@@ -278,7 +294,7 @@ def compute_calibration(
 
     inside, widths, counted = 0, [], 0
     for g in graphs[:200]:
-        if g.target_tc is None or g.target_tc <= 0:
+        if g.target_tc is None or g.target_tc < 1.0:
             continue
         try:
             preds = [float(m.predict(g, device, mc_passes=1).tc.item()) for m in models]
@@ -491,27 +507,11 @@ async def train(req: TrainRequest):
         log.info(f"[Job#{job_id}] Built {len(all_graphs)} valid graphs "
                  f"({len(req.training_data) - len(all_graphs)} skipped)")
 
-        # ── Augment with curated pressure-Tc sweep data (matches Colab) ──────
-        existing_keys = set()
+        # ── Fix 3: Reject sub-1K Tc noise from DB samples ────────────────────
         for g in all_graphs:
-            f = getattr(g, "formula", "")
-            p = round(getattr(g, "pressure_gpa", 0.0), 1)
-            existing_keys.add((f, p))
-
-        pressure_added = 0
-        for formula, pressure, tc in PRESSURE_TC_DATA:
-            if (formula, round(pressure, 1)) in existing_keys:
-                continue
-            try:
-                g = build_crystal_graph(formula=formula, pressure_gpa=pressure)
-                g.target_tc  = tc if tc > 0 else None
-                g.target_psc = 1.0 if tc > 0 else 0.0
-                g.formula    = formula
-                all_graphs.append(g)
-                existing_keys.add((formula, round(pressure, 1)))
-                pressure_added += 1
-            except Exception:
-                pass
+            if g.target_tc is not None and 0 < g.target_tc < 1.0:
+                g.target_tc  = None
+                g.target_psc = 0.0
 
         # Apply KNOWN_TC labels to any unlabeled graphs matching curated formulas
         known_labeled = 0
@@ -519,15 +519,14 @@ async def train(req: TrainRequest):
             f = getattr(g, "formula", "")
             if f in KNOWN_TC and g.target_tc is None:
                 tc = KNOWN_TC[f]
-                g.target_tc  = tc if tc > 0 else None
-                g.target_psc = 1.0 if tc > 0 else 0.0
+                g.target_tc  = tc if tc >= 1.0 else None
+                g.target_psc = 1.0 if tc >= 1.0 else 0.0
                 known_labeled += 1
             if f in HYDRIDE_PRESSURE_GPA and getattr(g, "pressure_gpa", 0.0) == 0.0:
                 g.pressure_gpa = HYDRIDE_PRESSURE_GPA[f]
 
-        if pressure_added > 0 or known_labeled > 0:
-            log.info(f"[Job#{job_id}] Augmented: +{pressure_added} pressure sweeps, "
-                     f"{known_labeled} KNOWN_TC labels applied")
+        if known_labeled > 0:
+            log.info(f"[Job#{job_id}] Applied {known_labeled} KNOWN_TC labels")
 
         if len(all_graphs) < 10:
             return TrainResponse(
@@ -536,18 +535,53 @@ async def train(req: TrainRequest):
                 metrics=MetricsResponse(),
             )
 
-        # Split
+        # ── Fix 2: Tc-stratified split (covers all Tc ranges in val) ─────────
         train_graphs, val_graphs = _split_train_val(all_graphs, val_frac=0.20, seed=42)
 
-        # Cap Tc=0 contrast
-        sc_train  = [g for g in train_graphs if g.target_tc and g.target_tc > 0]
-        nsc_train = [g for g in train_graphs if not g.target_tc or g.target_tc <= 0]
+        # Collect val formulas to prevent data leakage from pressure augmentation
+        val_formulas = {getattr(g, "formula", None) for g in val_graphs} - {None}
+
+        # ── Fix 1: Add pressure sweeps to TRAIN only (no val leakage) ────────
+        existing_keys = set()
+        for g in train_graphs:
+            f = getattr(g, "formula", "")
+            p = round(getattr(g, "pressure_gpa", 0.0), 1)
+            existing_keys.add((f, p))
+
+        pressure_added = 0
+        pressure_leaked = 0
+        for formula, pressure, tc in PRESSURE_TC_DATA:
+            if formula in val_formulas:
+                pressure_leaked += 1
+                continue
+            if (formula, round(pressure, 1)) in existing_keys:
+                continue
+            try:
+                g = build_crystal_graph(formula=formula, pressure_gpa=pressure)
+                g.target_tc  = tc if tc >= 1.0 else None
+                g.target_psc = 1.0 if tc >= 1.0 else 0.0
+                g.formula    = formula
+                train_graphs.append(g)
+                existing_keys.add((formula, round(pressure, 1)))
+                pressure_added += 1
+            except Exception:
+                pass
+
+        if pressure_added > 0 or pressure_leaked > 0:
+            log.info(f"[Job#{job_id}] Pressure augmentation: +{pressure_added} train graphs, "
+                     f"{pressure_leaked} skipped (val formula leakage prevention)")
+
+        # ── Fix 4: Cap Tc=0 contrast with logging ────────────────────────────
+        sc_train  = [g for g in train_graphs if g.target_tc and g.target_tc >= 1.0]
+        nsc_train = [g for g in train_graphs if not g.target_tc or g.target_tc < 1.0]
+        nsc_dropped = max(0, len(nsc_train) - len(sc_train))
         capped    = nsc_train[:len(sc_train)]
         train_set = sc_train + capped
 
         log.info(
             f"[Job#{job_id}] train={len(train_set)} "
-            f"(sc={len(sc_train)}, contrast={len(capped)}) | val={len(val_graphs)}"
+            f"(sc={len(sc_train)}, contrast={len(capped)}, "
+            f"contrast_dropped={nsc_dropped}) | val={len(val_graphs)}"
         )
 
         # Train ensemble (CPU threads — one per model)
