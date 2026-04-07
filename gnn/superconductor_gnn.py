@@ -1104,7 +1104,7 @@ class GNNTrainer:
         def to_t(lst): return torch.tensor(lst, dtype=torch.float32, device=device)
 
         h_x  = cat(node_feats)
-        ei   = cat(edge_indices)
+        ei   = torch.cat(edge_indices, dim=1).to(device)  # edge_index is [2, E]
         ea   = cat(edge_attrs)
         dsts = cat(distances_list)
         az   = cat(atom_zs).long()
