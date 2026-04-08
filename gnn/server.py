@@ -920,7 +920,6 @@ if __name__ == "__main__":
         workers = 1,          # Single worker — GPU state is not fork-safe
         log_level = LOG_LEVEL.lower(),
         access_log = False,   # Reduce noise; GNN-Service logs its own
-        limit_concurrency = 2,
         h11_max_incomplete_event_size = 500 * 1024 * 1024,  # 500 MB request body limit
         timeout_keep_alive = 3600,  # 1 hour keepalive for long training jobs
     )
