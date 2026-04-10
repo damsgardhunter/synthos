@@ -252,6 +252,55 @@ def _split_train_val_test(
     return train, val_graphs, test_graphs
 
 
+def filter_consistent_graphs(graphs: List[SuperconGraph]) -> List[SuperconGraph]:
+    """
+    Defensive guard against tensor-cat mismatches during batching (cycle 1378).
+
+    All graphs should have edge_attr.shape[1] == N_GAUSSIAN_BASIS (40) and
+    node_features.shape[1] == NODE_DIM (32) — those are fixed by the encoder.
+    But if two graph builders with different schemas ever ran in the same
+    process (e.g. mid-deploy with stale .pyc bytecode loaded next to fresh .py
+    source), the second-axis widths could diverge and torch.cat would explode
+    inside _step at superconductor_gnn.py:~1109 with a confusing message like
+    "Expected size 32 but got size 24 for tensor number N in the list".
+
+    This filter inspects the *fixed* second dimension (feature width), not the
+    variable first dimension (per-graph node/edge count) — so it does NOT drop
+    graphs of different sizes, only graphs whose feature schema disagrees with
+    the majority. In a healthy process every graph passes through and this is
+    a no-op.
+    """
+    from collections import Counter
+    if not graphs:
+        return graphs
+    edge_dims = [
+        g.edge_attr.shape[1] if g.edge_attr is not None and g.edge_attr.numel() > 0 else None
+        for g in graphs
+    ]
+    node_dims = [
+        g.node_features.shape[1] if g.node_features is not None else None
+        for g in graphs
+    ]
+    edge_counter = Counter(d for d in edge_dims if d is not None)
+    node_counter = Counter(d for d in node_dims if d is not None)
+    if not edge_counter or not node_counter:
+        return graphs  # nothing to compare against
+    edge_majority = edge_counter.most_common(1)[0][0]
+    node_majority = node_counter.most_common(1)[0][0]
+    filtered = [
+        g for g, ed, nd in zip(graphs, edge_dims, node_dims)
+        if ed == edge_majority and nd == node_majority
+    ]
+    dropped = len(graphs) - len(filtered)
+    if dropped:
+        log.warning(
+            f"[filter] Dropped {dropped}/{len(graphs)} graphs with mismatched dims "
+            f"(expected edge={edge_majority}, node={node_majority}; "
+            f"edge dims seen={dict(edge_counter)}, node dims seen={dict(node_counter)})"
+        )
+    return filtered
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Metrics helpers (matching TS computeMetrics / computeCalibration)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -593,6 +642,16 @@ async def train(req: TrainRequest):
             f"(sc={len(sc_train)}, contrast={len(capped)}, "
             f"contrast_dropped={nsc_dropped}) | val={len(val_graphs)}"
         )
+
+        # ── Cycle 1378 fix: defensive dim consistency check ───────────────────
+        # Drop any graphs whose feature widths disagree with the majority before
+        # they reach the trainer's torch.cat. In a healthy process this is a
+        # no-op (all graphs come from build_crystal_graph and share the same
+        # NODE_DIM/N_GAUSSIAN_BASIS). It's only a safety net for the case where
+        # a stale .pyc and a fresh .py emit different schemas in the same run.
+        all_graphs  = filter_consistent_graphs(all_graphs)
+        val_graphs  = filter_consistent_graphs(val_graphs)
+        test_graphs = filter_consistent_graphs(test_graphs)
 
         # Train ensemble (CPU threads — one per model)
         try:
