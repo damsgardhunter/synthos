@@ -649,9 +649,15 @@ async def train(req: TrainRequest):
         # no-op (all graphs come from build_crystal_graph and share the same
         # NODE_DIM/N_GAUSSIAN_BASIS). It's only a safety net for the case where
         # a stale .pyc and a fresh .py emit different schemas in the same run.
-        all_graphs  = filter_consistent_graphs(all_graphs)
-        val_graphs  = filter_consistent_graphs(val_graphs)
-        test_graphs = filter_consistent_graphs(test_graphs)
+        all_graphs   = filter_consistent_graphs(all_graphs)
+        val_graphs   = filter_consistent_graphs(val_graphs)
+        test_graphs  = filter_consistent_graphs(test_graphs)
+        # train_graphs is also filtered because pressure-augmented graphs (added
+        # at the PRESSURE_TC_DATA loop above) are appended to train_graphs AFTER
+        # the split, so they aren't covered by the all_graphs filter — and a
+        # subset of train_graphs feeds compute_metrics(models, sc_train[:200])
+        # below for the train-sample metrics.
+        train_graphs = filter_consistent_graphs(train_graphs)
 
         # Train ensemble (CPU threads — one per model)
         try:
