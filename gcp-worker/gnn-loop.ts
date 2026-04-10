@@ -16,6 +16,7 @@ import path from "path";
 import { spawn, ChildProcess } from "child_process";
 import {
   ENSEMBLE_SIZE,
+  ENSEMBLE_SEEDS,
   splitTrainValidation,
 } from "../server/learning/graph-neural-net";
 import type { TrainingSample } from "../server/learning/graph-neural-net";
@@ -153,6 +154,40 @@ let _mpSkipLoaded = false;
 // Mutex: prevents concurrent GNN job completions from each firing a duplicate MP fetch.
 let _mpFetchInProgress = false;
 
+// ── DB retry helper ──────────────────────────────────────────────────────────
+// Wraps a DB query with exponential-backoff retry for transient connection errors
+// (Neon "Exceeded concurrency limit", "connection terminated", ETIMEDOUT, etc.).
+// Without this, each loader's silent catch returns empty data when Neon throttles,
+// which causes training to proceed with near-empty datasets and immediately fail.
+async function withDBRetry<T>(
+  label: string,
+  fn: () => Promise<T>,
+  maxAttempts = 4,
+): Promise<T> {
+  let lastErr: any;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err: any) {
+      lastErr = err;
+      const msg = String(err?.message ?? err ?? "").toLowerCase();
+      const isRetryable =
+        isConnectionError(err) ||
+        msg.includes("concurrency limit") ||
+        msg.includes("too many clients") ||
+        msg.includes("rate limit") ||
+        msg.includes("server_login_retry");
+      if (!isRetryable || attempt === maxAttempts) throw err;
+      const delayMs = Math.min(15_000, 1500 * 2 ** (attempt - 1));
+      console.warn(
+        `[GNN-GCP] ${label} attempt ${attempt}/${maxAttempts} failed: ${msg.slice(0, 100)} — retrying in ${delayMs}ms`
+      );
+      await new Promise(r => setTimeout(r, delayMs));
+    }
+  }
+  throw lastErr;
+}
+
 // ── MP progressive fetch ─────────────────────────────────────────────────────
 
 async function getMPSkip(): Promise<number> {
@@ -264,13 +299,13 @@ async function storeCalibrationMetric(
 
 async function loadQEDatasetSamples(existingFormulas: Set<string>): Promise<TrainingSample[]> {
   try {
-    const rows = await db.execute(
+    const rows = await withDBRetry("loadQEDatasetSamples", () => db.execute(
       `SELECT material, tc, formation_energy, band_gap, lambda, omega_log, mu_star
        FROM quantum_engine_dataset
        WHERE tc >= 1.0 AND lambda IS NOT NULL AND lambda > 0
        ORDER BY tc DESC
        LIMIT 5000`
-    );
+    ));
     const items: any[] = (rows as any).rows ?? (Array.isArray(rows) ? rows : []);
     const samples: TrainingSample[] = [];
     for (const row of items) {
@@ -314,8 +349,10 @@ async function loadSuperconExternalSamples(existingFormulas: Set<string>): Promi
     // LEFT JOIN with jarvis-dft3d by shared external_id (JVASP-XXXXX) to pull
     // formation_energy_per_atom, bandgap_ev, and other DFT properties that are
     // absent from jarvis-supercon_3d entries. ~907/1058 SC3D entries match.
-    // No LIMIT — loads all sources including 3DSC, NIMS, JARVIS-Chem, etc.
-    const rows = await db.execute(
+    // LIMIT 50000 caps the result set so a single query can never blow past Neon's
+    // statement timeout / concurrency window — there are ~16k SC entries today, so
+    // the cap is purely defensive against future growth swelling the JOIN.
+    const rows = await withDBRetry("loadSuperconExternalSamples", () => db.execute(
       `SELECT sc.formula, sc.tc, sc.lambda, sc.space_group, sc.crystal_system,
               sc.source,
               (sc.raw_data->>'wlog_K')::real                              AS omega_log_k,
@@ -327,8 +364,9 @@ async function loadSuperconExternalSamples(existingFormulas: Set<string>): Promi
        LEFT JOIN supercon_external_entries dft
          ON dft.external_id = sc.external_id AND dft.source = 'jarvis-dft3d'
        WHERE sc.is_superconductor = true AND sc.tc > 0
-       ORDER BY sc.source, sc.tc DESC`
-    );
+       ORDER BY sc.source, sc.tc DESC
+       LIMIT 50000`
+    ));
     const items: any[] = (rows as any).rows ?? (Array.isArray(rows) ? rows : []);
     const samples: TrainingSample[] = [];
     const srcCounts: Record<string, number> = {};
@@ -396,7 +434,7 @@ async function loadSuperconExternalSamples(existingFormulas: Set<string>): Promi
 
 async function loadJarvisDFT3DContrast(existingFormulas: Set<string>, scCount: number): Promise<TrainingSample[]> {
   try {
-    const rows = await db.execute(
+    const rows = await withDBRetry("loadJarvisDFT3DContrast", () => db.execute(
       `SELECT formula, space_group, crystal_system,
               (raw_data->>'formation_energy_per_atom')::real  AS fe_per_atom,
               (raw_data->>'bandgap_ev')::real                 AS bandgap_ev
@@ -404,7 +442,7 @@ async function loadJarvisDFT3DContrast(existingFormulas: Set<string>, scCount: n
        WHERE source IN ('jarvis-dft3d', 'JARVIS-DFT3D-Metallic') AND (tc IS NULL OR tc = 0)
        ORDER BY RANDOM()
        LIMIT ${Math.min(scCount, 20000)}`
-    );
+    ));
     const items: any[] = (rows as any).rows ?? (Array.isArray(rows) ? rows : []);
     const samples: TrainingSample[] = [];
     for (const row of items) {
@@ -440,9 +478,9 @@ async function loadJarvisDFT3DContrast(existingFormulas: Set<string>, scCount: n
 
 async function loadMPContrastSamples(existingFormulas: Set<string>, scCount: number): Promise<TrainingSample[]> {
   try {
-    const rows = await db.execute(
+    const rows = await withDBRetry("loadMPContrastSamples", () => db.execute(
       `SELECT formula, data FROM mp_material_cache WHERE data_type = 'summary' LIMIT 10000`
-    );
+    ));
     const items: any[] = (rows as any).rows ?? (Array.isArray(rows) ? rows : []);
     const maxContrast = scCount;  // 1:1 cap — avoids Tc=0 majority diluting SC signal
     const samples: TrainingSample[] = [];
@@ -471,12 +509,12 @@ async function loadMPContrastSamples(existingFormulas: Set<string>, scCount: num
 
 async function loadMPCuprateHydrideSamples(existingFormulas: Set<string>): Promise<TrainingSample[]> {
   try {
-    const rows = await db.execute(
+    const rows = await withDBRetry("loadMPCuprateHydrideSamples", () => db.execute(
       `SELECT formula, data FROM mp_material_cache
        WHERE data_type = 'summary'
          AND (formula LIKE '%Cu%' OR formula LIKE '%H%')
        LIMIT 5000`
-    );
+    ));
     const items: any[] = (rows as any).rows ?? (Array.isArray(rows) ? rows : []);
     const samples: TrainingSample[] = [];
     for (const row of items) {
@@ -548,12 +586,15 @@ async function processNextGnnJob(): Promise<boolean> {
 
   // Pre-warm the Neon connection before augmentation queries. Neon may cold-start
   // after inactivity; a failed warm-up here causes silent empty results below.
+  // withDBRetry handles "Exceeded concurrency limit" + transient connection errors
+  // with exponential backoff, so a momentary cap hit doesn't cascade into empty
+  // augmentation results.
   try {
-    await db.execute("SELECT 1");
+    await withDBRetry("pre-warm", () => db.execute("SELECT 1"), 3);
   } catch (warmErr: any) {
-    console.warn(`[GNN-GCP] DB pre-warm failed for job #${jobId}: ${warmErr.message?.slice(0, 80)} — augmentation queries may return empty`);
-    // Small delay to let the pool recover before continuing
-    await new Promise(r => setTimeout(r, 3000));
+    console.warn(`[GNN-GCP] DB pre-warm failed for job #${jobId} after retries: ${warmErr.message?.slice(0, 80)} — augmentation queries may return empty`);
+    // Larger delay to let the pool recover before continuing
+    await new Promise(r => setTimeout(r, 5000));
   }
 
   // Augment with NIMS + JARVIS superconductors from supercon_external_entries.
@@ -624,6 +665,28 @@ async function processNextGnnJob(): Promise<boolean> {
     trainingData = [...trainingData, ...mpCuprateHydride];
     mpCuprateHydride.forEach(s => existingFormulas.add(s.formula));
     console.log(`[GNN-GCP] Augmented job #${jobId} with ${mpCuprateHydride.length} MP cuprate/hydride samples — total ${trainingData.length}`);
+  }
+
+  // ── Augmentation sanity gate ──────────────────────────────────────────
+  // If the local server's dispatch payload was tiny (~274 SC seed samples)
+  // AND every augmentation loader exhausted its retries (e.g. Neon DB cap
+  // hit during the augmentation burst), the resulting trainingData is
+  // useless to train on. Requeue the job rather than marking it failed —
+  // failed jobs cause the local server to dispatch a fresh one immediately,
+  // which hits the same DB cap, and the loop repeats. Requeuing gives the
+  // pool time to recover before the next attempt.
+  const scInTrainingData = trainingData.filter(s => s.tc > 0).length;
+  const MIN_JOB_SC_SAMPLES = 200;
+  if (scInTrainingData < MIN_JOB_SC_SAMPLES && externalSCSamples.length === 0) {
+    console.warn(
+      `[GNN-GCP] Job #${jobId}: augmentation loaders all returned empty (only ${scInTrainingData} SC samples in dispatched payload). ` +
+      `Likely Neon DB cap hit during data fetching. Requeuing job and waiting 60s before next poll.`
+    );
+    await db.execute(
+      `UPDATE gnn_training_jobs SET status = 'queued', started_at = NULL WHERE id = ${jobId}`
+    ).catch(() => {});
+    await new Promise(r => setTimeout(r, 60_000));
+    return false;
   }
 
   // Split BEFORE training so validation data is never seen by the models.
@@ -855,12 +918,17 @@ async function clearStartupModelCheckpoints(): Promise<void> {
 }
 
 async function runStartupFullCorpusTraining(): Promise<void> {
-  // Skip if already ran in this process (e.g. called twice).
+  // Skip if already ran SUCCESSFULLY in this process (set at the bottom).
+  // The flag is intentionally NOT set up-front anymore — a transient failure
+  // (e.g. Neon "Exceeded concurrency limit" during the first 30s rush) used to
+  // permanently disable startup training for the worker's lifetime, leaving the
+  // poll loop running but never actually training. Now the flag is only set on
+  // a successful (or "discarded by quality gate") completion, so callers (the
+  // outer retry loop in startGNNLoop) can re-enter on failure.
   if (_startupCorpusRan) {
     console.log('[GNN-GCP] Startup full corpus training already ran this session — skipping');
     return;
   }
-  _startupCorpusRan = true;
 
   // ── Load partial checkpoints from a previous interrupted run ─────────────
   // Always run startup training on every GCP restart — the full corpus
@@ -918,6 +986,22 @@ async function runStartupFullCorpusTraining(): Promise<void> {
 
 
   console.log(`[GNN-GCP]  Dataset: ${scSamples.length} SC + ${cappedNonSc.length} contrast | train=${trainSet.length} val=${valSet.length}`);
+
+  // ── Dataset sanity gate ────────────────────────────────────────────────
+  // If every loader returned [] (e.g. Neon "Exceeded concurrency limit" during
+  // the startup rush even after withDBRetry exhausted its attempts), we get a
+  // tiny/empty dataset. Calling Python /train with this would either fail
+  // outright or produce a worthless model that overrides the cached ensemble.
+  // Throw so the outer retry loop in startGNNLoop can wait and try again.
+  const MIN_SC_SAMPLES = 100;
+  if (scSamples.length < MIN_SC_SAMPLES) {
+    throw new Error(
+      `Startup dataset too small: ${scSamples.length} SC samples (need ≥${MIN_SC_SAMPLES}). ` +
+      `Likely cause: Neon DB connection cap hit during data fetching. ` +
+      `Will retry after backoff.`
+    );
+  }
+
   console.log(`[GNN-GCP]  Delegating startup training to Python GNN service…`);
 
   let r2 = 0, mae = 0, rmse = 0, trainR2 = 0, trainMae = 0, valN = 0;
@@ -1013,6 +1097,11 @@ async function runStartupFullCorpusTraining(): Promise<void> {
   } catch { /* non-fatal */ }
   // Per-model checkpoints are superseded by the full job stored above.
   await clearStartupModelCheckpoints();
+
+  // Only set the in-process "ran" flag after a successful (or quality-discarded)
+  // training run. This must be the last line of the success path so transient
+  // failures earlier in the function are eligible for retry by the outer loop.
+  _startupCorpusRan = true;
 }
 
 // ── Main loop ─────────────────────────────────────────────────────────────────
@@ -1050,17 +1139,47 @@ export async function startGNNLoop(): Promise<void> {
   }
 
   // Phase 3 startup: train on full NIMS+JARVIS corpus as a background task.
-  // Delayed 30s so XGB/ML/DFT loops can claim their DB connections first.
-  // Regular dispatched jobs use a 5k-sample subset; startup gets the full corpus once.
-  // Fire-and-forget so job polling starts immediately after startup training acquires the slot.
-  new Promise<void>(r => setTimeout(r, 30_000))
-    .then(() => runStartupFullCorpusTraining())
-    .catch(err => console.error("[GNN-GCP] Startup corpus training error:", err?.message ?? String(err)));
+  // Delayed 120s (was 30s) so SuperCon/COD/JARVIS/3DSC ingestion + DFT/ML/XGB
+  // poll loops can claim their initial DB connections and settle. Hitting Neon's
+  // pgBouncer with a 5-loader cascade at the same instant as ingestion's batch
+  // inserts is what triggered the "Exceeded concurrency limit" cap and made
+  // every loader silently return [] → empty training data → tiny model.
+  //
+  // Wrapped in a retry loop so a transient DB cap during the first attempt
+  // doesn't permanently disable startup training for the worker's lifetime.
+  // Each failed attempt waits 5 minutes before retrying so the connection
+  // pressure has time to subside.
+  void (async () => {
+    await new Promise(r => setTimeout(r, 120_000));
+    const STARTUP_MAX_ATTEMPTS = 4;
+    for (let attempt = 1; attempt <= STARTUP_MAX_ATTEMPTS; attempt++) {
+      try {
+        await runStartupFullCorpusTraining();
+        if (_startupCorpusRan) return; // success — flag is set at end of function
+        console.warn(
+          `[GNN-GCP] Startup attempt ${attempt}/${STARTUP_MAX_ATTEMPTS} returned without setting ran flag — likely deferred. Retrying.`
+        );
+      } catch (err: any) {
+        console.error(
+          `[GNN-GCP] Startup attempt ${attempt}/${STARTUP_MAX_ATTEMPTS} failed: ${err?.message ?? String(err)}`
+        );
+      }
+      if (attempt < STARTUP_MAX_ATTEMPTS) {
+        const waitMs = 5 * 60_000;
+        console.log(`[GNN-GCP] Waiting ${waitMs / 1000}s before retrying startup corpus training…`);
+        await new Promise(r => setTimeout(r, waitMs));
+      }
+    }
+    console.error(
+      `[GNN-GCP] Startup corpus training gave up after ${STARTUP_MAX_ATTEMPTS} attempts. ` +
+      `Worker will continue polling for dispatched jobs but will not have a fresh full-corpus baseline.`
+    );
+  })();
 
-  // Delay job polling by 35s so the startup corpus training acquires the slot first.
-  // Without this delay the poll loop grabs a queued job immediately, wins the slot race,
-  // and startup training gets deferred for 5+ minutes.
-  await new Promise(r => setTimeout(r, 35_000));
+  // Delay job polling by 125s so the startup corpus training acquires the slot first.
+  // Was 35s — increased to match the new 120s startup delay so the poll loop
+  // doesn't claim jobs before startup training has had a chance to run.
+  await new Promise(r => setTimeout(r, 125_000));
   console.log("[GNN-GCP] Job polling starting — startup training should hold the slot");
 
   let pollCount = 0;
