@@ -14,6 +14,7 @@ import { acquireGNNTrainingSlot, releaseGNNTrainingSlot, waitForXGBIdle, isGNNTr
 import { fileURLToPath } from "url";
 import path from "path";
 import { spawn, ChildProcess } from "child_process";
+import * as http from "node:http";
 import {
   ENSEMBLE_SIZE,
   ENSEMBLE_SEEDS,
@@ -69,6 +70,77 @@ async function spawnPythonGNNService(): Promise<void> {
   throw new Error("Python GNN service did not become ready within 90s");
 }
 
+/**
+ * POST a JSON body and read the JSON response, with NO 5-minute headers/body
+ * timeouts. This intentionally does NOT use the global `fetch` because Node's
+ * built-in fetch wraps undici, and undici has hard-coded defaults of
+ * headersTimeout=300_000 and bodyTimeout=300_000. Python's /train endpoint
+ * does ALL its work (graph build → ensemble training, 30-40 min for 62k
+ * samples) BEFORE sending response headers, so undici's headersTimeout always
+ * fires at exactly 5min 1s with `TypeError: fetch failed (cause:
+ * HeadersTimeoutError)`. node:http has no equivalent client-side
+ * headersTimeout — its default `timeout` is 0 (disabled). The only timeout
+ * is the explicit abortMs ceiling we install ourselves.
+ *
+ * Cycle 1379 fix. The earlier attempt used `setGlobalDispatcher` from undici,
+ * but undici is not a runtime dependency in this project (only undici-types
+ * is in package.json), so the import threw MODULE_NOT_FOUND on boot and the
+ * worker crashed in a tight restart loop with status=1.
+ */
+function postJsonLongRunning(
+  url:     string,
+  body:    unknown,
+  abortMs: number,
+): Promise<{ status: number; data: any; rawText: string }> {
+  return new Promise((resolve, reject) => {
+    let parsedUrl: URL;
+    try {
+      parsedUrl = new URL(url);
+    } catch (err) {
+      return reject(new Error(`Invalid URL: ${url}`));
+    }
+    const bodyStr = typeof body === "string" ? body : JSON.stringify(body);
+    const opts: http.RequestOptions = {
+      hostname: parsedUrl.hostname,
+      port:     parsedUrl.port || 80,
+      path:     parsedUrl.pathname + parsedUrl.search,
+      method:   "POST",
+      headers:  {
+        "Content-Type":   "application/json",
+        "Content-Length": Buffer.byteLength(bodyStr),
+      },
+    };
+
+    const req = http.request(opts, (res) => {
+      const chunks: Buffer[] = [];
+      res.on("data",  (chunk: Buffer) => chunks.push(chunk));
+      res.on("error", reject);
+      res.on("end",   () => {
+        const rawText = Buffer.concat(chunks).toString("utf-8");
+        let data: any = null;
+        try { data = JSON.parse(rawText); } catch { /* leave null; caller checks */ }
+        resolve({ status: res.statusCode ?? 0, data, rawText });
+      });
+    });
+
+    req.on("error", reject);
+
+    // Hard ceiling: kill the request after abortMs (default 60 min). Without
+    // this we'd have no upper bound at all if Python truly hangs forever.
+    const abortTimer = setTimeout(() => {
+      req.destroy(new Error(`POST ${url} exceeded abort ceiling of ${abortMs}ms`));
+    }, abortMs);
+    req.on("close", () => clearTimeout(abortTimer));
+
+    // Explicitly disable Node's per-socket inactivity timeout. Default is 0
+    // (disabled) anyway, but we set it to be defensive.
+    req.setTimeout(0);
+
+    req.write(bodyStr);
+    req.end();
+  });
+}
+
 /** POST training data to the Python service, returns parsed response. */
 async function callPythonTrain(
   jobId:             number,
@@ -105,19 +177,18 @@ async function callPythonTrain(
     startup_val_r2:      startupValR2 ?? null,
   };
 
-  const res = await fetch(`${GNN_SERVICE_URL}/train`, {
-    method:  "POST",
-    headers: { "Content-Type": "application/json" },
-    body:    JSON.stringify(body),
-    signal:  AbortSignal.timeout(60 * 60_000), // 60-min timeout for large corpus
-  });
+  // Cycle 1379 fix: postJsonLongRunning uses node:http directly to avoid
+  // undici's 5-minute headersTimeout. The 60-min ceiling is the hard upper
+  // bound — anything longer than that means Python is genuinely hung.
+  const res = await postJsonLongRunning(`${GNN_SERVICE_URL}/train`, body, 60 * 60_000);
 
-  if (!res.ok) {
-    const text = await res.text().catch(() => "(no body)");
-    throw new Error(`Python /train failed ${res.status}: ${text.slice(0, 200)}`);
+  if (res.status < 200 || res.status >= 300) {
+    throw new Error(`Python /train failed ${res.status}: ${res.rawText.slice(0, 200)}`);
   }
-
-  const data = await res.json() as any;
+  if (!res.data) {
+    throw new Error(`Python /train returned non-JSON body: ${res.rawText.slice(0, 200)}`);
+  }
+  const data = res.data;
   const m    = data.metrics ?? {};
   return {
     status:       data.status,

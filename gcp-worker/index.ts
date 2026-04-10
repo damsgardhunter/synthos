@@ -22,30 +22,13 @@
  *   XTBPATH=/usr/share/xtb
  */
 
-// ── Cycle 1379 fix: disable undici's 5-minute headers/body timeouts ─────────
-// MUST be the first import in the entry point. Node's built-in fetch is undici
-// under the hood, and undici has TWO timeouts that the explicit
-// `signal: AbortSignal.timeout(60 * 60_000)` in callPythonTrain does NOT
-// override:
-//   - headersTimeout: 300_000ms (5 min) — wait for response headers after POST
-//   - bodyTimeout:    300_000ms (5 min) — wait between response body chunks
-// Python's /train endpoint does ALL its work (graph build → ensemble training,
-// 30-40 min for 62k samples) BEFORE sending response headers, so undici's
-// headersTimeout always fires at exactly 5min 1s with `TypeError: fetch failed
-// (cause: HeadersTimeoutError)`. The outer retry loop then waits 5 min and
-// retries, hits the same wall, exhausts STARTUP_MAX_ATTEMPTS=4, gives up.
-// Setting both to 0 disables them, leaving only the 60-min AbortSignal as the
-// real timeout. Connect timeout (60s) is preserved so a dead Python service
-// is still detected quickly. setGlobalDispatcher affects all subsequent
-// fetch() calls in this process.
-import { Agent, setGlobalDispatcher } from "undici";
-setGlobalDispatcher(new Agent({
-  headersTimeout:    0,        // disabled — was 300_000 (5 min)
-  bodyTimeout:       0,        // disabled — was 300_000 (5 min)
-  connect:           { timeout: 60_000 }, // 60s connect timeout — catches dead service fast
-  keepAliveTimeout:  60_000,   // 60s — was 4s default; reduces socket churn
-  keepAliveMaxTimeout: 600_000,
-}));
+// NOTE: Cycle 1379 originally tried to setGlobalDispatcher() from undici here,
+// but undici is not a runtime dependency in this project (only undici-types is
+// in package.json) — the import threw MODULE_NOT_FOUND at process start and
+// crashed the worker on boot with status=1. The 5-minute headersTimeout fix
+// was moved into gcp-worker/gnn-loop.ts and now uses node:http directly,
+// which has NO headersTimeout at all. See the postJsonLongRunning helper
+// in gnn-loop.ts for details.
 
 import { startDFTLoop, stopDFTLoop } from "./dft-loop";
 import { startGNNLoop, stopGNNLoop } from "./gnn-loop";
