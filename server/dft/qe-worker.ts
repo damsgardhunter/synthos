@@ -3638,6 +3638,47 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       console.log(`[QE-Worker] SCF near-converged for ${formula} (accuracy=${result.scf!.lastScfAccuracyRy?.toExponential(2)} Ry < 1e-6 Ry, quality=${result.scf!.convergenceQuality}): E=${result.scf!.totalEnergy.toFixed(4)} eV, Ef=${result.scf!.fermiEnergy} — proceeding with caution`);
     }
 
+    // ── Phonon BEFORE bands (cycle 1374 fix for "0 modes" bug) ───────────────
+    // Order matters: bands and ph.x both target ./tmp/${prefix}.save/, and bands
+    // OVERWRITES the SCF wavefunctions there with bands-path wavefunctions.
+    // ph.x then sees the wrong k-point grid and exits in <1s with no frequencies
+    // — exactly the LaH10 "21000s SCF, 1s phonon, 0 modes" symptom. Running
+    // phonon first preserves the SCF .save/ contents for ph.x; bands afterwards
+    // is free to clobber them since nothing reads .save/ after that point.
+    // The earlier "Do NOT clean ./tmp" comment in the bands block was a partial
+    // diagnosis — not cleaning the dir wasn't enough because pw.x rewrites the
+    // wfc files inside it.
+    if (scfUsable) {
+      const phInput = generatePhononInput(formula, elements);
+      const phInputFile = path.join(jobDir, "ph.in");
+      fs.writeFileSync(phInputFile, phInput);
+
+      console.log(`[QE-Worker] Starting phonon calculation for ${formula}`);
+
+      const phResult = await runQECommand(
+        path.posix.join(getQEBinDir(), "ph.x"),
+        phInputFile,
+        jobDir,
+      );
+
+      fs.writeFileSync(path.join(jobDir, "ph.out"), phResult.stdout);
+      result.phonon = parsePhononOutput(phResult.stdout);
+
+      if (phResult.exitCode !== 0 && !result.phonon.converged) {
+        result.phonon.error = `ph.x exited with code ${phResult.exitCode}: ${phResult.stderr.slice(-500)}`;
+        result.failureStage = "phonon";
+        stageFailureCounts.phonon++;
+        console.log(`[QE-Worker] Phonon failed for ${formula}: ${result.phonon.error.slice(-200)}`);
+      } else {
+        console.log(`[QE-Worker] Phonon done for ${formula}: ${result.phonon.frequencies.length} modes, lowest=${result.phonon.lowestFrequency.toFixed(1)} cm-1`);
+      }
+    }
+
+    // ── Bands AFTER phonon (cycle 1374 fix) ──────────────────────────────────
+    // Safe to run last because nothing downstream reads ./tmp/${prefix}.save/
+    // after this point. DFPT EPC below uses runDFPTEPC which writes its own
+    // ph.in and reads only the lambda/omega from its own stdout — it does not
+    // depend on .save/ wavefunctions surviving the bands step.
     if (scfUsable && result.scf?.fermiEnergy !== null) {
       try {
         const cOverAVal = estimateCOverA(elements, counts);
@@ -3676,41 +3717,13 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
 
         if (!bandResult.converged && bandResult.error) {
           stageFailureCounts.bands++;
-          // Do NOT clean ./tmp here — ph.x needs the SCF .save/ directory that was
-          // written before bands ran. Cleaning it caused phonon to return 0 modes.
-          console.log(`[QE-Worker] Band structure failed for ${formula}: ${bandResult.error.slice(-200)} — continuing to phonon`);
+          console.log(`[QE-Worker] Band structure failed for ${formula}: ${bandResult.error.slice(-200)}`);
         } else {
           console.log(`[QE-Worker] Band structure done for ${formula}: ${bandResult.nBands} bands, ${bandResult.bandCrossings.length} crossings, flat=${bandResult.flatBandScore.toFixed(3)}`);
         }
       } catch (bandErr: any) {
         stageFailureCounts.bands++;
-        console.log(`[QE-Worker] Band structure error for ${formula}: ${bandErr.message?.slice(-200) ?? bandErr} — continuing to phonon`);
-      }
-    }
-
-    if (scfUsable) {
-      const phInput = generatePhononInput(formula, elements);
-      const phInputFile = path.join(jobDir, "ph.in");
-      fs.writeFileSync(phInputFile, phInput);
-
-      console.log(`[QE-Worker] Starting phonon calculation for ${formula}`);
-
-      const phResult = await runQECommand(
-        path.posix.join(getQEBinDir(), "ph.x"),
-        phInputFile,
-        jobDir,
-      );
-
-      fs.writeFileSync(path.join(jobDir, "ph.out"), phResult.stdout);
-      result.phonon = parsePhononOutput(phResult.stdout);
-
-      if (phResult.exitCode !== 0 && !result.phonon.converged) {
-        result.phonon.error = `ph.x exited with code ${phResult.exitCode}: ${phResult.stderr.slice(-500)}`;
-        result.failureStage = "phonon";
-        stageFailureCounts.phonon++;
-        console.log(`[QE-Worker] Phonon failed for ${formula}: ${result.phonon.error.slice(-200)}`);
-      } else {
-        console.log(`[QE-Worker] Phonon done for ${formula}: ${result.phonon.frequencies.length} modes, lowest=${result.phonon.lowestFrequency.toFixed(1)} cm-1`);
+        console.log(`[QE-Worker] Band structure error for ${formula}: ${bandErr.message?.slice(-200) ?? bandErr}`);
       }
     }
 
