@@ -15,13 +15,41 @@ ExecStartPre=/usr/bin/git -C /opt/quantum-alchemy pull --ff-only
 # tsx runs TypeScript directly — no build step needed
 ExecStart=/usr/bin/npx tsx gcp-worker/index.ts
 
-# Graceful shutdown: SIGTERM then SIGKILL after 35s
-TimeoutStopSec=35
+# Graceful shutdown: SIGTERM then SIGKILL after 10 minutes.
+# Cycle 1377 fix: was 35s — far too short. A long-running GNN training
+# (30-40 min for 62k graphs) can be holding the Python /train HTTP socket
+# when SIGTERM arrives. The previous 35s deadline meant systemd would SIGKILL
+# the entire control group while training was still running, corrupting state
+# and forcing a fresh restart. 10 minutes lets the in-flight training finish
+# its current epoch and the placeholder DELETE in the finally block run, OR
+# at least lets the python child save its checkpoint before dying.
+TimeoutStopSec=600
 KillMode=control-group
 KillSignal=SIGTERM
 
-Restart=always
-RestartSec=10
+# Cycle 1377 fix: was Restart=always with RestartSec=10. That combination
+# turns ANY exit (including a successful exit(0) or a transient error) into
+# a 10-second-later restart, which causes a thrash loop where the worker
+# starts startup training, crashes after 30-90s on whatever bug, restarts,
+# repeats forever. on-failure restarts only on non-zero exit; RestartSec=120
+# adds a 2-min cool-down so a misbehaving worker can't burn CPU in a tight
+# restart loop. StartLimitIntervalSec/StartLimitBurst caps it further:
+# at most 3 restarts in any 30-minute window, then the unit goes into
+# `failed` state and waits for a human (so we don't restart-loop overnight).
+Restart=on-failure
+RestartSec=120
+StartLimitIntervalSec=1800
+StartLimitBurst=3
+
+# Cycle 1377 fix: OOM hardening for the 128 GB box. The Node process + Python
+# GNN child + DFT QE jobs + ML loops can collectively spike memory usage. By
+# default the kernel may pick the Node parent (which holds the loop state) as
+# the OOM victim because it has the highest RSS. OOMScoreAdjust=-500 tells the
+# kernel to prefer killing other processes first. MemoryHigh sets a soft cap
+# at 110 GB (out of 128) so the kernel throttles us before truly OOMing —
+# leaves 18 GB headroom for the OS, ssh, journald, etc.
+OOMScoreAdjust=-500
+MemoryHigh=110G
 
 # Allow large GNN weight blobs in the journal
 StandardOutput=journal

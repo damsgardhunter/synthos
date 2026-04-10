@@ -86,6 +86,15 @@ async function callPythonTrain(
   modelPath?: string;
   nSamples: number;
 }> {
+  // Cycle 1377 fix: ensure the Python child is alive before each /train call.
+  // The exit handler in spawnPythonGNNService sets _pythonProcess = null when
+  // Python dies (OOM, crash, manual kill). spawnPythonGNNService is idempotent
+  // — its early-return check at the top makes this a no-op when Python is
+  // healthy, and a fresh spawn when it's not. Without this, Python dying
+  // mid-session would leave Node polling forever with every /train call
+  // hitting `fetch failed` (connection refused) and the worker stuck idle.
+  await spawnPythonGNNService();
+
   const body = {
     job_id:              jobId,
     training_data:       trainingData.map(s => ({
