@@ -962,6 +962,12 @@ async function runStartupFullCorpusTraining(): Promise<void> {
     throw new Error('GNN training slot busy at startup acquisition — outer retry will wait 5 min');
   }
 
+  // Declared at function scope (cycle 1376 fix) so the finally block can DELETE
+  // the placeholder by ID instead of doing a blanket `DELETE WHERE status IN
+  // ('queued','running')` that would also nuke unrelated jobs from
+  // active-learning.ts / gradient-boost.ts co-dispatches.
+  let startupJobId: number | undefined = undefined;
+
   try {
   // ── Load partial checkpoints from a previous interrupted run ─────────────
   // Always run startup training on every GCP restart — the full corpus
@@ -1043,7 +1049,7 @@ async function runStartupFullCorpusTraining(): Promise<void> {
 
   // Slot was already acquired at the top of this function — just call Python /train
   // directly. Errors propagate to the outer retry loop in startGNNLoop. Cleanup
-  // (delete stale jobs + release slot) is in the top-level finally below.
+  // (delete placeholder + release slot) is in the top-level finally below.
   // Insert a placeholder job so the Python service result has a job ID to reference
   const placeholderJob = await storage.insertGnnTrainingJob({
     status: "running" as any,
@@ -1051,9 +1057,20 @@ async function runStartupFullCorpusTraining(): Promise<void> {
     datasetSize: trainSet.length,
     dftSamples: qeSamples.length,
   });
-  const startupJobId = placeholderJob.id;
+  startupJobId = placeholderJob.id;
 
   pyResult = await callPythonTrain(startupJobId, trainingData, undefined, 15);
+
+  // Cycle 1376 fix: throw on Python-reported failure so the outer retry loop
+  // catches it and retries with backoff. Previously this path silently
+  // destructured zero metrics and set _startupCorpusRan = true, marking
+  // startup as "complete" even though training failed — outer retries never
+  // fired and the worker fell through to idle polling forever. The companion
+  // path in processGnnJob (line ~750) handles 'failed' the same way.
+  if (pyResult?.status === "failed") {
+    throw new Error(`Python /train returned status=failed: ${pyResult.reason ?? "(no reason)"}`);
+  }
+
   ({ r2, mae, rmse, trainR2, trainMae, valN, startupModelPath } = {
     ...pyResult, startupModelPath: pyResult.modelPath,
   });
@@ -1113,19 +1130,20 @@ async function runStartupFullCorpusTraining(): Promise<void> {
   // failures earlier in the function are eligible for retry by the outer loop.
   _startupCorpusRan = true;
   } finally {
-    // Cleanup runs whether training succeeded, threw, or was discarded by the
-    // quality gate. Delete any stale queued/running jobs before releasing the
-    // slot so the poll loop doesn't immediately grab them — startup weights are
-    // already saved to disk via clearStartupModelCheckpoints / system_state.
-    try {
-      const deleted = await db.execute(
-        `DELETE FROM gnn_training_jobs WHERE status IN ('queued', 'running') RETURNING id`
-      );
-      const deletedIds = ((deleted as any).rows ?? (Array.isArray(deleted) ? deleted : [])).map((r: any) => r.id);
-      if (deletedIds.length > 0) {
-        console.log(`[GNN-GCP] Cleared ${deletedIds.length} stale job(s) before slot release — startup weights preserved`);
-      }
-    } catch { /* non-fatal */ }
+    // Cleanup runs whether training succeeded, threw, or was discarded.
+    // Cycle 1376 fix: only delete the placeholder we created (by ID), not every
+    // queued/running job in the table. The previous blanket DELETE would also
+    // wipe unrelated jobs that active-learning.ts or gradient-boost.ts may have
+    // co-dispatched while startup was running. The success path above already
+    // inserted a separate `done` row with the actual metrics, so deleting the
+    // placeholder doesn't lose any data.
+    if (startupJobId !== undefined) {
+      try {
+        await db.execute(
+          `DELETE FROM gnn_training_jobs WHERE id = ${startupJobId}`
+        );
+      } catch { /* non-fatal */ }
+    }
     releaseGNNTrainingSlot('STARTUP');
   }
 }

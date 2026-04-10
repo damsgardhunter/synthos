@@ -1045,9 +1045,22 @@ export class DatabaseStorage implements IStorage {
   async resetStuckGnnJobs(): Promise<number> {
     // Reset 'running' GNN jobs back to 'queued' so the GCP worker re-picks them up
     // after a VM restart that killed the job mid-flight.
+    //
+    // Cycle 1376 fix: REQUIRE started_at older than 90 minutes. Without this age
+    // filter, a local server restart that happens while GCP startup corpus
+    // training is legitimately in flight (which can take 30-40+ min for ~62k
+    // graphs) would yank the placeholder out from under it, corrupting DB
+    // state. 90 min is comfortably longer than any successful training run
+    // but short enough that genuinely stuck jobs from a crashed GCP worker
+    // still get reclaimed on the next local server boot.
+    const STUCK_AGE_MS = 90 * 60 * 1000;
+    const cutoff = new Date(Date.now() - STUCK_AGE_MS);
     const rows = await db.update(gnnTrainingJobs)
       .set({ status: "queued" })
-      .where(eq(gnnTrainingJobs.status, "running"))
+      .where(and(
+        eq(gnnTrainingJobs.status, "running"),
+        lt(gnnTrainingJobs.startedAt, cutoff),
+      ))
       .returning({ id: gnnTrainingJobs.id });
     return rows.length;
   }
