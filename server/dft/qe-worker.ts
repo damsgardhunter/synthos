@@ -1349,6 +1349,36 @@ const MAGNETIC_ELEMENTS: Record<string, number> = {
   V: 0.5, Gd: 7.0, Eu: 7.0, Nd: 3.0, Sm: 1.0,
 };
 
+// Full d-block. Used to detect systems where moments may form even when
+// no element from MAGNETIC_ELEMENTS is present (e.g. Pd-H, Ta-N, Ru-Mn).
+const TRANSITION_METALS = new Set([
+  "Sc","Ti","V","Cr","Mn","Fe","Co","Ni","Cu","Zn",
+  "Y","Zr","Nb","Mo","Tc","Ru","Rh","Pd","Ag","Cd",
+  "Hf","Ta","W","Re","Os","Ir","Pt","Au","Hg",
+]);
+
+// Light electronegative elements that commonly induce TM moments via charge
+// transfer / d-band reshaping (hydrides, nitrides, oxides, fluorides).
+const MOMENT_INDUCERS = new Set(["H","N","O","F"]);
+
+// Default seed for TM atoms that aren't in MAGNETIC_ELEMENTS but may carry an
+// induced moment. Small enough to not bias chemistry, large enough to break
+// spin symmetry so QE can find the polarized solution.
+const INDUCED_TM_SEED = 0.5;
+
+// Returns true if the system can plausibly carry a net spin moment and should
+// therefore be run with nspin=2. Catches cases the narrow MAGNETIC_ELEMENTS
+// list misses: 4d/5d TMs (Ru, Pd, Ta, W…), TM-hydrides, TM-nitrides, and
+// multi-TM systems where d-band frustration drives moment formation.
+function mayHaveMagneticMoment(elements: string[]): boolean {
+  if (elements.some(el => el in MAGNETIC_ELEMENTS)) return true;
+  const tmCount = elements.filter(el => TRANSITION_METALS.has(el)).length;
+  if (tmCount === 0) return false;
+  if (tmCount >= 2) return true;
+  if (elements.some(el => MOMENT_INDUCERS.has(el))) return true;
+  return false;
+}
+
 function isAFMCandidate(elements: string[], counts: Record<string, number>): boolean {
   const hasCu = elements.includes("Cu");
   const hasO = elements.includes("O");
@@ -1389,13 +1419,18 @@ function generateMagnetizationLines(
   elements: string[],
   counts: Record<string, number>,
   useAFM: boolean,
+  seedAllTMs: boolean = false,
 ): string {
   let lines = "";
   const magneticIndices: number[] = [];
 
+  // Atoms that get a non-zero starting moment. With seedAllTMs we include any
+  // d-block element so QE can reach polarized solutions for Pd-H, Ta-N, etc.
   for (let idx = 0; idx < elements.length; idx++) {
     const el = elements[idx];
     if (el in MAGNETIC_ELEMENTS) {
+      magneticIndices.push(idx);
+    } else if (seedAllTMs && TRANSITION_METALS.has(el)) {
       magneticIndices.push(idx);
     }
   }
@@ -1406,7 +1441,14 @@ function generateMagnetizationLines(
 
   for (let idx = 0; idx < elements.length; idx++) {
     const el = elements[idx];
-    let mag = MAGNETIC_ELEMENTS[el] ?? 0.0;
+    let mag = MAGNETIC_ELEMENTS[el];
+    if (mag === undefined) {
+      if (seedAllTMs && TRANSITION_METALS.has(el)) {
+        mag = INDUCED_TM_SEED;
+      } else {
+        mag = 0.0;
+      }
+    }
 
     if (useAFM && mag !== 0) {
       const magSubIndex = magneticIndices.indexOf(idx);
@@ -1493,12 +1535,14 @@ function generateSCFInput(
   const ecutrho = ecutwfc * ecutrhoMultiplier(elements);
 
   const hasMagnetic = elements.some(el => el in MAGNETIC_ELEMENTS);
-  const nspin = hasMagnetic ? 2 : 1;
+  // Broaden: 4d/5d TMs and TM-hydrides/nitrides also need nspin=2 to converge.
+  const broadMagnetic = mayHaveMagneticMoment(elements);
+  const nspin = broadMagnetic ? 2 : 1;
   const useAFM = hasMagnetic && isAFMCandidate(elements, counts);
 
   let startingMagLines = "";
-  if (hasMagnetic) {
-    startingMagLines = generateMagnetizationLines(elements, counts, useAFM);
+  if (broadMagnetic) {
+    startingMagLines = generateMagnetizationLines(elements, counts, useAFM, !hasMagnetic);
   }
 
   let atomicSpecies = "";
@@ -2683,13 +2727,17 @@ function generateSCFInputWithParams(
   const bOverA2 = estimateBOverA(elements, counts);
   const cellBlock2 = `\n${generateCellParameters(latticeA, cOverA2, 0, bOverA2, elements, counts)}`;
 
-  // DFT+U overrides normal nspin/magnetization block when activated
+  // DFT+U overrides normal nspin/magnetization block when activated.
+  // Broaden the detector beyond MAGNETIC_ELEMENTS so 4d/5d TMs and TM-hydrides
+  // (Pd-H, Ta-N, Ru-Mn, …) also get nspin=2 + seeded moments — without this
+  // they show non-zero magnetization in the output but never converge SCF.
   const hasMagEl = elements.some(el => el in MAGNETIC_ELEMENTS);
-  const useNspin2 = (params.dftPlusUNspin2 ?? false) || hasMagEl;
+  const broadMagnetic = mayHaveMagneticMoment(elements);
+  const useNspin2 = (params.dftPlusUNspin2 ?? false) || broadMagnetic;
   // When DFT+U nspin2 is set, starting_magnetization is already embedded in dftPlusULines
   const magBlock = (params.dftPlusUNspin2 ?? false)
     ? ""
-    : (hasMagEl ? generateMagnetizationLines(elements, counts, isAFMCandidate(elements, counts)) : "");
+    : (broadMagnetic ? generateMagnetizationLines(elements, counts, isAFMCandidate(elements, counts), !hasMagEl) : "");
   const hubbardBlock = params.dftPlusULines ?? "";
 
   return `&CONTROL
@@ -2756,10 +2804,11 @@ function generateVCRelaxInput(
   const ecutrho = ecutwfc * ecutrhoMultiplier(elements);
 
   const hasMagnetic = elements.some(el => el in MAGNETIC_ELEMENTS);
-  const nspin = hasMagnetic ? 2 : 1;
+  const broadMagnetic = mayHaveMagneticMoment(elements);
+  const nspin = broadMagnetic ? 2 : 1;
   let magLines = "";
-  if (hasMagnetic) {
-    magLines = generateMagnetizationLines(elements, counts, isAFMCandidate(elements, counts));
+  if (broadMagnetic) {
+    magLines = generateMagnetizationLines(elements, counts, isAFMCandidate(elements, counts), !hasMagnetic);
   }
 
   let atomicSpecies = "";
@@ -3689,7 +3738,9 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
         const hasHydrogenBands = elements.includes("H");
         const rawEcutwfcBands = elements.reduce((max, el) => Math.max(max, ELEMENT_CUTOFFS_BANDS[el] ?? 45), hasHydrogenBands ? 80 : 45);
         const baseEcutwfcBands = Math.max(rawEcutwfcBands, hasHydrogenBands ? 100 : 60);
-        const nspinBands = elements.some(el => el in MAGNETIC_ELEMENTS) ? 2 : 1;
+        // Use the same broad detector as the SCF — bands must run with the
+        // same nspin or it will fail to read the SCF .save/ wavefunctions.
+        const nspinBands = mayHaveMagneticMoment(elements) ? 2 : 1;
 
         const bOverAVal = estimateBOverA(elements, counts);
         const latticeBVal = latticeA * bOverAVal;
