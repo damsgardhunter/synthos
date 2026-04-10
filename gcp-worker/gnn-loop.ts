@@ -556,6 +556,17 @@ async function loadMPCuprateHydrideSamples(existingFormulas: Set<string>): Promi
 // ── Job processing ────────────────────────────────────────────────────────────
 
 async function processNextGnnJob(): Promise<boolean> {
+  // Cycle 1375 fix: defer to startup corpus training. While startup is in its
+  // outer retry loop and hasn't successfully run yet, the dispatched-job poll
+  // loop must NOT claim the GNN slot — otherwise it locks startup out for the
+  // duration of a multi-hour dispatched job. Without this guard, the poll loop
+  // (which starts at T+125s) races startup (which begins data-loading at T+120s
+  // and reaches its slot acquisition only after ~30-90s of DB queries) and wins
+  // the race, leaving startup permanently deferred.
+  if (_startupCorpusActive && !_startupCorpusRan) {
+    return false;
+  }
+
   // Silent slot check — avoids the claim→augment→requeue loop without spamming
   // acquire/release log messages every poll cycle when the slot is free but idle.
   if (!isGNNTrainingSlotFree()) {
@@ -821,6 +832,12 @@ const GNN_MODEL_VERSION = 14; // v14: hard BCE labels + v15 dedicated cls head (
 
 // In-process guard: run corpus training exactly once per GCP worker process lifetime.
 let _startupCorpusRan = false;
+// True from worker boot until startup corpus training either succeeds or exhausts
+// its outer retry loop. While this is true AND _startupCorpusRan is false, the
+// dispatched-job poll loop must NOT claim the GNN training slot — otherwise it
+// races startup and locks startup out for the duration of the dispatched job
+// (potentially hours). See cycle 1375 fix and runStartupFullCorpusTraining below.
+let _startupCorpusActive = true;
 
 // ── Startup checkpoint helpers ────────────────────────────────────────────────
 
@@ -930,6 +947,22 @@ async function runStartupFullCorpusTraining(): Promise<void> {
     return;
   }
 
+  // ── Acquire the GNN training slot FIRST (cycle 1375 fix) ─────────────────
+  // Before doing any DB loading. Otherwise the ~30-90s of corpus loading below
+  // gives the poll loop (which starts at T+125s) a window to claim the slot
+  // for a dispatched job, locking startup out for hours. The slot must be held
+  // through the entire data load + python /train and released in the finally
+  // block at the end of this function.
+  await waitForXGBIdle();
+  if (!acquireGNNTrainingSlot('STARTUP')) {
+    // Slot is busy — only possible if a dispatched-job handler somehow grabbed
+    // it despite _startupCorpusActive being true (shouldn't happen with the
+    // poll-loop guard, but throw so the outer retry loop in startGNNLoop waits
+    // and retries cleanly).
+    throw new Error('GNN training slot busy at startup acquisition — outer retry will wait 5 min');
+  }
+
+  try {
   // ── Load partial checkpoints from a previous interrupted run ─────────────
   // Always run startup training on every GCP restart — the full corpus
   // training is the most reliable baseline and must not be skipped.
@@ -1007,46 +1040,23 @@ async function runStartupFullCorpusTraining(): Promise<void> {
   let r2 = 0, mae = 0, rmse = 0, trainR2 = 0, trainMae = 0, valN = 0;
   let startupModelPath: string | undefined;
   let pyResult: Awaited<ReturnType<typeof callPythonTrain>> | undefined;
-  try {
-    await waitForXGBIdle();
-    if (!acquireGNNTrainingSlot('STARTUP')) {
-      console.log('[GNN-GCP] Startup corpus training deferred — dispatched job is training, will retry in 5 min');
-      await new Promise(r => setTimeout(r, 5 * 60_000));
-      if (!acquireGNNTrainingSlot('STARTUP-retry')) {
-        console.log('[GNN-GCP] Startup corpus training skipped — GNN still busy');
-        return;
-      }
-    }
-    try {
-      // Insert a placeholder job so the Python service result has a job ID to reference
-      const placeholderJob = await storage.insertGnnTrainingJob({
-        status: "running" as any,
-        trainingData: [] as any,
-        datasetSize: trainSet.length,
-        dftSamples: qeSamples.length,
-      });
-      const startupJobId = placeholderJob.id;
 
-      pyResult = await callPythonTrain(startupJobId, trainingData, undefined, 15);
-      ({ r2, mae, rmse, trainR2, trainMae, valN, startupModelPath } = {
-        ...pyResult, startupModelPath: pyResult.modelPath,
-      });
-    } finally {
-      try {
-        const deleted = await db.execute(
-          `DELETE FROM gnn_training_jobs WHERE status IN ('queued', 'running') RETURNING id`
-        );
-        const deletedIds = ((deleted as any).rows ?? (Array.isArray(deleted) ? deleted : [])).map((r: any) => r.id);
-        if (deletedIds.length > 0) {
-          console.log(`[GNN-GCP] Cleared ${deletedIds.length} stale job(s) before slot release — startup weights preserved`);
-        }
-      } catch { /* non-fatal */ }
-      releaseGNNTrainingSlot('STARTUP');
-    }
-  } catch (err: any) {
-    console.error(`[GNN-GCP] Startup corpus training failed: ${err.message}`);
-    return;
-  }
+  // Slot was already acquired at the top of this function — just call Python /train
+  // directly. Errors propagate to the outer retry loop in startGNNLoop. Cleanup
+  // (delete stale jobs + release slot) is in the top-level finally below.
+  // Insert a placeholder job so the Python service result has a job ID to reference
+  const placeholderJob = await storage.insertGnnTrainingJob({
+    status: "running" as any,
+    trainingData: [] as any,
+    datasetSize: trainSet.length,
+    dftSamples: qeSamples.length,
+  });
+  const startupJobId = placeholderJob.id;
+
+  pyResult = await callPythonTrain(startupJobId, trainingData, undefined, 15);
+  ({ r2, mae, rmse, trainR2, trainMae, valN, startupModelPath } = {
+    ...pyResult, startupModelPath: pyResult.modelPath,
+  });
 
   const wallSec = pyResult ? pyResult.wallSeconds.toFixed(1) : "?";
   const trainMaeV = trainMae;
@@ -1102,6 +1112,22 @@ async function runStartupFullCorpusTraining(): Promise<void> {
   // training run. This must be the last line of the success path so transient
   // failures earlier in the function are eligible for retry by the outer loop.
   _startupCorpusRan = true;
+  } finally {
+    // Cleanup runs whether training succeeded, threw, or was discarded by the
+    // quality gate. Delete any stale queued/running jobs before releasing the
+    // slot so the poll loop doesn't immediately grab them — startup weights are
+    // already saved to disk via clearStartupModelCheckpoints / system_state.
+    try {
+      const deleted = await db.execute(
+        `DELETE FROM gnn_training_jobs WHERE status IN ('queued', 'running') RETURNING id`
+      );
+      const deletedIds = ((deleted as any).rows ?? (Array.isArray(deleted) ? deleted : [])).map((r: any) => r.id);
+      if (deletedIds.length > 0) {
+        console.log(`[GNN-GCP] Cleared ${deletedIds.length} stale job(s) before slot release — startup weights preserved`);
+      }
+    } catch { /* non-fatal */ }
+    releaseGNNTrainingSlot('STARTUP');
+  }
 }
 
 // ── Main loop ─────────────────────────────────────────────────────────────────
@@ -1150,30 +1176,40 @@ export async function startGNNLoop(): Promise<void> {
   // Each failed attempt waits 5 minutes before retrying so the connection
   // pressure has time to subside.
   void (async () => {
-    await new Promise(r => setTimeout(r, 120_000));
-    const STARTUP_MAX_ATTEMPTS = 4;
-    for (let attempt = 1; attempt <= STARTUP_MAX_ATTEMPTS; attempt++) {
-      try {
-        await runStartupFullCorpusTraining();
-        if (_startupCorpusRan) return; // success — flag is set at end of function
-        console.warn(
-          `[GNN-GCP] Startup attempt ${attempt}/${STARTUP_MAX_ATTEMPTS} returned without setting ran flag — likely deferred. Retrying.`
-        );
-      } catch (err: any) {
-        console.error(
-          `[GNN-GCP] Startup attempt ${attempt}/${STARTUP_MAX_ATTEMPTS} failed: ${err?.message ?? String(err)}`
-        );
+    try {
+      await new Promise(r => setTimeout(r, 120_000));
+      const STARTUP_MAX_ATTEMPTS = 4;
+      for (let attempt = 1; attempt <= STARTUP_MAX_ATTEMPTS; attempt++) {
+        try {
+          await runStartupFullCorpusTraining();
+          if (_startupCorpusRan) return; // success — flag is set at end of function
+          console.warn(
+            `[GNN-GCP] Startup attempt ${attempt}/${STARTUP_MAX_ATTEMPTS} returned without setting ran flag — likely deferred. Retrying.`
+          );
+        } catch (err: any) {
+          console.error(
+            `[GNN-GCP] Startup attempt ${attempt}/${STARTUP_MAX_ATTEMPTS} failed: ${err?.message ?? String(err)}`
+          );
+        }
+        if (attempt < STARTUP_MAX_ATTEMPTS) {
+          const waitMs = 5 * 60_000;
+          console.log(`[GNN-GCP] Waiting ${waitMs / 1000}s before retrying startup corpus training…`);
+          await new Promise(r => setTimeout(r, waitMs));
+        }
       }
-      if (attempt < STARTUP_MAX_ATTEMPTS) {
-        const waitMs = 5 * 60_000;
-        console.log(`[GNN-GCP] Waiting ${waitMs / 1000}s before retrying startup corpus training…`);
-        await new Promise(r => setTimeout(r, waitMs));
-      }
+      console.error(
+        `[GNN-GCP] Startup corpus training gave up after ${STARTUP_MAX_ATTEMPTS} attempts. ` +
+        `Worker will continue polling for dispatched jobs but will not have a fresh full-corpus baseline.`
+      );
+    } finally {
+      // Cycle 1375 fix: clear the active flag whether startup succeeded, failed,
+      // or exhausted retries. Once cleared, the dispatched-job poll loop is free
+      // to claim the GNN slot. Without this finally, a successful startup never
+      // clears the flag and dispatched jobs would be locked out forever after
+      // startup completes — _startupCorpusActive would stay true.
+      _startupCorpusActive = false;
+      console.log('[GNN-GCP] Startup corpus phase complete — dispatched-job poll loop unblocked');
     }
-    console.error(
-      `[GNN-GCP] Startup corpus training gave up after ${STARTUP_MAX_ATTEMPTS} attempts. ` +
-      `Worker will continue polling for dispatched jobs but will not have a fresh full-corpus baseline.`
-    );
   })();
 
   // Delay job polling by 125s so the startup corpus training acquires the slot first.
