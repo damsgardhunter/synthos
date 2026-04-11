@@ -321,14 +321,26 @@ def filter_consistent_graphs(graphs: List[SuperconGraph]) -> List[SuperconGraph]
 def compute_metrics(
     models: List[SuperconductorGNN],
     graphs: List[SuperconGraph],
-    max_n:  int = 500,
+    max_n:  Optional[int] = None,
 ) -> Dict[str, float]:
-    """R², MAE, RMSE on held-out graphs."""
+    """
+    R², MAE, RMSE on held-out graphs.
+
+    Colab parity: Colab's Cell 13 evaluate() scores EVERY graph in val_graphs
+    with no cap. The previous default of max_n=500 silently truncated the
+    val set from ~5,775 graphs down to 500, producing R² numbers that
+    weren't comparable to Colab's because the residual sum and total
+    variance were both computed over different subsets each run. max_n is
+    now None (no cap) by default; callers can still pass a small int for
+    the train-sample metric where evaluating all 27k SC train graphs would
+    waste GPU time.
+    """
     if not models or not graphs:
         return {"r2": 0.0, "mae": 0.0, "rmse": 0.0, "n": 0}
 
+    iter_graphs = graphs if max_n is None else graphs[:max_n]
     actuals, preds = [], []
-    for g in graphs[:max_n]:
+    for g in iter_graphs:
         if g.target_tc is None or g.target_tc < 1.0:
             continue
         try:
