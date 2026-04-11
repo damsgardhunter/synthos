@@ -36,14 +36,20 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
-# torch_geometric for batching / pooling (pip install torch-geometric)
+# torch_geometric is OPTIONAL — only the unused SuperconGraph.to_pyg()
+# helper depends on it. The training pipeline collates tensors directly
+# with torch.cat in GNNTrainer._step() and pools via index_reduce_, so PyG
+# is never imported on the hot path. We keep the import for to_pyg() in
+# case external callers want it, but installing it on the GCP worker is
+# pure overhead. Warning is suppressed to keep journald clean — to_pyg()
+# itself still asserts HAS_PYG so callers get a clear error if they ever
+# do try to use it.
 try:
     from torch_geometric.data import Data, DataLoader
     from torch_geometric.nn import global_mean_pool, global_max_pool
     HAS_PYG = True
 except ImportError:
     HAS_PYG = False
-    print("Warning: torch-geometric not installed. DataLoader and pooling helpers unavailable.")
 
 
 # ── Constants (exact match to graph-neural-net.ts) ────────────────────────────
@@ -1221,25 +1227,175 @@ class GNNTrainer:
 # Ensemble
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def train_one_model_colab_parity(
+    model:           SuperconductorGNN,
+    graphs:          List[SuperconGraph],
+    device:          torch.device,
+    n_epochs:        int  = 80,
+    batch_size:      int  = 64,
+    pretrain_epochs: int  = 15,
+    verbose:         bool = True,
+) -> List[float]:
+    """
+    Train one model using EXACTLY the Colab Cell 10 flow that achieves R²=0.83.
+
+    This intentionally bypasses the server's GNNTrainer.train() and the
+    AdamW + per-group-LR optimizer in make_optimizer(), because both diverge
+    from Colab in ways that crater accuracy. Specifically the per-group LR
+    runs the graph encoder at 9e-5 (1/3 of Colab's 3e-4) and decays it to
+    9e-7 by epoch 80 — the encoder is effectively frozen, so the MLP head
+    has to fit Tc from a near-random embedding. That's the R²=-3.15 failure.
+
+    What this function does, line by line, mirroring Cell 10:
+
+      1. Plain torch.optim.Adam (NOT AdamW) at lr=3e-4, weight_decay=1e-4,
+         single param group covering ALL model parameters.
+      2. FE pretrain phase with its OWN fresh Adam optimizer +
+         CosineAnnealingLR(T_max=pretrain_epochs, eta_min=1e-5). All params
+         updated — mlp1 is NOT frozen (Colab does not freeze it).
+      3. Main training phase with a SECOND fresh Adam optimizer +
+         CosineAnnealingLR(T_max=n_epochs, eta_min=3e-6). The fresh optimizer
+         clears any Adam moment contamination from the FE pretrain phase.
+      4. Per-epoch best-loss checkpointing in memory; restored at the end via
+         model.load_state_dict(best_state). Without this, the model is left
+         at whatever the cosine schedule's final epoch produces, which is
+         often worse than the best mid-run state.
+      5. Plain shuffled batches via train_epoch(enable_curriculum=False) — no
+         difficulty gating, no hard-example oversampling.
+      6. Scheduler.step() AFTER train_epoch (PyTorch idiom that Colab uses).
+
+    Returns the per-epoch loss history of the main training phase. The model
+    is left in eval() mode with best_state loaded.
+    """
+    model.to(device)
+    # We still need a GNNTrainer for its train_epoch() method (which contains
+    # the collation logic that matches Colab's _fixed_train_epoch). But we
+    # immediately overwrite trainer.optimizer with our Colab-parity Adam,
+    # so the AdamW that GNNTrainer.__init__ creates is discarded.
+    trainer = GNNTrainer(model, device)
+
+    # ── FE pretrain ──────────────────────────────────────────────────────
+    fe_graphs = [g for g in graphs if g.target_fe is not None]
+    if len(fe_graphs) >= 20:
+        if verbose:
+            print(f"  FE pretraining on {len(fe_graphs)} graphs for {pretrain_epochs} epochs…", flush=True)
+
+        fe_opt = torch.optim.Adam(
+            model.parameters(),    # ALL params, single group — matches Colab
+            lr=3e-4,
+            weight_decay=WEIGHT_DECAY,
+        )
+        fe_sch = torch.optim.lr_scheduler.CosineAnnealingLR(
+            fe_opt, T_max=pretrain_epochs, eta_min=1e-5,
+        )
+        trainer.optimizer = fe_opt
+
+        for ep in range(pretrain_epochs):
+            loss = trainer.train_epoch(
+                fe_graphs,
+                batch_size=batch_size,
+                progress=0.0,
+                enable_curriculum=False,
+            )
+            fe_sch.step()
+            if verbose and ((ep + 1) % 5 == 0 or ep == 0 or ep == pretrain_epochs - 1):
+                print(f"  FE pretrain {ep+1}/{pretrain_epochs}  loss={loss:.4f}", flush=True)
+
+    # ── Main training ────────────────────────────────────────────────────
+    # Fresh optimizer — Colab does `trainer.optimizer = optimizer` after the
+    # FE pretrain block, replacing fe_opt with a brand-new Adam. This clears
+    # the Adam moments accumulated during FE-only training.
+    main_opt = torch.optim.Adam(
+        model.parameters(),
+        lr=3e-4,
+        weight_decay=WEIGHT_DECAY,
+    )
+    main_sch = torch.optim.lr_scheduler.CosineAnnealingLR(
+        main_opt, T_max=n_epochs, eta_min=3e-6,
+    )
+    trainer.optimizer = main_opt
+
+    best_loss:  float = float('inf')
+    best_state: Optional[Dict] = None
+    best_epoch: int   = 0
+    losses:     List[float] = []
+
+    if verbose:
+        print(f"  Training on {len(graphs)} graphs for {n_epochs} epochs…", flush=True)
+
+    for epoch in range(n_epochs):
+        loss = trainer.train_epoch(
+            graphs,
+            batch_size=batch_size,
+            progress=epoch / max(n_epochs - 1, 1),
+            enable_curriculum=False,
+        )
+        main_sch.step()
+        losses.append(loss)
+
+        if loss < best_loss:
+            best_loss  = loss
+            best_epoch = epoch + 1
+            # .clone().detach() so we don't hold autograd refs across epochs
+            best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
+
+        if verbose and (epoch == 0 or (epoch + 1) % 8 == 0 or epoch == n_epochs - 1):
+            current_lr = main_opt.param_groups[0]['lr']
+            print(
+                f"  Epoch {epoch+1}/{n_epochs}  loss={loss:.4f}  lr={current_lr:.2e}  "
+                f"best={best_loss:.4f} @ ep{best_epoch}",
+                flush=True,
+            )
+
+    # ── Restore best state — critical for matching Colab's R² ────────────
+    if best_state is not None:
+        model.load_state_dict(best_state)
+        if verbose:
+            print(f"  Restored best state (loss={best_loss:.4f} @ epoch {best_epoch})", flush=True)
+
+    model.eval()
+    return losses
+
+
 def train_ensemble(
     graphs:   List[SuperconGraph],
     size:     int = ENSEMBLE_SIZE,
     device:   Optional[torch.device] = None,
     **train_kwargs,
 ) -> List[SuperconductorGNN]:
-    """Train ENSEMBLE_SIZE independent models with different seeds."""
+    """
+    Train ENSEMBLE_SIZE independent models with different seeds.
+
+    Each member is trained via train_one_model_colab_parity() which mirrors
+    the Colab Cell 10 training flow exactly. The non-parity GNNTrainer.train()
+    path is preserved for callers that want curriculum + per-group LR, but
+    is no longer used by the GCP /train endpoint.
+    """
     device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # Honour caller-provided knobs but default to Colab-parity values.
+    n_epochs        = train_kwargs.pop("n_epochs", None) or 80
+    batch_size      = train_kwargs.pop("batch_size", 64)
+    pretrain_epochs = train_kwargs.pop("pretrain_epochs", 15)
+    verbose         = train_kwargs.pop("verbose", True)
+    # pretrain_fe is always on for parity; the underlying function gates on
+    # fe_graphs >= 20 the same way Colab does.
+    train_kwargs.pop("pretrain_fe", None)
+    if train_kwargs:
+        # Surface unused kwargs so we don't silently swallow new flags.
+        print(f"[ensemble] WARNING: ignoring unknown train_kwargs: {list(train_kwargs.keys())}", flush=True)
+
     models = []
-    # Default to verbose so journald shows per-epoch progress. Callers that
-    # want to silence per-epoch logs (e.g. unit tests) can pass verbose=False
-    # explicitly in train_kwargs.
-    train_kwargs.setdefault("verbose", True)
     for i in range(size):
         torch.manual_seed(i * 1337 + 42)
         m = SuperconductorGNN()
-        trainer = GNNTrainer(m, device)
-        print(f"[ensemble] Training member {i+1}/{size} on {len(graphs)} graphs…", flush=True)
-        trainer.train(graphs, **train_kwargs)
+        print(f"[ensemble] Training member {i+1}/{size} on {len(graphs)} graphs (Colab parity)…", flush=True)
+        train_one_model_colab_parity(
+            m, graphs, device,
+            n_epochs=n_epochs,
+            batch_size=batch_size,
+            pretrain_epochs=pretrain_epochs,
+            verbose=verbose,
+        )
         m.eval()
         models.append(m)
         print(f"[ensemble] Member {i+1}/{size} trained.", flush=True)

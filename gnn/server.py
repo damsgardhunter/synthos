@@ -213,11 +213,28 @@ def _split_train_val_test(
     seed: int = 42,
 ) -> tuple[List[SuperconGraph], List[SuperconGraph], List[SuperconGraph]]:
     """
-    Tc-stratified train/val/test split matching Colab Cell 8:
-    15% test, 15% val, 70% train from SC samples.
-    Each Tc bin [0-10, 10-30, 30-77, 77-150, 150-200, 200-400]K gets
-    proportional coverage in val AND test.
-    Tc=0 contrast goes entirely to train.
+    Train/val/test split matching the Colab notebook (Cell 8) verbatim.
+
+    The previous implementation used Tc-stratified bins [0,10,30,77,150,200,400]
+    which sounds smarter but produces a different distribution than the Colab
+    notebook that achieves R²=0.83. To match Colab exactly we use a plain
+    seed=42 shuffle of the SC graphs and slice off the first 15% test, next
+    15% val, remainder train. Tc=0 contrast goes entirely to train.
+
+    The Colab code is:
+        random.seed(42); torch.manual_seed(42); np.random.seed(42)
+        sc_all  = [g for g in augmented_graphs if g.target_tc and g.target_tc > 0]
+        nsc_all = [g for g in augmented_graphs if not g.target_tc or g.target_tc <= 0]
+        random.shuffle(sc_all)
+        random.shuffle(nsc_all)
+        n_val  = int(len(sc_all) * 0.15)
+        n_test = int(len(sc_all) * 0.15)
+        test_graphs = sc_all[:n_test]
+        val_graphs  = sc_all[n_test:n_test + n_val]
+        sc_train    = sc_all[n_test + n_val:]
+        nsc_train   = nsc_all[:len(sc_train)]
+        train_graphs = sc_train + nsc_train + mp_unlabeled
+        random.shuffle(train_graphs)
     """
     import random as _random
     rng = _random.Random(seed)
@@ -225,30 +242,26 @@ def _split_train_val_test(
     sc  = [g for g in graphs if g.target_tc and g.target_tc >= 1.0]
     nsc = [g for g in graphs if not g.target_tc or g.target_tc < 1.0]
 
-    TC_BINS = [0, 10, 30, 77, 150, 200, 400]
-    strata: List[List[SuperconGraph]] = [[] for _ in range(len(TC_BINS) - 1)]
-    for g in sc:
-        for i, (lo, hi) in enumerate(zip(TC_BINS, TC_BINS[1:])):
-            if lo < g.target_tc <= hi:
-                strata[i].append(g)
-                break
+    rng.shuffle(sc)
+    rng.shuffle(nsc)
 
-    test_graphs:  List[SuperconGraph] = []
-    val_graphs:   List[SuperconGraph] = []
-    train_sc:     List[SuperconGraph] = []
+    n = len(sc)
+    n_test = int(n * test_frac)
+    n_val  = int(n * val_frac)
 
-    for i, bucket in enumerate(strata):
-        rng.shuffle(bucket)
-        n = len(bucket)
-        n_test_i = max(1, int(n * test_frac)) if n >= 5 else 0
-        n_val_i  = max(1, int(n * val_frac))  if n >= 5 else 0
-        test_graphs += bucket[:n_test_i]
-        val_graphs  += bucket[n_test_i:n_test_i + n_val_i]
-        train_sc    += bucket[n_test_i + n_val_i:]
-        lo, hi = TC_BINS[i], TC_BINS[i + 1]
-        log.debug(f"  Stratum {lo:>3}-{hi:<4}K: {n} total -> {n_test_i} test, {n_val_i} val, {n - n_test_i - n_val_i} train")
+    test_graphs = sc[:n_test]
+    val_graphs  = sc[n_test:n_test + n_val]
+    train_sc    = sc[n_test + n_val:]
 
-    train = train_sc + nsc
+    # 1:1 contrast cap, then merge — same as Colab Cell 8.
+    nsc_train = nsc[:len(train_sc)]
+    train     = train_sc + nsc_train
+    rng.shuffle(train)
+
+    log.info(
+        f"  Colab-parity split: sc_total={n} -> {len(test_graphs)} test, "
+        f"{len(val_graphs)} val, {len(train_sc)} train_sc + {len(nsc_train)} contrast"
+    )
     return train, val_graphs, test_graphs
 
 
@@ -593,14 +606,23 @@ async def train(req: TrainRequest):
                 metrics=MetricsResponse(),
             )
 
-        # ── Tc-stratified split matching Colab (15% val, 15% test) ────────────
-        train_graphs, val_graphs, test_graphs = _split_train_val_test(all_graphs, val_frac=0.15, test_frac=0.15, seed=42)
+        # ── Colab-parity train/val/test split (Cell 8) ───────────────────────
+        # _split_train_val_test now returns train = SC train + 1:1-capped
+        # contrast (shuffled), exactly matching Colab's
+        #   sc_train = sc_all[n_test+n_val:]
+        #   nsc_train = nsc_all[:len(sc_train)]
+        #   train_graphs = sc_train + nsc_train + mp_unlabeled
+        # We don't have mp_unlabeled (no live MP fetch in the server) but the
+        # rest is the same.
+        train_graphs, val_graphs, test_graphs = _split_train_val_test(
+            all_graphs, val_frac=0.15, test_frac=0.15, seed=42,
+        )
         log.info(f"[Job#{job_id}] Split: {len(test_graphs)} test, {len(val_graphs)} val held out")
 
         # Collect val formulas to prevent data leakage from pressure augmentation
         val_formulas = {getattr(g, "formula", None) for g in val_graphs} - {None}
 
-        # ── Fix 1: Add pressure sweeps to TRAIN only (no val leakage) ────────
+        # ── Pressure-sweep augmentation, train only (matches Colab Cell 8) ───
         existing_keys = set()
         for g in train_graphs:
             f = getattr(g, "formula", "")
@@ -630,54 +652,40 @@ async def train(req: TrainRequest):
             log.info(f"[Job#{job_id}] Pressure augmentation: +{pressure_added} train graphs, "
                      f"{pressure_leaked} skipped (val formula leakage prevention)")
 
-        # ── Fix 4: Cap Tc=0 contrast with logging ────────────────────────────
-        sc_train  = [g for g in train_graphs if g.target_tc and g.target_tc >= 1.0]
-        nsc_train = [g for g in train_graphs if not g.target_tc or g.target_tc < 1.0]
-        nsc_dropped = max(0, len(nsc_train) - len(sc_train))
-        capped    = nsc_train[:len(sc_train)]
-        train_set = sc_train + capped
+        # Final shuffle after pressure augmentation — matches Colab Cell 8's
+        # `random.shuffle(train_graphs)` at the end of the train assembly.
+        import random as _rng_post
+        _rng_post.Random(42).shuffle(train_graphs)
 
+        # Diagnostic counts
+        sc_train_count  = sum(1 for g in train_graphs if g.target_tc and g.target_tc >= 1.0)
+        nsc_train_count = len(train_graphs) - sc_train_count
         log.info(
-            f"[Job#{job_id}] train={len(train_set)} "
-            f"(sc={len(sc_train)}, contrast={len(capped)}, "
-            f"contrast_dropped={nsc_dropped}) | val={len(val_graphs)}"
+            f"[Job#{job_id}] train={len(train_graphs)} "
+            f"(sc={sc_train_count}, contrast={nsc_train_count}) | val={len(val_graphs)}"
         )
 
-        # ── Cycle 1378 fix: defensive dim consistency check ───────────────────
-        # Drop any graphs whose feature widths disagree with the majority before
-        # they reach the trainer's torch.cat. In a healthy process this is a
-        # no-op (all graphs come from build_crystal_graph and share the same
-        # NODE_DIM/N_GAUSSIAN_BASIS). It's only a safety net for the case where
-        # a stale .pyc and a fresh .py emit different schemas in the same run.
+        # ── Cycle 1378 defensive dim consistency check (kept as-is) ──────────
         all_graphs   = filter_consistent_graphs(all_graphs)
         val_graphs   = filter_consistent_graphs(val_graphs)
         test_graphs  = filter_consistent_graphs(test_graphs)
-        # train_graphs is also filtered because pressure-augmented graphs (added
-        # at the PRESSURE_TC_DATA loop above) are appended to train_graphs AFTER
-        # the split, so they aren't covered by the all_graphs filter — and a
-        # subset of train_graphs feeds compute_metrics(models, sc_train[:200])
-        # below for the train-sample metrics.
         train_graphs = filter_consistent_graphs(train_graphs)
 
-        # Train ensemble — Colab parity fix:
-        # Previously passed `all_graphs` with a comment claiming the trainer
-        # does its own split. That comment was wrong: GNNTrainer.train() has
-        # no internal split, so val and test were leaking into the training
-        # signal. Also: `train_set` above already contains the SC train set
-        # plus the Tc=0 contrast plus the 115 PRESSURE_TC_DATA augmentations,
-        # which is exactly what the working Colab notebook trains on. So we
-        # feed `train_set` here — no leakage, pressure sweeps actually reach
-        # the trainer.
+        # ── Train ensemble using Colab-parity training flow ──────────────────
+        # train_ensemble routes each member through train_one_model_colab_parity()
+        # which mirrors Colab Cell 10 line-by-line: plain Adam (not AdamW),
+        # single param group, fresh optimizer per phase, mlp1 NOT frozen during
+        # pretrain, and best-state checkpointing with restore at the end.
         try:
             models = await loop.run_in_executor(
                 None,
                 lambda: train_ensemble(
-                    train_set,
+                    train_graphs,
                     size=ENSEMBLE_SIZE,
                     device=device,
-                    n_epochs=None,  # auto-computed from dataset size
-                    batch_size=min(64, len(train_set)),
-                    pretrain_fe=True,
+                    n_epochs=80,
+                    batch_size=min(64, max(1, len(train_graphs))),
+                    pretrain_epochs=15,
                 ),
             )
         except Exception as e:
@@ -691,10 +699,17 @@ async def train(req: TrainRequest):
         wall_sec = time.perf_counter() - t0
 
         # ── Evaluate on held-out val + test sets ──────────────────────────────
+        # train-sample metric uses the first 200 SC graphs from the (already
+        # shuffled) train_graphs — same purpose as Colab's `evaluate(model,
+        # train_graphs[:200], ...)`. SC-only filter happens inside compute_metrics
+        # via the `g.target_tc < 1.0` skip, so passing the mixed contrast list is
+        # safe (it just yields fewer than 200 evaluation points if contrast
+        # dominates the head of the list).
+        train_sample = [g for g in train_graphs if g.target_tc and g.target_tc >= 1.0][:200]
         val_m   = await loop.run_in_executor(None, lambda: compute_metrics(models, val_graphs))
         test_m  = await loop.run_in_executor(None, lambda: compute_metrics(models, test_graphs))
         train_m = await loop.run_in_executor(
-            None, lambda: compute_metrics(models, sc_train[:200])
+            None, lambda: compute_metrics(models, train_sample)
         )
         cal     = await loop.run_in_executor(
             None, lambda: compute_calibration(models, val_graphs)
@@ -739,8 +754,14 @@ async def train(req: TrainRequest):
         )
 
         # ── Activate new ensemble + fit OOD ──────────────────────────────────
+        # OOD detector fits on the first 200 train graphs — was previously
+        # `train_set[:200]` which referenced a temporary variable that no
+        # longer exists after the Colab-parity refactor. `train_graphs` is
+        # the equivalent list (post-shuffle, post-pressure-augmentation) and
+        # is what the trainer actually saw, so OOD distances are computed
+        # against the same distribution the model was trained on.
         _ensemble = models
-        await loop.run_in_executor(None, lambda: fit_ood(models, train_set[:200]))
+        await loop.run_in_executor(None, lambda: fit_ood(models, train_graphs[:200]))
 
         metrics = MetricsResponse(
             job_id       = job_id,
