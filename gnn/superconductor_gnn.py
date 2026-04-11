@@ -56,7 +56,10 @@ GLOBAL_COMP_DIM  = 23          # composition/physics global features
 CLS_DIM          = 24          # classification head hidden dim
 GRAPH_FEAT_DIM   = 32          # = NODE_DIM, element embedding dim for GLFN-TC
 GNN_MSG_LAYERS   = 4           # attention message-passing layers
-ENSEMBLE_SIZE    = 5
+ENSEMBLE_SIZE    = 1           # Colab parity: Colab trains one model; 5 sequential
+                               # members on GPU blew past the 4h GCP abort ceiling
+                               # and also reduces epochs/sec by cache churn. Bump to
+                               # 3 later once server-side training is proven stable.
 
 LAMBDA_MAX       = 5.5         # λ ceiling (electron-phonon coupling)
 TC_MAX_K         = 300.0       # Tc ceiling in Kelvin
@@ -1015,9 +1018,18 @@ class GNNTrainer:
         graphs:    List[SuperconGraph],
         batch_size: int = 64,
         progress:   float = 0.0,   # 0.0 → 1.0 training progress for curriculum
+        enable_curriculum: bool = False,  # Colab parity: Colab uses plain shuffle
     ) -> float:
         self.model.train()
-        indices = self._curriculum_sample(graphs, progress)
+        if enable_curriculum:
+            indices = self._curriculum_sample(graphs, progress)
+        else:
+            # Colab-parity path: straight shuffled pass over all graphs, no
+            # difficulty gating, no hard-example oversampling. Matches the
+            # monkey-patched _fixed_train_epoch used in the working notebook.
+            import random as _rnd
+            indices = list(range(len(graphs)))
+            _rnd.shuffle(indices)
         total_loss = 0.0
         n_batches  = 0
 
@@ -1160,6 +1172,7 @@ class GNNTrainer:
         pretrain_fe:   bool = True,
         pretrain_epochs: int = 15,
         verbose:       bool = True,
+        enable_curriculum: bool = False,   # Colab parity: plain shuffle by default
     ) -> List[float]:
         """Full training loop."""
         if n_epochs is None:
@@ -1172,17 +1185,20 @@ class GNNTrainer:
         # Optional formation energy pre-training
         if pretrain_fe and sum(1 for g in graphs if g.target_fe is not None) >= 20:
             if verbose:
-                print(f"Pre-training formation energy for {pretrain_fe} epochs…")
+                print(f"Pre-training formation energy for {pretrain_epochs} epochs…", flush=True)
             self._pretrain_fe(graphs, pretrain_epochs, batch_size)
 
         losses = []
         for epoch in range(n_epochs):
             progress = epoch / max(n_epochs - 1, 1)
             cosine_annealing_lr(self.optimizer, epoch, n_epochs)
-            loss = self.train_epoch(graphs, batch_size, progress)
+            loss = self.train_epoch(graphs, batch_size, progress, enable_curriculum=enable_curriculum)
             losses.append(loss)
-            if verbose and (epoch % max(n_epochs // 10, 1) == 0 or epoch == n_epochs - 1):
-                print(f"  Epoch {epoch+1}/{n_epochs}  loss={loss:.4f}")
+            # Colab-parity logging cadence: every 8 epochs (same as notebook Cell 10).
+            # Also always print epoch 1 and the final epoch so journald shows
+            # begin/end markers even for very short runs.
+            if verbose and (epoch == 0 or (epoch + 1) % 8 == 0 or epoch == n_epochs - 1):
+                print(f"  Epoch {epoch+1}/{n_epochs}  loss={loss:.4f}", flush=True)
         return losses
 
     def _pretrain_fe(self, graphs, n_epochs, batch_size):
@@ -1191,7 +1207,12 @@ class GNNTrainer:
             p.requires_grad_(False)
         fe_graphs = [g for g in graphs if g.target_fe is not None]
         for epoch in range(n_epochs):
-            self.train_epoch(fe_graphs, batch_size, progress=0.0)
+            # enable_curriculum=False matches the Colab _fixed_train_epoch path
+            # (simple shuffle, no difficulty gating) for the pretrain phase.
+            loss = self.train_epoch(fe_graphs, batch_size, progress=0.0, enable_curriculum=False)
+            # Colab logs every 5 FE pretrain epochs (notebook Cell 10).
+            if (epoch + 1) % 5 == 0 or epoch == 0 or epoch == n_epochs - 1:
+                print(f"  FE pretrain {epoch+1}/{n_epochs}  loss={loss:.4f}", flush=True)
         for p in self.model.mlp1.parameters():
             p.requires_grad_(True)
 
@@ -1209,14 +1230,19 @@ def train_ensemble(
     """Train ENSEMBLE_SIZE independent models with different seeds."""
     device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
     models = []
+    # Default to verbose so journald shows per-epoch progress. Callers that
+    # want to silence per-epoch logs (e.g. unit tests) can pass verbose=False
+    # explicitly in train_kwargs.
+    train_kwargs.setdefault("verbose", True)
     for i in range(size):
         torch.manual_seed(i * 1337 + 42)
         m = SuperconductorGNN()
         trainer = GNNTrainer(m, device)
-        trainer.train(graphs, verbose=False, **train_kwargs)
+        print(f"[ensemble] Training member {i+1}/{size} on {len(graphs)} graphs…", flush=True)
+        trainer.train(graphs, **train_kwargs)
         m.eval()
         models.append(m)
-        print(f"Ensemble member {i+1}/{size} trained.")
+        print(f"[ensemble] Member {i+1}/{size} trained.", flush=True)
     return models
 
 

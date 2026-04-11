@@ -659,12 +659,20 @@ async def train(req: TrainRequest):
         # below for the train-sample metrics.
         train_graphs = filter_consistent_graphs(train_graphs)
 
-        # Train ensemble (CPU threads — one per model)
+        # Train ensemble — Colab parity fix:
+        # Previously passed `all_graphs` with a comment claiming the trainer
+        # does its own split. That comment was wrong: GNNTrainer.train() has
+        # no internal split, so val and test were leaking into the training
+        # signal. Also: `train_set` above already contains the SC train set
+        # plus the Tc=0 contrast plus the 115 PRESSURE_TC_DATA augmentations,
+        # which is exactly what the working Colab notebook trains on. So we
+        # feed `train_set` here — no leakage, pressure sweeps actually reach
+        # the trainer.
         try:
             models = await loop.run_in_executor(
                 None,
                 lambda: train_ensemble(
-                    all_graphs,     # pass full set; trainer does internal split
+                    train_set,
                     size=ENSEMBLE_SIZE,
                     device=device,
                     n_epochs=None,  # auto-computed from dataset size
