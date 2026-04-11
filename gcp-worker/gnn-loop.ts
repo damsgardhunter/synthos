@@ -178,9 +178,18 @@ async function callPythonTrain(
   };
 
   // Cycle 1379 fix: postJsonLongRunning uses node:http directly to avoid
-  // undici's 5-minute headersTimeout. The 60-min ceiling is the hard upper
-  // bound — anything longer than that means Python is genuinely hung.
-  const res = await postJsonLongRunning(`${GNN_SERVICE_URL}/train`, body, 60 * 60_000);
+  // undici's 5-minute headersTimeout. The ceiling here is the ONLY upper
+  // bound on training wall-time, so it must be longer than any plausibly
+  // successful training run. Cycle 1380 raised it from 60 min to 4 hours
+  // because the 62k-graph corpus actually takes 60-120 min (5 ensemble
+  // members × N epochs each + pretraining), and a 60-min ceiling killed
+  // training that was 80-90% complete, then forced four more retry attempts
+  // that also blew through the same cap. 4 hours leaves ~3x headroom for
+  // dataset growth and accidental slow runs. Override via the
+  // GNN_TRAIN_TIMEOUT_MS env var if you need to push it higher (e.g. on a
+  // CPU-only fallback host where training takes 6+ hours).
+  const trainAbortMs = parseInt(process.env.GNN_TRAIN_TIMEOUT_MS ?? "", 10) || (4 * 60 * 60_000);
+  const res = await postJsonLongRunning(`${GNN_SERVICE_URL}/train`, body, trainAbortMs);
 
   if (res.status < 200 || res.status >= 300) {
     throw new Error(`Python /train failed ${res.status}: ${res.rawText.slice(0, 200)}`);
