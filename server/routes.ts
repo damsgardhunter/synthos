@@ -758,20 +758,36 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
 
   app.get("/api/superconductor-candidates", async (req, res) => {
+    const rawLim = Number(req.query.limit);
+    const rawOffset = Number(req.query.offset);
+    const limit = Math.min(Number.isFinite(rawLim) && rawLim > 0 ? rawLim : 25, 1000);
+    const offset = Number.isFinite(rawOffset) && rawOffset >= 0 ? rawOffset : 0;
+    const cacheKey = `${CACHE_KEYS.CANDIDATES}:${limit}:${offset}`;
     try {
-      const rawLim = Number(req.query.limit);
-      const rawOffset = Number(req.query.offset);
-      const limit = Math.min(Number.isFinite(rawLim) && rawLim > 0 ? rawLim : 25, 1000);
-      const offset = Number.isFinite(rawOffset) && rawOffset >= 0 ? rawOffset : 0;
-      const cacheKey = `${CACHE_KEYS.CANDIDATES}:${limit}:${offset}`;
       const result = await cache.getOrSetStale(cacheKey, TTL.CANDIDATES, async () => {
         const candidates = await storage.getSuperconductorCandidates(limit, offset);
         const total = await storage.getSuperconductorCount();
         return { candidates, total };
       });
       res.json(result);
-    } catch (e) {
-      res.status(500).json({ error: "Failed to fetch superconductor candidates" });
+    } catch (e: any) {
+      // DB cold-start / event-loop block: cache fetch timed out. Try to serve
+      // any stale data we still have for this exact key, or any sibling key for
+      // the same offset (any limit), so the page never goes empty during a
+      // transient DB outage.
+      const stale = cache.getStale<any>(cacheKey);
+      if (stale) {
+        res.setHeader("X-Cache-Status", "stale-on-error");
+        return res.json(stale);
+      }
+      const fallback = cache.findFirstByPrefix<any>(`${CACHE_KEYS.CANDIDATES}:`);
+      if (fallback) {
+        res.setHeader("X-Cache-Status", "fallback-prefix");
+        return res.json(fallback);
+      }
+      console.warn(`[routes] /api/superconductor-candidates fallback empty: ${e?.message ?? e}`);
+      res.setHeader("X-Cache-Status", "empty-fallback");
+      res.json({ candidates: [], total: 0, _degraded: true });
     }
   });
 

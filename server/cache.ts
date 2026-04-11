@@ -59,6 +59,16 @@ class MemoryCache {
     this.store.delete(key);
   }
 
+  // Returns the first cached entry whose key starts with `prefix`, regardless
+  // of expiry. Used by routes that need a stale-on-error fallback when the
+  // exact-key entry has been swept and the DB is unreachable.
+  findFirstByPrefix<T>(prefix: string): T | undefined {
+    for (const [key, entry] of this.store) {
+      if (key.startsWith(prefix)) return entry.data as T;
+    }
+    return undefined;
+  }
+
   invalidatePrefix(prefix: string): void {
     const keysToDelete: string[] = [];
     this.store.forEach((_val, key) => {
@@ -98,19 +108,67 @@ class MemoryCache {
     if (stale !== undefined && !expired) return stale;
 
     if (stale !== undefined && expired) {
-      // Serve stale immediately; refresh in background (deduplicated)
+      // Serve stale immediately; refresh in background (deduplicated).
+      // We INTENTIONALLY do not evict stale data on background-refresh failures:
+      // during a Neon DB outage, stale candidates are infinitely better than
+      // no data + a 75s blocking fetch + a 500 to the user. The stale entry
+      // will refresh as soon as the DB recovers. Only the explicit `invalidate()`
+      // path or sweep can drop the entry.
       if (!this.inflight.has(key)) {
         const promise = fetcher().then(data => {
           this.set(key, data, ttlMs);
           this.inflight.delete(key);
           return data;
-        }).catch(() => { this.inflight.delete(key); });
+        }).catch(() => {
+          this.inflight.delete(key);
+        });
         this.inflight.set(key, promise);
       }
       return stale;
     }
 
-    return this.getOrSet(key, ttlMs, fetcher);
+    // Cold-start path: no stale data exists. Bound the wait so a hung DB
+    // doesn't block the response for the full Neon connection timeout (~75s).
+    // If the fetch doesn't complete in 6s, throw a timeout the route can
+    // catch and turn into an empty/partial response.
+    return this.getOrSetWithTimeout(key, ttlMs, fetcher, 6000);
+  }
+
+  // Like getOrSet, but rejects if the fetcher takes longer than `timeoutMs`.
+  // The fetcher is NOT cancelled — if it eventually succeeds, the result is
+  // still cached for the next caller. This way a slow first call returns an
+  // error fast, but the cache warms up in the background for subsequent ones.
+  private async getOrSetWithTimeout<T>(
+    key: string,
+    ttlMs: number,
+    fetcher: () => Promise<T>,
+    timeoutMs: number,
+  ): Promise<T> {
+    const cached = this.get<T>(key);
+    if (cached !== undefined) return cached;
+
+    let promise = this.inflight.get(key) as Promise<T> | undefined;
+    if (!promise) {
+      promise = fetcher().then(data => {
+        this.set(key, data, ttlMs);
+        this.inflight.delete(key);
+        return data;
+      }).catch(err => {
+        this.inflight.delete(key);
+        throw err;
+      });
+      this.inflight.set(key, promise);
+    }
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error(`cache fetch timeout after ${timeoutMs}ms for ${key}`)), timeoutMs);
+    });
+    try {
+      return await Promise.race([promise, timeout]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   clear(): void {
