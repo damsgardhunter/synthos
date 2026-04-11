@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState, useRef, useMemo } from "react";
-import { queryClient } from "@/lib/queryClient";
+import { queryClient, throttledInvalidate } from "@/lib/queryClient";
 import type { LearningPhase, ResearchLog, ResearchStrategy } from "@shared/schema";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -2084,12 +2084,15 @@ export default function Dashboard() {
 
     // Phase and cycle completions — refresh stable state.
     // "progress" fires per batch item (many/sec) and is intentionally excluded — it caused 1Hz HTTP spam.
-    if (t === "phaseUpdate" || t === "cycleEnd") {
-      queryClient.invalidateQueries({ queryKey: ["/api/stats"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/learning-phases"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/engine/memory"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/milestones"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/research-logs"] });
+    if (t === "phaseUpdate") {
+      throttledInvalidate("/api/learning-phases");
+    }
+    if (t === "cycleEnd") {
+      throttledInvalidate("/api/stats");
+      throttledInvalidate("/api/learning-phases");
+      throttledInvalidate("/api/engine/memory");
+      throttledInvalidate("/api/milestones");
+      throttledInvalidate("/api/research-logs");
     }
     // New predictions or insights — refresh discovery data
     if (["prediction", "insight"].includes(t)) {
@@ -2113,7 +2116,7 @@ export default function Dashboard() {
       if (cycleEndDebounceRef.current) clearTimeout(cycleEndDebounceRef.current);
       cycleEndDebounceRef.current = setTimeout(() => {
         for (const key of CYCLE_END_KEYS) {
-          queryClient.invalidateQueries({ queryKey: [key] });
+          throttledInvalidate(key);
         }
         cycleEndDebounceRef.current = null;
       }, 3000);

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useSyncExternalStore } from "react";
-import { queryClient } from "../lib/queryClient";
+import { queryClient, throttledInvalidate } from "../lib/queryClient";
 
 export interface WSMessage {
   type: string;
@@ -71,7 +71,7 @@ function connectWS() {
     // Flush only the core queries on reconnect — invalidating ALL queries causes a
     // thundering herd of 25+ simultaneous fetches that queue up and each take ~1s.
     for (const key of ["/api/stats", "/api/learning-phases", "/api/research-logs", "/api/engine/memory", "/api/dft-status"]) {
-      queryClient.invalidateQueries({ queryKey: [key] });
+      throttledInvalidate(key);
     }
     // Seed the activity feed with recent log history so it's not empty on connect/reconnect
     fetch("/api/research-logs?limit=20")

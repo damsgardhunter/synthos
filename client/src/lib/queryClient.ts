@@ -161,6 +161,18 @@ export const getQueryFn: <T>(options: {
     return await res.json();
   };
 
+// Throttled invalidation: skip re-invalidating the same query key within 15s.
+// Prevents request floods when phaseUpdate fires multiple times per cycle
+// and multiple pages each call invalidateQueries for the same key.
+const _lastInvalidated = new Map<string, number>();
+export function throttledInvalidate(key: string) {
+  const now = Date.now();
+  const last = _lastInvalidated.get(key) ?? 0;
+  if (now - last < 30_000) return;
+  _lastInvalidated.set(key, now);
+  queryClient.invalidateQueries({ queryKey: [key] });
+}
+
 export const queryClient = new QueryClient({
   defaultOptions: {
     queries: {

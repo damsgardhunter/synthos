@@ -1,7 +1,7 @@
 import { useQuery, useInfiniteQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "wouter";
-import { queryClient } from "@/lib/queryClient";
+import { queryClient, throttledInvalidate } from "@/lib/queryClient";
 import { useWebSocket } from "@/hooks/use-websocket";
 import type { LearningPhase, ResearchLog, NovelInsight, ConvergenceSnapshot, Milestone } from "@shared/schema";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -878,13 +878,14 @@ export default function ResearchPipeline() {
     if (!last) return;
     // "progress" fires per batch item (potentially many/sec); "insight" fires per discovery.
     // Only coarse-grained events (phaseUpdate, cycleEnd) should trigger broad invalidation.
-    if (last.type === "phaseUpdate" || last.type === "cycleEnd") {
-      queryClient.invalidateQueries({ queryKey: ["/api/learning-phases"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/engine/memory"] });
+    if (last.type === "phaseUpdate") {
+      throttledInvalidate("/api/learning-phases");
     }
     if (last.type === "cycleEnd") {
-      queryClient.invalidateQueries({ queryKey: ["/api/research-logs"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/superconductor-candidates"] });
+      throttledInvalidate("/api/learning-phases");
+      throttledInvalidate("/api/engine/memory");
+      throttledInvalidate("/api/research-logs");
+      throttledInvalidate("/api/superconductor-candidates");
     }
     if (last.type === "insight" || last.type === "cycleEnd") {
       queryClient.invalidateQueries({ queryKey: ["/api/novel-insights"] });
