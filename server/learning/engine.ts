@@ -9105,7 +9105,12 @@ async function backfillGBScores() {
   } catch (e) { console.error("[Engine] GB score backfill failed:", e); }
 }
 
-const PHYSICS_VERSION = 15;
+// Bumped 2026-04-11: GNN retrained with full Colab parity (job#657, VAL R²=0.874,
+// MAE=8.3K, TEST R²=0.871, ENSEMBLE_SIZE=1, MP cuprate/hydride fetch enabled).
+// Forces recalculatePhysics() to re-score every existing candidate against the
+// new model on next server restart. Without this bump the new model only affects
+// candidates discovered AFTER the deploy — historical rows keep their old scores.
+const PHYSICS_VERSION = 16;
 
 async function recalculatePhysics() {
   const yield_ = () => new Promise<void>(r => setTimeout(r, 200));
