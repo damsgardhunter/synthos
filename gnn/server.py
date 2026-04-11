@@ -47,6 +47,7 @@ from superconductor_gnn import (
 )
 from graph_builder import build_crystal_graph
 from training_data import KNOWN_TC, HYDRIDE_PRESSURE_GPA, PRESSURE_TC_DATA
+from mp_fetch import fetch_mp_graphs
 
 # ── Config ────────────────────────────────────────────────────────────────────
 PORT          = int(os.environ.get("GNN_SERVICE_PORT", "8765"))
@@ -611,6 +612,50 @@ async def train(req: TrainRequest):
         if known_labeled > 0:
             log.info(f"[Job#{job_id}] Applied {known_labeled} KNOWN_TC labels")
 
+        # ── Colab Cell 6: live MP fetch for cuprates + hydrides ──────────────
+        # Mirrors the Colab notebook's MP augmentation step. Pulls cuprate
+        # (Cu+O metallic, hull≤0.1) and hydride (H metallic, hull≤0.15)
+        # entries from Materials Project, builds graphs via the same
+        # build_crystal_graph() the rest of the pipeline uses, and merges
+        # them into all_graphs BEFORE the train/val/test split. The fetch
+        # is cached to /opt/qae/gnn_weights/mp_fetch_cache.pkl with a 7-day
+        # TTL — first run hits the network (~30-60s), subsequent runs are
+        # instant.
+        #
+        # Failure-safe: returns ([], []) when MP_API_KEY is unset, mp-api
+        # isn't installed, or the network call errors. Training proceeds
+        # without the augmentation in those cases — the worst-case is that
+        # we land where we were before this fix, never worse.
+        try:
+            mp_cuprates, mp_hydrides = await loop.run_in_executor(
+                None, fetch_mp_graphs,
+            )
+            mp_total = len(mp_cuprates) + len(mp_hydrides)
+            if mp_total > 0:
+                # Strip sub-1K Tc noise from any MP-labeled graphs (same
+                # rule applied to DB samples above) so the trainer never
+                # sees ambiguous near-zero positives.
+                for g in mp_cuprates + mp_hydrides:
+                    if g.target_tc is not None and 0 < g.target_tc < 1.0:
+                        g.target_tc  = None
+                        g.target_psc = 0.0
+
+                mp_labeled = sum(
+                    1 for g in mp_cuprates + mp_hydrides
+                    if g.target_tc is not None
+                )
+                all_graphs.extend(mp_cuprates)
+                all_graphs.extend(mp_hydrides)
+                log.info(
+                    f"[Job#{job_id}] MP augmentation: +{len(mp_cuprates)} cuprates, "
+                    f"+{len(mp_hydrides)} hydrides ({mp_labeled} labeled, "
+                    f"{mp_total - mp_labeled} unlabeled multi-task anchors)"
+                )
+            else:
+                log.info(f"[Job#{job_id}] MP augmentation: 0 graphs (MP fetch unavailable or empty)")
+        except Exception as e:
+            log.warning(f"[Job#{job_id}] MP augmentation skipped: {type(e).__name__}: {e}")
+
         if len(all_graphs) < 10:
             return TrainResponse(
                 job_id=job_id, status="failed",
@@ -619,13 +664,13 @@ async def train(req: TrainRequest):
             )
 
         # ── Colab-parity train/val/test split (Cell 8) ───────────────────────
-        # _split_train_val_test now returns train = SC train + 1:1-capped
-        # contrast (shuffled), exactly matching Colab's
+        # _split_train_val_test returns train = SC train + 1:1-capped contrast
+        # + (now also) any MP unlabeled graphs which the split routes entirely
+        # to train per Colab's `train_graphs = sc_train + nsc_train + mp_unlabeled`.
+        # Cell 8 logic in full:
         #   sc_train = sc_all[n_test+n_val:]
         #   nsc_train = nsc_all[:len(sc_train)]
         #   train_graphs = sc_train + nsc_train + mp_unlabeled
-        # We don't have mp_unlabeled (no live MP fetch in the server) but the
-        # rest is the same.
         train_graphs, val_graphs, test_graphs = _split_train_val_test(
             all_graphs, val_frac=0.15, test_frac=0.15, seed=42,
         )

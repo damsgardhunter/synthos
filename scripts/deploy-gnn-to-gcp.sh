@@ -39,9 +39,13 @@ GCP_REMOTE_GNN_DIR="${GCP_REMOTE_GNN_DIR:-/opt/quantum-alchemy/gnn}"
 GCP_SERVICE_NAME="${GCP_SERVICE_NAME:-quantum-alchemy-gcp.service}"
 
 # Files to sync. Add more here if you start touching graph_builder.py too.
+# training_data.py and mp_fetch.py are imported by server.py at module load —
+# they MUST land on the box together or the service will crash on restart.
 FILES=(
   "superconductor_gnn.py"
   "server.py"
+  "training_data.py"
+  "mp_fetch.py"
 )
 
 DRY_RUN=0
@@ -145,7 +149,13 @@ for f in "${FILES[@]}"; do
 done
 REMOTE_CMD+="sudo find $GCP_REMOTE_GNN_DIR -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true; "
 REMOTE_CMD+="echo '[deploy] files in place at $(date -Iseconds)' && "
-REMOTE_CMD+="ls -la $GCP_REMOTE_GNN_DIR/server.py $GCP_REMOTE_GNN_DIR/superconductor_gnn.py"
+# Verify every file we shipped actually landed — catches silent SCP drops
+# and tells you the size + mtime so you can sanity-check the deploy.
+LS_TARGETS=""
+for f in "${FILES[@]}"; do
+  LS_TARGETS+="$GCP_REMOTE_GNN_DIR/$f "
+done
+REMOTE_CMD+="ls -la $LS_TARGETS"
 
 run gcloud compute ssh "$GCP_HOST" \
   --zone="$GCP_ZONE" \

@@ -19,26 +19,32 @@ KNOWN_TC = {
     "TlBa2CuO5": 50.0, "TlBa2CaCu2O7": 80.0, "TlBa2Ca2Cu3O9": 110.0, "TlBa2Ca3Cu4O11": 122.0,
     # Cuprates - Mercury family (record holders)
     "HgBa2CuO4": 94.0, "HgBa2CaCu2O6": 128.0, "HgBa2Ca2Cu3O8": 133.0, "HgBa2Ca3Cu4O10": 125.0,
-    # Cuprates - Other
+    # Cuprates - Other (incl. Colab non-SC parents that act as negative anchors)
     "RuSr2GdCu2O8": 40.0, "CaCuO2": 110.0, "SrCuO2": 90.0,
-    # Iron-based - LaFeAsO family
+    "Sr2CuO2Cl2": 0.0, "Ca2CuO2Cl2": 0.0, "Bi2CuO4": 0.0, "CuO": 0.0,
+    "Ba2CuO4": 0.0, "Sr2CuO3": 0.0,
+    # Cuprates - Mercury pressure record key (Colab uses suffix to disambiguate)
+    "HgBa2Ca2Cu3O8_31GPa": 164.0,
+    # Iron-based - LaFeAsO family (parent + doped variants)
+    "LaFeAsO": 0.0,
     "LaFeAsO0.9F0.1": 26.0, "SmFeAsO0.9F0.1": 55.0, "NdFeAsO0.9F0.1": 52.0,
     "CeFeAsO0.9F0.1": 41.0, "GdFeAsO0.9F0.1": 36.0, "LaFePO": 6.0,
-    # Iron-based - BaFe2As2 family (122)
+    # Iron-based - BaFe2As2 family (122) — parents are 0K spin-density-wave compounds
+    "BaFe2As2": 0.0, "CaFe2As2": 0.0, "SrFe2As2": 0.0, "EuFe2As2": 0.0,
     "Ba0.6K0.4Fe2As2": 38.0, "BaFe1.8Co0.2As2": 22.0, "KFe2As2": 3.8, "CsFe2As2": 2.6,
-    # Iron-based - FeSe
-    "FeSe": 8.0, "FeSe0.5Te0.5": 14.0, "LiFeAs": 18.0, "NaFeAs": 9.0,
+    # Iron-based - FeSe (incl. FeTe parent)
+    "FeSe": 8.0, "FeSe0.5Te0.5": 14.0, "FeTe": 0.0, "LiFeAs": 18.0, "NaFeAs": 9.0,
     "FeSe_monolayer": 65.0,
     # Pnictides (non-iron)
     "LaRhP": 4.0, "LaRuP": 7.0, "BaNi2As2": 0.7, "SrPtAs": 2.4,
     # Hydrides - Sulfur/Phosphorus
     "H3S": 203.0, "H2S": 80.0, "PH3": 100.0,
-    # Hydrides - Lanthanum
-    "LaH10": 250.0, "LaH6": 90.0, "LaBeH8": 185.0,
+    # Hydrides - Lanthanum (incl. LaH3 non-SC parent)
+    "LaH10": 250.0, "LaH6": 90.0, "LaH3": 0.0, "LaBeH8": 185.0,
     # Hydrides - Yttrium
     "YH6": 224.0, "YH9": 243.0, "YH4": 84.0,
-    # Hydrides - Calcium
-    "CaH6": 210.0,
+    # Hydrides - Calcium (incl. CaH2 non-SC parent)
+    "CaH6": 210.0, "CaH2": 0.0,
     # Hydrides - Strontium / Barium
     "SrH6": 156.0, "SrH10": 259.0, "BaH6": 38.0, "BaH12": 20.0,
     # Hydrides - Thorium
@@ -59,8 +65,9 @@ KNOWN_TC = {
     "YB6": 7.1, "ZrB12": 6.0, "TaB2": 9.5, "OsB2": 2.1,
     # Heavy fermion
     "UBe13": 0.85, "UPt3": 0.54, "CeCoIn5": 2.3, "CeRhIn5": 2.1, "PuCoGa5": 18.5,
-    # Other notable
-    "Sr2RuO4": 1.5, "K3C60": 19.0, "Rb3C60": 29.0, "Cs3C60": 38.0, "CaC6": 11.5,
+    # Other notable (incl. Colab's UGe2/URhGe ferromagnetic SCs)
+    "Sr2RuO4": 1.5, "UGe2": 0.8, "URhGe": 0.25,
+    "K3C60": 19.0, "Rb3C60": 29.0, "Cs3C60": 38.0, "CaC6": 11.5,
     # Binary hydrides (low/zero Tc — important negatives for MP matching)
     "ScH2": 0.0, "ZrH2": 4.0, "YH2": 0.0, "LaH2": 0.0, "CeH3": 0.0, "PrH3": 0.0,
     "NdH3": 0.0, "SmH2": 0.0, "GdH3": 0.0, "DyH3": 0.0, "HoH3": 0.0, "ErH3": 0.0,
