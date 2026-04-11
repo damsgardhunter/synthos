@@ -84,6 +84,36 @@ If the **same issue** (same category + same root-cause keywords) appears **2 or 
 - "Feed frozen" recurring with no code change → read engine.ts and find what's blocking the event loop
 - "Research log circuit breaker opened" recurring → find what's generating the burst of DB writes and rate-limit it
 
+### ⛔ HOLDING LIMIT — Never Get Stuck in Observe-Only Mode
+
+Free Investigation Mode is **not** an excuse to write "Holding. Peak unchanged." for 40 cycles. If you have looked at an issue and decided not to act, you must commit to a decision **within 3 monitor cycles**. Indefinite observation = a stuck monitor.
+
+**Banned phrases in `openIssues`:** "Holding", "Peak unchanged", "Nth cycle of same issue", "monitoring", "watching", "stable so far". If you catch yourself about to write any of these, you have already failed the holding limit and must take one of the actions below **this cycle**.
+
+**On the 3rd consecutive cycle that the same issue is in `openIssues` with no fix applied, you must do EXACTLY ONE of these — not "wait and see":**
+
+1. **Investigate and fix the actual root cause.** Read the source files involved, trace the call chain, find the bug, edit the code. If the prior fix was wrong (the symptom got worse or didn't move), revert it as part of the same edit. The fix history is allowed to say "reverted X — wrong hypothesis."
+
+2. **Accept the issue as a known warning** by moving it from `openIssues` into a new top-level `acceptedWarnings` array in `monitor-state.json`:
+   ```json
+   "acceptedWarnings": [
+     { "pattern": "<short stable identifier>",
+       "since": "<ISO timestamp>",
+       "reason": "<why this is fine to ignore + what would change to re-open it>" }
+   ]
+   ```
+   An accepted warning **does not block clean cycles**. It is still surfaced in the cycle report, but the cycle counts as clean if no real issues are present. Use this when you have determined the warning is either a false positive, a measurement artifact, or a known cost that does not affect the science.
+
+3. **Tighten the warning detector in `scripts/qae-monitor-check.sh`** so the warning only fires on the genuinely-broken case. E.g. if `extractFeatures TOTAL >10s` is mostly measuring semaphore queue wait, raise the threshold to >60s, or split it into a wait-time vs cpu-time metric. Whatever you change must be a one-line edit in the check script with a comment citing the cycle number and reason.
+
+4. **Escalate to the user** by writing a single concise issue in `openIssues` titled `NEEDS USER DECISION: <one-line summary>` with: (a) what you investigated, (b) why none of options 1–3 are appropriate, (c) the specific question you need answered. After this, you may keep the issue across cycles **without it counting as a holding violation**, but you must not add any new analysis until the user responds — any new "still observing" cycles will reset the violation counter.
+
+**How to count holding cycles:** scan the last 3 entries of `fixHistory` plus the current `openIssues`. If the same issue (same stable keywords) has appeared in 3 cycles in a row without an entry in `fixHistory` for it, you are at the limit. Picking option 1, 2, or 3 above counts as a fix and should be added to `fixHistory` like any other fix.
+
+**Anti-cheat:** an entry in `fixHistory` that says "decided to keep monitoring" or "no action this cycle" does NOT reset the holding counter. Only options 1–4 above reset it.
+
+**Why this rule exists:** the monitor previously sat for 41 cycles writing "Peak unchanged. Holding." against an `extractFeatures TOTAL >10s` warning where the prior fix (cycle 1367 semaphore) had partially worked but the warning's measurement was conflating queue wait with CPU time. Forty-one observe-only cycles is forty-one missed opportunities to either fix the real issue, fix the measurement, or accept it. None of those happened because no rule forced a decision.
+
 ---
 
 ### Repeated OOM Crashes (CRITICAL — fix code, do NOT just restart again)
@@ -367,6 +397,11 @@ After all fixes (or if no fixes needed), update `logs/monitor-state.json`:
   "lastCheck": "<ISO timestamp>",
   "lastStatus": "<"clean" | "fixed" | "issues_remain">",
   "openIssues": [<list of issue messages that were NOT fixed this cycle>],
+  "acceptedWarnings": [
+    { "pattern": "<short stable identifier>",
+      "since": "<ISO timestamp>",
+      "reason": "<why ignored + what would re-open it>" }
+  ],
   "fixHistory": [
     {
       "cycle": <totalCycles>,
@@ -380,9 +415,11 @@ After all fixes (or if no fixes needed), update `logs/monitor-state.json`:
 ```
 
 Rules:
-- `cleanCycles` resets to 0 any time there are unfixed issues
-- `cleanCycles` increments only when `isClean === true` AND no fixes were needed
-- If you made fixes, set `lastStatus: "fixed"` and reset `cleanCycles` to 0 (fixes might have introduced new issues that need a clean run to confirm)
+- `cleanCycles` resets to 0 any time there are unfixed issues in `openIssues`. **Accepted warnings (in `acceptedWarnings`) do NOT block clean cycles.**
+- `cleanCycles` increments when `isClean === true` AND `openIssues` is empty AND no new fixes were applied this cycle. Accepted warnings may still be present — that is fine.
+- If you made fixes, set `lastStatus: "fixed"` and reset `cleanCycles` to 0 (fixes might have introduced new issues that need a clean run to confirm).
+- Preserve `acceptedWarnings` across cycles. Only remove an entry if its `re-open` condition triggers (e.g. a peak threshold is exceeded), in which case move it back into `openIssues` and start a fresh investigation.
+- When a warning fires this cycle that matches a `pattern` already in `acceptedWarnings`, **do not** add it to `openIssues` and **do not** count it against the clean streak. Just note in the cycle report that N accepted warnings are still firing.
 
 ---
 

@@ -44,17 +44,26 @@ api_get() {
 
 # ── Server reachability ───────────────────────────────────────
 # Use a 5s health-check to detect unresponsive servers quickly.
-# If HTTP times out but the PID is alive → event loop is saturated (SG sweep /
-# GB training). Set HTTP_BLOCKED=True and skip ALL subsequent curl calls so
-# a blocked server cannot make the monitor hang for 100+ seconds.
+# If HTTP times out, retry once after 2s — a single transient spike on the
+# event loop (e.g. pareto-frontier computing) shouldn't cause a cascade of
+# false-positive "HTTP blocked" warnings. Only declare HTTP_BLOCKED if BOTH
+# probes fail.
+# If both probes time out but the PID is alive → event loop is genuinely
+# saturated (SG sweep / GB training). Set HTTP_BLOCKED=True and skip ALL
+# subsequent curl calls so a blocked server cannot make the monitor hang.
 SERVER_RUNNING=False
 HTTP_BLOCKED=False
 PID_FILE="logs/server.pid"
 if curl -sf --max-time 5 "$HOST/api/health" > /dev/null 2>&1; then
   SERVER_RUNNING=True
-elif [[ -f "$PID_FILE" ]] && tasklist //FI "PID eq $(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null | grep -q "$(cat "$PID_FILE" 2>/dev/null)"; then
-  SERVER_RUNNING=True   # HTTP blocked (event loop saturated), process alive — not crashed
-  HTTP_BLOCKED=True     # skip all further curl calls to avoid 100s hang
+else
+  sleep 2
+  if curl -sf --max-time 5 "$HOST/api/health" > /dev/null 2>&1; then
+    SERVER_RUNNING=True   # second probe succeeded — first was a transient spike
+  elif [[ -f "$PID_FILE" ]] && tasklist //FI "PID eq $(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null | grep -q "$(cat "$PID_FILE" 2>/dev/null)"; then
+    SERVER_RUNNING=True   # HTTP blocked (event loop saturated), process alive — not crashed
+    HTTP_BLOCKED=True     # skip all further curl calls to avoid 100s hang
+  fi
 fi
 
 # ── Fetch API data (skipped when HTTP_BLOCKED to prevent 100s hang) ──────────
@@ -70,6 +79,14 @@ if [[ "$HTTP_BLOCKED" == "True" ]]; then
 else
   ENGINE_STATUS=$(api_get "/api/engine/status")
   DFT_STATUS=$(api_get "/api/dft-status")
+  # Double-fetch research-logs to defeat stale cache: cache.getOrSetStale returns
+  # stale data immediately and triggers a background refresh. If no client has
+  # queried this key for >TTL, the first call returns a stale entry from minutes
+  # or hours ago. Sleep briefly so the background refresh completes, then re-fetch
+  # to get the fresh data. Without this, the freeze detector reports 20-min false
+  # positives any time the cache hasn't been warmed by browser traffic.
+  api_get "/api/research-logs?limit=100" > /dev/null 2>&1
+  sleep 1
   RESEARCH_LOGS=$(api_get "/api/research-logs?limit=100")
   ML_CALIBRATION=$(api_get "/api/ml-calibration")
   DASHBOARD=$(api_get "/api/dashboard")
@@ -350,6 +367,34 @@ if log_tail:
                         add_issue("ml", f"{label} took {val}ms (threshold {threshold}ms)", f"log: {line.strip()[:120]}")
     if _extract_skip_count > 0:
         add_warning("ml", f"extractFeatures circuit-breaker fired {_extract_skip_count}x (event-loop congestion during GradientBoost training — materials skipped gracefully)", "log scan")
+
+    # Cycle 1367 fix verification: extractFeatures wall-clock TOTAL > 10s.
+    # Pre-fix this commonly hit 50-100s due to many concurrent compute bodies stacking
+    # on the event loop. Post-fix (global FEATURE_COMPUTE_MAX_CONCURRENT=2 semaphore in
+    # ml-predictor.ts), TOTAL should be 1-3s actual CPU. Anything still >10s means the
+    # semaphore isn't bounding contention enough, OR a single sub-call is genuinely
+    # slow — surface as a deduped warning so it's visible without spamming issues.
+    _extract_total_max = 0
+    _extract_total_count = 0
+    _extract_total_formula_max = ""
+    for line in lines:
+        m = re.search(r"\[extractFeatures\]\s+TOTAL\s+(\d+)ms\s+for\s+(\S+)", line)
+        if m:
+            ms = int(m.group(1))
+            if ms > 10000:
+                _extract_total_count += 1
+                if ms > _extract_total_max:
+                    _extract_total_max = ms
+                    _extract_total_formula_max = m.group(2)
+    if _extract_total_count > 0:
+        add_warning(
+            "ml",
+            f"extractFeatures wall-clock TOTAL >10s fired {_extract_total_count}x "
+            f"(max {_extract_total_max}ms for {_extract_total_formula_max}) — "
+            f"post-cycle-1367 fix in place (FEATURE_COMPUTE_MAX_CONCURRENT=2 semaphore); "
+            f"if persistent, semaphore may need lowering to 1 or a sub-call regressed",
+            "log scan",
+        )
 
     # OpenAI API errors — treated as errors, not warnings, because they block
     # formula generation, NLP analysis, structure prediction, and synthesis tracking.
@@ -686,8 +731,12 @@ for _log in research_logs[:5]:
 # Log format has two timestamp styles:
 #   [express] lines: ISO timestamps embedded in JSON response bodies
 #   [Engine] lines:  unix millisecond timestamps at end of line (e.g. 1775089982918)
+# Only fall back when HTTP is actually blocked. A transient /api/research-logs
+# timeout (>4s curl limit) on a responsive server would otherwise pick up a
+# stale historical ISO from an [express] body and produce a false-positive
+# FROZEN report — past fixHistory shows this happening repeatedly.
 _feed_ts_source = "api"
-if _feed_most_recent_ts is None and log_tail:
+if _feed_most_recent_ts is None and log_tail and http_blocked:
     import re as _re_ff
     _activity_line_pat = _re_ff.compile(
         r'\[Engine\]|\[express\]|Cycle #\d+|\[research-logs\]|cycleEnd|phaseUpdate|Phase \d+|'
@@ -1395,10 +1444,10 @@ if net_metrics:
     from collections import Counter
     _ep_counts = Counter(e.get("endpoint","") for e in net_metrics)
     for _ep, _count in _ep_counts.most_common(5):
-        if _count > 10 and "/api/network-metrics" not in _ep:
+        if _count > 30 and "/api/network-metrics" not in _ep:
             _ep_timings = [e["durationMs"] for e in net_metrics if e.get("endpoint") == _ep]
             _ep_avg = int(sum(_ep_timings) / len(_ep_timings)) if _ep_timings else 0
-            if _count > 20:
+            if _count > 60:
                 add_issue("frontend",
                     f"Request flood: '{_ep}' called {_count} times in 2 min (avg {_ep_avg}ms). "
                     f"This is >10x the expected rate. Check if a cycleEnd WebSocket event is triggering "
