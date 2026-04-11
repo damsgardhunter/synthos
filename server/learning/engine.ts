@@ -4678,7 +4678,20 @@ async function runPhase11_StructurePrediction() {
         let vaeGateFiltered = 0;
         let vaeConvergenceSkipped = 0;
         let vaeBestOverall: { bestTc: number; bestFormula: string; optimizationSteps: number; converged: boolean } | null = null;
-        for (const vaeSeed of vaeSeeds) {
+        for (let vaeSeedIdx = 0; vaeSeedIdx < vaeSeeds.length; vaeSeedIdx++) {
+          const vaeSeed = vaeSeeds[vaeSeedIdx];
+          // Heartbeat log: emit before each seed so the activity feed stays warm during
+          // the long VAE inverse design loop (3 seeds × 30 epochs × 0.02 lr can take 5-15 min total).
+          // Without this, the feed appears frozen for the entire VAE phase, triggering monitor alerts.
+          emit("log", {
+            phase: "phase-11",
+            event: "VAE seed start",
+            detail: `Seed ${vaeSeedIdx + 1}/${vaeSeeds.length}: ${vaeSeed ?? "random"}, target=${elasticTcTarget(autonomousBestTc)}K, 30 epochs`,
+            dataSource: "Crystal VAE",
+          });
+          // Yield to event loop so any pending HTTP requests / WS messages get processed
+          // before the CPU-bound optimization loop starts.
+          await new Promise(r => setTimeout(r, 0));
           try {
             const vaeResult = await runLatentSpaceInverseDesign(
               elasticTcTarget(autonomousBestTc),
@@ -7198,6 +7211,16 @@ async function runAutonomousFastPath() {
         if (autonomousTotalScreened <= 200 || autonomousTotalScreened % 50 === 0) {
           console.log(`[Autonomous] REJECTED: ${formula} Tc=${result.tc}K reason=${result.reason}`);
         }
+      }
+
+      // Yield to event loop every 5 formulas. The per-formula post-processing here
+      // (Physics ML emit, crystal growth simulation, novel synthesis discovery,
+      // experiment plan generation) is heavy sync CPU work — without periodic yields,
+      // HTTP requests get starved during long sweep cycles. Cycle 1297 hit 25+ min of
+      // hard HTTP block during post-restart catch-up because this loop ran 100s of
+      // formulas synchronously between event-loop turns.
+      if (batchCount % 5 === 0) {
+        await new Promise<void>(r => setTimeout(r, 0));
       }
     }
 

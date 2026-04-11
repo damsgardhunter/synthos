@@ -408,6 +408,13 @@ export async function extractFeatures(formula: string, mat?: Partial<Material>, 
   if (_noExtraCtx) {
     const _hit = getCachedFeatures(_cacheKey);
     if (_hit) return _hit;
+    // In-flight dedup: if another concurrent caller is already computing the same
+    // formula+pressure, await its Promise instead of duplicating the ~10s of work.
+    // Without this, 20 concurrent callers stack 20× the CPU load on shared sync code
+    // paths inside computeElectronicStructure / computePhononSpectrum, and HTTP gets
+    // starved for the entire duration. See cycle 1300 fix in monitor-state.json.
+    const _pending = inFlightFeatures.get(_cacheKey);
+    if (_pending) return _pending;
   }
 
   // Abort when SG sweep guard is active and no cache hit. The one fast-path candidate
@@ -418,6 +425,17 @@ export async function extractFeatures(formula: string, mat?: Partial<Material>, 
     throw new Error("sg-sweep-guard: skip extractFeatures — sweep active, no cache hit");
   }
 
+  // Wrap the heavy computation in an IIFE so we can register the Promise in
+  // inFlightFeatures *before* it starts running. Concurrent callers see the
+  // pending Promise and await it instead of starting their own copy.
+  const _computePromise = (async (): Promise<MLFeatureVector> => {
+  // Cycle 1367 fix: cap concurrent compute bodies process-wide to avoid wall-clock
+  // ballooning. Acquired here so SAME-formula callers (who share this Promise via
+  // inFlightFeatures) all wait on the SAME slot acquisition — they don't each take
+  // a slot. The slot is held until the entire compute body finishes and the cache
+  // is written, then released in finally.
+  await _acquireFeatureSlot();
+  try {
   const elements = parseFormula(formula);
   const counts = parseFormulaCounts(formula);
   const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
@@ -905,6 +923,21 @@ export async function extractFeatures(formula: string, mat?: Partial<Material>, 
   // Write to cache so subsequent callers (evolveRules, validateOnHeldOut, etc.) get a cache hit.
   if (_noExtraCtx) setCachedFeatures(_cacheKey, _result);
   return _result;
+  } finally {
+    _releaseFeatureSlot();
+  }
+  })();
+
+  // Register the Promise so concurrent callers see it and dedup. Clean up on completion.
+  if (_noExtraCtx) {
+    inFlightFeatures.set(_cacheKey, _computePromise);
+    try {
+      return await _computePromise;
+    } finally {
+      inFlightFeatures.delete(_cacheKey);
+    }
+  }
+  return _computePromise;
 }
 
 async function xgboostPredict(features: MLFeatureVector): Promise<{ score: number; tcEstimate: number; tcStd: number; tcCI95: [number, number]; reasoning: string[] }> {
@@ -952,6 +985,43 @@ interface PhysicsContext {
 }
 
 const featureCache = new Map<string, { features: MLFeatureVector; timestamp: number }>();
+// In-flight Promise dedup: when many concurrent callers ask for the same formula's
+// features at the same moment (cache cold), they all see the cache miss and proceed
+// to compute features in parallel. Each call duplicates ~10s of work, stacking N×.
+// Symptom: log shows `[extractFeatures] TOTAL 13169ms for Ce2H5` × 20 with monotonically
+// decreasing times (concurrent stacking). Fix: register an in-flight Promise so all
+// concurrent callers share one execution and one result.
+const inFlightFeatures = new Map<string, Promise<MLFeatureVector>>();
+
+// Global compute-slot semaphore (cycle 1367 fix, lowered to 1 in cycle 1373):
+// inFlightFeatures only dedups SAME formula. Different formulas requested concurrently
+// from ~50 call sites still stack their compute bodies on the event loop.
+// Initially set to 2 (cycle 1367); lowered to 1 in cycle 1373 after the monitor
+// confirmed `[extractFeatures] TOTAL >10s` warnings still fired on the post-restart
+// log (18 hits, max 58634ms for CuPr). With 1, only one extractFeatures compute body
+// runs at a time anywhere in the process — diagnostic test to determine whether the
+// remaining wall-clock balloon is residual contention (TOTALs should drop to near
+// pure CPU cost, ~1-3s) or genuinely intrinsic per-call cost in
+// computeElectronicStructure/computePhononSpectrum for OOD compounds (TOTALs stay
+// at 50+s, in which case the next move is finer-grained timing inside those funcs).
+const FEATURE_COMPUTE_MAX_CONCURRENT = 1;
+let _featureComputeActive = 0;
+const _featureComputeWaiters: Array<() => void> = [];
+
+async function _acquireFeatureSlot(): Promise<void> {
+  if (_featureComputeActive < FEATURE_COMPUTE_MAX_CONCURRENT) {
+    _featureComputeActive++;
+    return;
+  }
+  await new Promise<void>(resolve => _featureComputeWaiters.push(resolve));
+  _featureComputeActive++;
+}
+
+function _releaseFeatureSlot(): void {
+  _featureComputeActive--;
+  const next = _featureComputeWaiters.shift();
+  if (next) next();
+}
 // 4-hour TTL: extractFeatures is deterministic for a given formula+pressure.
 // Short TTL (was 5 min) caused all SUPERCON entries to expire by T+600s, forcing
 // evolveRules / validateOnHeldOut / precomputeFeatureMeans / buildTrainingDataAsync
