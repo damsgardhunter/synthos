@@ -1624,7 +1624,11 @@ async function fetchColabXGBPrediction(formula: string, pressureGpa = 0): Promis
 export async function gbPredictWithUncertaintyAsync(features: MLFeatureVector, formula?: string, pressureGpa = 0): Promise<XGBUncertaintyResult> {
   const resolvedFormula = formula || features._sourceFormula;
   if (_xgbServiceURL && resolvedFormula) {
-    const cacheKey = resolvedFormula;
+    // Cycle 1382: cache key must include pressure — LaH10 at 0 GPa vs 170 GPa
+    // are completely different predictions. The old key was just the formula,
+    // so the first call (usually 0 GPa from the engine loop) would poison the
+    // cache and the benchmark's 170 GPa call would get the wrong value.
+    const cacheKey = pressureGpa > 0 ? `${resolvedFormula}@${Math.round(pressureGpa)}GPa` : resolvedFormula;
     const cached = _xgbCache.get(cacheKey);
     if (cached && Date.now() - cached.fetchedAt < XGB_CACHE_TTL_MS) {
       return cached.result;
@@ -1633,27 +1637,28 @@ export async function gbPredictWithUncertaintyAsync(features: MLFeatureVector, f
     if (result) {
       _xgbCache.set(cacheKey, { result, fetchedAt: Date.now() });
       _saveXGBCacheToDisk();
-      console.log(`[Colab-XGB] ${resolvedFormula}: Tc=${result.tcMean}K`);
+      console.log(`[Colab-XGB] ${resolvedFormula}${pressureGpa > 0 ? ` @${pressureGpa}GPa` : ''}: Tc=${result.tcMean}K`);
       return result;
     }
   }
   return gbPredictWithUncertainty(features, formula);
 }
 
-export async function gbPredictWithUncertainty(features: MLFeatureVector, formula?: string): Promise<XGBUncertaintyResult> {
+export async function gbPredictWithUncertainty(features: MLFeatureVector, formula?: string, pressureGpa = 0): Promise<XGBUncertaintyResult> {
   // Return Colab XGBoost result if cached and fresh; fire background refresh if stale/missing.
   const resolvedFormula = formula || features._sourceFormula;
   if (_xgbServiceURL && resolvedFormula) {
-    const cacheKey = resolvedFormula;
+    // Cycle 1382: pressure-aware cache key (same fix as gbPredictWithUncertaintyAsync)
+    const cacheKey = pressureGpa > 0 ? `${resolvedFormula}@${Math.round(pressureGpa)}GPa` : resolvedFormula;
     const cached = _xgbCache.get(cacheKey);
     if (cached && Date.now() - cached.fetchedAt < XGB_CACHE_TTL_MS) {
       return cached.result;
     }
-    fetchColabXGBPrediction(resolvedFormula).then(result => {
+    fetchColabXGBPrediction(resolvedFormula, pressureGpa).then(result => {
       if (result) {
         _xgbCache.set(cacheKey, { result, fetchedAt: Date.now() });
         _saveXGBCacheToDisk();
-        console.log(`[Colab-XGB] ${resolvedFormula}: Tc=${result.tcMean}K`);
+        console.log(`[Colab-XGB] ${resolvedFormula}${pressureGpa > 0 ? ` @${pressureGpa}GPa` : ''}: Tc=${result.tcMean}K`);
       }
     }).catch(() => {});
   }

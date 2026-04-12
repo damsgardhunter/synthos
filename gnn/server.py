@@ -903,6 +903,28 @@ def _train_xgboost(
     # Collect SC graphs with Tc >= 1.0 (same filter as Colab)
     sc_graphs = [g for g in all_graphs if g.target_tc and g.target_tc >= 1.0]
 
+    # Cycle 1382: add PRESSURE_TC_DATA entries so XGBoost learns pressure-Tc
+    # relationships. Previously pressure sweeps were only appended to
+    # train_graphs (for GNN) but _train_xgboost received all_graphs which had
+    # all samples at pressure_gpa=0. Result: feature [23] (raw pressure) had
+    # near-zero variance and the model learned to ignore it — LaH10 at 0 and
+    # 170 GPa gave identical predictions.
+    pressure_added = 0
+    for formula, pressure, tc in PRESSURE_TC_DATA:
+        if tc < 1.0:
+            continue
+        try:
+            g = build_crystal_graph(formula=formula, pressure_gpa=pressure)
+            g.target_tc  = tc
+            g.target_psc = 1.0
+            g.formula    = formula
+            sc_graphs.append(g)
+            pressure_added += 1
+        except Exception:
+            pass
+    if pressure_added > 0:
+        log.info(f"[XGB] Added {pressure_added} pressure sweep entries from PRESSURE_TC_DATA")
+
     if len(sc_graphs) < 20:
         log.warning(f"[XGB] Only {len(sc_graphs)} SC graphs — need ≥20, skipping")
         return None

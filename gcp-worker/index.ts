@@ -56,8 +56,13 @@ process.env.OFFLOAD_GNN_TO_GCP = "true";
 const ENABLE_DFT = process.env.ENABLE_DFT_WORKER !== "false";
 const ENABLE_GNN = process.env.ENABLE_GNN_WORKER !== "false";
 // XGBoost is now trained in Python alongside GNN (matching Colab pipeline).
-// The JS gradient boosting fallback is disabled — Python XGBoost is the primary model.
-const ENABLE_XGB = process.env.ENABLE_XGB_WORKER === "true";
+// xgb-loop.ts is permanently disabled — it used a JS gradient boosting
+// implementation on tiny dispatched payloads (~600 samples, R²≈0.4) which is
+// completely redundant with Python _train_xgboost in server.py that trains
+// real xgboost.XGBRegressor on the full 62k corpus (R²≈0.91) during every
+// /train call. The Python XGB results are bridged to the local server via
+// xgb_training_jobs DB rows written by gnn-loop.ts (cycle 1381).
+const ENABLE_XGB = false;
 const ENABLE_ML  = process.env.ENABLE_ML_WORKER  !== "false";
 
 console.log("=".repeat(60));
