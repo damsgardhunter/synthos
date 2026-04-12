@@ -165,6 +165,14 @@ class MetricsResponse(BaseModel):
     n_samples:       int             = 0
     model_path:      Optional[str]   = None
     n_models:        int             = 0
+    # Cycle 1381: XGBoost metrics from _train_xgboost, so gnn-loop.ts can
+    # write them to xgb_training_jobs and the local server's XGB poller picks
+    # them up. Previously XGB metrics were only saved to disk on GCP and the
+    # local server never saw the full-corpus R²≈0.91 model.
+    xgb_r2:          Optional[float] = None
+    xgb_mae:         Optional[float] = None
+    xgb_rmse:        Optional[float] = None
+    xgb_n_train:     Optional[int]   = None
 
 class TrainResponse(BaseModel):
     job_id:        int
@@ -850,6 +858,14 @@ async def train(req: TrainRequest):
                     f"n_train={xgb_metrics['n_train']} n_val={xgb_metrics['n_val']} "
                     f"pressure_importance={xgb_metrics['pressure_importance']:.4f}"
                 )
+                # Cycle 1381: bubble XGB metrics into the response so gnn-loop.ts
+                # can write them to xgb_training_jobs and the local server's XGB
+                # poller picks up the full-corpus model (R²≈0.91) instead of only
+                # seeing the small-pool dispatched jobs (R²≈0.43).
+                metrics.xgb_r2      = xgb_metrics["r2"]
+                metrics.xgb_mae     = xgb_metrics["mae"]
+                metrics.xgb_rmse    = xgb_metrics["rmse"]
+                metrics.xgb_n_train = xgb_metrics["n_train"]
         except Exception as e:
             log.warning(f"[Job#{job_id}] XGBoost training failed (GNN still saved): {e}")
 

@@ -213,6 +213,11 @@ async function callPythonTrain(
     wallSeconds:  m.wall_seconds  ?? 0,
     modelPath:    m.model_path,
     nSamples:     m.n_samples ?? trainingData.length,
+    // Cycle 1381: XGBoost metrics from _train_xgboost on the full corpus
+    xgbR2:        m.xgb_r2     ?? null as number | null,
+    xgbMae:       m.xgb_mae    ?? null as number | null,
+    xgbRmse:      m.xgb_rmse   ?? null as number | null,
+    xgbNTrain:    m.xgb_n_train ?? null as number | null,
   };
 }
 
@@ -862,6 +867,28 @@ async function processNextGnnJob(): Promise<boolean> {
         valN,
         completedAt: new Date(),
       } as any);
+
+      // Cycle 1381: write XGB full-corpus metrics to DB (same as startup path)
+      if (pyResult.xgbR2 != null) {
+        try {
+          const xgbJob = await storage.insertXgbTrainingJob({
+            status: "queued" as any,
+            featuresX: [] as any,
+            labelsY: [] as any,
+            datasetSize: pyResult.xgbNTrain ?? 0,
+          });
+          await storage.updateXgbTrainingJob(xgbJob.id, {
+            status: "done",
+            r2: pyResult.xgbR2,
+            mae: pyResult.xgbMae ?? 0,
+            rmse: pyResult.xgbRmse ?? 0,
+            completedAt: new Date(),
+          } as any);
+          console.log(`[GNN-GCP] XGB full-corpus metrics stored as job #${xgbJob.id} — R²=${pyResult.xgbR2.toFixed(4)}`);
+        } catch (xgbErr: any) {
+          console.warn(`[GNN-GCP] Failed to store XGB metrics: ${xgbErr.message?.slice(0, 80)}`);
+        }
+      }
     }
 
     const coverageStr = ci95Coverage > 0
@@ -1197,6 +1224,32 @@ async function runStartupFullCorpusTraining(): Promise<void> {
       } as any);
       if (startupModelPath) await recordPytorchModelPath(insertedJob.id, startupModelPath);
       console.log(`[GNN-GCP] Startup metrics stored as job #${insertedJob.id}`);
+
+      // Cycle 1381: write XGB metrics to xgb_training_jobs so the local
+      // server's startGCPXGBPoller picks up the full-corpus model (R²≈0.91).
+      // Without this, only the small-pool dispatched XGB jobs (R²≈0.43) were
+      // visible to the local server — the full-corpus XGB from _train_xgboost
+      // was saved to GCP disk only and never flowed back.
+      if (pyResult?.xgbR2 != null) {
+        try {
+          const xgbJob = await storage.insertXgbTrainingJob({
+            status: "queued" as any,
+            featuresX: [] as any,
+            labelsY: [] as any,
+            datasetSize: pyResult.xgbNTrain ?? 0,
+          });
+          await storage.updateXgbTrainingJob(xgbJob.id, {
+            status: "done",
+            r2: pyResult.xgbR2,
+            mae: pyResult.xgbMae ?? 0,
+            rmse: pyResult.xgbRmse ?? 0,
+            completedAt: new Date(),
+          } as any);
+          console.log(`[GNN-GCP] XGB full-corpus metrics stored as job #${xgbJob.id} — R²=${pyResult.xgbR2.toFixed(4)}`);
+        } catch (xgbErr: any) {
+          console.warn(`[GNN-GCP] Failed to store XGB metrics: ${xgbErr.message?.slice(0, 120)}`);
+        }
+      }
     } catch (err: any) {
       console.warn(`[GNN-GCP] Failed to store startup metrics in DB: ${err.message?.slice(0, 120)}`);
     }
