@@ -547,16 +547,37 @@ async def predict_xgb(req: XGBPredictRequest):
     if _xgb_model is None:
         raise HTTPException(status_code=503, detail="XGBoost model not loaded")
     try:
-        graph = build_crystal_graph(req.formula, pressure_gpa=req.pressure_gpa)
+        # Cycle 1384: pass KNOWN_LAMBDA as physics_hints so the graph's
+        # global_features[13] (lambda hint) is populated at inference time
+        # exactly as it is during training. Without this, the model trains
+        # on real lambda values but predicts with zeros — train/inference
+        # feature mismatch that degrades accuracy.
+        hints: Dict = {}
+        if req.formula in KNOWN_LAMBDA:
+            hints["lambda"] = KNOWN_LAMBDA[req.formula]
+        graph = build_crystal_graph(
+            req.formula, pressure_gpa=req.pressure_gpa, physics_hints=hints or None,
+        )
         import numpy as np
         base     = np.array(graph.global_features, dtype=np.float32)
+        # Also inject via _graph_to_features path for consistency
+        if base[13] == 0.0 and req.formula in KNOWN_LAMBDA:
+            base[13] = min(KNOWN_LAMBDA[req.formula] / 3.0, 1.0)
         pressure = np.array([getattr(graph, "pressure_gpa", req.pressure_gpa)], dtype=np.float32)
         x        = np.concatenate([base, pressure]).reshape(1, -1)
         tc_pred  = float(_xgb_model.predict(x)[0])
         tc_pred = max(0.0, tc_pred)
+        # Read actual R² from metadata if available
+        _meta_r2 = 0.9117
+        try:
+            import json as _json
+            _meta = _json.load(open(WEIGHTS_DIR / "xgb_metadata.json"))
+            _meta_r2 = _meta.get("r2", 0.9117)
+        except Exception:
+            pass
         return XGBPredictResponse(
             tc=round(tc_pred, 2),
-            r2=0.9117,   # from xgb_metadata.json
+            r2=round(_meta_r2, 4),
             n_features=int(x.shape[1]),
             source="colab-xgb",
         )
@@ -860,9 +881,18 @@ async def train(req: TrainRequest):
         _last_metrics = metrics.model_dump()
 
         # ── Train XGBoost (matching Colab Cell 11 exactly) ────────────────────
+        # Cycle 1384 fix: pass train_graphs ONLY, not all_graphs. The previous
+        # code passed all_graphs which includes val_graphs + test_graphs —
+        # classic data leakage that inflated R². XGBoost also receives
+        # val_formulas so it can exclude pressure augmentation for val materials.
+        _val_test_formulas = (
+            {getattr(g, "formula", None) for g in val_graphs} |
+            {getattr(g, "formula", None) for g in test_graphs}
+        ) - {None}
         try:
             xgb_metrics = await loop.run_in_executor(None, lambda: _train_xgboost(
-                all_graphs, pressure_graphs=None, job_id=job_id
+                train_graphs, pressure_graphs=None, job_id=job_id,
+                exclude_formulas=_val_test_formulas,
             ))
             if xgb_metrics:
                 log.info(
@@ -910,10 +940,15 @@ def _train_xgboost(
     all_graphs: List[SuperconGraph],
     pressure_graphs: Optional[List[SuperconGraph]] = None,
     job_id: int = 0,
+    exclude_formulas: Optional[set] = None,
 ) -> Optional[Dict[str, float]]:
     """
     Train XGBoost on the same data as GNN, matching Colab Cell 11 exactly.
     Saves xgb_model.pkl to WEIGHTS_DIR.
+
+    Cycle 1384: `all_graphs` should be the TRAIN split only (not the full
+    dataset). `exclude_formulas` is the set of val+test formulas — used to
+    prevent pressure augmentation from leaking val/test materials.
     """
     global _xgb_model
     try:
@@ -934,8 +969,13 @@ def _train_xgboost(
     # near-zero variance and the model learned to ignore it — LaH10 at 0 and
     # 170 GPa gave identical predictions.
     pressure_added = 0
+    pressure_excluded = 0
     for formula, pressure, tc in PRESSURE_TC_DATA:
         if tc < 1.0:
+            continue
+        # Cycle 1384: skip formulas in val/test to prevent formula-level leakage
+        if exclude_formulas and formula in exclude_formulas:
+            pressure_excluded += 1
             continue
         try:
             g = build_crystal_graph(formula=formula, pressure_gpa=pressure)
@@ -946,8 +986,8 @@ def _train_xgboost(
             pressure_added += 1
         except Exception:
             pass
-    if pressure_added > 0:
-        log.info(f"[XGB] Added {pressure_added} pressure sweep entries from PRESSURE_TC_DATA")
+    if pressure_added > 0 or pressure_excluded > 0:
+        log.info(f"[XGB] Pressure sweeps: +{pressure_added} added, {pressure_excluded} excluded (val/test formula overlap)")
 
     if len(sc_graphs) < 20:
         log.warning(f"[XGB] Only {len(sc_graphs)} SC graphs — need ≥20, skipping")
