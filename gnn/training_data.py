@@ -92,6 +92,55 @@ KNOWN_TC = {
     "NiBi3": 4.25, "PtBi2": 1.2, "RhBi": 2.06,
 }
 
+# Published electron-phonon coupling constants (lambda) from literature.
+# Sources: McMillan (1968), Allen & Dynes (1975), Carbotte (1990),
+# Savrasov & Savrasov (1996), Profeta et al. (2006), Boeri et al. (2002),
+# Drozdov et al. (2015, 2019), Semenok et al., Flores-Livas et al. (2020).
+# Used to supervise the GNN lambda head and improve the lambda regressor.
+KNOWN_LAMBDA = {
+    # Elemental superconductors (McMillan 1968, Allen & Dynes 1975)
+    "Pb": 1.55, "Hg": 1.60, "Sn": 0.72, "In": 0.81, "Tl": 0.795,
+    "Nb": 0.82, "V": 0.60, "Ta": 0.65, "La": 0.81, "Mo": 0.41,
+    "Re": 0.46, "Zr": 0.41, "Ti": 0.38, "Al": 0.43, "Zn": 0.38,
+    "Ga": 0.40, "Cd": 0.38, "Os": 0.39, "Ir": 0.34, "W": 0.28,
+    # A15 compounds (Carbotte 1990, Gurvitch et al.)
+    "Nb3Sn": 1.80, "Nb3Ge": 1.90, "Nb3Al": 1.70, "V3Si": 1.15,
+    "V3Ga": 1.10, "Nb3Si": 1.60, "V3Ge": 0.80, "Mo3Si": 0.50,
+    # Transition metal carbides/nitrides (Savrasov & Savrasov 1996)
+    "NbN": 1.46, "NbC": 0.83, "MoC": 0.92, "TaC": 0.55, "TiN": 0.72,
+    "ZrN": 0.76, "VN": 0.83, "HfN": 0.59, "WC": 0.35,
+    # Borides (Profeta et al. 2006, Boeri et al. 2002)
+    "MgB2": 0.87, "TaB2": 0.53, "NbB2": 0.60, "ZrB12": 0.48, "YB6": 0.56,
+    # Chalcogenides
+    "NbSe2": 0.80, "NbS2": 0.72, "PdTe2": 0.60, "TaS2": 0.45,
+    # Iron-based (various ARPES + penetration depth studies)
+    "FeSe": 0.90, "FeSe0.5Te0.5": 1.05, "LiFeAs": 0.72,
+    "Ba0.6K0.4Fe2As2": 1.20, "BaFe1.8Co0.2As2": 0.85,
+    "LaFeAsO0.9F0.1": 0.95, "SmFeAsO0.9F0.1": 1.10,
+    # Cuprates (tunneling spectroscopy, Carbotte review)
+    "YBa2Cu3O7": 2.50, "Bi2Sr2CaCu2O8": 2.80, "Bi2Sr2Ca2Cu3O10": 3.00,
+    "HgBa2Ca2Cu3O8": 3.20, "Tl2Ba2Ca2Cu3O10": 2.90,
+    "La1.85Sr0.15CuO4": 2.00, "Nd2CuO4": 1.80,
+    # Fullerenes
+    "K3C60": 0.72, "Rb3C60": 0.89, "Cs3C60": 1.05, "CaC6": 0.73,
+    # Heavy fermion (renormalized)
+    "CeCoIn5": 1.70, "UBe13": 2.50, "UPt3": 1.30, "PuCoGa5": 1.80,
+    # Hydrides at high pressure (Drozdov, Semenok, Flores-Livas)
+    "H3S": 2.20, "LaH10": 3.50, "YH6": 2.60, "YH9": 3.00,
+    "CaH6": 2.70, "ThH10": 1.90, "ThH9": 1.70, "CeH9": 1.20,
+    "CeH10": 1.50, "LaBeH8": 2.40, "SrH6": 2.10, "SrH10": 3.10,
+    "ScH9": 2.80, "ScH6": 2.20, "MgH6": 3.40, "Li2MgH16": 4.10,
+    "LaYH20": 3.60, "NbH4": 0.80, "TaH3": 1.80,
+    # Binary hydrides (low lambda or non-SC)
+    "PdH": 0.55, "NbH": 0.40, "TiH2": 0.35, "ZrH2": 0.32,
+    # Nickelates
+    "NdNiO2": 1.50, "PrNiO2": 1.30,
+    # Intermetallics
+    "NbTi": 0.85, "NbZr": 0.90,
+    # Bismuthides
+    "NiBi3": 0.78, "PtBi2": 0.55,
+}
+
 HYDRIDE_PRESSURE_GPA = {
     "H3S": 155.0, "H2S": 90.0, "PH3": 200.0,
     "LaH10": 170.0, "LaH6": 150.0, "LaBeH8": 120.0,

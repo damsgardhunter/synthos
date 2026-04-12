@@ -46,7 +46,7 @@ from superconductor_gnn import (
     SuperconGraph, ENSEMBLE_SIZE, TC_MAX_K,
 )
 from graph_builder import build_crystal_graph
-from training_data import KNOWN_TC, HYDRIDE_PRESSURE_GPA, PRESSURE_TC_DATA
+from training_data import KNOWN_TC, KNOWN_LAMBDA, HYDRIDE_PRESSURE_GPA, PRESSURE_TC_DATA
 from mp_fetch import fetch_mp_graphs
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -617,6 +617,20 @@ async def train(req: TrainRequest):
             if f in HYDRIDE_PRESSURE_GPA and getattr(g, "pressure_gpa", 0.0) == 0.0:
                 g.pressure_gpa = HYDRIDE_PRESSURE_GPA[f]
 
+        # Apply KNOWN_LAMBDA labels so the GNN lambda head gets supervised on
+        # curated literature values. Most DB samples have target_lambda=None,
+        # which means the lambda loss is skipped during training. This injects
+        # ~90 high-confidence lambda labels from McMillan, Allen-Dynes, DFPT
+        # papers, and high-pressure hydride studies.
+        lambda_labeled = 0
+        for g in all_graphs:
+            f = getattr(g, "formula", "")
+            if f in KNOWN_LAMBDA and g.target_lambda is None:
+                g.target_lambda = KNOWN_LAMBDA[f]
+                lambda_labeled += 1
+        if lambda_labeled > 0:
+            log.info(f"[Job#{job_id}] Applied {lambda_labeled} KNOWN_LAMBDA labels")
+
         if known_labeled > 0:
             log.info(f"[Job#{job_id}] Applied {known_labeled} KNOWN_TC labels")
 
@@ -876,8 +890,18 @@ def _graph_to_features(g: SuperconGraph) -> np.ndarray:
     """Extract tabular features from a graph for XGBoost.
     Returns global_features + pressure_gpa as the final column.
     Matches Colab Cell 11 graph_to_features() exactly.
+
+    Cycle 1383: inject KNOWN_LAMBDA into feature[13] if the graph's lambda
+    hint is zero but we have a curated value. This ensures XGBoost trains with
+    lambda as a real feature, not just zeros for most samples. The graph's
+    global_features[13] is `min(lambda / 3.0, 1.0)` (normalized) — same
+    normalization is applied here.
     """
     base = g.global_features.numpy().astype(np.float32)
+    # Inject curated lambda if feature[13] is zero and we have a known value
+    formula = getattr(g, 'formula', '')
+    if base[13] == 0.0 and formula in KNOWN_LAMBDA:
+        base[13] = min(KNOWN_LAMBDA[formula] / 3.0, 1.0)
     pressure = np.array([getattr(g, 'pressure_gpa', 0.0)], dtype=np.float32)
     return np.concatenate([base, pressure])
 
