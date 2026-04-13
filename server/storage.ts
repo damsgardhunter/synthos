@@ -332,17 +332,39 @@ export class DatabaseStorage implements IStorage {
 
   async getSuperconductorCandidates(limit = 50, offset = 0): Promise<SuperconductorCandidate[]> {
     // Fetch with index-friendly query, then apply hull guard in memory.
-    // Over-fetch to account for filtered rows (hull violations are rare).
+    // Progressively fetch more rows if hull guard filters too many.
+    const needed = offset + limit;
+    let multiplier = 1.5;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const rows = await db.select().from(superconductorCandidates)
+        .orderBy(desc(superconductorCandidates.predictedTc))
+        .limit(Math.ceil(needed * multiplier));
+      const filtered = rows.filter(c => this.hullGuardOk(c));
+      if (filtered.length >= needed || rows.length < Math.ceil(needed * multiplier)) {
+        return filtered.slice(offset, offset + limit);
+      }
+      multiplier *= 2;
+    }
+    // Final fallback: fetch all rows
     const rows = await db.select().from(superconductorCandidates)
-      .orderBy(desc(superconductorCandidates.predictedTc))
-      .limit(Math.ceil((offset + limit) * 1.3));
+      .orderBy(desc(superconductorCandidates.predictedTc));
     return rows.filter(c => this.hullGuardOk(c)).slice(offset, offset + limit);
   }
 
   async getSuperconductorCandidatesByTc(limit = 10): Promise<SuperconductorCandidate[]> {
+    let multiplier = 1.5;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const rows = await db.select().from(superconductorCandidates)
+        .orderBy(desc(superconductorCandidates.predictedTc))
+        .limit(Math.ceil(limit * multiplier));
+      const filtered = rows.filter(c => this.hullGuardOk(c));
+      if (filtered.length >= limit || rows.length < Math.ceil(limit * multiplier)) {
+        return filtered.slice(0, limit);
+      }
+      multiplier *= 2;
+    }
     const rows = await db.select().from(superconductorCandidates)
-      .orderBy(desc(superconductorCandidates.predictedTc))
-      .limit(Math.ceil(limit * 1.2));
+      .orderBy(desc(superconductorCandidates.predictedTc));
     return rows.filter(c => this.hullGuardOk(c)).slice(0, limit);
   }
 
@@ -521,7 +543,15 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getSuperconductorCount(): Promise<number> {
-    const [{ count }] = await db.select({ count: sql<number>`count(*)` }).from(superconductorCandidates);
+    // Count only candidates that pass hullGuardOk (matches getSuperconductorCandidates filtering).
+    // Uses SQL-level filtering to avoid fetching all rows:
+    //   pass if notes is NULL, no eAboveHull tag, eAboveHull <= 0.5, or eAboveHull > 5.0
+    const [{ count }] = await db.select({ count: sql<number>`count(*)` })
+      .from(superconductorCandidates)
+      .where(sql`${superconductorCandidates.notes} IS NULL
+        OR ${superconductorCandidates.notes} NOT LIKE '%eAboveHull=%'
+        OR CAST(substring(${superconductorCandidates.notes} FROM 'eAboveHull=([0-9]+\\.?[0-9]*)') AS numeric) <= 0.5
+        OR CAST(substring(${superconductorCandidates.notes} FROM 'eAboveHull=([0-9]+\\.?[0-9]*)') AS numeric) > 5.0`);
     return Number(count);
   }
 

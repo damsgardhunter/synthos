@@ -26,7 +26,7 @@ import { analyzeAndEvolveStrategy, captureConvergenceSnapshot, trackDuplicatesSk
 import { checkMilestones } from "./milestone-tracker";
 import { extractFeatures, physicsPredictor, setSweepGuardActive, isSweepGuardActive } from "./ml-predictor";
 import type { PhysicsPrediction, MLFeatureVector } from "./ml-predictor";
-import { gbPredict, incorporateFailureData, getFailureExampleCount, surrogateScreen, getSurrogateStats, incorporateSuccessData, retrainWithAccumulatedData, incorporateDFTResult, retrainXGBoostFromEvaluated, getEvaluatedDatasetStats, getModelVersionHistory, setActiveApplication, setCuriosityProvider, startGCPXGBPoller } from "./gradient-boost";
+import { gbPredict, gbPredictWithUncertaintyAsync, incorporateFailureData, getFailureExampleCount, surrogateScreen, getSurrogateStats, incorporateSuccessData, retrainWithAccumulatedData, incorporateDFTResult, retrainXGBoostFromEvaluated, getEvaluatedDatasetStats, getModelVersionHistory, setActiveApplication, setCuriosityProvider, startGCPXGBPoller } from "./gradient-boost";
 import { normalizeFormula, classifyFamily, sanitizeForbiddenWords, isValidFormula } from "./utils";
 import { recordPhysicsResult } from "./physics-results-store";
 import { runMassiveGeneration, passesValenceFilter, passesElementCountCap, estimateFamilyPressure, mutatePressure, generatePressureVariants, type MassiveGenerationStats } from "./candidate-generator";
@@ -2522,7 +2522,7 @@ async function runDFTEnrichment() {
         const updates: any = {
           xgboostScore: gb.score,
           ensembleScore: ensemble,
-          dataConfidence: dftData.dftCoverage > 0.4 ? "dft-verified" : "medium",
+          dataConfidence: dftData.dftCoverage > 0.4 ? "high" : "medium",
           mlFeatures: { ...existingMl, dftConfidence: dftData.dftCoverage },
         };
 
@@ -4499,8 +4499,12 @@ async function runPhase11_StructurePrediction() {
               estimateFamilyPressure(normalized),
             );
             if (!percResult.percolates3D) {
-              hPercolationPenalty = 0.5;
-              hPercNote = ` [H-percolation FAIL: ${percResult.clusterCount} clusters, largest=${percResult.largestClusterSize}/${percResult.hAtomCount}]`;
+              // H-percolation failure means disconnected H sublattice — the phonon-
+              // mediated high-Tc mechanism (LaH10/H3S type) cannot operate. Apply
+              // a severe penalty proportional to how fragmented the network is.
+              const clusterFrac = percResult.largestClusterSize / Math.max(percResult.hAtomCount, 1);
+              hPercolationPenalty = Math.min(0.25, 0.1 + clusterFrac * 0.15);
+              hPercNote = ` [H-percolation FAIL: ${percResult.clusterCount} clusters, largest=${percResult.largestClusterSize}/${percResult.hAtomCount}, penalty=${hPercolationPenalty.toFixed(2)}]`;
             }
           }
 
@@ -4597,8 +4601,9 @@ async function runPhase11_StructurePrediction() {
               estimateFamilyPressure(normalized),
             );
             if (!percResult.percolates3D) {
-              distHPercPenalty = 0.5;
-              distHPercNote = ` [H-percolation FAIL: ${percResult.clusterCount} clusters, largest=${percResult.largestClusterSize}/${percResult.hAtomCount}]`;
+              const clusterFrac = percResult.largestClusterSize / Math.max(percResult.hAtomCount, 1);
+              distHPercPenalty = Math.min(0.25, 0.1 + clusterFrac * 0.15);
+              distHPercNote = ` [H-percolation FAIL: ${percResult.clusterCount} clusters, largest=${percResult.largestClusterSize}/${percResult.hAtomCount}, penalty=${distHPercPenalty.toFixed(2)}]`;
             }
           }
 
@@ -9105,12 +9110,11 @@ async function backfillGBScores() {
   } catch (e) { console.error("[Engine] GB score backfill failed:", e); }
 }
 
-// Bumped 2026-04-11: GNN retrained with full Colab parity (job#657, VAL R²=0.874,
-// MAE=8.3K, TEST R²=0.871, ENSEMBLE_SIZE=1, MP cuprate/hydride fetch enabled).
-// Forces recalculatePhysics() to re-score every existing candidate against the
-// new model on next server restart. Without this bump the new model only affects
-// candidates discovered AFTER the deploy — historical rows keep their old scores.
-const PHYSICS_VERSION = 16;
+// Bumped 2026-04-12: XGBoost retrained with full Colab parity (R²=0.9227),
+// data leakage fixed (cycle 1384), KNOWN_LAMBDA injected (cycle 1383),
+// pressure-aware predictions working (cycle 1382). Forces recalculatePhysics()
+// to re-score every existing candidate against the new model.
+const PHYSICS_VERSION = 17;
 
 async function recalculatePhysics() {
   const yield_ = () => new Promise<void>(r => setTimeout(r, 200));
@@ -9133,17 +9137,29 @@ async function recalculatePhysics() {
         const c = needsRecalc[i];
         try {
           const features = await getCachedFeatures(c.formula);
-          const gb = await gbPredict(features);
+          const recalcPressure = enforcePhysicsPressure(c.formula, c.pressureGpa);
+
+          // Cycle 1385: use GCP Python XGBoost (R²≈0.92) as the primary Tc
+          // predictor instead of the local JS gbPredict (R²≈0.72). The async
+          // version routes through fetchColabXGBPrediction → GCP /predict-xgb
+          // when GNN_PYTORCH_SERVICE_URL is set, falling back to local JS if
+          // GCP is unreachable. This means recalculatePhysics produces the
+          // same predictions as the reference benchmark and the frontend.
+          const gcpXgb = await gbPredictWithUncertaintyAsync(features, c.formula, recalcPressure);
+          const gb = await gbPredict(features); // still used for score/ensemble weighting
           const nnScore = c.neuralNetScore ?? c.quantumCoherence ?? 0.3;
           const ensemble = Math.min(0.95, gb.score * 0.4 + nnScore * 0.6);
           dbErrorCount = 0; // reset on success
 
           const featureLambda = features.electronPhononLambda ?? 0;
           const metalScore = features.metallicity ?? 0.5;
-          const recalcPressure = enforcePhysicsPressure(c.formula, c.pressureGpa);
 
+          // Use GCP XGBoost Tc as the primary prediction when available,
+          // falling back to physics-only Allen-Dynes Tc
           let newTc: number | null = null;
-          if (featureLambda > 0) {
+          if (gcpXgb.tcMean > 0) {
+            newTc = Math.round(gcpXgb.tcMean);
+          } else if (featureLambda > 0) {
             const adTc = computePhysicsOnlyTc(featureLambda, features.logPhononFreq, features.muStarEstimate, c.formula);
             newTc = adTc > 0 ? Math.round(adTc) : 0;
           }
@@ -9294,47 +9310,44 @@ export async function startEngine() {
     }
   }, 120_000); // Run 2min after startup — well after first two cycles complete
 
-  // Starts 20 min after startup. Waits for SG sweep to finish (isSGSweepActive flag)
+  // Runs 20 min after startup, then every 20 min. Waits for SG sweep to finish
   // so both tasks don't simultaneously hit the DB and saturate the Neon pool.
-  // The SG sweep has a 2-hour wall-time cap so this wait is bounded.
-  setTimeout(async () => {
-    let _waitedForSweep = false;
-    if (isSGSweepActive) {
-      _waitedForSweep = true;
-      console.log("[Engine] background: backfill waiting for SG sweep to finish...");
-      let _backfillWaitLogged = Date.now();
-      while (isSGSweepActive) {
-        await new Promise(r => setTimeout(r, 30_000));
-        if (isSGSweepActive && Date.now() - _backfillWaitLogged >= 600_000) {
-          console.log("[Engine] background: backfill still waiting for SG sweep...");
-          _backfillWaitLogged = Date.now();
+  async function runBackfillAndRecalc() {
+    try {
+      if (isSGSweepActive) {
+        console.log("[Engine] background: backfill waiting for SG sweep to finish...");
+        let _backfillWaitLogged = Date.now();
+        while (isSGSweepActive) {
+          await new Promise(r => setTimeout(r, 30_000));
+          if (isSGSweepActive && Date.now() - _backfillWaitLogged >= 600_000) {
+            console.log("[Engine] background: backfill still waiting for SG sweep...");
+            _backfillWaitLogged = Date.now();
+          }
+        }
+        // SG sweep blocks the event loop, exhausting DB pool connections. Give Neon
+        // 90 seconds to reap dead connections before the backfill hammers the DB.
+        console.log("[Engine] background: pausing 90s for DB pool recovery after SG sweep...");
+        await new Promise(r => setTimeout(r, 90_000));
+        await drainIdleConnections().catch(() => {});
+        const dbReady = await probeDBConnection(5, 30_000);
+        if (!dbReady) {
+          console.warn("[Engine] background: DB still unreachable after 5 probes — will retry next cycle");
+          return;
         }
       }
-      // SG sweep blocks the event loop, exhausting DB pool connections. Give Neon
-      // 90 seconds to reap dead connections before the backfill hammers the DB.
-      console.log("[Engine] background: pausing 90s for DB pool recovery after SG sweep...");
-      await new Promise(r => setTimeout(r, 90_000));
-      // Drain any zombie idle connections left over from the sweep's event-loop
-      // blocks (idle timeout timers can't fire while the loop is blocked).
-      await drainIdleConnections().catch(() => {});
-      // Probe the pool: attempt SELECT 1 up to 5 times with 30s between tries.
-      // After a long block, all pool slots may be occupied by in-flight TCP
-      // CONNECT attempts to Neon (not yet established, so socket.setTimeout
-      // can't fire). The probe serialises reconnection — if it fails, Neon is
-      // still recovering; we keep waiting rather than hammering it with a full
-      // backfill. Each retry fires at most 1 connection, avoiding the storm.
-      const dbReady = await probeDBConnection(5, 30_000);
-      if (!dbReady) {
-        console.warn("[Engine] background: DB still unreachable after 5 probes — skipping backfill this cycle");
-        return;
-      }
+      console.log("[Engine] background: backfillGBScores + recalculatePhysics starting...");
+      await backfillGBScores();
+      await recalculatePhysics();
+      console.log("[Engine] background: backfillGBScores + recalculatePhysics done");
+    } catch (e) {
+      console.error("[Engine] background score/physics recalc failed:", e);
     }
-    console.log("[Engine] background: backfillGBScores + recalculatePhysics starting...");
-    backfillGBScores()
-      .then(() => recalculatePhysics())
-      .then(() => console.log("[Engine] background: backfillGBScores + recalculatePhysics done"))
-      .catch(e => console.error("[Engine] background score/physics recalc failed:", e));
-  }, 1_200_000); // 20 min — after SG sweep starts (15 min)
+  }
+  setTimeout(function scheduleRecalc() {
+    runBackfillAndRecalc().finally(() => {
+      setTimeout(scheduleRecalc, 1_200_000); // re-run every 20 min
+    });
+  }, 1_200_000); // first run 20 min after startup
 
   // ── Background: systematic space-group sweep ─────────────────────────────────
   // Runs once at startup (15 min delay) then every 6 hours. Generates prototype

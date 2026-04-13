@@ -13,7 +13,7 @@ import { storage } from "../server/storage";
 import { acquireGNNTrainingSlot, releaseGNNTrainingSlot, waitForXGBIdle, isGNNTrainingSlotFree } from "./training-priority";
 import { fileURLToPath } from "url";
 import path from "path";
-import { spawn, ChildProcess } from "child_process";
+import { spawn, execSync, ChildProcess } from "child_process";
 import * as http from "node:http";
 import {
   ENSEMBLE_SIZE,
@@ -32,7 +32,44 @@ let _pythonProcess: ChildProcess | null = null;
 
 /** Spawn the FastAPI GNN service and wait until it responds to /health. */
 async function spawnPythonGNNService(): Promise<void> {
-  if (_pythonProcess && !_pythonProcess.killed) return; // already running
+  // If we think Python is alive, verify it actually responds to /health.
+  // The process can be alive but unresponsive (GIL stuck, uvicorn wedged,
+  // OOM-thrashing). The old check `_pythonProcess && !_pythonProcess.killed`
+  // only tests the ChildProcess reference — .killed is false even when the
+  // process crashed on its own (it's only true after WE send a signal).
+  if (_pythonProcess && !_pythonProcess.killed) {
+    try {
+      const ac = new AbortController();
+      const t = setTimeout(() => ac.abort(), 10_000);
+      const res = await fetch(`${GNN_SERVICE_URL}/health`, { signal: ac.signal });
+      clearTimeout(t);
+      if (res.ok) return; // genuinely healthy
+    } catch { /* health check failed — fall through to kill+respawn */ }
+    console.warn("[GNN-GCP] Python process alive but /health unresponsive — killing and respawning");
+    try { _pythonProcess.kill("SIGKILL"); } catch { /* ignore */ }
+    _pythonProcess = null;
+    // Give the OS a moment to release port 8765
+    await new Promise(r => setTimeout(r, 3000));
+  }
+
+  // Also kill any orphan Python process bound to our port from a prior session
+  // (e.g. Node restarted but old Python survived). Without this, the new Python
+  // can't bind and the health check polls the stale orphan indefinitely.
+  try {
+    const res = await fetch(`${GNN_SERVICE_URL}/health`, { signal: AbortSignal.timeout(5000) });
+    if (res.ok) {
+      console.warn("[GNN-GCP] Orphan Python process detected on port — killing via /shutdown or fuser");
+      // Best-effort: ask it to shut down, then force-kill the port holder
+      try {
+        await fetch(`${GNN_SERVICE_URL}/shutdown`, { method: "POST", signal: AbortSignal.timeout(3000) });
+      } catch { /* no /shutdown endpoint — use fuser */ }
+      await new Promise(r => setTimeout(r, 2000));
+      try {
+        execSync(`fuser -k ${GNN_SERVICE_PORT}/tcp 2>/dev/null || true`);
+      } catch { /* fuser not available or no process found */ }
+      await new Promise(r => setTimeout(r, 3000));
+    }
+  } catch { /* nothing on the port — good */ }
 
   const python = process.env.PYTHON_BIN ?? "python3";
   console.log(`[GNN-GCP] Spawning Python GNN service: ${python} ${GNN_PY_SCRIPT}`);
@@ -62,7 +99,7 @@ async function spawnPythonGNNService(): Promise<void> {
       const res = await fetch(`${GNN_SERVICE_URL}/health`);
       if (res.ok) {
         const body = await res.json() as any;
-        console.log(`[GNN-GCP] Python GNN service ready — device=${body.device} models_loaded=${body.models_loaded}`);
+        console.log(`[GNN-GCP] Python GNN service ready — device=${body.device} n_models=${body.n_models}`);
         return;
       }
     } catch { /* not ready yet */ }
@@ -109,9 +146,17 @@ function postJsonLongRunning(
         "Content-Type":   "application/json",
         "Content-Length": Buffer.byteLength(bodyStr),
       },
+      // Fail fast on connection issues (default TCP ETIMEDOUT is ~2 min on
+      // Linux). 30s is generous for localhost; if the service can't accept a
+      // TCP connection within 30s it's wedged and we should respawn it rather
+      // than waiting the full kernel SYN retry backoff.
+      timeout: 30_000,
     };
 
     const req = http.request(opts, (res) => {
+      // Connection established — disable the 30s connect timeout so the long
+      // training run isn't killed by it. Only the abortMs ceiling applies now.
+      req.setTimeout(0);
       const chunks: Buffer[] = [];
       res.on("data",  (chunk: Buffer) => chunks.push(chunk));
       res.on("error", reject);
@@ -123,6 +168,9 @@ function postJsonLongRunning(
       });
     });
 
+    req.on("timeout", () => {
+      req.destroy(new Error(`connect ETIMEDOUT ${parsedUrl.hostname}:${parsedUrl.port} (30s connect timeout)`));
+    });
     req.on("error", reject);
 
     // Hard ceiling: kill the request after abortMs (default 60 min). Without
@@ -131,10 +179,6 @@ function postJsonLongRunning(
       req.destroy(new Error(`POST ${url} exceeded abort ceiling of ${abortMs}ms`));
     }, abortMs);
     req.on("close", () => clearTimeout(abortTimer));
-
-    // Explicitly disable Node's per-socket inactivity timeout. Default is 0
-    // (disabled) anyway, but we set it to be defensive.
-    req.setTimeout(0);
 
     req.write(bodyStr);
     req.end();
