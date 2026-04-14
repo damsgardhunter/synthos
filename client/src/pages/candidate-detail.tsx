@@ -209,17 +209,29 @@ function ConsensusTcPanel({ formula, data: prefetched }: { formula: string; data
 
 function ConfidenceBadge({ level, verificationStage }: { level?: string | null; verificationStage?: number | null }) {
   if (!level) return null;
+
+  // dft-verified in DB + verification stage >= 2 = real DFT was run by the job queue
+  const hasRealDFT = level === "dft-verified" && (verificationStage != null && verificationStage >= 2);
+
   const styles: Record<string, string> = {
-    high: "bg-green-100 text-green-700 dark:bg-green-950 dark:text-green-400",
+    "dft-verified": hasRealDFT
+      ? "bg-green-100 text-green-700 dark:bg-green-950 dark:text-green-400"
+      : "bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-400",
+    high: "bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-400",
     medium: "bg-yellow-100 text-yellow-700 dark:bg-yellow-950 dark:text-yellow-400",
     low: "bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-400",
   };
-  // Only show "DFT" if DFT has actually been run (stage >= 2). At stage 0/1, this is a physics engine estimate.
-  const dftLabel = (verificationStage != null && verificationStage >= 2) ? "DFT" : "Physics Est.";
-  const labels: Record<string, string> = { high: dftLabel, medium: "Model", low: "Est." };
+
+  const labels: Record<string, string> = {
+    "dft-verified": hasRealDFT ? "DFT Verified" : "Physics Est.",
+    high: "Physics Est.",
+    medium: "Model Est.",
+    low: "Heuristic Est.",
+  };
+
   return (
     <span data-testid={`confidence-badge-${level}`} className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium ${styles[level] ?? styles.low}`}>
-      {labels[level] ?? level}
+      {labels[level] ?? "Est."}
     </span>
   );
 }
@@ -708,7 +720,7 @@ function NovelSynthesisSection({ candidate }: { candidate: SuperconductorCandida
               <Badge className="bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-300 border-0 text-[10px]" data-testid="badge-planner">
                 Planned Routes
               </Badge>
-              <span className="text-xs text-muted-foreground">{plannerRoutes.length} route(s) from synthesis planner</span>
+              <span className="text-xs text-gray-300">{plannerRoutes.length} route(s) from synthesis planner</span>
             </div>
             {plannerRoutes.map((route: any, i: number) => (
               <div key={`planner-${i}`} className="p-3 bg-blue-50/50 dark:bg-blue-950/20 rounded-md space-y-2 border border-blue-200/50 dark:border-blue-800/30" data-testid={`synthesis-planner-${i}`}>
@@ -720,7 +732,7 @@ function NovelSynthesisSection({ candidate }: { candidate: SuperconductorCandida
                     </Badge>
                   )}
                 </div>
-                <div className="flex flex-wrap gap-2 text-[10px] text-muted-foreground">
+                <div className="flex flex-wrap gap-2 text-[10px] text-gray-300">
                   {route.method && <span>Method: {route.method}</span>}
                   {route.difficulty && <span>Difficulty: {route.difficulty}</span>}
                   {route.maxTemperature != null && <span>Max T: {route.maxTemperature}K</span>}
@@ -743,7 +755,7 @@ function NovelSynthesisSection({ candidate }: { candidate: SuperconductorCandida
               <Badge className="bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300 border-0 text-[10px]" data-testid="badge-heuristic">
                 Rule-Based
               </Badge>
-              <span className="text-xs text-muted-foreground">{heuristicRoutes.length} route(s) from heuristic rules</span>
+              <span className="text-xs text-gray-300">{heuristicRoutes.length} route(s) from heuristic rules</span>
             </div>
             {heuristicRoutes.map((route: any, i: number) => (
               <div key={`heuristic-${i}`} className="p-3 bg-emerald-50/50 dark:bg-emerald-950/20 rounded-md space-y-2 border border-emerald-200/50 dark:border-emerald-800/30" data-testid={`synthesis-heuristic-${i}`}>
@@ -751,7 +763,7 @@ function NovelSynthesisSection({ candidate }: { candidate: SuperconductorCandida
                   <div>
                     <p className="text-sm font-bold">{route.routeName || route.method}</p>
                     {route.equation && (
-                      <p className="text-xs font-mono text-muted-foreground mt-0.5">{route.equation}</p>
+                      <p className="text-xs font-mono text-gray-300 mt-0.5">{route.equation}</p>
                     )}
                   </div>
                   {typeof route.confidence === "number" && (
@@ -760,7 +772,7 @@ function NovelSynthesisSection({ candidate }: { candidate: SuperconductorCandida
                     </Badge>
                   )}
                 </div>
-                <div className="flex flex-wrap gap-2 text-[10px] text-muted-foreground">
+                <div className="flex flex-wrap gap-2 text-[10px] text-gray-300">
                   {route.rule && <span>Rule: {route.rule}</span>}
                   {route.difficulty && <span>Difficulty: {route.difficulty}</span>}
                   {route.temperature != null && <span>{route.temperature}K</span>}
@@ -775,13 +787,13 @@ function NovelSynthesisSection({ candidate }: { candidate: SuperconductorCandida
                   </div>
                 )}
                 {route.steps && Array.isArray(route.steps) && (
-                  <ol className="text-xs space-y-0.5 ml-4 list-decimal text-muted-foreground">
+                  <ol className="text-xs space-y-0.5 ml-4 list-decimal text-gray-300">
                     {route.steps.slice(0, 6).map((s: string, j: number) => <li key={j}>{s}</li>)}
                     {route.steps.length > 6 && <li className="italic">...and {route.steps.length - 6} more step(s)</li>}
                   </ol>
                 )}
                 {route.notes && (
-                  <p className="text-[10px] text-muted-foreground italic">{route.notes}</p>
+                  <p className="text-[10px] text-gray-300 italic">{route.notes}</p>
                 )}
               </div>
             ))}
@@ -793,7 +805,7 @@ function NovelSynthesisSection({ candidate }: { candidate: SuperconductorCandida
               <Badge className="bg-primary/10 text-primary border border-primary/30 text-[10px]" data-testid="badge-physics-reasoned">
                 Physics-Reasoned
               </Badge>
-              <span className="text-xs text-muted-foreground">{physicsRoutes.length} route(s) derived from first-principles analysis</span>
+              <span className="text-xs text-gray-300">{physicsRoutes.length} route(s) derived from first-principles analysis</span>
             </div>
             {physicsRoutes.map((route, i) => (
               <NovelRouteCard key={`novel-${i}`} route={route} index={i} />
@@ -806,13 +818,13 @@ function NovelSynthesisSection({ candidate }: { candidate: SuperconductorCandida
               <Badge className="bg-purple-100 text-purple-800 dark:bg-purple-900/40 dark:text-purple-300 border-0 text-[10px]" data-testid="badge-analogy">
                 Analogy Transfer
               </Badge>
-              <span className="text-xs text-muted-foreground">{analogyRoutes.length} route(s) from similar materials</span>
+              <span className="text-xs text-gray-300">{analogyRoutes.length} route(s) from similar materials</span>
             </div>
             {analogyRoutes.map((route: any, i: number) => (
               <div key={`analogy-${i}`} className="p-3 bg-purple-50/30 dark:bg-purple-950/20 rounded-md space-y-1" data-testid={`synthesis-analogy-${i}`}>
                 <p className="text-sm font-bold">{route.method || route.routeName || "Analogy route"}</p>
                 {route.steps && Array.isArray(route.steps) && (
-                  <ol className="text-xs space-y-0.5 ml-4 list-decimal text-muted-foreground">
+                  <ol className="text-xs space-y-0.5 ml-4 list-decimal text-gray-300">
                     {route.steps.slice(0, 5).map((s: string, j: number) => <li key={j}>{typeof s === "string" ? s : JSON.stringify(s)}</li>)}
                   </ol>
                 )}
@@ -826,13 +838,13 @@ function NovelSynthesisSection({ candidate }: { candidate: SuperconductorCandida
               <Badge variant="outline" className="text-[10px]" data-testid="badge-literature-based">
                 {pathwayRoutes.length > 0 ? "Pathway / Literature" : "Literature-Based"}
               </Badge>
-              <span className="text-xs text-muted-foreground">{pathwayRoutes.length + literatureRoutes.length} route(s)</span>
+              <span className="text-xs text-gray-300">{pathwayRoutes.length + literatureRoutes.length} route(s)</span>
             </div>
             {[...pathwayRoutes, ...literatureRoutes].map((route: any, i: number) => (
               <div key={`lit-${i}`} className="p-3 bg-muted/30 rounded-md space-y-1" data-testid={`synthesis-literature-${i}`}>
                 <p className="text-sm font-bold">{route.method || route.routeName || route.name || "Unknown method"}</p>
                 {route.steps && Array.isArray(route.steps) && (
-                  <ol className="text-xs space-y-0.5 ml-4 list-decimal text-muted-foreground">
+                  <ol className="text-xs space-y-0.5 ml-4 list-decimal text-gray-300">
                     {route.steps.slice(0, 5).map((s: string, j: number) => <li key={j}>{typeof s === "string" ? s : JSON.stringify(s)}</li>)}
                   </ol>
                 )}
@@ -1349,6 +1361,134 @@ const AGREEMENT_STYLES: Record<string, { bg: string; text: string; label: string
   "no-comparison": { bg: "bg-gray-100 dark:bg-gray-900", text: "text-gray-600 dark:text-gray-400", label: "Reference Only" },
 };
 
+interface BenchmarkResult {
+  formula: string;
+  name: string;
+  family: string;
+  textbook: {
+    tc: number; lambda: number; omegaLog: number; crystalSystem: string;
+    spaceGroup: string; yearDiscovered: number; pressureGpa: number;
+    pairingMechanism: string; notes: string;
+  };
+  predicted: {
+    xgboostTc: number; xgboostScore: number; gnnTc: number;
+    gnnUncertainty: number; gnnLambda: number; ensembleTc: number;
+    reasoning: string[];
+  };
+  accuracy: {
+    tcErrorK: number; tcErrorPercent: number;
+    lambdaError: number | null; rating: string;
+  };
+  computedAt: number;
+}
+
+function ReferenceBenchmarkSection({ formula }: { formula: string }) {
+  const { data, isLoading } = useQuery<{ results: BenchmarkResult[]; computedAt: number }>({
+    queryKey: ["/api/reference-benchmark"],
+    refetchInterval: false,
+  });
+
+  const match = data?.results?.find(r => r.formula === formula);
+  if (isLoading) return null;
+  if (!match) return null;
+
+  const ratingColor = match.accuracy.rating === "excellent"
+    ? "text-green-500" : match.accuracy.rating === "good"
+    ? "text-blue-500" : match.accuracy.rating === "fair"
+    ? "text-yellow-500" : "text-red-500";
+
+  return (
+    <Card data-testid="reference-benchmark">
+      <CardHeader className="pb-3">
+        <CardTitle className="text-lg flex items-center gap-2">
+          <Target className="h-5 w-5" />
+          Reference Benchmark — {match.name}
+          <Badge className={`ml-2 ${ratingColor} border-current`} variant="outline">
+            {match.accuracy.rating}
+          </Badge>
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="space-y-2">
+            <h4 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider">Textbook / Experimental</h4>
+            <div className="space-y-1.5">
+              <div className="flex justify-between text-sm">
+                <span className="text-muted-foreground">Tc (verified)</span>
+                <span className="font-mono font-bold">{match.textbook.tc} K</span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-muted-foreground">Lambda (e-ph)</span>
+                <span className="font-mono font-bold">{match.textbook.lambda}</span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-muted-foreground">omega_log</span>
+                <span className="font-mono font-bold">{match.textbook.omegaLog} cm⁻¹</span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-muted-foreground">Pressure</span>
+                <span className="font-mono font-bold">{match.textbook.pressureGpa} GPa</span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-muted-foreground">Crystal</span>
+                <span className="font-mono">{match.textbook.spaceGroup} ({match.textbook.crystalSystem})</span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-muted-foreground">Mechanism</span>
+                <span className="font-mono text-xs">{match.textbook.pairingMechanism}</span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-muted-foreground">Discovered</span>
+                <span className="font-mono">{match.textbook.yearDiscovered}</span>
+              </div>
+            </div>
+            {match.textbook.notes && (
+              <p className="text-xs text-muted-foreground italic mt-2">{match.textbook.notes}</p>
+            )}
+          </div>
+
+          <div className="space-y-2">
+            <h4 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider">Our Prediction</h4>
+            <div className="space-y-1.5">
+              <div className="flex justify-between text-sm">
+                <span className="text-muted-foreground">XGBoost Tc</span>
+                <span className="font-mono font-bold">{match.predicted.xgboostTc.toFixed(1)} K</span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-muted-foreground">GNN Tc</span>
+                <span className="font-mono font-bold">{match.predicted.gnnTc.toFixed(1)} K</span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-muted-foreground">Ensemble Tc</span>
+                <span className="font-mono font-bold">{match.predicted.ensembleTc.toFixed(1)} K</span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-muted-foreground">Tc Error</span>
+                <span className={`font-mono font-bold ${ratingColor}`}>
+                  {match.accuracy.tcErrorPercent.toFixed(1)}% ({match.accuracy.tcErrorK.toFixed(1)} K)
+                </span>
+              </div>
+              {match.accuracy.lambdaError != null && (
+                <div className="flex justify-between text-sm">
+                  <span className="text-muted-foreground">Lambda Error</span>
+                  <span className="font-mono font-bold">{match.accuracy.lambdaError.toFixed(3)}</span>
+                </div>
+              )}
+            </div>
+            {match.predicted.reasoning?.length > 0 && (
+              <div className="mt-2 space-y-1">
+                {match.predicted.reasoning.map((r, i) => (
+                  <p key={i} className="text-xs text-muted-foreground">• {r}</p>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 function ExternalDataSourcesSection({ formula }: { formula: string }) {
   const { data, isLoading } = useQuery<CrossValidationData>({
     queryKey: ["/api/cross-validation", encodeURIComponent(formula)],
@@ -1538,6 +1678,194 @@ function ExternalDataSourcesSection({ formula }: { formula: string }) {
           <p className="text-xs text-muted-foreground text-center py-2">
             No external data found for this composition in Materials Project or AFLOW databases.
           </p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function DFTResultsSection({ formula }: { formula: string }) {
+  const { data, isLoading } = useQuery<{
+    formula: string;
+    totalJobs: number;
+    completed: number;
+    failed: number;
+    queued: number;
+    jobs: {
+      id: number;
+      status: string;
+      jobType: string;
+      workerNode: string;
+      createdAt: string;
+      completedAt: string | null;
+      errorMessage: string | null;
+      outputData: any;
+    }[];
+  }>({
+    queryKey: ["/api/dft-jobs", formula],
+    queryFn: () => fetch(`/api/dft-jobs/${encodeURIComponent(formula)}`).then(r => r.json()),
+    enabled: !!formula,
+  });
+
+  if (isLoading) return <Card><CardContent className="p-6"><Skeleton className="h-20" /></CardContent></Card>;
+  if (!data || data.totalJobs === 0) return null;
+
+  const completedJobs = data.jobs.filter(j => j.status === "completed" && j.outputData);
+
+  return (
+    <Card data-testid="dft-results" className="col-span-full border-[hsl(var(--gold)/0.3)]">
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between">
+          <CardTitle className="text-lg flex items-center gap-2">
+            <Atom className="h-5 w-5 text-[hsl(var(--gold))]" />
+            DFT Calculation Results
+          </CardTitle>
+          <div className="flex gap-2">
+            <Badge className="bg-green-500/20 text-green-400 border-green-500/30" variant="outline">{data.completed} completed</Badge>
+            {data.failed > 0 && <Badge className="bg-red-500/20 text-red-400 border-red-500/30" variant="outline">{data.failed} failed</Badge>}
+            {data.queued > 0 && <Badge className="bg-yellow-500/20 text-yellow-400 border-yellow-500/30" variant="outline">{data.queued} queued</Badge>}
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {completedJobs.length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            {data.failed > 0 ? `All ${data.failed} DFT jobs failed. No results available.` : "No completed DFT calculations yet."}
+          </p>
+        ) : (
+          completedJobs.slice(0, 5).map((job) => {
+            const out = typeof job.outputData === "string" ? JSON.parse(job.outputData) : job.outputData;
+            const scf = out?.scf;
+            const phonon = out?.phonon;
+            const completedDate = job.completedAt ? new Date(job.completedAt).toLocaleString() : "N/A";
+
+            return (
+              <div key={job.id} className="p-4 rounded-lg border border-[hsl(var(--gold)/0.2)] bg-[hsl(var(--gold)/0.03)] space-y-3" data-testid={`dft-result-${job.id}`}>
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Badge className="bg-green-500/20 text-green-400 border-green-500/30 text-xs" variant="outline">
+                      {job.jobType?.toUpperCase() ?? "SCF"}
+                    </Badge>
+                    <span className="text-xs text-muted-foreground">Worker: {job.workerNode ?? "local"}</span>
+                  </div>
+                  <span className="text-xs text-muted-foreground">{completedDate}</span>
+                </div>
+
+                {scf && (
+                  <div>
+                    <p className="text-xs font-semibold text-[hsl(var(--gold))] uppercase tracking-wider mb-2">SCF Results</p>
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                      {scf.totalEnergy != null && (
+                        <div className="p-2 bg-muted/30 rounded">
+                          <p className="text-[9px] text-muted-foreground">Total Energy</p>
+                          <p className="text-sm font-mono font-bold">{scf.totalEnergy.toFixed(4)} Ry</p>
+                        </div>
+                      )}
+                      {scf.totalEnergyPerAtom != null && (
+                        <div className="p-2 bg-muted/30 rounded">
+                          <p className="text-[9px] text-muted-foreground">Energy/Atom</p>
+                          <p className="text-sm font-mono font-bold">{scf.totalEnergyPerAtom.toFixed(4)} Ry</p>
+                        </div>
+                      )}
+                      {scf.fermiEnergy != null && (
+                        <div className="p-2 bg-muted/30 rounded">
+                          <p className="text-[9px] text-muted-foreground">Fermi Energy</p>
+                          <p className="text-sm font-mono font-bold">{scf.fermiEnergy.toFixed(4)} eV</p>
+                        </div>
+                      )}
+                      {scf.bandGap != null && (
+                        <div className="p-2 bg-muted/30 rounded">
+                          <p className="text-[9px] text-muted-foreground">Band Gap</p>
+                          <p className="text-sm font-mono font-bold">{scf.bandGap === 0 ? "Metallic" : `${scf.bandGap.toFixed(3)} eV`}</p>
+                        </div>
+                      )}
+                      {scf.isMetallic != null && scf.bandGap == null && (
+                        <div className="p-2 bg-muted/30 rounded">
+                          <p className="text-[9px] text-muted-foreground">Electronic</p>
+                          <p className="text-sm font-mono font-bold">{scf.isMetallic ? "Metallic" : "Insulating"}</p>
+                        </div>
+                      )}
+                      {scf.pressure != null && (
+                        <div className="p-2 bg-muted/30 rounded">
+                          <p className="text-[9px] text-muted-foreground">Pressure</p>
+                          <p className="text-sm font-mono font-bold">{scf.pressure.toFixed(2)} GPa</p>
+                        </div>
+                      )}
+                      {scf.totalForce != null && (
+                        <div className="p-2 bg-muted/30 rounded">
+                          <p className="text-[9px] text-muted-foreground">Total Force</p>
+                          <p className="text-sm font-mono font-bold">{scf.totalForce.toFixed(4)} Ry/au</p>
+                        </div>
+                      )}
+                      {scf.magnetization != null && (
+                        <div className="p-2 bg-muted/30 rounded">
+                          <p className="text-[9px] text-muted-foreground">Magnetization</p>
+                          <p className="text-sm font-mono font-bold">{scf.magnetization.toFixed(3)} μB</p>
+                        </div>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap gap-3 mt-2 text-xs text-muted-foreground">
+                      {scf.converged != null && (
+                        <span className="flex items-center gap-1">
+                          {scf.converged ? <CheckCircle2 className="h-3 w-3 text-green-500" /> : <XCircle className="h-3 w-3 text-red-500" />}
+                          {scf.converged ? "Converged" : "Not converged"}
+                        </span>
+                      )}
+                      {scf.convergenceQuality && <span>Quality: {scf.convergenceQuality}</span>}
+                      {scf.nscfIterations != null && <span>{scf.nscfIterations} SCF iterations</span>}
+                      {scf.lastScfAccuracyRy != null && <span>Accuracy: {scf.lastScfAccuracyRy.toExponential(1)} Ry</span>}
+                    </div>
+                  </div>
+                )}
+
+                {phonon && (phonon.frequencies?.length > 0 || phonon.hasImaginary != null) && (
+                  <div>
+                    <p className="text-xs font-semibold text-[hsl(var(--gold))] uppercase tracking-wider mb-2">Phonon Results</p>
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                      {phonon.lowestFrequency != null && (
+                        <div className="p-2 bg-muted/30 rounded">
+                          <p className="text-[9px] text-muted-foreground">Lowest Freq</p>
+                          <p className="text-sm font-mono font-bold">{phonon.lowestFrequency.toFixed(1)} cm⁻¹</p>
+                        </div>
+                      )}
+                      {phonon.highestFrequency != null && phonon.highestFrequency > 0 && (
+                        <div className="p-2 bg-muted/30 rounded">
+                          <p className="text-[9px] text-muted-foreground">Highest Freq</p>
+                          <p className="text-sm font-mono font-bold">{phonon.highestFrequency.toFixed(1)} cm⁻¹</p>
+                        </div>
+                      )}
+                      {phonon.hasImaginary != null && (
+                        <div className="p-2 bg-muted/30 rounded">
+                          <p className="text-[9px] text-muted-foreground">Imaginary Modes</p>
+                          <p className={`text-sm font-mono font-bold ${phonon.hasImaginary ? "text-red-400" : "text-green-400"}`}>
+                            {phonon.hasImaginary ? `Yes (${phonon.imaginaryCount ?? 0})` : "None"}
+                          </p>
+                        </div>
+                      )}
+                      {phonon.converged != null && (
+                        <div className="p-2 bg-muted/30 rounded">
+                          <p className="text-[9px] text-muted-foreground">Phonon Status</p>
+                          <p className={`text-sm font-mono font-bold ${phonon.converged ? "text-green-400" : "text-yellow-400"}`}>
+                            {phonon.converged ? "Converged" : "Partial"}
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {out?.estimatedPressureGPa != null && (
+                  <div className="text-xs text-muted-foreground">
+                    Estimated pressure: {out.estimatedPressureGPa.toFixed(1)} GPa
+                    {out.highPressure ? " (high-pressure regime)" : ""}
+                  </div>
+                )}
+                {out?.wallTimeTotal != null && out.wallTimeTotal > 0 && (
+                  <div className="text-xs text-muted-foreground">Wall time: {(out.wallTimeTotal / 1000).toFixed(1)}s</div>
+                )}
+              </div>
+            );
+          })
         )}
       </CardContent>
     </Card>
@@ -1812,12 +2140,14 @@ export default function CandidateDetail() {
   return (
     <div className="p-6 space-y-6">
       <div className="flex items-center gap-3">
-        <Link href="/superconductor" data-testid="link-back-sc-lab">
-          <button className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors">
-            <ArrowLeft className="h-4 w-4" />
-            Back to SC Lab
-          </button>
-        </Link>
+        <button
+          onClick={() => window.history.back()}
+          className="flex items-center gap-1.5 text-sm text-[hsl(var(--gold-muted))] hover:text-[hsl(var(--gold))] transition-colors"
+          data-testid="link-back"
+        >
+          <ArrowLeft className="h-4 w-4" />
+          Back to Explorer
+        </button>
       </div>
 
       <div>
@@ -1844,6 +2174,8 @@ export default function CandidateDetail() {
 
       {candidate && <CandidateHeader candidate={candidate} p90={p90} />}
 
+      {formula && <ReferenceBenchmarkSection formula={formula} />}
+
       {formula && <ExternalDataSourcesSection formula={formula} />}
 
       {formula && <ExperimentalValidationSection formula={formula} />}
@@ -1856,6 +2188,7 @@ export default function CandidateDetail() {
         {formula && <RetrosynthesisSection formula={formula} />}
         <ReactionsSection reactions={data?.chemicalReactions ?? []} />
         <PipelineResultsSection results={data?.computationalResults ?? []} />
+        {formula && <DFTResultsSection formula={formula} />}
       </div>
     </div>
   );

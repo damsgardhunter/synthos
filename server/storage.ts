@@ -1072,6 +1072,13 @@ export class DatabaseStorage implements IStorage {
     return row;
   }
 
+  async getCompletedGnnJobs(limit = 20): Promise<GnnTrainingJob[]> {
+    return db.select().from(gnnTrainingJobs)
+      .where(eq(gnnTrainingJobs.status, "done"))
+      .orderBy(desc(gnnTrainingJobs.completedAt))
+      .limit(limit);
+  }
+
   async resetStuckGnnJobs(): Promise<number> {
     // Reset 'running' GNN jobs back to 'queued' so the GCP worker re-picks them up
     // after a VM restart that killed the job mid-flight.

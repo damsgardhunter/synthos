@@ -1,173 +1,118 @@
+@import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@400;500;600;700&family=Inter:wght@300;400;500;600;700&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* METANOIA — primary brand font. Add .woff2 to client/public/fonts/ when available */
+@font-face {
+  font-family: 'Metanoia';
+  src: url('/fonts/Metanoia.woff2') format('woff2'),
+       url('/fonts/Metanoia.woff') format('woff'),
+       url('/fonts/Metanoia.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
 
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(4px); }
   to { opacity: 1; transform: translateY(0); }
 }
 
-/* LIGHT MODE */
+@keyframes goldPulse {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 1; }
+}
+
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+/* ─── GOLD & BLACK THEME (always dark) ─── */
 :root {
-  --button-outline: rgba(0,0,0, .10);
-  --badge-outline: rgba(0,0,0, .05);
-  --opaque-button-border-intensity: -8;
-  --elevate-1: rgba(0,0,0, .03);
-  --elevate-2: rgba(0,0,0, .08);
-  --background: 210 5% 98%;
-  --foreground: 210 6% 12%;
-  --border: 210 6% 88%;
-  --card: 210 5% 96%;
-  --card-foreground: 210 6% 15%;
-  --card-border: 210 5% 92%;
-  --sidebar: 210 5% 94%;
-  --sidebar-foreground: 210 6% 18%;
-  --sidebar-border: 210 5% 89%;
-  --sidebar-primary: 210 85% 42%;
-  --sidebar-primary-foreground: 210 20% 98%;
-  --sidebar-accent: 210 8% 88%;
-  --sidebar-accent-foreground: 210 6% 18%;
-  --sidebar-ring: 210 85% 42%;
-  --popover: 210 6% 92%;
-  --popover-foreground: 210 6% 15%;
-  --popover-border: 210 6% 87%;
-  --primary: 210 85% 42%;
-  --primary-foreground: 210 20% 98%;
-  --secondary: 210 8% 88%;
-  --secondary-foreground: 210 6% 18%;
-  --muted: 210 8% 90%;
-  --muted-foreground: 210 6% 28%;
-  --accent: 210 12% 92%;
-  --accent-foreground: 210 6% 18%;
-  --destructive: 0 72% 45%;
+  --button-outline: rgba(197, 165, 90, .20);
+  --badge-outline: rgba(197, 165, 90, .10);
+  --opaque-button-border-intensity: 9;
+  --elevate-1: rgba(197, 165, 90, .06);
+  --elevate-2: rgba(197, 165, 90, .12);
+
+  /* Core palette */
+  --gold: 42 55% 56%;
+  --gold-light: 42 60% 72%;
+  --gold-dark: 42 50% 38%;
+  --gold-muted: 42 30% 45%;
+
+  --background: 220 8% 8%;
+  --foreground: 40 10% 92%;
+  --border: 42 20% 18%;
+  --card: 220 8% 11%;
+  --card-foreground: 40 10% 90%;
+  --card-border: 42 25% 22%;
+  --sidebar: 220 10% 7%;
+  --sidebar-foreground: 40 10% 85%;
+  --sidebar-border: 42 20% 16%;
+  --sidebar-primary: 42 55% 56%;
+  --sidebar-primary-foreground: 220 10% 8%;
+  --sidebar-accent: 220 10% 14%;
+  --sidebar-accent-foreground: 40 10% 85%;
+  --sidebar-ring: 42 55% 56%;
+  --popover: 220 8% 12%;
+  --popover-foreground: 40 10% 90%;
+  --popover-border: 42 20% 18%;
+  --primary: 42 55% 56%;
+  --primary-foreground: 220 10% 8%;
+  --secondary: 220 10% 16%;
+  --secondary-foreground: 40 10% 85%;
+  --muted: 220 8% 14%;
+  --muted-foreground: 40 8% 55%;
+  --accent: 220 10% 14%;
+  --accent-foreground: 40 10% 85%;
+  --destructive: 0 72% 40%;
   --destructive-foreground: 0 10% 98%;
-  --input: 210 12% 72%;
-  --ring: 210 85% 42%;
-  --chart-1: 210 85% 38%;
-  --chart-2: 195 75% 35%;
-  --chart-3: 225 80% 40%;
-  --chart-4: 180 70% 32%;
-  --chart-5: 240 75% 42%;
-  --font-sans: Open Sans, sans-serif;
-  --font-serif: Georgia, serif;
-  --font-mono: Menlo, monospace;
-  --radius: .5rem;
-  --shadow-2xs: 0px 2px 0px 0px hsl(210 6% 15% / 0.00);
-  --shadow-xs: 0px 2px 0px 0px hsl(210 6% 15% / 0.00);
-  --shadow-sm: 0px 2px 0px 0px hsl(210 6% 15% / 0.00), 0px 1px 2px -1px hsl(210 6% 15% / 0.00);
-  --shadow: 0px 2px 0px 0px hsl(210 6% 15% / 0.00), 0px 1px 2px -1px hsl(210 6% 15% / 0.00);
-  --shadow-md: 0px 2px 0px 0px hsl(210 6% 15% / 0.00), 0px 2px 4px -1px hsl(210 6% 15% / 0.00);
-  --shadow-lg: 0px 2px 0px 0px hsl(210 6% 15% / 0.00), 0px 4px 6px -1px hsl(210 6% 15% / 0.00);
-  --shadow-xl: 0px 2px 0px 0px hsl(210 6% 15% / 0.00), 0px 8px 10px -1px hsl(210 6% 15% / 0.00);
-  --shadow-2xl: 0px 2px 0px 0px hsl(210 6% 15% / 0.00);
-  --tracking-normal: 0em;
+  --input: 42 15% 22%;
+  --ring: 42 55% 56%;
+  --chart-1: 42 55% 56%;
+  --chart-2: 42 60% 65%;
+  --chart-3: 42 45% 45%;
+  --chart-4: 35 50% 55%;
+  --chart-5: 50 50% 55%;
+  --font-sans: "Inter", system-ui, -apple-system, sans-serif;
+  --font-serif: "Cinzel", Georgia, serif;
+  --font-mono: "JetBrains Mono", Menlo, Consolas, monospace;
+  --radius: .625rem;
+  --shadow-2xs: 0px 1px 2px 0px rgba(0,0,0, 0.3);
+  --shadow-xs: 0px 1px 3px 0px rgba(0,0,0, 0.3);
+  --shadow-sm: 0px 2px 4px 0px rgba(0,0,0, 0.3), 0px 1px 2px -1px rgba(0,0,0, 0.2);
+  --shadow: 0px 2px 6px 0px rgba(0,0,0, 0.3), 0px 1px 3px -1px rgba(0,0,0, 0.2);
+  --shadow-md: 0px 4px 8px 0px rgba(0,0,0, 0.3), 0px 2px 4px -1px rgba(0,0,0, 0.2);
+  --shadow-lg: 0px 8px 16px 0px rgba(0,0,0, 0.3), 0px 4px 6px -1px rgba(0,0,0, 0.2);
+  --shadow-xl: 0px 12px 24px 0px rgba(0,0,0, 0.4), 0px 8px 10px -1px rgba(0,0,0, 0.2);
+  --shadow-2xl: 0px 16px 32px 0px rgba(0,0,0, 0.5);
+  --tracking-normal: 0.02em;
   --spacing: 0.25rem;
 
-/* Fallback for older browsers */
+  /* Fallback for older browsers */
   --sidebar-primary-border: hsl(var(--sidebar-primary));
   --sidebar-primary-border: hsl(from hsl(var(--sidebar-primary)) h s calc(l + var(--opaque-button-border-intensity)) / alpha);
-
-  /* Fallback for older browsers */
   --sidebar-accent-border: hsl(var(--sidebar-accent));
   --sidebar-accent-border: hsl(from hsl(var(--sidebar-accent)) h s calc(l + var(--opaque-button-border-intensity)) / alpha);
-
-  /* Fallback for older browsers */
   --primary-border: hsl(var(--primary));
   --primary-border: hsl(from hsl(var(--primary)) h s calc(l + var(--opaque-button-border-intensity)) / alpha);
-
-  /* Fallback for older browsers */
   --secondary-border: hsl(var(--secondary));
   --secondary-border: hsl(from hsl(var(--secondary)) h s calc(l + var(--opaque-button-border-intensity)) / alpha);
-
-  /* Fallback for older browsers */
   --muted-border: hsl(var(--muted));
   --muted-border: hsl(from hsl(var(--muted)) h s calc(l + var(--opaque-button-border-intensity)) / alpha);
-
-  /* Fallback for older browsers */
   --accent-border: hsl(var(--accent));
   --accent-border: hsl(from hsl(var(--accent)) h s calc(l + var(--opaque-button-border-intensity)) / alpha);
-
-  /* Fallback for older browsers */
   --destructive-border: hsl(var(--destructive));
   --destructive-border: hsl(from hsl(var(--destructive)) h s calc(l + var(--opaque-button-border-intensity)) / alpha);
 }
 
+/* Force dark mode always — no light mode */
 .dark {
-  --button-outline: rgba(255,255,255, .10);
-  --badge-outline: rgba(255,255,255, .05);
-  --opaque-button-border-intensity: 9;
-  --elevate-1: rgba(255,255,255, .04);
-  --elevate-2: rgba(255,255,255, .09);
-  --background: 210 6% 8%;
-  --foreground: 210 5% 95%;
-  --border: 210 6% 18%;
-  --card: 210 6% 10%;
-  --card-foreground: 210 5% 92%;
-  --card-border: 210 6% 14%;
-  --sidebar: 210 6% 12%;
-  --sidebar-foreground: 210 5% 88%;
-  --sidebar-border: 210 6% 16%;
-  --sidebar-primary: 210 85% 48%;
-  --sidebar-primary-foreground: 210 20% 98%;
-  --sidebar-accent: 210 10% 16%;
-  --sidebar-accent-foreground: 210 5% 88%;
-  --sidebar-ring: 210 85% 48%;
-  --popover: 210 6% 14%;
-  --popover-foreground: 210 5% 90%;
-  --popover-border: 210 6% 18%;
-  --primary: 210 85% 32%;
-  --primary-foreground: 210 20% 98%;
-  --secondary: 210 10% 18%;
-  --secondary-foreground: 210 5% 88%;
-  --muted: 210 10% 16%;
-  --muted-foreground: 210 5% 68%;
-  --accent: 210 12% 14%;
-  --accent-foreground: 210 5% 88%;
-  --destructive: 0 72% 32%;
-  --destructive-foreground: 0 10% 98%;
-  --input: 210 12% 32%;
-  --ring: 210 85% 48%;
-  --chart-1: 210 85% 65%;
-  --chart-2: 195 75% 68%;
-  --chart-3: 225 80% 70%;
-  --chart-4: 180 70% 65%;
-  --chart-5: 240 75% 72%;
-  --shadow-2xs: 0px 2px 0px 0px hsl(210 5% 95% / 0.00);
-  --shadow-xs: 0px 2px 0px 0px hsl(210 5% 95% / 0.00);
-  --shadow-sm: 0px 2px 0px 0px hsl(210 5% 95% / 0.00), 0px 1px 2px -1px hsl(210 5% 95% / 0.00);
-  --shadow: 0px 2px 0px 0px hsl(210 5% 95% / 0.00), 0px 1px 2px -1px hsl(210 5% 95% / 0.00);
-  --shadow-md: 0px 2px 0px 0px hsl(210 5% 95% / 0.00), 0px 2px 4px -1px hsl(210 5% 95% / 0.00);
-  --shadow-lg: 0px 2px 0px 0px hsl(210 5% 95% / 0.00), 0px 4px 6px -1px hsl(210 5% 95% / 0.00);
-  --shadow-xl: 0px 2px 0px 0px hsl(210 5% 95% / 0.00), 0px 8px 10px -1px hsl(210 5% 95% / 0.00);
-  --shadow-2xl: 0px 2px 0px 0px hsl(210 5% 95% / 0.00);
-
-/* Fallback for older browsers */
-  --sidebar-primary-border: hsl(var(--sidebar-primary));
-  --sidebar-primary-border: hsl(from hsl(var(--sidebar-primary)) h s calc(l + var(--opaque-button-border-intensity)) / alpha);
-
-  /* Fallback for older browsers */
-  --sidebar-accent-border: hsl(var(--sidebar-accent));
-  --sidebar-accent-border: hsl(from hsl(var(--sidebar-accent)) h s calc(l + var(--opaque-button-border-intensity)) / alpha);
-
-  /* Fallback for older browsers */
-  --primary-border: hsl(var(--primary));
-  --primary-border: hsl(from hsl(var(--primary)) h s calc(l + var(--opaque-button-border-intensity)) / alpha);
-
-  /* Fallback for older browsers */
-  --secondary-border: hsl(var(--secondary));
-  --secondary-border: hsl(from hsl(var(--secondary)) h s calc(l + var(--opaque-button-border-intensity)) / alpha);
-
-  /* Fallback for older browsers */
-  --muted-border: hsl(var(--muted));
-  --muted-border: hsl(from hsl(var(--muted)) h s calc(l + var(--opaque-button-border-intensity)) / alpha);
-
-  /* Fallback for older browsers */
-  --accent-border: hsl(var(--accent));
-  --accent-border: hsl(from hsl(var(--accent)) h s calc(l + var(--opaque-button-border-intensity)) / alpha);
-
-  /* Fallback for older browsers */
-  --destructive-border: hsl(var(--destructive));
-  --destructive-border: hsl(from hsl(var(--destructive)) h s calc(l + var(--opaque-button-border-intensity)) / alpha);
+  /* Inherits same vars as :root since we're gold/black only */
 }
 
 @layer base {
@@ -177,32 +122,49 @@
 
   body {
     @apply font-sans antialiased bg-background text-foreground;
+    letter-spacing: 0.02em;
+  }
+
+  /* Gold-bordered cards */
+  .gold-card {
+    @apply rounded-xl border transition-all;
+    border-color: hsl(var(--gold) / 0.3);
+    background: hsl(var(--card));
+  }
+  .gold-card:hover {
+    border-color: hsl(var(--gold) / 0.5);
+    box-shadow: 0 0 20px hsl(var(--gold) / 0.08);
+  }
+
+  /* Gold gradient text */
+  .gold-text {
+    background: linear-gradient(135deg, hsl(42 60% 72%), hsl(42 55% 56%), hsl(42 50% 45%));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  /* Gold shimmer effect for special elements */
+  .gold-shimmer {
+    background: linear-gradient(90deg,
+      hsl(var(--gold) / 0) 0%,
+      hsl(var(--gold) / 0.15) 50%,
+      hsl(var(--gold) / 0) 100%
+    );
+    background-size: 200% 100%;
+    animation: shimmer 3s ease-in-out infinite;
+  }
+
+  /* Synthos brand heading — METANOIA primary, Cinzel fallback */
+  .synthos-heading {
+    font-family: "Metanoia", "Cinzel", Georgia, serif;
+    letter-spacing: 0.18em;
+    font-weight: 400;
   }
 }
 
-/**
- * Using the elevate system.
- * Automatic contrast adjustment.
- *
- * <element className="hover-elevate" />
- * <element className="active-elevate-2" />
- *
- * // Using the tailwind utility when a data attribute is "on"
- * <element className="toggle-elevate data-[state=on]:toggle-elevated" />
- * // Or manually controlling the toggle state
- * <element className="toggle-elevate toggle-elevated" />
- *
- * Elevation systems have to handle many states.
- * - not-hovered, vs. hovered vs. active  (three mutually exclusive states)
- * - toggled or not
- * - focused or not (this is not handled with these utilities)
- *
- * Even without handling focused or not, this is six possible combinations that
- * need to be distinguished from eachother visually.
- */
 @layer utilities {
-
-  /* Hide ugly search cancel button in Chrome until we can style it properly */
+  /* Hide ugly search cancel button in Chrome */
   input[type="search"]::-webkit-search-cancel-button {
     @apply hidden;
   }
@@ -214,42 +176,27 @@
     pointer-events: none;
   }
 
-  /* .no-default-hover-elevate/no-default-active-elevate is an escape hatch so consumers of
-   * buttons/badges can remove the automatic brightness adjustment on interactions
-   * and program their own. */
   .no-default-hover-elevate {}
-
   .no-default-active-elevate {}
 
-
-  /**
-   * Toggleable backgrounds go behind the content. Hoverable/active goes on top.
-   * This way they can stack/compound. Both will overlap the parent's borders!
-   * So borders will be automatically adjusted both on toggle, and hover/active,
-   * and they will be compounded.
-   */
   .toggle-elevate::before,
   .toggle-elevate-2::before {
     content: "";
     pointer-events: none;
     position: absolute;
     inset: 0px;
-    /*border-radius: inherit;   match rounded corners */
     border-radius: inherit;
     z-index: -1;
-    /* sits behind content but above backdrop */
   }
 
   .toggle-elevate.toggle-elevated::before {
     background-color: var(--elevate-2);
   }
 
-  /* If there's a 1px border, adjust the inset so that it covers that parent's border */
   .border.toggle-elevate::before {
     inset: -1px;
   }
 
-  /* Does not work on elements with overflow:hidden! */
   .hover-elevate:not(.no-default-hover-elevate),
   .active-elevate:not(.no-default-active-elevate),
   .hover-elevate-2:not(.no-default-hover-elevate),
@@ -266,10 +213,8 @@
     pointer-events: none;
     position: absolute;
     inset: 0px;
-    /*border-radius: inherit;   match rounded corners */
     border-radius: inherit;
     z-index: 999;
-    /* sits in front of content */
   }
 
   .hover-elevate:hover:not(.no-default-hover-elevate)::after,
@@ -282,7 +227,6 @@
     background-color: var(--elevate-2);
   }
 
-  /* If there's a 1px border, adjust the inset so that it covers that parent's border */
   .border.hover-elevate:not(.no-hover-interaction-elevate)::after,
   .border.active-elevate:not(.no-active-interaction-elevate)::after,
   .border.hover-elevate-2:not(.no-hover-interaction-elevate)::after,

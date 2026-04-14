@@ -3,6 +3,7 @@ import { useEffect, useState, useRef, useMemo } from "react";
 import { queryClient, throttledInvalidate } from "@/lib/queryClient";
 import type { LearningPhase, ResearchLog, ResearchStrategy } from "@shared/schema";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { LoadingCard } from "@/components/loading-animation";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -14,7 +15,7 @@ import {
   MessageSquare, Lightbulb, AlertTriangle, Trophy, Archive,
   Cpu, Shield, Activity, Network, GitMerge, GitBranch, Layers, Mountain, Shuffle,
 } from "lucide-react";
-import { RadarChart, PolarGrid, PolarAngleAxis, Radar, ResponsiveContainer, Tooltip, LineChart, Line, AreaChart, Area } from "recharts";
+import { RadarChart, PolarGrid, PolarAngleAxis, Radar, ResponsiveContainer, Tooltip, LineChart, Line, AreaChart, Area, YAxis } from "recharts";
 import { useWebSocket, type ThoughtMessage } from "@/hooks/use-websocket";
 import { EngineControls } from "@/components/engine-controls";
 import { ParetoFrontierChart } from "@/components/pareto-frontier";
@@ -398,7 +399,7 @@ function GNNActiveLearningCard() {
     currentVersion: number;
     ensembleSize: number;
     latestMetrics: { r2: number; mae: number; rmse: number; datasetSize: number } | null;
-    r2Trend: { version: number; r2: number }[];
+    r2Trend: { version: number; r2: number; datasetSize?: number }[];
     maeTrend: { version: number; mae: number }[];
     history: any[];
     uncertaintyMethods: string[];
@@ -441,15 +442,15 @@ function GNNActiveLearningCard() {
         <div className="space-y-3">
           {gnnVersionData?.latestMetrics ? (
             <div className="grid grid-cols-3 gap-2">
-              <div className="p-2 bg-purple-50/50 dark:bg-purple-950/20 rounded-md border border-purple-200/50 dark:border-purple-800/30" data-testid="gnn-version">
+              <div className="p-2 bg-[hsl(220,10%,10%)] rounded-md border border-[hsl(var(--gold)/0.25)]" data-testid="gnn-version">
                 <p className="text-[10px] text-muted-foreground uppercase tracking-wider">GNN v{gnnVersionData.currentVersion}</p>
                 <p className="text-sm font-mono font-bold">{gnnVersionData.ensembleSize}-model</p>
               </div>
-              <div className="p-2 bg-purple-50/50 dark:bg-purple-950/20 rounded-md border border-purple-200/50 dark:border-purple-800/30" data-testid="gnn-r2">
+              <div className="p-2 bg-[hsl(220,10%,10%)] rounded-md border border-[hsl(var(--gold)/0.25)]" data-testid="gnn-r2">
                 <p className="text-[10px] text-muted-foreground uppercase tracking-wider">R-squared</p>
                 <p className="text-sm font-mono font-bold">{gnnVersionData.latestMetrics.r2 != null ? gnnVersionData.latestMetrics.r2.toFixed(4) : "--"}</p>
               </div>
-              <div className="p-2 bg-purple-50/50 dark:bg-purple-950/20 rounded-md border border-purple-200/50 dark:border-purple-800/30" data-testid="gnn-mae">
+              <div className="p-2 bg-[hsl(220,10%,10%)] rounded-md border border-[hsl(var(--gold)/0.25)]" data-testid="gnn-mae">
                 <p className="text-[10px] text-muted-foreground uppercase tracking-wider">MAE</p>
                 <p className="text-sm font-mono font-bold">{gnnVersionData.latestMetrics.mae != null ? `${gnnVersionData.latestMetrics.mae.toFixed(2)}K` : "--"}</p>
               </div>
@@ -510,17 +511,31 @@ function GNNActiveLearningCard() {
 
           {gnnVersionData?.r2Trend && gnnVersionData.r2Trend.filter(d => d.r2 != null).length > 1 && (
             <div data-testid="gnn-r2-trend">
-              <p className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1">R-squared Trend</p>
-              <ResponsiveContainer width="100%" height={50}>
+              <p className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1">R² & Dataset Growth</p>
+              <ResponsiveContainer width="100%" height={70}>
                 <LineChart data={gnnVersionData.r2Trend.filter(d => d.r2 != null)}>
-                  <Line type="monotone" dataKey="r2" stroke="hsl(var(--primary))" strokeWidth={1.5} dot={false} />
+                  <Line yAxisId="r2" type="monotone" dataKey="r2" stroke="hsl(var(--gold))" strokeWidth={1.5} dot={{ r: 2 }} name="R²" />
+                  <Line yAxisId="ds" type="monotone" dataKey="datasetSize" stroke="#6366f1" strokeWidth={1} dot={{ r: 1.5 }} strokeDasharray="3 2" name="Dataset" connectNulls />
                   <Tooltip
                     contentStyle={{ background: "hsl(var(--card))", border: "1px solid hsl(var(--border))", borderRadius: "6px", fontSize: "11px" }}
-                    formatter={(v: any) => [v != null ? v.toFixed(4) : "--", "R-squared"]}
+                    formatter={(v: any, name: string) => {
+                      if (name === "R²") return [v != null ? Number(v).toFixed(4) : "--", "R²"];
+                      return [v != null ? Number(v).toLocaleString() : "--", "Dataset"];
+                    }}
                     labelFormatter={(l: any) => `v${l}`}
                   />
+                  <YAxis yAxisId="r2" hide domain={[0, 1]} />
+                  <YAxis yAxisId="ds" hide orientation="right" />
                 </LineChart>
               </ResponsiveContainer>
+              <div className="flex items-center justify-center gap-3 mt-1">
+                <div className="flex items-center gap-1 text-[9px] text-muted-foreground">
+                  <div className="h-1.5 w-3 rounded-full bg-[hsl(var(--gold))]" />R²
+                </div>
+                <div className="flex items-center gap-1 text-[9px] text-muted-foreground">
+                  <div className="h-1.5 w-3 rounded-full bg-indigo-500" />Dataset Size
+                </div>
+              </div>
             </div>
           )}
         </div>
@@ -2154,25 +2169,58 @@ export default function Dashboard() {
     "OpenAI NLP": "bg-violet-100 text-violet-700 dark:bg-violet-950 dark:text-violet-300",
   };
 
+  const shortcutButtons = [
+    { label: "Pipeline Statistics", href: "/research", icon: BarChart3 },
+    { label: "Materials Explorer", href: "/materials", icon: Database },
+    { label: "Discovery Lab", href: "/discovery-lab", icon: FlaskConical },
+    { label: "SC Candidates", href: "/materials?tab=candidates", icon: Zap },
+    { label: "Periodic Table", href: "/materials?tab=periodic", icon: Atom },
+    { label: "Synthesis Routes", href: "/discovery-lab?tab=synthesis", icon: Microscope },
+    { label: "Novel Predictions", href: "/discovery-lab?tab=predictions", icon: Star },
+    { label: "Causal Physics", href: "/causal-physics", icon: Brain },
+    { label: "Research Memory", href: "#research-memory", icon: Archive },
+    { label: "Learning Insights", href: "#learning-insights", icon: BookOpen },
+  ];
+
   return (
     <div className="p-6 space-y-6 max-w-7xl mx-auto">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight">Command Center</h1>
-        <p className="text-muted-foreground text-sm mt-1">
-          Real-time overview of the MatSci-∞ learning system and materials research progress.
-        </p>
+      {/* ═══ 1. HEADER ═══ */}
+      <div className="flex items-center justify-between">
+        <h1 className="synthos-heading text-2xl gold-text tracking-wider">Command Center</h1>
       </div>
 
-      <EngineControls
-        engineState={ws.engineState}
-        activeTasks={ws.activeTasks}
-        connected={ws.connected}
-        messages={ws.messages}
-      />
+      {/* ═══ 2. LIVE ACTIVITY FEED ═══ */}
+      <div className="gold-card rounded-xl p-4">
+        <EngineControls
+          engineState={ws.engineState}
+          activeTasks={ws.activeTasks}
+          connected={ws.connected}
+          messages={ws.messages}
+        />
+      </div>
 
+      {/* ═══ 3. ENGINE THOUGHTS ═══ */}
+      <ThoughtFeed thoughts={ws.thoughts} tempo={ws.tempo} />
+
+      {/* ═══ 4. SHORTCUT BUTTONS (2 rows of 5) ═══ */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2">
+        {shortcutButtons.map((btn) => (
+          <a
+            key={btn.label}
+            href={btn.href}
+            className="flex items-center gap-2 px-3 py-2.5 rounded-lg border border-[hsl(var(--gold)/0.25)] bg-[hsl(var(--gold)/0.05)] hover:bg-[hsl(var(--gold)/0.12)] hover:border-[hsl(var(--gold)/0.4)] transition-all text-[hsl(var(--gold-light))] text-xs font-medium tracking-wide"
+            data-testid={`shortcut-${btn.label.toLowerCase().replace(/ /g, "-")}`}
+          >
+            <btn.icon className="h-3.5 w-3.5 text-[hsl(var(--gold))]" />
+            {btn.label}
+          </a>
+        ))}
+      </div>
+
+      {/* ═══ 5. TOP 10 CANDIDATES FOUND (stat cards) ═══ */}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
         {statsLoading ? (
-          Array.from({ length: 8 }).map((_, i) => <Skeleton key={i} className="h-28" />)
+          Array.from({ length: 8 }).map((_, i) => <LoadingCard key={i} height="h-28" size="sm" />)
         ) : (
           <>
             <StatCard title="Elements Learned" value={stats?.elementsLearned ?? 0} icon={Atom} sub="of 118 known elements" history={getHistory("elements")} />
@@ -2190,10 +2238,9 @@ export default function Dashboard() {
         )}
       </div>
 
-      <ReferenceBenchmarkCard />
-
+      {/* ═══ 6. ACTIVE LEARNING + HULL STABILITY GATE (side by side) ═══ */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <Card data-testid="active-learning-stats">
+        <Card data-testid="active-learning-stats" className="border-[hsl(var(--gold)/0.2)]">
           <CardHeader className="pb-3">
             <CardTitle className="text-base flex items-center gap-2">
               <Activity className="h-4 w-4 text-primary" />
@@ -2439,8 +2486,44 @@ export default function Dashboard() {
         </Card>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-2">
-        <Card data-testid="cross-engine-hub">
+      {/* ═══ 7. CURRENT RESEARCH STRATEGY (left) + RESEARCH MEMORY + KNOWLEDGE RADAR (right stacked) ═══ */}
+      <div className="grid gap-4 md:grid-cols-2" id="research-memory">
+        <StrategyCard />
+        <div className="space-y-4">
+          <ResearchMemoryCard />
+          <Card data-testid="card-knowledge-radar" className="border-[hsl(var(--gold)/0.2)]">
+            <CardHeader className="pb-2">
+              <CardTitle className="text-base flex items-center gap-2">
+                <BarChart3 className="h-4 w-4 text-[hsl(var(--gold))]" />
+                Knowledge Radar
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              {phasesLoading ? (
+                <LoadingCard height="h-52" size="md" />
+              ) : (
+                <ResponsiveContainer width="100%" height={220}>
+                  <RadarChart data={radarData}>
+                    <PolarGrid stroke="hsl(var(--border))" />
+                    <PolarAngleAxis dataKey="subject" tick={{ fontSize: 9, fill: "hsl(var(--muted-foreground))" }} />
+                    <Radar name="Progress" dataKey="value" stroke="hsl(var(--gold))" fill="hsl(var(--gold))" fillOpacity={0.2} strokeWidth={1.5} />
+                    <Tooltip
+                      contentStyle={{ background: "hsl(var(--card))", border: "1px solid hsl(var(--border))", borderRadius: "6px", fontSize: "12px" }}
+                      formatter={(v: any) => [`${v}%`, "Progress"]}
+                    />
+                  </RadarChart>
+                </ResponsiveContainer>
+              )}
+            </CardContent>
+          </Card>
+        </div>
+      </div>
+
+      {/* ═══ 8. KNOWLEDGE MAP (full width — Pareto Frontier) ═══ */}
+      <ParetoFrontierChart />
+
+      {/* ═══ 9. CONVERGENCE TRACKER (full width — Cross-Engine Hub) ═══ */}
+      <Card data-testid="cross-engine-hub" className="border-[hsl(var(--gold)/0.2)]">
           <CardHeader className="pb-3">
             <CardTitle className="text-base flex items-center gap-2">
               <Network className="h-4 w-4 text-primary" />
@@ -2500,11 +2583,13 @@ export default function Dashboard() {
           </CardContent>
         </Card>
 
-        <Card data-testid="synthesis-discovery">
+      {/* ═══ 10. DISCOVERY MILESTONES + LEARNING PROGRESS (side by side) ═══ */}
+      <div className="grid gap-4 md:grid-cols-2">
+        <Card data-testid="synthesis-discovery" className="border-[hsl(var(--gold)/0.2)]">
           <CardHeader className="pb-3">
             <CardTitle className="text-base flex items-center gap-2">
-              <GitMerge className="h-4 w-4 text-primary" />
-              Synthesis Discovery
+              <GitMerge className="h-4 w-4 text-[hsl(var(--gold))]" />
+              Discovery Milestones
             </CardTitle>
           </CardHeader>
           <CardContent>
@@ -2913,128 +2998,111 @@ export default function Dashboard() {
             </div>
           </CardContent>
         </Card>
+
+        <Card data-testid="card-research-events" className="border-[hsl(var(--gold)/0.2)]">
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base flex items-center gap-2">
+              <FileText className="h-4 w-4 text-[hsl(var(--gold))]" />
+              Recent Research Events
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="p-0">
+            <ScrollArea className="h-64">
+              {logsLoading ? (
+                <div className="p-4 space-y-3">
+                  {Array.from({ length: 5 }).map((_, i) => <Skeleton key={i} className="h-12" />)}
+                </div>
+              ) : (
+                <div className="divide-y divide-border">
+                  {logs?.slice(0, 12).map((log, i) => (
+                    <div key={i} className="px-4 py-3 flex items-start gap-3" data-testid={`log-entry-${i}`}>
+                      <div className="mt-0.5">
+                        <Zap className="h-3.5 w-3.5 text-[hsl(var(--gold))] flex-shrink-0" />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-sm font-medium break-words">{log.event}</span>
+                          {log.dataSource && (
+                            <span className={`text-xs px-1.5 py-0.5 rounded-sm font-medium ${sourceColors[log.dataSource] || "bg-muted text-muted-foreground"}`}>
+                              {log.dataSource}
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-xs text-muted-foreground mt-0.5 break-words line-clamp-3">{log.detail}</p>
+                      </div>
+                      {log.timestamp && (
+                        <span className="text-xs text-muted-foreground font-mono flex-shrink-0 hidden sm:block">
+                          {formatLogTime(log.timestamp as unknown as string)}
+                        </span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </ScrollArea>
+          </CardContent>
+        </Card>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-2">
-        <div className="space-y-4">
-          <ThoughtFeed thoughts={ws.thoughts} tempo={ws.tempo} />
-
-          <Card data-testid="card-research-events">
-            <CardHeader className="pb-3">
-              <CardTitle className="text-base flex items-center gap-2">
-                <FileText className="h-4 w-4 text-primary" />
-                Recent Research Events
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="p-0">
-              <ScrollArea className="h-64">
-                {logsLoading ? (
-                  <div className="p-4 space-y-3">
-                    {Array.from({ length: 5 }).map((_, i) => <Skeleton key={i} className="h-12" />)}
-                  </div>
-                ) : (
-                  <div className="divide-y divide-border">
-                    {logs?.slice(0, 12).map((log, i) => (
-                      <div key={i} className="px-4 py-3 flex items-start gap-3" data-testid={`log-entry-${i}`}>
-                        <div className="mt-0.5">
-                          <Zap className="h-3.5 w-3.5 text-primary flex-shrink-0" />
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <span className="text-sm font-medium break-words">{log.event}</span>
-                            {log.dataSource && (
-                              <span className={`text-xs px-1.5 py-0.5 rounded-sm font-medium ${sourceColors[log.dataSource] || "bg-muted text-muted-foreground"}`}>
-                                {log.dataSource}
-                              </span>
-                            )}
-                          </div>
-                          <p className="text-xs text-muted-foreground mt-0.5 break-words line-clamp-3">{log.detail}</p>
-                        </div>
-                        {log.timestamp && (
-                          <span className="text-xs text-muted-foreground font-mono flex-shrink-0 hidden sm:block">
-                            {formatLogTime(log.timestamp as unknown as string)}
-                          </span>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </ScrollArea>
-            </CardContent>
-          </Card>
-        </div>
-
-        <div className="space-y-4">
-          <StrategyCard />
-          <ResearchMemoryCard />
-
-          <Card data-testid="card-knowledge-radar">
-            <CardHeader className="pb-2">
-              <CardTitle className="text-base flex items-center gap-2">
-                <BarChart3 className="h-4 w-4 text-primary" />
-                Knowledge Radar
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              {phasesLoading ? (
-                <Skeleton className="h-52 w-full" />
-              ) : (
-                <ResponsiveContainer width="100%" height={220}>
-                  <RadarChart data={radarData}>
-                    <PolarGrid stroke="hsl(var(--border))" />
-                    <PolarAngleAxis dataKey="subject" tick={{ fontSize: 9, fill: "hsl(var(--muted-foreground))" }} />
-                    <Radar name="Progress" dataKey="value" stroke="hsl(var(--primary))" fill="hsl(var(--primary))" fillOpacity={0.2} strokeWidth={1.5} />
-                    <Tooltip
-                      contentStyle={{ background: "hsl(var(--card))", border: "1px solid hsl(var(--border))", borderRadius: "6px", fontSize: "12px" }}
-                      formatter={(v: any) => [`${v}%`, "Progress"]}
-                    />
-                  </RadarChart>
-                </ResponsiveContainer>
-              )}
-            </CardContent>
-          </Card>
-
-          <Card data-testid="card-data-sources">
-            <CardHeader className="pb-2">
-              <CardTitle className="text-base flex items-center gap-2">
-                <Microscope className="h-4 w-4 text-primary" />
-                Data Sources
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-2.5">
-                {[
-                  { name: "NIST WebBook", status: "Synced", entries: "28K compounds", color: "bg-blue-500" },
-                  { name: "Materials Project", status: "Synced", entries: "140K materials", color: "bg-purple-500" },
-                  { name: "OQMD", status: "Synced", entries: "1M+ entries", color: "bg-orange-500" },
-                  { name: "AFLOW", status: "Synced", entries: "3.5M alloys", color: "bg-green-500" },
-                ].map((src) => (
-                  <div key={src.name} className="flex items-center justify-between" data-testid={`source-${src.name.toLowerCase().replace(/ /g, "-")}`}>
-                    <div className="flex items-center gap-2">
-                      <div className={`h-2 w-2 rounded-full ${src.color}`} />
-                      <span className="text-sm font-medium">{src.name}</span>
-                    </div>
-                    <div className="text-right">
-                      <div className="text-xs font-mono text-primary">{src.entries}</div>
-                      <div className="text-xs text-muted-foreground">{src.status}</div>
+      {/* ═══ 11. NOVELTY INSIGHT TRACKER (full width) ═══ */}
+      <Card data-testid="card-learning-insights" id="learning-insights" className="border-[hsl(var(--gold)/0.2)]">
+        <CardHeader className="pb-2">
+          <div className="flex items-center justify-between">
+            <CardTitle className="text-base flex items-center gap-2">
+              <BookOpen className="h-4 w-4 text-[hsl(var(--gold))]" />
+              Novelty Insight Tracker
+            </CardTitle>
+            {(novelInsightData?.total ?? 0) > 0 && (
+              <Badge variant="secondary" className="text-xs border-0" data-testid="insight-total-count">
+                {novelInsightData?.total ?? 0} total
+              </Badge>
+            )}
+          </div>
+        </CardHeader>
+        <CardContent>
+          <ScrollArea className="h-52">
+            {(novelInsightData?.insights?.length ?? 0) > 0 ? (
+              <div className="space-y-2">
+                {(novelInsightData?.insights ?? []).slice(0, 10).map((insight) => (
+                  <div key={insight.id} className="bg-muted/50 rounded-md px-3 py-2" data-testid={`insight-${insight.id}`}>
+                    <p className="text-xs text-foreground leading-relaxed">{insight.insightText}</p>
+                    <div className="flex items-center gap-2 mt-1.5">
+                      {insight.category && (
+                        <Badge variant="outline" className="text-[10px] h-4 px-1.5 border-0 bg-primary/10 text-primary">
+                          {insight.category}
+                        </Badge>
+                      )}
+                      {insight.noveltyScore != null && (
+                        <span className="text-[10px] text-muted-foreground font-mono">
+                          novelty: {(insight.noveltyScore * 100).toFixed(0)}%
+                        </span>
+                      )}
+                      <span className="text-[10px] text-muted-foreground ml-auto">
+                        {insight.phaseName}
+                      </span>
                     </div>
                   </div>
                 ))}
               </div>
-            </CardContent>
-          </Card>
+            ) : (
+              <p className="text-sm text-muted-foreground italic py-4" data-testid="insights-placeholder">
+                Insights will appear as the engine discovers novel patterns
+              </p>
+            )}
+          </ScrollArea>
+        </CardContent>
+      </Card>
 
-          <GNNActiveLearningCard />
-          <PhysicsUQCard />
-          <HeterostructureGeneratorCard />
-          <DisorderGeneratorCard />
-          <InterfaceRelaxationCard />
-          <DistortionDetectorCard />
-          <EnergyLandscapeCard />
-          <DistortionClassifierCard />
-          <FeedbackLoopCard />
+      {/* ═══ 12. ALL TRACKING CARDS (everything not in wireframe above) ═══ */}
+      <ReferenceBenchmarkCard />
 
-          <Card data-testid="card-discovery-progress">
+      <div className="grid gap-4 md:grid-cols-2">
+        <GNNActiveLearningCard />
+        <PhysicsUQCard />
+      </div>
+
+      <div className="grid gap-4 md:grid-cols-2">
+        <Card data-testid="card-discovery-progress" className="border-[hsl(var(--gold)/0.2)]">
             <CardHeader className="pb-2">
               <CardTitle className="text-base flex items-center gap-2">
                 <Compass className="h-4 w-4 text-primary" />
@@ -3120,9 +3188,7 @@ export default function Dashboard() {
             </CardContent>
           </Card>
 
-          <ParetoFrontierChart />
-
-          <Card data-testid="card-tsc-candidates">
+        <Card data-testid="card-tsc-candidates" className="border-[hsl(var(--gold)/0.2)]">
             <CardHeader className="pb-2">
               <div className="flex items-center justify-between">
                 <CardTitle className="text-base flex items-center gap-2">
@@ -3216,54 +3282,47 @@ export default function Dashboard() {
             </CardContent>
           </Card>
 
-          <Card data-testid="card-learning-insights">
-            <CardHeader className="pb-2">
-              <div className="flex items-center justify-between">
-                <CardTitle className="text-base flex items-center gap-2">
-                  <BookOpen className="h-4 w-4 text-primary" />
-                  Learning Insights
-                </CardTitle>
-                {(novelInsightData?.total ?? 0) > 0 && (
-                  <Badge variant="secondary" className="text-xs border-0" data-testid="insight-total-count">
-                    {novelInsightData?.total ?? 0} total
-                  </Badge>
-                )}
+      </div>
+
+      <Card data-testid="card-data-sources" className="border-[hsl(var(--gold)/0.2)]">
+        <CardHeader className="pb-2">
+          <CardTitle className="text-base flex items-center gap-2">
+            <Microscope className="h-4 w-4 text-[hsl(var(--gold))]" />
+            Data Sources
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            {[
+              { name: "NIST WebBook", status: "Synced", entries: "28K compounds", color: "bg-blue-500" },
+              { name: "Materials Project", status: "Synced", entries: "140K materials", color: "bg-purple-500" },
+              { name: "OQMD", status: "Synced", entries: "1M+ entries", color: "bg-orange-500" },
+              { name: "AFLOW", status: "Synced", entries: "3.5M alloys", color: "bg-green-500" },
+            ].map((src) => (
+              <div key={src.name} className="flex items-center justify-between" data-testid={`source-${src.name.toLowerCase().replace(/ /g, "-")}`}>
+                <div className="flex items-center gap-2">
+                  <div className={`h-2 w-2 rounded-full ${src.color}`} />
+                  <span className="text-sm font-medium">{src.name}</span>
+                </div>
+                <div className="text-right">
+                  <div className="text-xs font-mono text-[hsl(var(--gold))]">{src.entries}</div>
+                  <div className="text-xs text-muted-foreground">{src.status}</div>
+                </div>
               </div>
-            </CardHeader>
-            <CardContent>
-              <ScrollArea className="h-52">
-                {(novelInsightData?.insights?.length ?? 0) > 0 ? (
-                  <div className="space-y-2">
-                    {(novelInsightData?.insights ?? []).slice(0, 10).map((insight) => (
-                      <div key={insight.id} className="bg-muted/50 rounded-md px-3 py-2" data-testid={`insight-${insight.id}`}>
-                        <p className="text-xs text-foreground leading-relaxed">{insight.insightText}</p>
-                        <div className="flex items-center gap-2 mt-1.5">
-                          {insight.category && (
-                            <Badge variant="outline" className="text-[10px] h-4 px-1.5 border-0 bg-primary/10 text-primary">
-                              {insight.category}
-                            </Badge>
-                          )}
-                          {insight.noveltyScore != null && (
-                            <span className="text-[10px] text-muted-foreground font-mono">
-                              novelty: {(insight.noveltyScore * 100).toFixed(0)}%
-                            </span>
-                          )}
-                          <span className="text-[10px] text-muted-foreground ml-auto">
-                            {insight.phaseName}
-                          </span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="text-sm text-muted-foreground italic py-4" data-testid="insights-placeholder">
-                    Insights will appear as the engine discovers novel patterns
-                  </p>
-                )}
-              </ScrollArea>
-            </CardContent>
-          </Card>
-        </div>
+            ))}
+          </div>
+        </CardContent>
+      </Card>
+
+      <FeedbackLoopCard />
+
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+        <HeterostructureGeneratorCard />
+        <DisorderGeneratorCard />
+        <InterfaceRelaxationCard />
+        <DistortionDetectorCard />
+        <EnergyLandscapeCard />
+        <DistortionClassifierCard />
       </div>
     </div>
   );

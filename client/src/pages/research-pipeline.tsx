@@ -9,6 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Progress } from "@/components/ui/progress";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { CheckCircle2, Clock, Loader2, Zap, BookOpen, ArrowRight, BarChart3, FileText, Lightbulb, Sparkles, TrendingUp, TrendingDown, Minus, Target, Gauge, Star, FlaskConical, Trophy, GraduationCap, Layers, Database, BrainCircuit, Map as MapIcon, Notebook, ExternalLink } from "lucide-react";
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -273,14 +274,18 @@ function ConvergenceTracker() {
     cycle: `C${s.cycle}`,
     bestTc: s.bestTc ?? 0,
     bestPhysicsTc: s.bestPhysicsTc ?? null,
+    avgTop10Tc: (s as any).avgTop10Tc ?? null,
+    dftSelectedTc: (s as any).dftSelectedTc ?? null,
     bestScore: s.bestScore ?? 0,
     avgTopScore: s.avgTopScore ?? 0,
+    r2Score: s.r2Score ?? null,
   }));
 
   const velocityWindow = Math.min(5, sorted.length);
   let tcVelocity = 0;
   let scoreVelocity = 0;
   let diversityVelocity = 0;
+  let r2Velocity = 0;
   let cyclesSinceImprovement = 0;
   if (sorted.length >= 2) {
     const recent = sorted.slice(-velocityWindow);
@@ -292,6 +297,9 @@ function ConvergenceTracker() {
         tcVelocity = ((last.bestTc ?? 0) - (first.bestTc ?? 0)) / cycles;
         scoreVelocity = ((last.bestScore ?? 0) - (first.bestScore ?? 0)) / cycles;
         diversityVelocity = ((last.familyDiversity ?? 0) - (first.familyDiversity ?? 0)) / cycles;
+        if (last.r2Score != null && first.r2Score != null) {
+          r2Velocity = (last.r2Score - first.r2Score) / cycles;
+        }
       }
     }
     let maxTcSoFar = 0;
@@ -339,50 +347,24 @@ function ConvergenceTracker() {
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
-        <div className="grid gap-3 sm:grid-cols-3">
-          {latest.topFormula && (
-            <div className="rounded-lg border border-border bg-muted/30 p-3" data-testid="best-candidate-callout">
-              <p className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-1">Best Candidate</p>
-              <p className="text-sm font-bold font-mono">{latest.topFormula}</p>
-              <div className="flex items-center gap-3 mt-1">
-                {latest.bestTc != null && (
-                  <span className="text-xs text-muted-foreground">Tc: <span className="font-mono font-bold text-foreground">{latest.bestTc.toFixed(1)}K</span></span>
-                )}
-                {latest.bestScore != null && (
-                  <span className="text-xs text-muted-foreground">Score: <span className="font-mono font-bold text-foreground">{latest.bestScore.toFixed(3)}</span></span>
-                )}
-              </div>
+        {/* Best Candidate callout above graph */}
+        {latest.topFormula && (
+          <div className="rounded-lg border border-border bg-muted/30 p-3" data-testid="best-candidate-callout">
+            <p className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-1">Best Candidate</p>
+            <p className="text-sm font-bold font-mono">{latest.topFormula}</p>
+            <div className="flex items-center gap-3 mt-1">
+              {latest.bestTc != null && (
+                <span className="text-xs text-muted-foreground">Tc: <span className="font-mono font-bold text-foreground">{latest.bestTc.toFixed(1)}K</span></span>
+              )}
+              {latest.bestScore != null && (
+                <span className="text-xs text-muted-foreground">Score: <span className="font-mono font-bold text-foreground">{latest.bestScore.toFixed(3)}</span></span>
+              )}
+              {latest.r2Score != null && (
+                <span className="text-xs text-muted-foreground">R²: <span className="font-mono font-bold text-foreground">{latest.r2Score.toFixed(4)}</span></span>
+              )}
             </div>
-          )}
-          <div className="rounded-lg border border-border bg-muted/30 p-3" data-testid="convergence-stats-total">
-            <p className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-1">Total Candidates</p>
-            <p className="text-lg font-bold font-mono">{(latest.candidatesTotal ?? 0).toLocaleString()}</p>
           </div>
-          <div className="rounded-lg border border-border bg-muted/30 p-3" data-testid="convergence-stats-cycles">
-            <p className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-1">Cycles Tracked</p>
-            <p className="text-lg font-bold font-mono">{sorted.length}</p>
-            {latest.strategyFocus && (
-              <p className="text-[10px] text-muted-foreground mt-0.5 truncate">Focus: {latest.strategyFocus}</p>
-            )}
-          </div>
-        </div>
-
-        <div className="grid gap-3 sm:grid-cols-2">
-          {latest.familyDiversity != null && (
-            <div className="rounded-lg border border-border bg-muted/30 p-3" data-testid="convergence-family-diversity">
-              <p className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-1">Family Diversity</p>
-              <p className="text-lg font-bold font-mono">{latest.familyDiversity}<span className="text-xs text-muted-foreground font-normal">/10 families</span></p>
-              <p className="text-[10px] text-muted-foreground mt-0.5">Distinct material families in top 50 candidates</p>
-            </div>
-          )}
-          {latest.duplicatesSkipped != null && latest.duplicatesSkipped > 0 && (
-            <div className="rounded-lg border border-border bg-muted/30 p-3" data-testid="convergence-duplicates-skipped">
-              <p className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-1">Duplicates Skipped</p>
-              <p className="text-lg font-bold font-mono">{latest.duplicatesSkipped}</p>
-              <p className="text-[10px] text-muted-foreground mt-0.5">Redundant formulas filtered this cycle</p>
-            </div>
-          )}
-        </div>
+        )}
 
         <ResponsiveContainer width="100%" height={220}>
           <LineChart data={chartData} margin={{ top: 5, right: 10, left: -10, bottom: 0 }}>
@@ -399,19 +381,27 @@ function ConvergenceTracker() {
               orientation="right"
               domain={[0, 1]}
               tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }}
-              label={{ value: "Score", angle: 90, position: "insideRight", style: { fontSize: 10, fill: "hsl(var(--muted-foreground))" } }}
+              label={{ value: "Score / R²", angle: 90, position: "insideRight", style: { fontSize: 10, fill: "hsl(var(--muted-foreground))" } }}
             />
             <Tooltip
               contentStyle={{ background: "hsl(var(--card))", border: "1px solid hsl(var(--border))", borderRadius: "6px", fontSize: "11px" }}
-              formatter={(v: any, name: string) => [
-                name === "bestTc" || name === "bestPhysicsTc" ? `${v != null ? Number(v).toFixed(1) : '-'}K` : Number(v).toFixed(3),
-                name === "bestTc" ? "Best Tc" : name === "bestPhysicsTc" ? "Physics Tc" : name === "bestScore" ? "Best Score" : "Avg Top-10"
-              ]}
+              formatter={(v: any, name: string) => {
+                if (name === "bestTc") return [`${v != null ? Number(v).toFixed(1) : '-'}K`, "Best Tc"];
+                if (name === "bestPhysicsTc") return [`${v != null ? Number(v).toFixed(1) : '-'}K`, "Physics Tc"];
+                if (name === "avgTop10Tc") return [`${v != null ? Number(v).toFixed(1) : '-'}K`, "Avg Top-10 Tc"];
+                if (name === "dftSelectedTc") return [`${v != null ? Number(v).toFixed(1) : '-'}K`, "DFT Selected Tc"];
+                if (name === "r2Score") return [v != null ? Number(v).toFixed(4) : '-', "GNN R²"];
+                const label = name === "bestScore" ? "DFT Score" : "Avg Ensemble";
+                return [Number(v).toFixed(3), label];
+              }}
             />
             <Line yAxisId="tc" type="monotone" dataKey="bestTc" name="bestTc" stroke="#ef4444" strokeWidth={2} dot={{ r: 3 }} />
             <Line yAxisId="tc" type="monotone" dataKey="bestPhysicsTc" name="bestPhysicsTc" stroke="#22c55e" strokeWidth={2} dot={{ r: 3 }} connectNulls />
+            <Line yAxisId="tc" type="monotone" dataKey="avgTop10Tc" name="avgTop10Tc" stroke="#c084fc" strokeWidth={2} dot={{ r: 2 }} connectNulls />
+            <Line yAxisId="tc" type="monotone" dataKey="dftSelectedTc" name="dftSelectedTc" stroke="#06b6d4" strokeWidth={2} dot={{ r: 3 }} connectNulls />
             <Line yAxisId="score" type="monotone" dataKey="bestScore" name="bestScore" stroke="#6366f1" strokeWidth={2} dot={{ r: 3 }} />
             <Line yAxisId="score" type="monotone" dataKey="avgTopScore" name="avgTopScore" stroke="#6366f1" strokeWidth={1} strokeDasharray="4 4" dot={false} />
+            <Line yAxisId="score" type="monotone" dataKey="r2Score" name="r2Score" stroke="#f59e0b" strokeWidth={2} dot={{ r: 3 }} connectNulls />
           </LineChart>
         </ResponsiveContainer>
         <div className="flex flex-wrap gap-x-4 gap-y-1 justify-center">
@@ -424,17 +414,38 @@ function ConvergenceTracker() {
             <span className="text-xs text-muted-foreground">Physics Tc (K)</span>
           </div>
           <div className="flex items-center gap-1.5">
+            <div className="h-2 w-4 rounded-full bg-purple-400" />
+            <span className="text-xs text-muted-foreground">Avg Top-10 Tc (K)</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <div className="h-2 w-4 rounded-full bg-cyan-500" />
+            <span className="text-xs text-muted-foreground">DFT Selected Tc (K)</span>
+          </div>
+          <div className="flex items-center gap-1.5">
             <div className="h-2 w-4 rounded-full bg-indigo-500" />
-            <span className="text-xs text-muted-foreground">Best Score</span>
+            <span className="text-xs text-muted-foreground">DFT Score</span>
           </div>
           <div className="flex items-center gap-1.5">
             <div className="h-2 w-4 rounded-full border border-indigo-500 bg-transparent" />
-            <span className="text-xs text-muted-foreground">Avg Top-10</span>
+            <span className="text-xs text-muted-foreground">Avg Ensemble</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <div className="h-2 w-4 rounded-full bg-amber-500" />
+            <span className="text-xs text-muted-foreground">GNN R²</span>
           </div>
         </div>
 
+        {/* Total Candidates — centered below legend */}
+        <div className="flex justify-center">
+          <div className="rounded-lg border border-border bg-muted/30 px-6 py-3 text-center" data-testid="convergence-stats-total">
+            <p className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-1">Total Candidates</p>
+            <p className="text-lg font-bold font-mono">{(latest.candidatesTotal ?? 0).toLocaleString()}</p>
+          </div>
+        </div>
+
+        {/* Velocity tracking boxes */}
         {sorted.length >= 2 && (
-          <div className="grid gap-3 sm:grid-cols-4 mt-2" data-testid="learning-velocity">
+          <div className="grid gap-3 sm:grid-cols-3 mt-2" data-testid="learning-velocity">
             <div className="rounded-lg border border-border bg-muted/30 p-2.5">
               <p className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-0.5">Tc Velocity</p>
               <p className={`text-sm font-bold font-mono ${velocityColor(tcVelocity, 0.5)}`} data-testid="velocity-tc">
@@ -448,15 +459,9 @@ function ConvergenceTracker() {
               </p>
             </div>
             <div className="rounded-lg border border-border bg-muted/30 p-2.5">
-              <p className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-0.5">Diversity Growth</p>
-              <p className={`text-sm font-bold font-mono ${velocityColor(diversityVelocity, 0.1)}`} data-testid="velocity-diversity">
-                {diversityVelocity >= 0 ? "+" : ""}{diversityVelocity.toFixed(2)}/cycle
-              </p>
-            </div>
-            <div className="rounded-lg border border-border bg-muted/30 p-2.5">
-              <p className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-0.5">Since Improvement</p>
-              <p className={`text-sm font-bold font-mono ${cyclesSinceImprovement <= 1 ? "text-green-600 dark:text-green-400" : cyclesSinceImprovement <= 3 ? "text-yellow-600 dark:text-yellow-400" : "text-red-600 dark:text-red-400"}`} data-testid="cycles-since-improvement">
-                {cyclesSinceImprovement} cycle{cyclesSinceImprovement !== 1 ? "s" : ""}
+              <p className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-0.5">R² Velocity</p>
+              <p className={`text-sm font-bold font-mono ${velocityColor(r2Velocity, 0.005)}`} data-testid="velocity-r2">
+                {r2Velocity >= 0 ? "+" : ""}{r2Velocity.toFixed(4)}/cycle
               </p>
             </div>
           </div>
@@ -930,87 +935,61 @@ export default function ResearchPipeline() {
     "DFT Engine": "bg-cyan-100 text-cyan-700 dark:bg-cyan-950 dark:text-cyan-300",
   };
 
+  // Pipeline funnel data (for Multi-Fidelity Pipeline tab)
+  const { data: pipelineStatsData } = useQuery<{ pipelineStages: { stage: number; count: number; passed: number }[]; crystalStructures: number; computationalResults: number }>({
+    queryKey: ["/api/pipeline-stats"],
+  });
+
+  // Synthesis variables data
+  const { data: synthesisData } = useQuery<{
+    parameterSpace: {
+      totalVariables: number;
+      categories: { name: string; count: number; parameters: string[] }[];
+      totalGridPoints: number;
+      discreteVariables: { name: string; options: string[] }[];
+    };
+    optimizerStats: {
+      totalOptimized: number;
+      avgFeasibility: number;
+      complexityBreakdown: Record<string, number>;
+      methodBreakdown: Record<string, number>;
+      categoryUsage: Record<string, number>;
+      topConditions: { formula: string; method: string; feasibility: number; tc: number }[];
+      parameterRangesExplored: Record<string, { min: number; max: number; count: number }>;
+    };
+  }>({
+    queryKey: ["/api/synthesis-variables/stats"],
+    refetchInterval: false,
+  });
+
+  const STAGE_NAMES = ["ML Filter", "Electronic Structure", "Phonon / E-Ph Coupling", "Tc Prediction (Eliashberg)", "Synthesis Feasibility"];
+  const STAGE_COLORS = ["bg-gray-500", "bg-blue-500", "bg-purple-500", "bg-amber-500", "bg-green-500"];
+
   return (
     <div className="p-6 max-w-7xl mx-auto space-y-6">
       <div>
-        <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
-          <FileText className="h-6 w-6 text-primary" />
-          Research Pipeline
+        <h1 className="synthos-heading text-2xl gold-text tracking-wider flex items-center gap-2">
+          <FileText className="h-6 w-6 text-[hsl(var(--gold))]" />
+          Pipeline Statistics
         </h1>
         <p className="text-muted-foreground text-sm mt-1">
           Full learning trajectory from subatomic particles to novel material discovery — tracking every phase of scientific understanding.
         </p>
       </div>
 
-      <Card>
-        <CardHeader className="pb-3">
-          <CardTitle className="text-base flex items-center gap-2">
-            <BarChart3 className="h-4 w-4 text-primary" />
-            Learning Progress Over Time
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          {phases && phases.length > 0 ? (() => {
-            const progressData = buildProgressFromPhases(phases);
-            const barData = [
-              { name: "Subatomic", value: progressData[0].atomic, color: "#6366f1" },
-              { name: "Elements", value: progressData[0].elements, color: "#8b5cf6" },
-              { name: "Bonding", value: progressData[0].bonding, color: "#06b6d4" },
-              { name: "Materials", value: progressData[0].materials, color: "#10b981" },
-              { name: "Prediction", value: progressData[0].prediction, color: "#f59e0b" },
-              { name: "Discovery", value: progressData[0].discovery, color: "#ef4444" },
-              { name: "SC Research", value: progressData[0].scResearch, color: "#ec4899" },
-              { name: "Synthesis", value: progressData[0].synthesis, color: "#14b8a6" },
-              { name: "Reactions", value: progressData[0].reactions, color: "#a855f7" },
-              { name: "Comp. Physics", value: progressData[0].compPhysics, color: "#3b82f6" },
-              { name: "Crystals", value: progressData[0].crystalStructures, color: "#f97316" },
-              { name: "Pipeline", value: progressData[0].pipeline, color: "#84cc16" },
-            ];
-            return (
-              <>
-                <ResponsiveContainer width="100%" height={220}>
-                  <BarChart data={barData} margin={{ top: 5, right: 10, left: -20, bottom: 0 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
-                    <XAxis dataKey="name" tick={{ fontSize: 9, fill: "hsl(var(--muted-foreground))" }} angle={-35} textAnchor="end" height={60} />
-                    <YAxis tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }} domain={[0, 100]} tickFormatter={(v: number) => `${v}%`} />
-                    <Tooltip
-                      contentStyle={{ background: "hsl(var(--card))", border: "1px solid hsl(var(--border))", borderRadius: "6px", fontSize: "11px" }}
-                      formatter={(v: any) => [`${Math.round(v)}%`]}
-                    />
-                    <Bar dataKey="value" name="Progress" radius={[4, 4, 0, 0]}>
-                      {barData.map((entry, i) => (
-                        <Cell key={i} fill={entry.color} />
-                      ))}
-                    </Bar>
-                  </BarChart>
-                </ResponsiveContainer>
-                <div className="flex flex-wrap gap-x-4 gap-y-1 mt-3 justify-center">
-                  {barData.map(item => (
-                    <div key={item.name} className="flex items-center gap-1.5">
-                      <div className="h-2 w-4 rounded-full" style={{ background: item.color }} />
-                      <span className="text-xs text-muted-foreground">{item.name} {Math.round(item.value)}%</span>
-                    </div>
-                  ))}
-                </div>
-              </>
-            );
-          })() : (
-            <p className="text-sm text-muted-foreground italic" data-testid="progress-placeholder">
-              Progress data will appear once the engine begins learning
-            </p>
-          )}
-        </CardContent>
-      </Card>
+      <Tabs defaultValue="learning-phases" className="space-y-4">
+        <TabsList className="flex flex-wrap h-auto gap-1">
+          <TabsTrigger value="learning-phases">Learning Phases</TabsTrigger>
+          <TabsTrigger value="multi-fidelity">Multi-Fidelity Pipeline</TabsTrigger>
+          <TabsTrigger value="synthesis-vars">Synthesis Variables</TabsTrigger>
+          <TabsTrigger value="advanced-physics">Advanced Physics</TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="learning-phases" className="space-y-6">
 
       <ConvergenceTracker />
 
-      <div className="grid gap-4 lg:grid-cols-2">
-        <KnowledgeMap
-          onFamilyClick={(fam) => setFamilyFilter(prev => prev === fam ? null : fam)}
-          selectedFamily={familyFilter}
-        />
-        <CycleJournal />
-      </div>
+      <CycleJournal />
 
       {familyFilter && (
         <div className="flex items-center gap-2">
@@ -1029,72 +1008,57 @@ export default function ResearchPipeline() {
 
       <MilestoneTimeline />
 
-      <div className="grid gap-6 lg:grid-cols-2">
-        <div className="space-y-4">
-          <h2 className="text-base font-semibold">Learning Phases</h2>
-          {phasesLoading ? (
-            <div className="space-y-4">
-              {Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-48" />)}
-            </div>
-          ) : (
-            <div className="space-y-4">
-              {phases?.map((phase, i) => <PhaseCard key={phase.id} phase={phase} index={i} />)}
-            </div>
-          )}
-        </div>
-
-        <div className="space-y-4">
-          <h2 className="text-base font-semibold">Research Activity Log</h2>
-          <Card>
-            <CardContent className="p-0">
-              <ScrollArea className="h-[calc(100vh-280px)]">
-                {logsLoading ? (
-                  <div className="p-4 space-y-3">
-                    {Array.from({ length: 10 }).map((_, i) => <Skeleton key={i} className="h-16" />)}
-                  </div>
-                ) : (
-                  <div className="divide-y divide-border">
-                    {logs.map((log, i) => (
-                      <div key={i} className="px-4 py-3 flex items-start gap-3" data-testid={`log-row-${i}`}>
-                        <div className="mt-1 flex-shrink-0">
-                          <Zap className="h-3.5 w-3.5 text-primary" />
+      <div className="space-y-4">
+        <h2 className="text-base font-semibold">Research Activity Log</h2>
+        <Card>
+          <CardContent className="p-0">
+            <ScrollArea className="h-[calc(100vh-280px)]">
+              {logsLoading ? (
+                <div className="p-4 space-y-3">
+                  {Array.from({ length: 10 }).map((_, i) => <Skeleton key={i} className="h-16" />)}
+                </div>
+              ) : (
+                <div className="divide-y divide-border">
+                  {logs.map((log, i) => (
+                    <div key={i} className="px-4 py-3 flex items-start gap-3" data-testid={`log-row-${i}`}>
+                      <div className="mt-1 flex-shrink-0">
+                        <Zap className="h-3.5 w-3.5 text-primary" />
+                      </div>
+                      <div className="flex-1 min-w-0 space-y-1">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-sm font-medium">{log.event}</span>
+                          {log.dataSource && (
+                            <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${sourceColors[log.dataSource] ?? "bg-muted text-muted-foreground"}`}>
+                              {log.dataSource}
+                            </span>
+                          )}
                         </div>
-                        <div className="flex-1 min-w-0 space-y-1">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <span className="text-sm font-medium">{log.event}</span>
-                            {log.dataSource && (
-                              <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${sourceColors[log.dataSource] ?? "bg-muted text-muted-foreground"}`}>
-                                {log.dataSource}
-                              </span>
-                            )}
-                          </div>
-                          <p className="text-xs text-muted-foreground leading-relaxed">{log.detail}</p>
-                          <div className="flex items-center gap-2">
-                            <span className="text-xs font-mono text-muted-foreground/70">{log.phase}</span>
-                            {log.timestamp && (
-                              <span className="text-xs text-muted-foreground/70 font-mono">
-                                · {new Date(log.timestamp as unknown as string).toLocaleDateString()}
-                              </span>
-                            )}
-                          </div>
+                        <p className="text-xs text-muted-foreground leading-relaxed">{log.detail}</p>
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-mono text-muted-foreground/70">{log.phase}</span>
+                          {log.timestamp && (
+                            <span className="text-xs text-muted-foreground/70 font-mono">
+                              · {new Date(log.timestamp as unknown as string).toLocaleDateString()}
+                            </span>
+                          )}
                         </div>
                       </div>
-                    ))}
-                    {logs.length === 0 && (
-                      <div className="py-8 text-center text-muted-foreground text-sm">No research logs yet</div>
-                    )}
-                    <div ref={logSentinelRef} className="py-1" />
-                    {isFetchingNextPage && (
-                      <div className="py-3 flex justify-center">
-                        <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-                      </div>
-                    )}
-                  </div>
-                )}
-              </ScrollArea>
-            </CardContent>
-          </Card>
-        </div>
+                    </div>
+                  ))}
+                  {logs.length === 0 && (
+                    <div className="py-8 text-center text-muted-foreground text-sm">No research logs yet</div>
+                  )}
+                  <div ref={logSentinelRef} className="py-1" />
+                  {isFetchingNextPage && (
+                    <div className="py-3 flex justify-center">
+                      <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                    </div>
+                  )}
+                </div>
+              )}
+            </ScrollArea>
+          </CardContent>
+        </Card>
       </div>
 
       {insightsLoading && (
@@ -1178,6 +1142,217 @@ export default function ResearchPipeline() {
           </CardContent>
         </Card>
       )}
+
+      <div className="space-y-4">
+        <h2 className="text-base font-semibold">Learning Phases</h2>
+        {phasesLoading ? (
+          <div className="grid gap-4 grid-cols-1 md:grid-cols-2 xl:grid-cols-3">
+            {Array.from({ length: 6 }).map((_, i) => <Skeleton key={i} className="h-48" />)}
+          </div>
+        ) : (
+          <div className="grid gap-4 grid-cols-1 md:grid-cols-2 xl:grid-cols-3">
+            {phases?.map((phase, i) => <PhaseCard key={phase.id} phase={phase} index={i} />)}
+          </div>
+        )}
+      </div>
+
+        </TabsContent>
+
+        <TabsContent value="multi-fidelity" className="space-y-4">
+          <Card className="border-[hsl(var(--gold)/0.2)]">
+            <CardHeader className="pb-3">
+              <CardTitle className="text-lg flex items-center gap-2">
+                Multi-Fidelity Screening Pipeline
+              </CardTitle>
+              <p className="text-sm text-muted-foreground">
+                5-stage computational pipeline: cheap models filter first, expensive methods confirm
+              </p>
+            </CardHeader>
+            <CardContent className="space-y-2">
+              {STAGE_NAMES.map((name, i) => {
+                const data = pipelineStatsData?.pipelineStages?.find(s => s.stage === i);
+                const total = data?.count ?? 0;
+                const passed = data?.passed ?? 0;
+                const failed = total - passed;
+                const maxWidth = Math.max(20, 100 - i * 15);
+                return (
+                  <div key={i} className="space-y-1">
+                    <div className="flex items-center justify-between text-xs">
+                      <div className="flex items-center gap-2">
+                        <div className={`h-3 w-3 rounded-sm ${STAGE_COLORS[i]}`} />
+                        <span className="font-medium">Stage {i}: {name}</span>
+                      </div>
+                      <div className="flex items-center gap-3 font-mono">
+                        <span className="text-green-600 dark:text-green-400">{passed} passed</span>
+                        {failed > 0 && <span className="text-red-500">{failed} failed</span>}
+                      </div>
+                    </div>
+                    <div className="relative h-6 bg-muted rounded overflow-hidden" style={{ width: `${maxWidth}%` }}>
+                      {total > 0 && (
+                        <>
+                          <div
+                            className={`absolute inset-y-0 left-0 ${STAGE_COLORS[i]} opacity-80 transition-all`}
+                            style={{ width: `${(passed / Math.max(total, 1)) * 100}%` }}
+                          />
+                          <div className="absolute inset-0 flex items-center justify-center text-xs font-mono font-medium text-white mix-blend-difference">
+                            {passed}/{total}
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </CardContent>
+          </Card>
+
+          <div className="grid grid-cols-3 gap-4">
+            <Card className="border-[hsl(var(--gold)/0.2)]">
+              <CardContent className="pt-4 text-center">
+                <p className="text-xs text-muted-foreground">Crystal Structures</p>
+                <p className="text-2xl font-mono font-bold">{pipelineStatsData?.crystalStructures ?? 0}</p>
+              </CardContent>
+            </Card>
+            <Card className="border-[hsl(var(--gold)/0.2)]">
+              <CardContent className="pt-4 text-center">
+                <p className="text-xs text-muted-foreground">Computations Run</p>
+                <p className="text-2xl font-mono font-bold">{pipelineStatsData?.computationalResults ?? 0}</p>
+              </CardContent>
+            </Card>
+            <Card className="border-[hsl(var(--gold)/0.2)]">
+              <CardContent className="pt-4 text-center">
+                <p className="text-xs text-muted-foreground">Total Stages</p>
+                <p className="text-2xl font-mono font-bold">{pipelineStatsData?.pipelineStages?.length ?? 0}</p>
+              </CardContent>
+            </Card>
+          </div>
+        </TabsContent>
+
+        <TabsContent value="synthesis-vars" className="space-y-4">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <Card className="border-[hsl(var(--gold)/0.2)]">
+              <CardContent className="pt-4">
+                <p className="text-xs text-muted-foreground">Parameter Categories</p>
+                <p className="text-2xl font-mono font-bold">{synthesisData?.parameterSpace?.categories?.length ?? 0}</p>
+              </CardContent>
+            </Card>
+            <Card className="border-[hsl(var(--gold)/0.2)]">
+              <CardContent className="pt-4">
+                <p className="text-xs text-muted-foreground">Total Variables</p>
+                <p className="text-2xl font-mono font-bold">{synthesisData?.parameterSpace?.totalVariables ?? 0}</p>
+              </CardContent>
+            </Card>
+            <Card className="border-[hsl(var(--gold)/0.2)]">
+              <CardContent className="pt-4">
+                <p className="text-xs text-muted-foreground">Grid Points</p>
+                <p className="text-2xl font-mono font-bold">{synthesisData?.parameterSpace?.totalGridPoints ?? 0}</p>
+              </CardContent>
+            </Card>
+            <Card className="border-[hsl(var(--gold)/0.2)]">
+              <CardContent className="pt-4">
+                <p className="text-xs text-muted-foreground">Conditions Optimized</p>
+                <p className="text-2xl font-mono font-bold">{synthesisData?.optimizerStats?.totalOptimized ?? 0}</p>
+              </CardContent>
+            </Card>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <Card className="border-[hsl(var(--gold)/0.2)]">
+              <CardHeader className="pb-3">
+                <CardTitle className="text-lg flex items-center gap-2">
+                  <Layers className="h-5 w-5 text-[hsl(var(--gold))]" />
+                  Parameter Space Categories
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="space-y-2">
+                  {(synthesisData?.parameterSpace?.categories ?? []).map((cat, i) => (
+                    <div key={i} className="p-3 bg-muted/30 rounded-md">
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-sm font-medium">{cat.name}</span>
+                        <Badge variant="secondary" className="text-xs">{cat.count} params</Badge>
+                      </div>
+                      <div className="flex flex-wrap gap-1">
+                        {cat.parameters.map((p, j) => (
+                          <span key={j} className="text-[10px] px-1.5 py-0.5 bg-background rounded border text-muted-foreground">
+                            {p}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </CardContent>
+            </Card>
+
+            {synthesisData?.optimizerStats && synthesisData.optimizerStats.totalOptimized > 0 && (
+              <Card className="border-[hsl(var(--gold)/0.2)]">
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-lg flex items-center gap-2">
+                    <Target className="h-5 w-5 text-[hsl(var(--gold))]" />
+                    Optimizer Results
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="space-y-3">
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="p-2 bg-muted/30 rounded-md">
+                        <p className="text-[10px] text-muted-foreground uppercase">Avg Feasibility</p>
+                        <p className="text-lg font-mono font-bold">{(synthesisData.optimizerStats.avgFeasibility * 100).toFixed(1)}%</p>
+                      </div>
+                      <div className="p-2 bg-muted/30 rounded-md">
+                        <p className="text-[10px] text-muted-foreground uppercase">Total Optimized</p>
+                        <p className="text-lg font-mono font-bold">{synthesisData.optimizerStats.totalOptimized}</p>
+                      </div>
+                    </div>
+                    {Object.keys(synthesisData.optimizerStats.methodBreakdown).length > 0 && (
+                      <div>
+                        <p className="text-[10px] text-muted-foreground uppercase mb-1">Methods</p>
+                        <div className="flex flex-wrap gap-1.5">
+                          {Object.entries(synthesisData.optimizerStats.methodBreakdown)
+                            .sort(([, a], [, b]) => b - a)
+                            .map(([method, count]) => (
+                              <Badge key={method} variant="secondary" className="text-[10px] font-mono border-0">{method}: {count}</Badge>
+                            ))}
+                        </div>
+                      </div>
+                    )}
+                    {synthesisData.optimizerStats.topConditions.length > 0 && (
+                      <div>
+                        <p className="text-[10px] text-muted-foreground uppercase mb-1">Top Conditions</p>
+                        <div className="space-y-1">
+                          {synthesisData.optimizerStats.topConditions.slice(0, 5).map((tc, i) => (
+                            <div key={i} className="flex items-center justify-between text-xs bg-muted/30 px-2 py-1.5 rounded">
+                              <span className="font-mono font-medium">{tc.formula}</span>
+                              <div className="flex items-center gap-2 text-muted-foreground">
+                                <span>{tc.method}</span>
+                                <span className="font-mono">{(tc.feasibility * 100).toFixed(0)}%</span>
+                                <span className="font-mono text-[hsl(var(--gold))]">{tc.tc}K</span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+          </div>
+        </TabsContent>
+
+        <TabsContent value="advanced-physics" className="space-y-4">
+          <Card className="border-[hsl(var(--gold)/0.2)] p-6 text-center">
+            <p className="text-muted-foreground">
+              Advanced physics analysis runs automatically as the engine processes candidates.
+            </p>
+            <p className="text-sm text-muted-foreground mt-2">
+              View detailed physics properties, DFT results, and crystal structures in the{" "}
+              <a href="/discovery-lab" className="text-[hsl(var(--gold))] hover:underline">Discovery Lab</a>.
+            </p>
+          </Card>
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }

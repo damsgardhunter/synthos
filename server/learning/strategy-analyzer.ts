@@ -4,6 +4,7 @@ import { storage } from "../storage";
 import type { EventEmitter } from "./engine";
 import { classifyFamily, sanitizeForbiddenWords } from "./utils";
 import { getModelDiagnosticsSummaryForStrategy } from "./model-improvement-loop";
+import { getPerformanceMetrics } from "../theory/model-performance-tracker";
 
 const openai = new OpenAI({
   baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
@@ -328,10 +329,12 @@ export async function captureConvergenceSnapshot(
     let bestPhysicsTc = 0;
     let bestScore = 0;
     let topFormula = "";
-    let scoreSum = 0;
-    const topByScore10 = uniqueCandidates
-      .sort((a, b) => (b.ensembleScore ?? 0) - (a.ensembleScore ?? 0))
-      .slice(0, 10);
+    let dftSelectedTc = 0;
+    let avgTop10Tc = 0;
+
+    // Sort all candidates by Tc descending to get top 10
+    const allByTc = [...uniqueCandidates].sort((a, b) => (b.predictedTc ?? 0) - (a.predictedTc ?? 0));
+    const top10ByTc = allByTc.slice(0, 10);
 
     for (const c of uniqueCandidates) {
       const tc = c.predictedTc ?? 0;
@@ -343,20 +346,54 @@ export async function captureConvergenceSnapshot(
         if (tc > bestPhysicsTc) bestPhysicsTc = tc;
       }
     }
-    for (const c of topByScore10) {
-      const score = c.ensembleScore ?? 0;
-      if (score > bestScore) bestScore = Math.min(score, 0.95);
-      scoreSum += Math.min(score, 0.95);
+
+    // bestScore & avgTopScore: use physics engine Tc of DFT-selected candidates this cycle
+    // Priority: 1) candidates selected for DFT (high uncertainty + high Tc)
+    //           2) best physics engine Tc from current cycle
+    //           3) zero
+    const dftCandidates = uniqueCandidates
+      .filter(c => c.dataConfidence === "dft-verified" || ((c.uncertaintyEstimate ?? 0) > 0.3 && (c.predictedTc ?? 0) > 20))
+      .sort((a, b) => {
+        const aScore = 0.5 * Math.min(1, (a.predictedTc ?? 0) / 300) + 0.5 * (a.uncertaintyEstimate ?? 0);
+        const bScore = 0.5 * Math.min(1, (b.predictedTc ?? 0) / 300) + 0.5 * (b.uncertaintyEstimate ?? 0);
+        return bScore - aScore;
+      });
+
+    if (dftCandidates.length > 0) {
+      // Best DFT-selected candidate's physics Tc
+      dftSelectedTc = dftCandidates[0].predictedTc ?? 0;
+      bestScore = dftSelectedTc;
+    } else if (bestPhysicsTc > 0) {
+      dftSelectedTc = bestPhysicsTc;
+      bestScore = bestPhysicsTc;
     }
 
+    // Average Tc of top 10 candidates by Tc
+    if (top10ByTc.length > 0) {
+      const tcSum = top10ByTc.reduce((s, c) => s + (c.predictedTc ?? 0), 0);
+      avgTop10Tc = tcSum / top10ByTc.length;
+    }
+
+    // avgTopScore tracks the avg ensemble score of top 10 by ensemble
+    const topByScore10 = [...uniqueCandidates]
+      .sort((a, b) => (b.ensembleScore ?? 0) - (a.ensembleScore ?? 0))
+      .slice(0, 10);
+    let scoreSum = 0;
+    for (const c of topByScore10) {
+      scoreSum += Math.min(c.ensembleScore ?? 0, 0.95);
+    }
     const avgTopScore = topByScore10.length > 0 ? scoreSum / topByScore10.length : 0;
 
     const stats = await storage.getStats();
-    const stage0 = stats.pipelineStages.find(p => p.stage === 0);
-    const stage4 = stats.pipelineStages.find(p => p.stage === 4);
-    const totalEnteredPipeline = stage0 ? stage0.count : 0;
-    const totalPassedAllStages = stage4 ? stage4.passed : 0;
-    const pipelinePassRate = totalEnteredPipeline > 0 ? totalPassedAllStages / totalEnteredPipeline : 0;
+    // Use the highest stage with data for pass rate calculation
+    // If only stage 0 exists (common), use stage 0's pass rate
+    // Otherwise use the ratio of last stage passed to first stage entered
+    const sortedStages = stats.pipelineStages.sort((a, b) => a.stage - b.stage);
+    const firstStage = sortedStages[0];
+    const lastStage = sortedStages.length > 1 ? sortedStages[sortedStages.length - 1] : firstStage;
+    const totalEnteredPipeline = firstStage ? firstStage.count : 0;
+    const totalPassed = lastStage ? lastStage.passed : 0;
+    const pipelinePassRate = totalEnteredPipeline > 0 ? totalPassed / totalEnteredPipeline : 0;
 
     const allCandidatesForDiversity = await storage.getSuperconductorCandidates(500);
     const allFamilies = new Set<string>();
@@ -384,6 +421,34 @@ export async function captureConvergenceSnapshot(
       familyDiversity += otherContribution;
     }
 
+    // Use GNN R² from GCP training (authoritative) instead of in-session performance tracker
+    let r2Score: number | null = null;
+    try {
+      const latestGnn = await storage.getLatestCompletedGnnJob();
+      if (latestGnn && latestGnn.r2 != null) {
+        r2Score = Math.round(latestGnn.r2 * 10000) / 10000;
+      }
+    } catch (e) { /* GNN R² unavailable, fall back to null */ }
+
+    // Fallback: if GNN R² not available, try in-session tracker (but only if positive)
+    if (r2Score == null) {
+      const perfMetrics = getPerformanceMetrics();
+      if (perfMetrics.totalPredictions >= 10 && perfMetrics.last100.r2 > 0) {
+        r2Score = Math.round(perfMetrics.last100.r2 * 1000) / 1000;
+      }
+    }
+
+    // If bestTc is still 0, try a direct DB query as fallback
+    if (bestTc === 0) {
+      try {
+        const directTop = await storage.getSuperconductorCandidates(1, 0);
+        if (directTop.length > 0 && (directTop[0].predictedTc ?? 0) > 0) {
+          bestTc = directTop[0].predictedTc ?? 0;
+          topFormula = directTop[0].formula;
+        }
+      } catch (e) { /* fallback failed */ }
+    }
+
     await storage.deleteConvergenceSnapshotByCycle(cycleNumber);
     const snapshotId = `conv-${crypto.randomUUID()}`;
     await storage.insertConvergenceSnapshot({
@@ -393,6 +458,8 @@ export async function captureConvergenceSnapshot(
       bestPhysicsTc: bestPhysicsTc > 0 ? Math.round(bestPhysicsTc * 100) / 100 : null,
       bestScore: Math.round(bestScore * 1000) / 1000,
       avgTopScore: Math.round(avgTopScore * 1000) / 1000,
+      avgTop10Tc: Math.round(avgTop10Tc * 100) / 100,
+      dftSelectedTc: dftSelectedTc > 0 ? Math.round(dftSelectedTc * 100) / 100 : null,
       candidatesTotal: totalCount,
       pipelinePassRate: Math.round(pipelinePassRate * 1000) / 1000,
       novelInsightCount: insightCount,
@@ -400,6 +467,7 @@ export async function captureConvergenceSnapshot(
       strategyFocus: strategyFocus || null,
       familyDiversity,
       duplicatesSkipped: cumulativeDuplicatesSkipped,
+      r2Score,
     });
 
     cumulativeDuplicatesSkipped = 0;

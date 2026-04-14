@@ -1248,25 +1248,46 @@ async function runStartupFullCorpusTraining(): Promise<void> {
   if (pyResult?.status === "discarded") {
     console.warn(`[GNN-GCP] Startup weights NOT stored — ${pyResult.reason}`);
   } else if (pyResult?.status === "done") {
-    // Record metrics in DB as a completed job (weights: [] since .pt lives on disk)
+    // Record metrics in DB — update the placeholder job instead of creating a new one
     try {
       await db.execute("SELECT 1");
-      const insertedJob = await storage.insertGnnTrainingJob({
-        status: "queued" as any,
-        trainingData: [] as any,
-        datasetSize: trainSet.length,
-        dftSamples: qeSamples.length,
-      });
-      await storage.updateGnnTrainingJob(insertedJob.id, {
-        status: "done",
-        weights: [] as any,   // PyTorch weights live in .pt file on disk
-        r2, mae, rmse,
-        trainR2,
-        trainMae,
-        valN,
-        completedAt: new Date(),
-      } as any);
-      if (startupModelPath) await recordPytorchModelPath(insertedJob.id, startupModelPath);
+      // Update the placeholder job that was created at line 1214 (startupJobId)
+      // instead of inserting a duplicate. This ensures the DB id matches what
+      // the Python service logged as Job#<startupJobId>.
+      const targetJobId = startupJobId ?? 0;
+      if (targetJobId > 0) {
+        await storage.updateGnnTrainingJob(targetJobId, {
+          status: "done",
+          weights: [] as any,   // PyTorch weights live in .pt file on disk
+          r2, mae, rmse,
+          trainR2,
+          trainMae,
+          valN,
+          datasetSize: trainSet.length,
+          completedAt: new Date(),
+        } as any);
+        if (startupModelPath) await recordPytorchModelPath(targetJobId, startupModelPath);
+        console.log(`[GNN-GCP] Startup results written to DB as job #${targetJobId} — R²=${r2.toFixed(4)} MAE=${mae.toFixed(1)}K`);
+      } else {
+        // Fallback: insert new job if no placeholder exists
+        const insertedJob = await storage.insertGnnTrainingJob({
+          status: "queued" as any,
+          trainingData: [] as any,
+          datasetSize: trainSet.length,
+          dftSamples: qeSamples.length,
+        });
+        await storage.updateGnnTrainingJob(insertedJob.id, {
+          status: "done",
+          weights: [] as any,
+          r2, mae, rmse,
+          trainR2,
+          trainMae,
+          valN,
+          completedAt: new Date(),
+        } as any);
+        if (startupModelPath) await recordPytorchModelPath(insertedJob.id, startupModelPath);
+        console.log(`[GNN-GCP] Startup results written to DB as new job #${insertedJob.id} — R²=${r2.toFixed(4)} MAE=${mae.toFixed(1)}K`);
+      }
       console.log(`[GNN-GCP] Startup metrics stored as job #${insertedJob.id}`);
 
       // Cycle 1381: write XGB metrics to xgb_training_jobs so the local
@@ -1316,17 +1337,13 @@ async function runStartupFullCorpusTraining(): Promise<void> {
   // failures earlier in the function are eligible for retry by the outer loop.
   _startupCorpusRan = true;
   } finally {
-    // Cleanup runs whether training succeeded, threw, or was discarded.
-    // Cycle 1376 fix: only delete the placeholder we created (by ID), not every
-    // queued/running job in the table. The previous blanket DELETE would also
-    // wipe unrelated jobs that active-learning.ts or gradient-boost.ts may have
-    // co-dispatched while startup was running. The success path above already
-    // inserted a separate `done` row with the actual metrics, so deleting the
-    // placeholder doesn't lose any data.
+    // Cleanup: only delete the placeholder if it was NOT updated to 'done'.
+    // If the success path above updated it to 'done', keep it — it has the metrics.
+    // Only delete if training failed/was discarded and the job is still 'running'.
     if (startupJobId !== undefined) {
       try {
         await db.execute(
-          `DELETE FROM gnn_training_jobs WHERE id = ${startupJobId}`
+          `DELETE FROM gnn_training_jobs WHERE id = ${startupJobId} AND status = 'running'`
         );
       } catch { /* non-fatal */ }
     }

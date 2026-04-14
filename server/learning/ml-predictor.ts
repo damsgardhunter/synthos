@@ -161,6 +161,19 @@ export async function computeUnifiedCI(formula: string): Promise<UnifiedCIResult
   const sigmaOOD = ood.oodSigmaPenalty * stdCombinedRaw;
   const stdCombined = Math.sqrt(stdCombinedRaw ** 2 + sigmaOOD ** 2);
 
+  // OOD Tc dampening: when the model is far from training data, reduce confidence in Tc prediction
+  // extreme-ood (latent=1.0, oodScore>0.75): dampen Tc by 40-60%
+  // strong-ood (oodScore>0.5): dampen by 20-40%
+  // moderate-ood (oodScore>0.3): dampen by 5-20%
+  if (ood.isOOD && tcCombined > 0) {
+    const dampeningFactor = ood.oodCategory === "extreme-ood"
+      ? 0.4 + 0.2 * (1 - ood.oodScore)   // 0.40-0.45 of original (60% reduction)
+      : ood.oodCategory === "strong-ood"
+      ? 0.6 + 0.2 * (1 - ood.oodScore)    // 0.65-0.70 of original (30-35% reduction)
+      : 0.85 + 0.1 * (1 - ood.oodScore);  // 0.85-0.92 of original (8-15% reduction)
+    tcCombined = tcCombined * dampeningFactor;
+  }
+
   const tcCI95Lower = Math.max(0, tcCombined - 1.96 * stdCombined);
   const tcCI95Upper = tcCombined + 1.96 * stdCombined;
 

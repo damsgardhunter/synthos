@@ -762,9 +762,32 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     const rawOffset = Number(req.query.offset);
     const limit = Math.min(Number.isFinite(rawLim) && rawLim > 0 ? rawLim : 25, 1000);
     const offset = Number.isFinite(rawOffset) && rawOffset >= 0 ? rawOffset : 0;
-    const cacheKey = `${CACHE_KEYS.CANDIDATES}:${limit}:${offset}`;
+    const elementsParam = typeof req.query.elements === "string" ? req.query.elements.trim() : "";
+    const confidenceParam = typeof req.query.confidence === "string" ? req.query.confidence.trim() : "";
+    const cacheKey = `${CACHE_KEYS.CANDIDATES}:${limit}:${offset}:${elementsParam}:${confidenceParam}`;
     try {
       const result = await cache.getOrSetStale(cacheKey, TTL.CANDIDATES, async () => {
+        if (elementsParam || confidenceParam) {
+          const symbols = elementsParam ? elementsParam.split(",").map(s => s.trim()).filter(Boolean) : [];
+          const all = await storage.getSuperconductorCandidates(5000, 0);
+          const filtered = all.filter(c => {
+            if (symbols.length > 0) {
+              const formulaEls = (c.formula ?? "").match(/[A-Z][a-z]?/g) ?? [];
+              if (!symbols.every(sym => formulaEls.includes(sym))) return false;
+            }
+            if (confidenceParam) {
+              if (confidenceParam === "dft-verified") return c.dataConfidence === "dft-verified";
+              if (confidenceParam === "high") return c.dataConfidence === "high" || c.dataConfidence === "dft-verified";
+              if (confidenceParam === "medium") return c.dataConfidence === "medium";
+              if (confidenceParam === "low") return c.dataConfidence === "low";
+            }
+            return true;
+          });
+          return {
+            candidates: filtered.slice(offset, offset + limit),
+            total: filtered.length,
+          };
+        }
         const candidates = await storage.getSuperconductorCandidates(limit, offset);
         const total = await storage.getSuperconductorCount();
         return { candidates, total };
@@ -796,6 +819,23 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   // Limit default to 200 results — full latestParetoResults can be 1000+ entries
   // and res.json() serializes synchronously, causing 10-70s event-loop blocks
   // that freeze the frontend. The chart only renders rank-1 candidates anyway.
+  app.get("/api/last-cycle-stats", (_req, res) => {
+    const loopStats = getAutonomousLoopStats();
+    const candidates = loopStats.lastCycleCandidates ?? [];
+    const familyCounts = loopStats.lastCycleFamilyCounts ?? {};
+    const bestTc = candidates.length > 0 ? Math.max(...candidates.map((c: any) => c.tc ?? 0)) : 0;
+    const bestFormula = candidates.find((c: any) => (c.tc ?? 0) === bestTc)?.formula ?? "";
+    const passed = candidates.filter((c: any) => c.passed).length;
+    res.json({
+      totalCandidates: candidates.length,
+      passed,
+      bestTc: Math.round(bestTc * 100) / 100,
+      bestFormula,
+      familyCounts,
+      candidates: candidates.slice(0, 50),
+    });
+  });
+
   app.get("/api/pareto-frontier", (req, res) => {
     const limit = Math.min(Number(req.query.limit) || 200, 1000);
     const data = getParetoFrontierData();
@@ -861,6 +901,35 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     } catch (e: any) {
       console.error("[dashboard] ERROR:", e?.message);
       res.status(500).json({ error: "Failed to fetch dashboard data", detail: e?.message });
+    }
+  });
+
+  app.get("/api/dft-jobs/:formula", async (req, res) => {
+    try {
+      const formula = decodeURIComponent(req.params.formula);
+      const jobs = await storage.getDftJobsByFormula(formula);
+      const completed = jobs.filter(j => j.status === "completed");
+      const failed = jobs.filter(j => j.status === "failed");
+      const queued = jobs.filter(j => j.status === "queued" || j.status === "running");
+      res.json({
+        formula,
+        totalJobs: jobs.length,
+        completed: completed.length,
+        failed: failed.length,
+        queued: queued.length,
+        jobs: jobs.map(j => ({
+          id: j.id,
+          status: j.status,
+          jobType: j.jobType,
+          workerNode: j.workerNode,
+          createdAt: j.createdAt,
+          completedAt: j.completedAt,
+          errorMessage: j.errorMessage,
+          outputData: j.outputData,
+        })),
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message?.slice(0, 200) });
     }
   });
 
@@ -2797,20 +2866,57 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
-  app.get("/api/gnn/version-history", generalLimiter, (_req, res) => {
+  app.get("/api/gnn/version-history", generalLimiter, async (_req, res) => {
     try {
-      const history = getGNNVersionHistory();
+      // Merge in-memory history with GCP training jobs from DB for accurate metrics
+      const inMemHistory = getGNNVersionHistory();
       const currentVersion = getGNNModelVersion();
-      const latest = history.length > 0 ? history[history.length - 1] : null;
-      const r2Trend = history.slice(-10).map(h => ({ version: h.version, r2: h.r2 }));
-      const maeTrend = history.slice(-10).map(h => ({ version: h.version, mae: h.mae }));
+
+      // Fetch GCP GNN training results from DB (authoritative R², MAE, dataset size)
+      let dbJobs: any[] = [];
+      try {
+        const completedJobs = await storage.getCompletedGnnJobs(20);
+        dbJobs = completedJobs.filter(j => j.r2 != null).reverse();
+      } catch (e) { /* DB unavailable, use in-memory only */ }
+
+      // Use DB data if available (it has the real GCP metrics), fall back to in-memory
+      const hasDBData = dbJobs.length > 0;
+      const latestDB = hasDBData ? dbJobs[dbJobs.length - 1] : null;
+      const latestMem = inMemHistory.length > 0 ? inMemHistory[inMemHistory.length - 1] : null;
+
+      const latestMetrics = latestDB
+        ? { r2: latestDB.r2, mae: latestDB.mae, rmse: latestDB.rmse, datasetSize: latestDB.datasetSize }
+        : latestMem
+        ? { r2: latestMem.r2, mae: latestMem.mae, rmse: latestMem.rmse, datasetSize: latestMem.datasetSize }
+        : null;
+
+      const ensembleSize = latestDB?.ensembleSize ?? latestMem?.ensembleSize ?? 4;
+
+      // Build R² and MAE trends from DB data (GCP-authoritative)
+      // Filter out early garbage runs (R² < -1 means completely broken training)
+      const validDbJobs = hasDBData ? dbJobs.filter((j: any) => j.r2 != null && j.r2 > -1) : [];
+      const r2Trend = validDbJobs.length > 0
+        ? validDbJobs.map((j: any, i: number) => ({ version: i + 1, r2: j.r2, datasetSize: j.datasetSize }))
+        : inMemHistory.slice(-10).map(h => ({ version: h.version, r2: h.r2, datasetSize: h.datasetSize }));
+      const maeTrend = validDbJobs.length > 0
+        ? validDbJobs.map((j: any, i: number) => ({ version: i + 1, mae: j.mae }))
+        : inMemHistory.slice(-10).map(h => ({ version: h.version, mae: h.mae }));
+
       res.json({
-        currentVersion,
-        ensembleSize: latest?.ensembleSize ?? 4,
-        latestMetrics: latest ? { r2: latest.r2, mae: latest.mae, rmse: latest.rmse, datasetSize: latest.datasetSize } : null,
+        currentVersion: hasDBData ? dbJobs.length : currentVersion,
+        ensembleSize,
+        latestMetrics,
         r2Trend,
         maeTrend,
-        history: history.slice(-20),
+        history: hasDBData ? dbJobs.map((j: any, i: number) => ({
+          version: i + 1,
+          r2: j.r2,
+          mae: j.mae,
+          rmse: j.rmse,
+          datasetSize: j.datasetSize,
+          ensembleSize: j.ensembleSize,
+          completedAt: j.completedAt,
+        })) : inMemHistory.slice(-20),
         uncertaintyMethods: ["ensemble-variance", "mc-dropout", "latent-distance"],
       });
     } catch (e: any) {

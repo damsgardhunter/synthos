@@ -84,15 +84,25 @@ process.on("unhandledRejection", (reason) => {
     if (req.path.startsWith("/api/")) return next();
     res.status(200).send(`<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>MatSci Supercomputer - Starting</title>
+<title>SYNTHOS - Starting</title>
 <meta http-equiv="refresh" content="10">
-<style>*{margin:0;padding:0;box-sizing:border-box}body{background:#0a0a0a;color:#e0e0e0;font-family:'Open Sans',system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh}
-.container{text-align:center;max-width:480px;padding:2rem}.title{font-size:1.5rem;font-weight:700;margin-bottom:1rem;color:#fff}
-.subtitle{font-size:0.95rem;color:#999;margin-bottom:2rem}
-.spinner{width:48px;height:48px;border:4px solid #333;border-top-color:#3b82f6;border-radius:50%;animation:spin 1s linear infinite;margin:0 auto 1.5rem}
-@keyframes spin{to{transform:rotate(360deg)}}</style></head>
-<body><div class="container"><div class="spinner"></div><div class="title">Initializing MatSci Supercomputer</div>
-<div class="subtitle">Loading ML models, physics engines, and database. This page will refresh automatically.</div></div></body></html>`);
+<style>*{margin:0;padding:0;box-sizing:border-box}body{background:#0a0a0a;color:#e0e0e0;font-family:'Inter',system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;overflow:hidden}
+.container{text-align:center;max-width:480px;padding:2rem;position:relative;z-index:10}
+.title{font-family:'Cinzel',Georgia,serif;font-size:1.8rem;font-weight:600;margin-bottom:0.5rem;color:#C5A55A;letter-spacing:0.15em}
+.subtitle{font-size:0.85rem;color:#8a7a5a;margin-bottom:0;letter-spacing:0.05em}
+.video-wrap{width:160px;height:160px;margin:0 auto 1.5rem;border-radius:50%;overflow:hidden}
+.video-wrap video{width:100%;height:100%;object-fit:cover}
+.stars{position:fixed;inset:0;z-index:1}
+.star{position:absolute;background:#fff;border-radius:50%;animation:twinkle 3s ease-in-out infinite}
+@keyframes twinkle{0%,100%{opacity:0.1}50%{opacity:0.6}}
+</style></head>
+<body>
+<div class="stars">${Array.from({length:40}).map((_,i)=>`<div class="star" style="width:${Math.random()*2+0.5}px;height:${Math.random()*2+0.5}px;top:${Math.random()*100}%;left:${Math.random()*100}%;animation-delay:${Math.random()*3}s;animation-duration:${2+Math.random()*4}s"></div>`).join('')}</div>
+<div class="container">
+<div class="video-wrap"><video autoplay loop muted playsinline src="/loading.mp4"></video></div>
+<div class="title">SYNTHOS</div>
+<div class="subtitle">Initializing materials intelligence engine...</div>
+</div></body></html>`);
   });
 
   httpServer.listen(
@@ -180,6 +190,15 @@ process.on("unhandledRejection", (reason) => {
         const overComplex = await db.execute(sql`DELETE FROM superconductor_candidates WHERE array_length(regexp_split_to_array(formula, '[A-Z]'), 1) - 1 > 5`);
         const deletedCount = overComplex.rowCount ?? 0;
         if (deletedCount > 0) log(`Purged ${deletedCount} over-complex candidates (>5 elements) on startup`, "startup");
+
+        // Fix mislabeled dft-verified: only candidates with verification_stage >= 2 had real DFT
+        const dftFixResult = await db.execute(sql`UPDATE superconductor_candidates SET data_confidence = 'high' WHERE data_confidence = 'dft-verified' AND (verification_stage IS NULL OR verification_stage < 2)`);
+        const dftFixed = dftFixResult.rowCount ?? 0;
+        if (dftFixed > 0) log(`Corrected ${dftFixed} candidates: dft-verified → high (no actual DFT run)`, "startup");
+
+        // Add new convergence snapshot columns if missing
+        await db.execute(sql`ALTER TABLE convergence_snapshots ADD COLUMN IF NOT EXISTS avg_top10_tc REAL`);
+        await db.execute(sql`ALTER TABLE convergence_snapshots ADD COLUMN IF NOT EXISTS dft_selected_tc REAL`);
 
         log("Applied bulk corrections on startup", "startup");
       } catch (err: any) {

@@ -245,6 +245,8 @@ export const convergenceSnapshots = pgTable("convergence_snapshots", {
   bestPhysicsTc: real("best_physics_tc"),
   bestScore: real("best_score"),
   avgTopScore: real("avg_top_score"),
+  avgTop10Tc: real("avg_top10_tc"),
+  dftSelectedTc: real("dft_selected_tc"),
   candidatesTotal: integer("candidates_total"),
   pipelinePassRate: real("pipeline_pass_rate"),
   novelInsightCount: integer("novel_insight_count"),
@@ -252,6 +254,7 @@ export const convergenceSnapshots = pgTable("convergence_snapshots", {
   strategyFocus: text("strategy_focus"),
   familyDiversity: integer("family_diversity"),
   duplicatesSkipped: integer("duplicates_skipped"),
+  r2Score: real("r2_score"),
   createdAt: timestamp("created_at").defaultNow(),
 });
 

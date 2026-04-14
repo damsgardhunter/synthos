@@ -1523,9 +1523,9 @@ export default function ComputationalPhysics() {
   return (
     <div className="p-6 space-y-6">
       <div>
-        <h1 className="text-2xl font-bold tracking-tight" data-testid="text-page-title">Computational Physics Engine</h1>
+        <h1 className="synthos-heading text-2xl gold-text tracking-wider" data-testid="text-page-title">Discovery Lab</h1>
         <p className="text-muted-foreground mt-1">
-          DFT-informed electronic structure, phonon spectra, Eliashberg theory, competing phases, and multi-fidelity screening
+          DFT-informed electronic structure, phonon spectra, Eliashberg theory, competing phases, causal physics, and multi-fidelity screening
         </p>
       </div>
 
@@ -1558,47 +1558,15 @@ export default function ComputationalPhysics() {
 
       <DFTQueuePanel />
 
-      <Tabs defaultValue="pipeline" className="space-y-4">
-        <TabsList data-testid="physics-tabs">
-          <TabsTrigger value="pipeline" data-testid="tab-pipeline">Pipeline</TabsTrigger>
-          <TabsTrigger value="physics" data-testid="tab-physics">Physics Properties</TabsTrigger>
+      <Tabs defaultValue="dft-selections" className="space-y-4">
+        <TabsList data-testid="physics-tabs" className="flex flex-wrap h-auto gap-1">
           <TabsTrigger value="dft-selections" data-testid="tab-dft-selections">DFT Selections</TabsTrigger>
-          <TabsTrigger value="structures" data-testid="tab-structures">Crystal Structures</TabsTrigger>
-          <TabsTrigger value="failures" data-testid="tab-failures">Negative Results</TabsTrigger>
-          <TabsTrigger value="synthesis" data-testid="tab-synthesis">Synthesis Variables</TabsTrigger>
-          <TabsTrigger value="advanced-physics" data-testid="tab-advanced-physics">Advanced Physics</TabsTrigger>
-          <TabsTrigger value="next-gen-pipeline" data-testid="tab-next-gen-pipeline">Inverse Design</TabsTrigger>
-          <TabsTrigger value="self-improving-lab" data-testid="tab-self-improving-lab">Design Lab</TabsTrigger>
           <TabsTrigger value="design-repr" data-testid="tab-design-repr">Representations</TabsTrigger>
-          <TabsTrigger value="theory-discovery" data-testid="tab-theory-discovery">Theory Discovery</TabsTrigger>
           <TabsTrigger value="causal-discovery" data-testid="tab-causal-discovery">Causal Discovery</TabsTrigger>
           <TabsTrigger value="dos-surrogate" data-testid="tab-dos-surrogate">DOS Surrogate</TabsTrigger>
           <TabsTrigger value="topo-invariants" data-testid="tab-topo-invariants">Topo Invariants</TabsTrigger>
           <TabsTrigger value="doping-engine" data-testid="tab-doping-engine">Doping Engine</TabsTrigger>
         </TabsList>
-
-        <TabsContent value="pipeline" className="space-y-4">
-          <PipelineFunnel stages={pipelineData?.pipelineStages ?? []} />
-        </TabsContent>
-
-        <TabsContent value="physics" className="space-y-4">
-          {scLoading ? (
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-              {[1,2,3,4].map(i => <Skeleton key={i} className="h-64" />)}
-            </div>
-          ) : physicsAnalyzed.length > 0 ? (
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-              {physicsAnalyzed.map(c => <PhysicsPropertyCard key={c.id} candidate={c} p90={p90} />)}
-            </div>
-          ) : (
-            <Card>
-              <CardContent className="pt-8 pb-8 text-center text-muted-foreground">
-                <Atom className="h-8 w-8 mx-auto mb-2 opacity-50" />
-                <p>Physics engine will analyze candidates once SC research generates them</p>
-              </CardContent>
-            </Card>
-          )}
-        </TabsContent>
 
         <TabsContent value="dft-selections" className="space-y-4" data-testid="dft-selections-content">
           <Card>
@@ -1710,40 +1678,8 @@ export default function ComputationalPhysics() {
           </Card>
         </TabsContent>
 
-        <TabsContent value="structures" className="space-y-4">
-          {structures.length > 0 ? (
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-              {structures.map(s => <CrystalStructureCard key={s.id} structure={s} />)}
-            </div>
-          ) : (
-            <Card>
-              <CardContent className="pt-8 pb-8 text-center text-muted-foreground">
-                <Layers className="h-8 w-8 mx-auto mb-2 opacity-50" />
-                <p>Crystal structure predictions will appear as the pipeline processes candidates</p>
-              </CardContent>
-            </Card>
-          )}
-        </TabsContent>
-
-        <TabsContent value="failures" className="space-y-4">
-          <p className="text-sm text-muted-foreground">
-            Negative results are crucial for understanding what does NOT work. Each rejected candidate narrows the search space.
-          </p>
-          {failedResults.length > 0 ? (
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-              {failedResults.map(r => <FailedResultCard key={r.id} result={r} />)}
-            </div>
-          ) : (
-            <Card>
-              <CardContent className="pt-8 pb-8 text-center text-muted-foreground">
-                <XCircle className="h-8 w-8 mx-auto mb-2 opacity-50" />
-                <p>No failed screenings yet. Failed candidates will be tracked here with failure reasons.</p>
-              </CardContent>
-            </Card>
-          )}
-        </TabsContent>
-
-        <TabsContent value="synthesis" className="space-y-4">
+        {/* Synthesis Variables, Advanced Physics, Pipeline moved to Pipeline Statistics page */}
+        <TabsContent value="__removed_synthesis__" className="hidden">
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <Card>
               <CardContent className="pt-4">
@@ -2100,24 +2036,8 @@ export default function ComputationalPhysics() {
           )}
         </TabsContent>
 
-        <TabsContent value="advanced-physics" className="space-y-4" data-testid="advanced-physics-content">
-          <AdvancedPhysicsPanel />
-        </TabsContent>
-
-        <TabsContent value="next-gen-pipeline" className="space-y-4" data-testid="next-gen-pipeline-content">
-          <NextGenPipelinePanel />
-        </TabsContent>
-
-        <TabsContent value="self-improving-lab" className="space-y-4" data-testid="self-improving-lab-content">
-          <SelfImprovingLabPanel />
-        </TabsContent>
-
         <TabsContent value="design-repr" className="space-y-4" data-testid="design-repr-content">
           <DesignRepresentationsPanel />
-        </TabsContent>
-
-        <TabsContent value="theory-discovery" className="space-y-4" data-testid="theory-discovery-content">
-          <TheoryDiscoveryPanel />
         </TabsContent>
 
         <TabsContent value="causal-discovery" className="space-y-4" data-testid="causal-discovery-content">
