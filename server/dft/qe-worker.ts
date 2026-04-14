@@ -1569,7 +1569,7 @@ function generateSCFInput(
   restart_mode = 'from_scratch',
   prefix = '${formula.replace(/[^a-zA-Z0-9]/g, "")}',
   outdir = './tmp',
-  disk_io = 'low',
+  disk_io = 'medium',
   pseudo_dir = '${QE_PSEUDO_DIR_INPUT}',
   tprnfor = .true.,
   tstress = .true.,
@@ -2745,7 +2745,7 @@ function generateSCFInputWithParams(
   restart_mode = 'from_scratch',
   prefix = '${formula.replace(/[^a-zA-Z0-9]/g, "")}',
   outdir = './tmp',
-  disk_io = 'low',
+  disk_io = 'medium',
   pseudo_dir = '${QE_PSEUDO_DIR_INPUT}',
   tprnfor = .true.,
   tstress = .true.,
@@ -2837,7 +2837,7 @@ function generateVCRelaxInput(
   restart_mode = 'from_scratch',
   prefix = '${prefix}',
   outdir = './tmp',
-  disk_io = 'low',
+  disk_io = 'medium',
   pseudo_dir = '${QE_PSEUDO_DIR_INPUT}',
   tprnfor = .true.,
   tstress = .true.,
@@ -3712,6 +3712,68 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
 
       fs.writeFileSync(path.join(jobDir, "ph.out"), phResult.stdout);
       result.phonon = parsePhononOutput(phResult.stdout);
+
+      // ldisp=.true. writes frequencies to dynmat files, not stdout.
+      // Run q2r.x + matdyn.x to extract actual phonon frequencies.
+      if (result.phonon.frequencies.length === 0 && phResult.exitCode === 0) {
+        const prefix = formula.replace(/[^a-zA-Z0-9]/g, "");
+        try {
+          // q2r.x: convert dynamical matrices to real-space force constants
+          const q2rInput = `&INPUT\n  fildyn = '${prefix}.dyn',\n  zasr = 'simple',\n  flfrc = '${prefix}.fc'\n/\n`;
+          const q2rInputFile = path.join(jobDir, "q2r.in");
+          fs.writeFileSync(q2rInputFile, q2rInput);
+          const q2rResult = await runQECommand(
+            path.posix.join(getQEBinDir(), "q2r.x"),
+            q2rInputFile, jobDir,
+          );
+          fs.writeFileSync(path.join(jobDir, "q2r.out"), q2rResult.stdout);
+
+          if (q2rResult.exitCode === 0) {
+            // matdyn.x: compute phonon DOS and frequencies on a fine grid
+            const matdynInput = `&INPUT\n  asr = 'simple',\n  flfrc = '${prefix}.fc',\n  flfrq = '${prefix}.freq',\n  dos = .true.,\n  fldos = '${prefix}.phdos',\n  nk1 = 10, nk2 = 10, nk3 = 10,\n/\n`;
+            const matdynInputFile = path.join(jobDir, "matdyn.in");
+            fs.writeFileSync(matdynInputFile, matdynInput);
+            const matdynResult = await runQECommand(
+              path.posix.join(getQEBinDir(), "matdyn.x"),
+              matdynInputFile, jobDir,
+            );
+            fs.writeFileSync(path.join(jobDir, "matdyn.out"), matdynResult.stdout);
+
+            // Parse frequencies from matdyn.x output
+            const matdynPhonon = parsePhononOutput(matdynResult.stdout);
+            if (matdynPhonon.frequencies.length > 0) {
+              result.phonon = matdynPhonon;
+              console.log(`[QE-Worker] matdyn.x extracted ${matdynPhonon.frequencies.length} modes for ${formula}`);
+            } else {
+              // Try parsing the .freq file directly
+              try {
+                const freqFile = path.join(jobDir, `${prefix}.freq`);
+                if (fs.existsSync(freqFile)) {
+                  const freqContent = fs.readFileSync(freqFile, "utf8");
+                  const freqValues: number[] = [];
+                  for (const line of freqContent.split("\n")) {
+                    const nums = line.trim().split(/\s+/).map(Number).filter(n => Number.isFinite(n) && n !== 0);
+                    freqValues.push(...nums);
+                  }
+                  if (freqValues.length > 0) {
+                    result.phonon.frequencies = freqValues;
+                    result.phonon.lowestFrequency = Math.min(...freqValues);
+                    result.phonon.highestFrequency = Math.max(...freqValues);
+                    result.phonon.imaginaryCount = freqValues.filter(f => f < -20).length;
+                    result.phonon.hasImaginary = result.phonon.imaginaryCount > 0;
+                    result.phonon.converged = true;
+                    console.log(`[QE-Worker] Parsed ${freqValues.length} frequencies from ${prefix}.freq file`);
+                  }
+                }
+              } catch { /* freq file parse failed */ }
+            }
+          } else {
+            console.log(`[QE-Worker] q2r.x failed for ${formula}: exit ${q2rResult.exitCode}`);
+          }
+        } catch (postErr: any) {
+          console.log(`[QE-Worker] Phonon post-processing failed for ${formula}: ${postErr.message?.slice(0, 150)}`);
+        }
+      }
 
       if (phResult.exitCode !== 0 && !result.phonon.converged) {
         result.phonon.error = `ph.x exited with code ${phResult.exitCode}: ${phResult.stderr.slice(-500)}`;
