@@ -808,6 +808,40 @@ const SEMICORE_REQUIRED: Set<string> = new Set([
   "Th", "U", "Pu",
 ]);
 
+// Elements whose best-available PPs include f-orbital projectors that exceed
+// QE's compile-time lmaxx=3 limit. Production DB shows 75 jobs failing with
+// "momentum in pseudopotentials (lmaxx) = 3" on these. Reject upfront until
+// either (a) QE is rebuilt with a higher lmaxx, or (b) scalar-relativistic
+// PPs with lmax<=2 are installed for each.
+const LMAXX_INCOMPATIBLE: Set<string> = new Set([
+  // Lanthanides with 4f projectors
+  "Ce", "Pr", "Nd", "Pm", "Sm", "Eu", "Gd", "Tb", "Dy", "Ho", "Er", "Tm",
+  // Actinides with 5f projectors
+  "Th", "Pa", "U", "Np", "Pu", "Am",
+]);
+
+// Elements whose PP fetch has failed in this process lifetime. Populated by
+// ensurePseudopotential() catches; queried by the pre-flight element gate so
+// subsequent candidates containing the same element fail in ms instead of
+// retrying the (failing) download path every time.
+const PP_FAILED_ELEMENTS = new Map<string, number>(); // element -> timestamp ms
+const PP_FAILURE_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour
+
+function markElementPPFailed(element: string): void {
+  PP_FAILED_ELEMENTS.set(element, Date.now());
+}
+
+function getUnsupportedElement(elements: string[]): string | null {
+  for (const el of elements) {
+    if (LMAXX_INCOMPATIBLE.has(el)) return el;
+    const failedAt = PP_FAILED_ELEMENTS.get(el);
+    if (failedAt !== undefined && Date.now() - failedAt < PP_FAILURE_COOLDOWN_MS) {
+      return el;
+    }
+  }
+  return null;
+}
+
 function validateSemicorePP(element: string, ppPath: string): boolean {
   if (!SEMICORE_REQUIRED.has(element)) return true;
   try {
@@ -3292,6 +3326,23 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     return result;
   }
 
+  // Pre-flight: reject candidates containing elements we can't compute.
+  // Catches two cases: (a) f-block elements whose PPs exceed lmaxx=3, and
+  // (b) elements whose PP fetch failed earlier this process lifetime
+  // (cooldown-cached). Both previously wasted minutes-to-hours per job.
+  const unsupported = getUnsupportedElement(elements);
+  if (unsupported) {
+    const reason = LMAXX_INCOMPATIBLE.has(unsupported)
+      ? `unsupported element ${unsupported} (PPs require lmaxx>3; QE rebuild or scalar-relativistic PP needed)`
+      : `unsupported element ${unsupported} (PP fetch failed recently)`;
+    result.error = `Pre-filter rejected: ${reason}`;
+    result.rejectionReason = reason;
+    result.failureStage = "unsupported_element";
+    stageFailureCounts.unsupported_element = (stageFailureCounts.unsupported_element ?? 0) + 1;
+    console.log(`[QE-Worker] ${formula} rejected: ${reason}`);
+    return result;
+  }
+
   const formulaCheck = validateFormulaForDFT(formula, counts);
   if (!formulaCheck.valid) {
     result.error = `Pre-filter rejected: ${formulaCheck.reason}`;
@@ -3324,12 +3375,13 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       try {
         await ensurePseudopotential(el);
       } catch (ppErr: any) {
+        markElementPPFailed(el);
         result.error = ppErr.message;
         result.ppValidated = false;
         result.rejectionReason = `PP: ${ppErr.message}`;
         result.failureStage = "pp_validation";
         stageFailureCounts.pp_validation++;
-        console.log(`[QE-Worker] PP validation failed for ${formula}: ${ppErr.message}`);
+        console.log(`[QE-Worker] PP validation failed for ${formula}: ${ppErr.message} — ${el} blacklisted for ${PP_FAILURE_COOLDOWN_MS / 60000} min`);
         recordFormulaFailure(formula);
         return result;
       }
@@ -3648,6 +3700,21 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
           combined.includes("set_dft_from_name");
         if (isPPError) {
           result.scf.error = `Pseudopotential read failure: ${stdoutTail.slice(-300)}`;
+          // lmaxx=3 errors are unrecoverable for this element set without a
+          // QE rebuild. Auto-blacklist the offending f-block element so
+          // future candidates containing it get fast-rejected by the
+          // pre-flight gate instead of wasting SCF attempts here.
+          if (combined.includes("lmaxx") || combined.includes("momentum in pseudopotentials")) {
+            for (const el of elements) {
+              if (LMAXX_INCOMPATIBLE.has(el)) {
+                console.log(`[QE-Worker] lmaxx=3 failure traced to ${el} — already in static blacklist`);
+              } else if (SEMICORE_REQUIRED.has(el) && /^[A-Z][a-z]?$/.test(el)) {
+                // Heavy element with semicore PP that unexpectedly hit lmaxx — add to runtime blacklist.
+                markElementPPFailed(el);
+                console.log(`[QE-Worker] lmaxx=3 failure — ${el} blacklisted for ${PP_FAILURE_COOLDOWN_MS / 60000} min`);
+              }
+            }
+          }
           console.log(`[QE-Worker] PP error for ${formula}, no retry will help — skipping`);
           recordFormulaFailure(formula);
           break;
@@ -3664,8 +3731,18 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
         }
         // Capture the real error: prefer stdout tail over MPI_ABORT boilerplate in stderr.
         const errSummary = stdoutTail || scfResult.stderr.slice(-300);
-        result.scf.error = `pw.x exited with code ${scfResult.exitCode}: ${errSummary}`;
-        console.log(`[QE-Worker] SCF attempt ${attempt + 1} failed for ${formula}: ${errSummary.slice(-200)}`);
+        // Classify exit=-1 cases (generic process death) so ops can tell
+        // timeout from OOM from segfault without spelunking raw stderr.
+        let classifier = "";
+        if (scfResult.exitCode === -1) {
+          if (combined.includes("TIMEOUT")) classifier = " [TIMEOUT]";
+          else if (combined.includes("Killed") || combined.includes("SIGKILL") || combined.includes("out of memory") || combined.includes("Cannot allocate")) classifier = " [OOM/KILLED]";
+          else if (combined.includes("SIGSEGV") || combined.includes("Segmentation fault")) classifier = " [SEGFAULT]";
+          else if (combined.includes("ENOENT") || combined.includes("command not found") || combined.includes("No such file")) classifier = " [BINARY_MISSING]";
+          else classifier = " [PROCESS_DIED]";
+        }
+        result.scf.error = `pw.x exited with code ${scfResult.exitCode}${classifier}: ${errSummary}`;
+        console.log(`[QE-Worker] SCF attempt ${attempt + 1} failed for ${formula}${classifier}: ${errSummary.slice(-200)}`);
         retryCount = attempt + 1;
       } else if (result.scf.converged) {
         scfConverged = true;
