@@ -642,6 +642,13 @@ function runXTBStabilityCheck(
     let basis: string;
     if (hasRef) {
       const formationLike = (ePerAtomHa - refEPerAtom) * HA_TO_EV;
+      // Real formation-like energies live within ±10 eV/atom. Values outside
+      // that window mean xTB didn't produce a trustworthy number (SCF non-
+      // convergence on heavy-element/high-pressure cells, bad atomic ref, etc).
+      // Treat as "no pre-filter opinion" so QE gets to decide.
+      if (!isFinite(formationLike) || Math.abs(formationLike) > 10.0) {
+        return null;
+      }
       isStable = formationLike < 2.0;
       basis = `relative (Ef-like=${formationLike.toFixed(3)} eV/atom)`;
     } else {

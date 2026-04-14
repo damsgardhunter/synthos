@@ -1374,7 +1374,8 @@ export async function startGNNLoop(): Promise<void> {
   try {
     const reset = await db.execute(
       `UPDATE gnn_training_jobs SET status = 'queued', started_at = NULL
-       WHERE status = 'running' AND started_at < NOW() - INTERVAL '5 minutes'
+       WHERE status = 'running'
+         AND (started_at IS NULL OR started_at < NOW() - INTERVAL '5 minutes')
        RETURNING id`
     );
     const resetIds: number[] = ((reset as any).rows ?? (Array.isArray(reset) ? reset : [])).map((r: any) => r.id);
