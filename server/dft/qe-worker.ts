@@ -1476,7 +1476,15 @@ function generateMagnetizationLines(
     }
   }
 
-  if (magneticIndices.length === 0) return "";
+  if (magneticIndices.length === 0) {
+    // Safety net: callers only invoke this when nspin=2 is going to be emitted
+    // (broadMagnetic=true or DFT+U nspin2 path). If nspin=2 appears without
+    // any starting_magnetization line, QE aborts with "some starting_magnetization
+    // MUST be set" — 75 production jobs failed on this. Emit a tiny seed for
+    // species 1 so QE parses the block; 0.1 is small enough not to bias a
+    // genuinely non-magnetic solution.
+    return `  starting_magnetization(1) = 0.1,\n`;
+  }
 
   const afmPattern = useAFM ? determineAFMPattern(elements, counts) : null;
 
@@ -3699,29 +3707,24 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
           combined.includes("conflicting values for igcx") || combined.includes("conflicting values for igcc") ||
           combined.includes("set_dft_from_name");
         if (isPPError) {
+          // NB: QE prints "momentum in pseudopotentials (lmaxx) = 3" as a
+          // diagnostic banner on every startup, so seeing it in stdout does
+          // NOT mean an f-electron PP overflow. The real error is the line
+          // that follows "Error in routine iosys". Don't auto-blacklist
+          // elements on the lmaxx substring — 75 jobs previously misclassified
+          // here were actually failing on a missing starting_magnetization.
           result.scf.error = `Pseudopotential read failure: ${stdoutTail.slice(-300)}`;
-          // lmaxx=3 errors are unrecoverable for this element set without a
-          // QE rebuild. Auto-blacklist the offending f-block element so
-          // future candidates containing it get fast-rejected by the
-          // pre-flight gate instead of wasting SCF attempts here.
-          if (combined.includes("lmaxx") || combined.includes("momentum in pseudopotentials")) {
-            for (const el of elements) {
-              if (LMAXX_INCOMPATIBLE.has(el)) {
-                console.log(`[QE-Worker] lmaxx=3 failure traced to ${el} — already in static blacklist`);
-              } else if (SEMICORE_REQUIRED.has(el) && /^[A-Z][a-z]?$/.test(el)) {
-                // Heavy element with semicore PP that unexpectedly hit lmaxx — add to runtime blacklist.
-                markElementPPFailed(el);
-                console.log(`[QE-Worker] lmaxx=3 failure — ${el} blacklisted for ${PP_FAILURE_COOLDOWN_MS / 60000} min`);
-              }
-            }
-          }
           console.log(`[QE-Worker] PP error for ${formula}, no retry will help — skipping`);
           recordFormulaFailure(formula);
           break;
         }
         // Geometry failures won't improve with SCF parameter tweaks — skip all retries.
+        // NB: do NOT match "overlap" alone — it false-matches QE's normal
+        // "Davidson diagonalization with overlap" banner and mislabels every
+        // non-convergence as a geometry failure. Match only on specific
+        // geometry-error phrases.
         const isGeomError = combined.includes("atom too close") || combined.includes("negative Jacobian") ||
-          combined.includes("atoms are too close") || combined.includes("overlap") ||
+          combined.includes("atoms are too close") || combined.includes("overlapping atoms") ||
           combined.includes("Wrong atomic coordinates") || combined.includes("too many atoms in the unit cell");
         if (isGeomError) {
           result.scf.error = `Geometry failure (atoms too close or bad cell): ${stdoutTail.slice(-200)}`;
