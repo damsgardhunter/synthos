@@ -3715,8 +3715,16 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
 
       // ldisp=.true. writes frequencies to dynmat files, not stdout.
       // Run q2r.x + matdyn.x to extract actual phonon frequencies.
-      if (result.phonon.frequencies.length === 0 && phResult.exitCode === 0) {
+      // ldisp=.true. writes frequencies to .dyn files; ph.x may exit non-zero
+      // during post-processing but the dyn files are still written. Run the
+      // q2r/matdyn fallback whenever we have no frequencies AND ph.x either
+      // converged OR any .dyn file was produced.
+      const dynFilesExist = fs.readdirSync(jobDir).some(f => /\.dyn\d*$/.test(f));
+      const fallbackNeeded = result.phonon.frequencies.length === 0 &&
+        (phResult.exitCode === 0 || result.phonon.converged || dynFilesExist);
+      if (fallbackNeeded) {
         const prefix = formula.replace(/[^a-zA-Z0-9]/g, "");
+        console.log(`[QE-Worker] Running q2r.x+matdyn.x fallback for ${formula} (exit=${phResult.exitCode}, conv=${result.phonon.converged}, dyn=${dynFilesExist})`);
         try {
           // q2r.x: convert dynamical matrices to real-space force constants
           const q2rInput = `&INPUT\n  fildyn = '${prefix}.dyn',\n  zasr = 'simple',\n  flfrc = '${prefix}.fc'\n/\n`;
@@ -3727,6 +3735,7 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
             q2rInputFile, jobDir,
           );
           fs.writeFileSync(path.join(jobDir, "q2r.out"), q2rResult.stdout);
+          console.log(`[QE-Worker] q2r.x exit=${q2rResult.exitCode} for ${formula}`);
 
           if (q2rResult.exitCode === 0) {
             // matdyn.x: compute phonon DOS and frequencies on a fine grid
