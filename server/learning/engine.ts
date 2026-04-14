@@ -58,7 +58,8 @@ import { optimizePressureForFormula, getBayesianPressureStats, addPressureObserv
 import { recordClusterDiscovery, getPressureClusterStats, fastPressureScreen, samplePressureFromClusters } from "./pressure-screening";
 import { detectPhaseTransitions, getPhaseTransitionStats } from "./pressure-phase-detector";
 import { recordEvaluationResult, getCalibrationStats, notifyModelRetrain } from "./surrogate-fitness";
-import { getXTBStats, runXTBPhononCheck, checkXTBHealth } from "../dft/qe-dft-engine";
+import { getXTBStats, runXTBPhononCheck, checkXTBHealth, recordHeuristicLandscape } from "../dft/qe-dft-engine";
+import { recordHeuristicDistortion } from "../crystal/distortion-detector";
 import { submitDFTJob, promoteDFTJob, getDFTQueueStats, setDFTBroadcast, scheduleQEAvailabilityProbe, setSGSweepActive } from "../dft/dft-job-queue";
 import { recordTSCFamily } from "../physics/tsc-generator-bias";
 import { runDiffusionGenerationCycle, getDiffusionStats } from "../ai/crystal-generator";
@@ -1686,11 +1687,11 @@ function assessCompositionComplexity(formula: string): CompositionCost {
   if (elements.length > 8) {
     return { reject: true, penalty: 1, reason: `${elements.length} total elements exceeds hard cap of 8` };
   }
-  if (maxSingle > 24) {
-    return { reject: true, penalty: 1, reason: `max stoichiometry ${maxSingle} exceeds hard cap of 24` };
+  if (maxSingle > 20) {
+    return { reject: true, penalty: 1, reason: `max stoichiometry ${maxSingle} exceeds hard cap of 20 (large supercells like Pd100H597W100 break the bulk McMillan/Eliashberg approximation)` };
   }
-  if (totalAtoms > 40) {
-    return { reject: true, penalty: 1, reason: `${totalAtoms} total atoms exceeds hard cap of 40` };
+  if (totalAtoms > 32) {
+    return { reject: true, penalty: 1, reason: `${totalAtoms} total atoms exceeds hard cap of 32 (DFT cost scales as N^3; supercells of this size are not physically meaningful unit cells)` };
   }
 
   let penalty = 0;
@@ -2168,6 +2169,17 @@ async function insertCandidateWithStabilityCheck(candidateData: Parameters<typeo
         });
       }
     } catch { /* novelty check is best-effort */ }
+
+    // Populate heuristic distortion + landscape stats so the UI panels aren't
+    // empty while DFT-backed analyses populate asynchronously on the GCP worker.
+    try {
+      const candidateElements = parseFormulaElements(finalPayload.formula);
+      const spaceGroup = (finalPayload.crystalStructure || "").split(" ")[0] || null;
+      const crystalSystem = (finalPayload as any).crystalSystem ?? null;
+      const latticeA = (finalPayload.latticeParams as any)?.a ?? null;
+      recordHeuristicDistortion(finalPayload.formula, spaceGroup, crystalSystem, latticeA, candidateElements, finalPayload.pressureGpa ?? 0);
+      recordHeuristicLandscape(finalPayload.formula, candidateElements, spaceGroup, finalPayload.pressureGpa ?? 0);
+    } catch { /* non-fatal — stats are best-effort */ }
 
     queueCandidateWrite({ ...finalPayload, ...noveltyAnnotation }, generatorSource);
 
@@ -5218,6 +5230,85 @@ async function runPhase13_SynthesisReasoning() {
   }
 }
 
+// Composition-only fast Tc estimate used on the SG-sweep fast path. The full
+// surrogateScreen calls extractFeatures (18-57s per novel formula) and blocks
+// the event loop across hundreds of candidates per sweep — unusable as a
+// gating step. This estimator runs in microseconds on formula alone and
+// serves two purposes:
+//   1. Produce a per-candidate Tc estimate instead of the old flat tc=20
+//      placeholder so downstream logs/displays show meaningful variance.
+//   2. Fast-reject obvious non-SC candidates (4f-magnetic rare-earth hydrides,
+//      known-weak intermetallics like Mg-Ni or Fe-Sr binaries) that a
+//      symmetry-only filter would otherwise pass. These candidates pollute the
+//      DFT queue with guaranteed-failure runs.
+// The returned Tc is NOT a physics prediction — it's a coarse triage estimate.
+// Full ensemble prediction still runs downstream for accepted candidates.
+const FOUR_F_MAGNETIC: Set<string> = new Set([
+  // Lanthanides with unpaired 4f electrons that localize strong moments and
+  // suppress s-wave pairing. Ce/Yb/Lu excluded (Ce has itinerant 4f in some
+  // compounds, Yb/Lu are effectively non-magnetic).
+  "Eu", "Gd", "Tb", "Dy", "Ho", "Er", "Tm", "Sm", "Nd", "Pr",
+]);
+function fastCompositionTcEstimate(formula: string): { pass: boolean; tc: number; reason: string } {
+  let counts: Record<string, number>;
+  try {
+    counts = parseComposition(formula);
+  } catch {
+    return { pass: true, tc: 10, reason: "fast-pass: parse-fallback" };
+  }
+  const els = Object.keys(counts);
+  const nAtoms = els.reduce((s, e) => s + (counts[e] ?? 0), 0) || 1;
+  const hCount = counts["H"] ?? 0;
+  const hFrac = hCount / nAtoms;
+
+  // 4f-magnetic rare earth: BCS pairing is suppressed by local moments.
+  const magRE = els.filter(e => FOUR_F_MAGNETIC.has(e));
+  if (magRE.length > 0) {
+    return { pass: false, tc: 0, reason: `fast-pass reject: 4f-magnetic ${magRE.join(",")} suppresses pairing` };
+  }
+
+  // Known-weak intermetallic binaries — well-characterized non-SC or sub-1K.
+  const isBinary = els.length === 2;
+  if (isBinary) {
+    const hasMg = els.includes("Mg"), hasNi = els.includes("Ni"), hasFe = els.includes("Fe"), hasSr = els.includes("Sr"), hasBa = els.includes("Ba"), hasCa = els.includes("Ca");
+    if ((hasMg && hasNi) || (hasFe && (hasSr || hasBa || hasCa)) || (hasFe && hasMg)) {
+      return { pass: false, tc: 0, reason: `fast-pass reject: ${formula} is a known weak/non-SC intermetallic` };
+    }
+  }
+
+  // Hydride Tc heuristic. High H content + heavy s/p/d-block metal under
+  // pressure is the BCS-H superhydride regime (H3S-like, LaH10-like). Scale
+  // estimate with hFrac; cap at 200K to avoid spurious enthusiasm in the log.
+  if (hFrac >= 0.6) {
+    const heavyMetal = els.some(e => ["La", "Y", "Ca", "Sc", "Th", "Ba", "Sr", "Mg", "Al"].includes(e));
+    const tcEst = Math.round((heavyMetal ? 80 : 40) + 120 * Math.max(0, hFrac - 0.6));
+    return { pass: true, tc: Math.min(tcEst, 200), reason: "fast-pass: H-rich heuristic" };
+  }
+
+  // Cuprate-like (Cu + O + other): 40-90K window depending on stoichiometry.
+  if (els.includes("Cu") && els.includes("O") && els.length >= 3) {
+    return { pass: true, tc: 60, reason: "fast-pass: cuprate-like composition" };
+  }
+
+  // Iron-pnictide-like (Fe + {As, P, Se, Te}): 10-55K window.
+  if (els.includes("Fe") && els.some(e => ["As", "P", "Se", "Te"].includes(e))) {
+    return { pass: true, tc: 25, reason: "fast-pass: Fe-pnictide/chalcogenide composition" };
+  }
+
+  // MgB2-like (light-metal borides).
+  if (els.includes("B") && els.some(e => ["Mg", "Al", "Ca"].includes(e))) {
+    return { pass: true, tc: 30, reason: "fast-pass: light-metal boride composition" };
+  }
+
+  // A15 / element candidates with known moderate Tc (Nb, V, Ta + Sn/Ge/Si).
+  if (els.some(e => ["Nb", "V", "Ta"].includes(e)) && els.some(e => ["Sn", "Ge", "Si", "Al", "Ga"].includes(e))) {
+    return { pass: true, tc: 18, reason: "fast-pass: A15-like composition" };
+  }
+
+  // Default: low-prior candidate, kept for full pipeline but flagged small.
+  return { pass: true, tc: 8, reason: "fast-pass: low-prior composition" };
+}
+
 async function runAutonomousDiscoveryCycle(formula: string, opts?: { skipDbDupCheck?: boolean; skipStructurePrediction?: boolean; suppressLogs?: boolean; skipRejectedCache?: boolean; skipGNN?: boolean; fastSweepMode?: boolean; skipSurrogate?: boolean }): Promise<{ passed: boolean; tc: number; reason: string; physicsPred?: PhysicsPrediction }> {
   try {
     if (typeof formula !== "string") {
@@ -5274,7 +5365,17 @@ async function runAutonomousDiscoveryCycle(formula: string, opts?: { skipDbDupCh
     // = hours of blocking). The stability pre-filter above is sufficient for candidate
     // discovery; full surrogateScreen runs in the main pipeline after submission.
     if (opts?.skipSurrogate) {
-      return { passed: true, tc: 20, reason: "sg-sweep-fast-pass" };
+      try {
+        const els = parseFormulaElements(formula);
+        recordHeuristicDistortion(formula, null, null, null, els, 0);
+        recordHeuristicLandscape(formula, els, null, 0);
+      } catch { /* best-effort */ }
+      const est = fastCompositionTcEstimate(formula);
+      if (!est.pass) {
+        recordRejection(formula, est.reason, 0);
+        return { passed: false, tc: 0, reason: est.reason };
+      }
+      return { passed: true, tc: est.tc, reason: `sg-sweep-fast-pass (${est.reason})` };
     }
 
     // Dynamic sweep guard: re-check isSGSweepActive even if skipSurrogate was false at
@@ -5286,7 +5387,17 @@ async function runAutonomousDiscoveryCycle(formula: string, opts?: { skipDbDupCh
     // block — all others in the queue exit immediately. Max damage: 1×58s = 58s.
     // Only applies to fastSweepMode (fast-path candidates), not full-pipeline submissions.
     if (isSGSweepActive && opts?.fastSweepMode) {
-      return { passed: true, tc: 20, reason: "sg-sweep-fast-pass" };
+      try {
+        const els = parseFormulaElements(formula);
+        recordHeuristicDistortion(formula, null, null, null, els, 0);
+        recordHeuristicLandscape(formula, els, null, 0);
+      } catch { /* best-effort */ }
+      const est = fastCompositionTcEstimate(formula);
+      if (!est.pass) {
+        recordRejection(formula, est.reason, 0);
+        return { passed: false, tc: 0, reason: est.reason };
+      }
+      return { passed: true, tc: est.tc, reason: `sg-sweep-fast-pass (${est.reason})` };
     }
 
     const surrogateResult = await surrogateScreen(formula, 3);
@@ -6963,7 +7074,7 @@ async function runAutonomousFastPath() {
       } catch (e) { console.error("[Engine] Constraint weight update failed:", e); }
 
       try {
-        if (result.tc > 0 && !explorationModeActive && result.reason !== "sg-sweep-fast-pass") {
+        if (result.tc > 0 && !explorationModeActive && !result.reason.startsWith("sg-sweep-fast-pass")) {
           // Skip for sg-sweep-fast-pass: buildAndStoreFeatureRecord calls computeElectronicStructure
           // synchronously (no cache). With hundreds of fast-pass candidates per sweep cycle,
           // this causes cascading synchronous blocks totalling minutes of event-loop freeze.
@@ -6975,7 +7086,7 @@ async function runAutonomousFastPath() {
 
       const isPromising = result.passed || result.tc >= 5;
 
-      if (result.passed && result.reason !== "sg-sweep-fast-pass") {
+      if (result.passed && !result.reason.startsWith("sg-sweep-fast-pass")) {
         // Skip enrichment queue for sg-sweep-fast-pass candidates — fast-path always uses
         // skipSurrogate: true (since computeElectronicStructure blocks 18-120s for cold
         // formulas, causing false server_down alerts). Without surrogate data, physicsPred
@@ -9253,6 +9364,29 @@ export async function startEngine() {
   // (band gap, formation energy, e_above_hull, lattice params, density).
   // Staggered 30 s to avoid DB connection contention with SuperCon.
   setTimeout(() => startThreeDSCIngestion(), 30_000);
+
+  // Seed heuristic distortion + landscape stats from existing DB candidates so
+  // the UI panels populate immediately on startup instead of waiting for new
+  // insertions. Delayed 20s so it runs AFTER the first-cycle DB storm settles.
+  setTimeout(async () => {
+    try {
+      const existing = await storage.getSuperconductorCandidates(300, 0);
+      let seeded = 0;
+      for (const c of existing) {
+        try {
+          const els = parseFormulaElements(c.formula);
+          const spaceGroup = (c.crystalStructure || "").split(" ")[0] || null;
+          const latticeA = (c.latticeParams as any)?.a ?? null;
+          recordHeuristicDistortion(c.formula, spaceGroup, null, latticeA, els, c.pressureGpa ?? 0);
+          recordHeuristicLandscape(c.formula, els, spaceGroup, c.pressureGpa ?? 0);
+          seeded++;
+        } catch { /* skip bad records */ }
+      }
+      console.log(`[Engine] Seeded ${seeded} heuristic distortion + landscape records from DB candidates`);
+    } catch (err: any) {
+      console.log(`[Engine] Heuristic stat seeding failed: ${err?.message?.slice(0, 100) ?? "unknown"}`);
+    }
+  }, 20_000);
 
   // Reset any GNN training jobs that were stuck in 'running' due to a VM shutdown.
   storage.resetStuckGnnJobs().then(n => {
