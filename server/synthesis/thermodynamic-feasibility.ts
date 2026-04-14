@@ -350,7 +350,9 @@ export function assessPressureRequirement(formula: string, family?: string): Pre
   const hasH = elements.includes("H");
   const hFrac = (counts["H"] || 0) / totalAtoms;
 
-  if (resolvedFamily === "hydride" && hFrac > 0.5) {
+  // Ca2H3Sc has hFrac=0.5 (3H out of 6 atoms) — previous > 0.5 gate excluded it.
+  // Any compound classified as a hydride with significant H content needs pressure.
+  if (resolvedFamily === "hydride" && hFrac >= 0.3) {
     const nHeavy = elements.filter(e => e !== "H").length;
     let pressureGpa: number;
 
@@ -358,6 +360,8 @@ export function assessPressureRequirement(formula: string, family?: string): Pre
       pressureGpa = 200;
     } else if (hFrac > 0.6) {
       pressureGpa = 150;
+    } else if (hFrac >= 0.5) {
+      pressureGpa = 100;
     } else {
       pressureGpa = 50;
     }

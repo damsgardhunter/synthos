@@ -490,8 +490,15 @@ export function evaluateSynthesisGate(
     rejectionReasons.push(`Precursors unavailable: avail=${chemDist.precursorAvailability.toFixed(3)}`);
   }
 
-  if (kineticInput && kineticInput.kineticScore < 0.15 && kineticInput.stabilizationStrategies.length === 0) {
-    rejectionReasons.push(`Kinetically unstable: score=${kineticInput.kineticScore}, lifetime=${kineticInput.lifetimeString}, no stabilization routes`);
+  if (kineticInput) {
+    // Hard reject: sub-microsecond lifetime means the material decomposes faster
+    // than any measurement or stabilization could act. No stabilization strategy
+    // can rescue a material that lives < 1 µs at 300K.
+    if (kineticInput.metastableLifetime300K < 1e-6) {
+      rejectionReasons.push(`Kinetically unstable: lifetime=${kineticInput.lifetimeString} (< 1 µs) — too short-lived for any stabilization`);
+    } else if (kineticInput.kineticScore < 0.15 && kineticInput.stabilizationStrategies.length === 0) {
+      rejectionReasons.push(`Kinetically unstable: score=${kineticInput.kineticScore}, lifetime=${kineticInput.lifetimeString}, no stabilization routes`);
+    }
   }
 
   const pass = compositeScore >= HARD_GATE_THRESHOLD && rejectionReasons.length === 0;

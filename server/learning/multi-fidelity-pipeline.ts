@@ -323,10 +323,14 @@ async function stage0c_FastBandScreen(
   const dopableFamilies = new Set(["Cuprates", "Iron-Based", "Nickelates", "Heavy-Fermion"]);
   const hasDopingPotential = dopableFamilies.has(family)
     || (candidate.mlFeatures as any)?.dopingIntent === true;
-  const insulatorThreshold = hasDopingPotential ? 1.0 : 0.1;
+  // The band surrogate has limited accuracy (~0.15 eV resolution) — using a
+  // threshold of 0.1 eV causes false rejections of metallic hydrides and
+  // intermetallics that the surrogate assigns bandGap ≈ 0.14-0.16 eV.
+  // Raise to 0.5 eV for non-dopable families; 1.0 for dopable (cuprates etc.).
+  const insulatorThreshold = hasDopingPotential ? 1.0 : 0.5;
 
   const isInsulating = bandPred.bandGap > insulatorThreshold;
-  const hasMinimalDOS = bandPred.dosPredicted < 0.3;
+  const hasMinimalDOS = bandPred.dosPredicted < 0.1;
   const hasSomePromise = bandPred.flatBandScore > 0.2
     || bandPred.nestingFromBands > 0.3
     || bandPred.vhsProximity > 0.3

@@ -123,7 +123,11 @@ function computeMiedemaFromParsed(parsed: ParsedFormula): number {
     }
   }
 
-  return Math.max(-5.0, Math.min(2.0, deltaH));
+  // Miedema model is semi-empirical; clamp to physically plausible range.
+  // Real formation energies span roughly -8 eV/atom (very stable oxides/hydrides)
+  // to +3 eV/atom (highly metastable). Previous -5.0 floor was too tight and
+  // caused many diverse materials to saturate at exactly -5.0000.
+  return Math.max(-8.0, Math.min(3.0, deltaH));
 }
 
 export function computeMiedemaFormationEnergy(formula: string): number {

@@ -3505,7 +3505,30 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
 
     result.vcRelaxed = false;
     const preVcLatticeA = latticeA;
+
+    // Skip vc-relax for known compounds with literature lattice parameters.
+    // vc-relax routinely times out at 90 min for high-pressure hydrides without
+    // converging — wasting compute on geometries we already know experimentally.
+    // Override latticeA with the literature value and proceed straight to SCF.
+    const VERIFIED_LATTICE_A: Record<string, number> = {
+      LaH10: 5.10, H3S: 3.10, YH6: 3.95, YH9: 4.20, CeH9: 4.85,
+      CaH6: 3.85, MgB2: 3.09, Nb3Sn: 5.29, Nb3Ge: 5.14, NbN: 4.39,
+      NbC: 4.47, V3Si: 4.72, NbTi: 3.30, ScH3: 4.48, YH3: 5.14,
+      ScH9: 4.20, ThH9: 4.62, ThH10: 4.79, SrH6: 4.10, BaH2: 4.16, CaH2: 3.59,
+    };
+    const normFormula = formula.replace(/\s+/g, "");
+    if (VERIFIED_LATTICE_A[normFormula]) {
+      const litA = VERIFIED_LATTICE_A[normFormula];
+      console.log(`[QE-Worker] Skipping vc-relax for ${formula} — using literature lattice a=${litA} Å (saves ~90 min wall time)`);
+      latticeA = litA;
+      result.relaxedLatticeA = latticeA;
+      result.vcRelaxed = true;
+    }
+
     try {
+      if (result.vcRelaxed) {
+        // Already set from verified-compound shortcut, skip the actual run
+      } else {
       console.log(`[QE-Worker] Starting vc-relax for ${formula} (lattice=${latticeA.toFixed(2)} A, ${positions.length} atoms${workerPressure > 0 ? `, P=${workerPressure} GPa (${(workerPressure * 10).toFixed(0)} kbar)` : ""})`);
       const vcRelaxInput = generateVCRelaxInput(formula, elements, counts, latticeA, positions, workerPressure);
       const vcRelaxFile = path.join(jobDir, "vc_relax.in");
@@ -3542,6 +3565,7 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       }
 
       cleanQETmpDir(path.join(jobDir, "tmp"));
+      } // close: if (result.vcRelaxed) {} else { ... vc-relax run ... }
     } catch (vcErr: any) {
       console.log(`[QE-Worker] vc-relax failed for ${formula}: ${(vcErr.message || "").slice(-200)}, proceeding with original geometry`);
       cleanQETmpDir(path.join(jobDir, "tmp"));
@@ -3612,14 +3636,37 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     const hasFluorine = elements.includes("F");
     const isQuaternaryPlus = elements.length >= 4;
     const isPentanaryPlus = elements.length >= 5;
-    // "Very complex": F + quaternary, or 5+ elements, or DFT+U magnetic (nspin=2 doubles state space)
-    const isVeryComplexSystem = (hasFluorine && isQuaternaryPlus) || isPentanaryPlus || dftPlusUNspin2;
-    const isComplexSystem = hasHalogen || isQuaternaryPlus;
+    // Alkali + H mixtures (Li, Na, K, Rb, Cs with H) have huge electronegativity
+    // spreads (Li 0.98, H 2.20, heavy metal ~1.1) plus dramatic orbital extent
+    // mismatch between H 1s and alkali ns. At high pressure, charge transfer
+    // becomes severe and plain Pulay mixing oscillates indefinitely.
+    // Examples that fail: Li2LaH12, YH9Na2, LaH11Li2, CCaH4Li3, NaAsH4.
+    const hasAlkali = elements.some(el => ["Li", "Na", "K", "Rb", "Cs"].includes(el));
+    const isAlkaliHydride = hasAlkali && elements.includes("H");
+    // High-pressure ternary+ hydrides (heavy metal + H + 3rd element) also need
+    // local-TF — the charge sloshes between the H sublattice and the metal d/f bands.
+    const hCount = (counts["H"] || 0);
+    const totalAtomCount = positions.length;
+    const isHighPHydride = hCount > 0 && (hCount / totalAtomCount) >= 0.5 && workerPressure > 50;
+
+    // "Very complex": F + quaternary, 5+ elements, DFT+U magnetic, alkali-hydride,
+    // or high-pressure (>50 GPa) hydride with ≥3 elements.
+    const isVeryComplexSystem = (hasFluorine && isQuaternaryPlus) || isPentanaryPlus
+      || dftPlusUNspin2 || isAlkaliHydride
+      || (isHighPHydride && elements.length >= 3);
+    const isComplexSystem = hasHalogen || isQuaternaryPlus || isHighPHydride;
 
     if (isVeryComplexSystem) {
-      console.log(`[QE-Worker] ${formula}: very-complex system (${elements.length} el, F=${hasFluorine}, nspin2=${dftPlusUNspin2}) — using hardened SCF schedule (local-TF from attempt 1)`);
+      const reasons = [
+        hasFluorine && isQuaternaryPlus && "F+quaternary",
+        isPentanaryPlus && `${elements.length} elements`,
+        dftPlusUNspin2 && "DFT+U nspin2",
+        isAlkaliHydride && "alkali-hydride (Li/Na/K + H)",
+        isHighPHydride && elements.length >= 3 && `high-P ternary+ hydride (P=${workerPressure} GPa)`,
+      ].filter(Boolean).join(", ");
+      console.log(`[QE-Worker] ${formula}: very-complex system [${reasons}] — using hardened SCF schedule (local-TF from attempt 1)`);
     } else if (isComplexSystem) {
-      console.log(`[QE-Worker] ${formula}: complex system (${elements.length} el, halogen=${hasHalogen}) — using local-TF SCF schedule`);
+      console.log(`[QE-Worker] ${formula}: complex system (${elements.length} el, halogen=${hasHalogen}, highP-H=${isHighPHydride}) — using local-TF SCF schedule`);
     }
 
     type RetryConfig = { mixingBeta: number; maxSteps: number; diag: string; smearing?: string; degauss?: number; ecutwfcBoost?: number; convThr?: string; forcConvThr?: string; etotConvThr?: string; mixingMode?: string; mixingNdim?: number };

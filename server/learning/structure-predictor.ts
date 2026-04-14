@@ -988,9 +988,16 @@ function estimateSynthesizability(
   if (minMeltingPoint === Infinity) minMeltingPoint = 0;
 
   if (maxMeltingPoint > 0) {
-    const tammannBase = minMeltingPoint > 0 ? minMeltingPoint : maxMeltingPoint;
-    estimatedSynthesisTemp = Math.round(0.5 * tammannBase);
-    notes.push(`Tammann T_synth ~ ${estimatedSynthesisTemp} K (0.5 * T_melt of ${tammannBase} K)`);
+    // For hydrides, H melts at 14K which is irrelevant — Tammann temperature
+    // should reflect the host lattice (metal framework) melting point, since
+    // that controls diffusion kinetics. Use max melting point for hydrides,
+    // min for non-hydrides (rate-limiting component).
+    const hasHydrogen = elements.includes("H");
+    const tammannBase = hasHydrogen
+      ? maxMeltingPoint
+      : (minMeltingPoint > 0 ? minMeltingPoint : maxMeltingPoint);
+    estimatedSynthesisTemp = Math.round(0.57 * tammannBase);
+    notes.push(`Tammann T_synth ~ ${estimatedSynthesisTemp} K (0.57 * T_melt of ${tammannBase} K)`);
 
     if (estimatedSynthesisTemp > 3000) {
       score -= 0.15;

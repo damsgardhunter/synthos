@@ -76,6 +76,18 @@ except: print('')
 " 2>/dev/null || echo "")
 fi
 
+# ── Profile page health: reference benchmark + key candidates ─
+echo "null" > "$_TMPDIR_WD/benchmark.json"
+echo "null" > "$_TMPDIR_WD/profile-LaH10.json"
+echo "null" > "$_TMPDIR_WD/profile-MgB2.json"
+echo "null" > "$_TMPDIR_WD/profile-H3S.json"
+if [[ "$_server_up" == "true" ]]; then
+  curl -4 -sf --max-time 10 "$HOST/api/reference-benchmark" 2>/dev/null > "$_TMPDIR_WD/benchmark.json" || echo "null" > "$_TMPDIR_WD/benchmark.json"
+  curl -4 -sf --max-time 10 "$HOST/api/candidate-profile/LaH10" 2>/dev/null > "$_TMPDIR_WD/profile-LaH10.json" || echo "null" > "$_TMPDIR_WD/profile-LaH10.json"
+  curl -4 -sf --max-time 10 "$HOST/api/candidate-profile/MgB2" 2>/dev/null > "$_TMPDIR_WD/profile-MgB2.json" || echo "null" > "$_TMPDIR_WD/profile-MgB2.json"
+  curl -4 -sf --max-time 10 "$HOST/api/candidate-profile/H3S" 2>/dev/null > "$_TMPDIR_WD/profile-H3S.json" || echo "null" > "$_TMPDIR_WD/profile-H3S.json"
+fi
+
 # ── Check log for GB training activity ───────────────────────
 _gb_in_log=false
 if [[ -f "$LOG_FILE" ]]; then
@@ -295,6 +307,50 @@ elif classified_errors and status not in ("event_loop_blocked", "server_down", "
     if action == "monitor":
         action = first["suggestedAction"]
 
+# ── Profile page health checks ──────────────────────────────
+profile_issues = []
+
+# Check reference benchmark is populated (not pending)
+bench_data = load_json("benchmark.json")
+if isinstance(bench_data, dict):
+    if bench_data.get("pending"):
+        profile_issues.append("Reference benchmark pending — not yet computed")
+    elif not bench_data.get("results"):
+        profile_issues.append("Reference benchmark empty — no results returned")
+
+# Check known superconductors have reasonable physics values
+EXPECTED_PROFILES = {
+    "LaH10": {"minTc": 50, "minLambda": 1.5, "refTc": 250},
+    "MgB2":  {"minTc": 20, "minLambda": 0.5, "refTc": 39},
+    "H3S":   {"minTc": 50, "minLambda": 1.0, "refTc": 203},
+}
+for formula, expect in EXPECTED_PROFILES.items():
+    pdata = load_json(f"profile-{formula}.json")
+    if not isinstance(pdata, dict):
+        profile_issues.append(f"{formula}: profile API returned invalid data")
+        continue
+    candidates = pdata.get("candidates", [])
+    if not candidates:
+        profile_issues.append(f"{formula}: no candidate record in DB (may need re-discovery)")
+        continue
+    c = candidates[0]
+    tc = c.get("predictedTc") or 0
+    lam = c.get("electronPhononCoupling") or 0
+    if tc < expect["minTc"]:
+        profile_issues.append(
+            f"{formula}: Tc={tc}K (expected >{expect['minTc']}K, ref={expect['refTc']}K) — physics engine underpredict"
+        )
+    if lam < expect["minLambda"]:
+        profile_issues.append(
+            f"{formula}: lambda={lam} (expected >{expect['minLambda']}) — coupling too low"
+        )
+
+if profile_issues and status in ("healthy", "feed_slow", "feed_errors"):
+    status = "profile_issues"
+    issue = (issue or "") + " PROFILE: " + "; ".join(profile_issues[:3])
+    if action == "monitor":
+        action = "free_investigation_physics"
+
 report = {
     "timestamp":       now.isoformat(),
     "status":          status,
@@ -308,6 +364,7 @@ report = {
     "serverUp":        server_up,
     "detectedErrors":  classified_errors[:10],
     "errorCount":      len(classified_errors),
+    "profileIssues":   profile_issues,
 }
 
 with open(report_file, "w") as f:
@@ -319,7 +376,12 @@ if classified_errors:
     for e in classified_errors[:3]:
         print(f"  [!] [{e['phase']}] {e['event']}: {e['detail'][:100]}")
 
-if status in ("event_loop_blocked", "feed_frozen", "server_down", "feed_empty", "feed_errors"):
+if profile_issues:
+    print(f"  [profile] {len(profile_issues)} issue(s):")
+    for pi in profile_issues[:5]:
+        print(f"    - {pi}")
+
+if status in ("event_loop_blocked", "feed_frozen", "server_down", "feed_empty", "feed_errors", "profile_issues"):
     sys.exit(1)
 sys.exit(0)
 PYEOF

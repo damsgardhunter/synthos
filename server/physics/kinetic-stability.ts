@@ -361,7 +361,7 @@ function computeNucleationBarrier(formula: string, eAboveHull: number, pressureG
   };
 }
 
-function computePressureStabilization(formula: string, eAboveHull: number): PressureStabilizationAnalysis {
+function computePressureStabilization(formula: string, eAboveHull: number, synthesisPressureGpa: number = 0): PressureStabilizationAnalysis {
   const elements = parseFormulaElements(formula);
   const counts = parseFormulaCounts(formula);
   const totalAtoms = getTotalAtoms(counts);
@@ -398,7 +398,15 @@ function computePressureStabilization(formula: string, eAboveHull: number): Pres
     const pMurnaghan = (avgBulkModulus / Bprime) *
       (Math.pow(1 + eAboveHullGPaA3 / (avgBulkModulus * deltaV), Bprime) - 1);
     const hCorrection = hasH ? hFraction * 30 : 0;
-    minPressureGPa = Math.min(500, pMurnaghan + hCorrection);
+    const rawPressure = pMurnaghan + hCorrection;
+    // Cap at synthesis pressure if known (kinetic stability at pressures far
+    // above synthesis conditions is physically meaningless — the material
+    // was never at 500 GPa if synthesis is at 173 GPa). Fall back to a
+    // reasonable cap of 350 GPa for extreme high-pressure phases.
+    const pressureCap = synthesisPressureGpa > 0
+      ? Math.max(synthesisPressureGpa * 1.2, synthesisPressureGpa + 20)
+      : 350;
+    minPressureGPa = Math.min(pressureCap, rawPressure);
   } else {
     minPressureGPa = 0;
   }
@@ -606,7 +614,7 @@ export function predictKineticStability(formula: string, eAboveHull: number, pre
   const gb = computeGrainBoundaryEnergy(formula);
   const diffusion = computeDiffusionBarriers(formula, pressureGpa);
   const nucleation = computeNucleationBarrier(formula, eAboveHull, pressureGpa);
-  const pressure = computePressureStabilization(formula, eAboveHull);
+  const pressure = computePressureStabilization(formula, eAboveHull, pressureGpa);
 
   const metastability = assessMetastability(formula, eAboveHull);
 

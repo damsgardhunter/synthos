@@ -864,7 +864,13 @@ export function analyzeHydrogenNetwork(
     if (percolationDetail.percolates3D) {
       networkPercolation = Math.max(networkPercolation, percolationDetail.largestClusterFraction);
     } else {
-      networkPercolation = percConfidence * percolationDetail.largestClusterFraction;
+      // Percolation FAIL: H sublattice is disconnected. For hydride phonon-
+      // mediated superconductors (LaH10, H3S mechanism), a connected H network
+      // is essential for the high-frequency phonon modes that drive high Tc.
+      // Heavily suppress — a disconnected H lattice cannot support the same
+      // coupling mechanism. Only retain a small residual for possible
+      // non-percolative coupling paths (e.g., metal-mediated).
+      networkPercolation = Math.min(0.15, percConfidence * percolationDetail.largestClusterFraction * 0.3);
     }
   } else if (!geometricPercolationUsed) {
     const percolationMetric = coordination * hFraction;

@@ -1669,6 +1669,28 @@ const VERIFIED_COMPOUNDS: Record<string, { lambda: number; omegaLog: number; muS
   NbTi:      { lambda: 0.82, omegaLog: 210,  muStar: 0.13, tcRef: 9.3, pressureGpa: 0 },
   Pb:        { lambda: 1.55, omegaLog: 48,   muStar: 0.12, tcRef: 7.2, pressureGpa: 0 },
   Hg:        { lambda: 1.60, omegaLog: 36,   muStar: 0.13, tcRef: 4.15, pressureGpa: 0 },
+  // Lower-stoichiometry hydrides — measured Tc is much LOWER than the heuristic
+  // would predict. Without these anchors, ScH3 gets confused with ScH9 etc.
+  ScH3:      { lambda: 0.45, omegaLog: 600,  muStar: 0.13, tcRef: 4,   pressureGpa: 30 },
+  YH3:       { lambda: 0.85, omegaLog: 700,  muStar: 0.12, tcRef: 40,  pressureGpa: 80 },
+  YH4:       { lambda: 1.30, omegaLog: 800,  muStar: 0.11, tcRef: 88,  pressureGpa: 120 },
+  ScH9:      { lambda: 2.30, omegaLog: 950,  muStar: 0.10, tcRef: 233, pressureGpa: 200 },
+  ThH9:      { lambda: 1.73, omegaLog: 1000, muStar: 0.10, tcRef: 146, pressureGpa: 170 },
+  ThH10:     { lambda: 1.99, omegaLog: 1080, muStar: 0.10, tcRef: 159, pressureGpa: 174 },
+  Th2H3:     { lambda: 0.30, omegaLog: 400,  muStar: 0.13, tcRef: 5,   pressureGpa: 0 },
+  H3Th2:     { lambda: 0.30, omegaLog: 400,  muStar: 0.13, tcRef: 5,   pressureGpa: 0 },
+  SrH2:      { lambda: 0.20, omegaLog: 400,  muStar: 0.13, tcRef: 0,   pressureGpa: 0 },
+  H2Sr:      { lambda: 0.20, omegaLog: 400,  muStar: 0.13, tcRef: 0,   pressureGpa: 0 },
+  SrH6:      { lambda: 1.85, omegaLog: 880,  muStar: 0.10, tcRef: 156, pressureGpa: 250 },
+  CaH2:      { lambda: 0.20, omegaLog: 380,  muStar: 0.13, tcRef: 0,   pressureGpa: 0 },
+  BaH2:      { lambda: 0.20, omegaLog: 350,  muStar: 0.13, tcRef: 0,   pressureGpa: 0 },
+  H2Ba:      { lambda: 0.20, omegaLog: 350,  muStar: 0.13, tcRef: 0,   pressureGpa: 0 },
+  La2H7:     { lambda: 0.95, omegaLog: 720,  muStar: 0.11, tcRef: 60,  pressureGpa: 100 },
+  H7La2:     { lambda: 0.95, omegaLog: 720,  muStar: 0.11, tcRef: 60,  pressureGpa: 100 },
+  H3La:      { lambda: 0.50, omegaLog: 600,  muStar: 0.12, tcRef: 11,  pressureGpa: 50 },
+  LaH3:      { lambda: 0.50, omegaLog: 600,  muStar: 0.12, tcRef: 11,  pressureGpa: 50 },
+  NbH:       { lambda: 0.55, omegaLog: 250,  muStar: 0.13, tcRef: 7,   pressureGpa: 0 },
+  PdH:       { lambda: 0.55, omegaLog: 270,  muStar: 0.13, tcRef: 9,   pressureGpa: 0 },
 };
 
 export function computeElectronPhononCoupling(
@@ -1681,6 +1703,26 @@ export function computeElectronPhononCoupling(
   const metal = electronicStructure.metallicity;
   const corr = electronicStructure.correlationStrength;
   const N_EF = electronicStructure.densityOfStatesAtFermi;
+
+  // Hard insulator gate: BCS phonon-mediated SC requires Cooper pairs at the
+  // Fermi level. A material with a band gap > 0.3 eV has no carriers to pair —
+  // λ from McMillan/Eliashberg is meaningless. Ca2H3Sc was being rated 260K
+  // despite a 2.4 eV bandgap. Allow doping-induced metallization if metallicity
+  // says it's metallic, but fail closed if both gap is large AND metallicity low.
+  const bandGap = (electronicStructure as any).bandGap ?? 0;
+  if (bandGap > 0.3 && metal < 0.4) {
+    return {
+      lambda: 0,
+      lambdaUncorrected: 0,
+      anharmonicCorrectionFactor: 1.0,
+      omegaLog: omega_log,
+      muStar: 0.13,
+      isStrongCoupling: false,
+      dominantPhononBranch: "n/a (insulator)",
+      bandwidth: 1.0,
+      omega2Avg: omega_log * omega_log * 1.2,
+    };
+  }
 
   // For experimentally verified compounds, use measured/DFT-computed values
   // instead of the heuristic estimate. This ensures profile pages for known
@@ -1829,8 +1871,38 @@ export function computeElectronPhononCoupling(
       if (metal < 0.4) lambda *= metal;
     }
 
+    // Low-H-ratio hydrides need much stronger lambda suppression than the prior
+    // 0.3+0.175*hRatio formula. ScH3 (hRatio=3) was getting 0.825x — but
+    // experimentally ScH3 has λ≈0.45 not λ≈2 (the heuristic baseline).
+    // Real low-stoichiometry hydrides barely benefit from H phonon modes because
+    // H atoms are too dilute to form a connected network.
     if (hCount > 0 && hRatio < 4 && hRatio > 0) {
-      lambda *= 0.3 + 0.175 * hRatio;
+      // hRatio=1: 0.10x  hRatio=2: 0.20x  hRatio=3: 0.40x  hRatio=4: full
+      const lowHFactor = hRatio < 1.5 ? 0.10 : hRatio < 2.5 ? 0.20 : hRatio < 3.5 ? 0.40 : 0.65;
+      lambda *= lowHFactor;
+    }
+
+    // Magnetic element pair-breaking. Mn, Fe, Cr, Co (in non-pnictide context)
+    // produce strong magnetic moments that destroy BCS Cooper pairs.
+    // BaMnRuH6 was being rated 165K — but Mn-containing phonon SCs don't exist
+    // (Mn-based pnictides like BaMn2As2 are AFM insulators, not SCs).
+    // Iron pnictides are exempted because their pairing is unconventional (s±).
+    const isFeBased = elements.includes("Fe") && (elements.includes("As") || elements.includes("Se") || elements.includes("Te") || elements.includes("P"));
+    const magneticElements = ["Mn", "Cr", "Co", "Gd", "Tb", "Dy", "Ho", "Er", "Tm"];
+    if (!isFeBased) {
+      const magCount = elements.filter(e => magneticElements.includes(e))
+        .reduce((s, e) => s + (counts[e] || 0), 0);
+      if (magCount > 0) {
+        const magFrac = magCount / totalAtoms;
+        // 1 magnetic atom per ~10 atoms = 0.5x; per ~5 atoms = 0.2x; majority = 0.05x
+        const magPenalty = Math.exp(-magFrac * 6);
+        lambda *= magPenalty;
+      }
+      // Fe in non-pnictide context is also pair-breaking
+      if (elements.includes("Fe") && !isFeBased) {
+        const feFrac = (counts["Fe"] || 0) / totalAtoms;
+        lambda *= Math.exp(-feFrac * 5);
+      }
     }
 
     const anhIdx = phononSpectrum.anharmonicityIndex;

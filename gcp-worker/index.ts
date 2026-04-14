@@ -1,7 +1,9 @@
 /**
  * Quantum Alchemy Engine — GCP Worker Entry Point
  *
- * Runs on the GCP instance (34.42.172.122, 32 vCPUs, 128 GB RAM).
+ * Runs on GCP instances:
+ *   - DFT worker (quantum-alchemy-dft-worker2, 34.31.53.152, 32 vCPUs, 128 GB RAM)
+ *   - GNN trainer (gnn-training, 34.130.121.199, GPU)
  * Connects to the shared Neon DB and processes:
  *   - DFT jobs  (dft_jobs table)  — Quantum ESPRESSO calculations
  *   - GNN jobs  (gnn_training_jobs table) — full ensemble training
