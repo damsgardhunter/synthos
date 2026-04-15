@@ -3561,15 +3561,27 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       result.vcRelaxed = true;
     }
 
-    // Skip vc-relax for high-pressure ternary+ hydrides. Empirically these
-    // burn ~90 min per attempt on worker2 and produce no usable geometry
-    // (vc-relax exit=2, no final ATOMIC_POSITIONS block): e.g. YH9Na2,
-    // Li2LaH12, LaH11Li2 at 175-200 GPa — all three hit the same pathology
-    // in the Apr-15 run. Cell optimisation is extremely stiff at these
-    // pressures and BFGS destabilises. Use the xTB pre-relaxed geometry +
-    // prototype lattice directly and let SCF do its job.
-    if (!result.vcRelaxed && workerPressure >= 100 && elements.includes("H") && elements.length >= 3) {
-      console.log(`[QE-Worker] Skipping vc-relax for ${formula} — high-P ternary+ hydride (P=${workerPressure} GPa, ${elements.length} elements); cell optimisation unreliable above 100 GPa, proceeding with xTB geometry (saves ~90 min)`);
+    // Skip vc-relax for high-pressure hydrides (binary or ternary+).
+    // Empirically these burn ~90 min per attempt on worker2 and produce no
+    // usable geometry (vc-relax exit=2, no final ATOMIC_POSITIONS block):
+    // Apr-15: YH9Na2, Li2LaH12, LaH11Li2 (ternary); Apr-15 p2: LaH12
+    // (binary). Cell optimisation is extremely stiff at >100 GPa and BFGS
+    // destabilises. Use the xTB pre-relaxed geometry + prototype lattice
+    // directly and let SCF do its job. Threshold lowered from 3 to 2
+    // elements after LaH12 slipped through.
+    if (!result.vcRelaxed && workerPressure >= 100 && elements.includes("H") && elements.length >= 2) {
+      console.log(`[QE-Worker] Skipping vc-relax for ${formula} — high-P hydride (P=${workerPressure} GPa, ${elements.length} elements); cell optimisation unreliable above 100 GPa, proceeding with xTB geometry (saves ~90 min)`);
+      result.vcRelaxed = true;
+    }
+
+    // Skip vc-relax for TSC candidates. With forceSpin=true we emit
+    // nspin=2, and vc-relax on heavy 5d/5p elements (Bi, Sb, Te, W, Pb,
+    // Hg, Ta, Au, Pt) with two spin channels oscillates between spin
+    // configurations and dies on wall time (CuSbTe3 in the Apr-15 p2 run:
+    // 1h28m, exit=2, no geometry). The TSC analysis uses the prototype
+    // geometry anyway — vc-relax buys nothing.
+    if (!result.vcRelaxed && opts?.forceSpin) {
+      console.log(`[QE-Worker] Skipping vc-relax for ${formula} — TSC candidate (forceSpin=true); nspin=2 vc-relax on heavy elements oscillates indefinitely, proceeding with xTB geometry (saves ~90 min)`);
       result.vcRelaxed = true;
     }
 
