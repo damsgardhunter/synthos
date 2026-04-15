@@ -1371,10 +1371,21 @@ function estimateBOverA(elements: string[], counts: Record<string, number>): num
   return 1.0;
 }
 
-function autoKPoints(latticeA: number, cOverA?: number, minK: number = 4, dimensionality?: string): string {
-  // densityFactor=40 (screening quality) vs 80 (publication quality).
-  // For a 3.5Å cell this gives k=12 per direction (4096 k-pts) vs 24 (13824 k-pts) — 8× faster.
-  const densityFactor = 40;
+// Default kspacing (Å⁻¹) — matches aiida-quantumespresso "fast" protocol.
+// Lowering to 0.10 gives publication quality; raising to 0.30 gives
+// coarse screening. Override via env QE_KSPACING for whole-pipeline tuning.
+const DEFAULT_KSPACING = (() => {
+  const env = parseFloat(process.env.QE_KSPACING ?? "");
+  return Number.isFinite(env) && env > 0.02 && env < 0.5 ? env : 0.157;
+})();
+
+function autoKPoints(latticeA: number, cOverA?: number, minK: number = 4, dimensionality?: string, kspacing: number = DEFAULT_KSPACING): string {
+  // Density-based k-point grid: n_i = ceil(2π / (kspacing * a_i)).
+  // kspacing=0.157 Å⁻¹ ≈ densityFactor=40 (legacy); aiida's "fast" protocol
+  // uses 0.15 (screening), "moderate" 0.125, "precise" 0.10.
+  // For a 3.5Å cell this gives k≈12 per direction (4096 k-pts); precise
+  // protocol ~19 (6859 k-pts) — 2-8× slower for ~0.05 eV energy improvement.
+  const densityFactor = (2 * Math.PI) / kspacing;
   const isLayered = dimensionality === "quasi-2D" || dimensionality === "2D";
   const layeredBoost = isLayered ? 1.5 : 1.0;
   const effCOverA = cOverA ?? 1.0;
@@ -1406,6 +1417,30 @@ const MOMENT_INDUCERS = new Set(["H","N","O","F"]);
 // induced moment. Small enough to not bias chemistry, large enough to break
 // spin symmetry so QE can find the polarized solution.
 const INDUCED_TM_SEED = 0.5;
+
+// Per-species wavefunction cutoff (Ry). Values are screening-quality,
+// aligned with SSSP efficiency v1.3 recommendations and empirically
+// validated by production runs. Consolidated from 4 duplicated tables
+// (SCF / SCF-with-params / VC-relax / bands paths) so changes propagate
+// consistently and the canonical source is obvious.
+// Callers: use computeEcutwfc(elements, extraBoost) — it applies the
+// hydrogen-presence floor and caller-specified boost.
+const SPECIES_ECUTWFC: Record<string, number> = {
+  H: 100, O: 70, F: 80, N: 60, Cl: 60, S: 55, P: 55, Se: 50, Br: 50,
+  Li: 60, Be: 60, B: 55, C: 60, Na: 60, Mg: 55, Al: 50, Si: 50,
+  La: 55, Ce: 55, Pr: 55, Nd: 55, Sm: 55, Eu: 55, Gd: 55, Tb: 55,
+  Dy: 55, Ho: 55, Er: 55, Tm: 55, Yb: 55, Lu: 55, Sc: 50, Y: 50,
+  Th: 55,
+};
+
+// Returns the recommended ecutwfc (Ry) for a composition. Applies a floor
+// of 80 Ry when hydrogen is present (the raw SSSP cutoff of 60 Ry
+// under-converges small-volume hydrides), plus any caller-requested boost.
+function computeEcutwfc(elements: string[], extraBoost: number = 0, hydrogenFloor: number = 80, nonHFloor: number = 45): number {
+  const hasH = elements.includes("H");
+  const raw = elements.reduce((max, el) => Math.max(max, SPECIES_ECUTWFC[el] ?? 45), hasH ? hydrogenFloor : nonHFloor);
+  return raw + extraBoost;
+}
 
 // Returns true if the system can plausibly carry a net spin moment and should
 // therefore be run with nspin=2. Catches cases the narrow MAGNETIC_ELEMENTS
@@ -1570,16 +1605,11 @@ function generateSCFInput(
 ): string {
   const totalAtoms = Object.values(counts).reduce((s, n) => s + Math.round(n), 0);
   const nTypes = elements.length;
-  const ELEMENT_CUTOFFS: Record<string, number> = {
-    H: 100, O: 70, F: 80, N: 60, Cl: 60, S: 55, P: 55, Se: 50, Br: 50,
-    Li: 60, Be: 60, B: 55, C: 60, Na: 60, Mg: 55, Al: 50, Si: 50,
-    // Lanthanides and group-3: PAW pseudopotentials, recommended ~55 Ry wavefunction cutoff
-    La: 55, Ce: 55, Pr: 55, Nd: 55, Sm: 55, Eu: 55, Gd: 55, Tb: 55,
-    Dy: 55, Ho: 55, Er: 55, Tm: 55, Yb: 55, Lu: 55, Sc: 50, Y: 50,
-    Th: 55,
-  };
   const hasHydrogen = elements.includes("H");
-  const baseEcutwfc = elements.reduce((max, el) => Math.max(max, ELEMENT_CUTOFFS[el] ?? 45), hasHydrogen ? 80 : 45);
+  // Uses module-level SPECIES_ECUTWFC table. Higher floor (100/60) here than
+  // other call-sites because this is the default SCF path with no retry
+  // boost — conservative to land convergence on attempt 1.
+  const baseEcutwfc = computeEcutwfc(elements, 0, 80, 45);
   const ecutwfc = Math.max(baseEcutwfc, hasHydrogen ? 100 : 60);
   const ecutrho = ecutwfc * ecutrhoMultiplier(elements);
 
@@ -2735,21 +2765,14 @@ function generateSCFInputWithParams(
   counts: Record<string, number>,
   latticeA: number,
   positions: Array<{ element: string; x: number; y: number; z: number }>,
-  params: { mixingBeta: number; maxSteps: number; diag: string; smearing?: string; degauss?: number; ecutwfcBoost?: number; convThr?: string; forcConvThr?: string; etotConvThr?: string; dftPlusULines?: string; dftPlusUNspin2?: boolean; mixingMode?: string; mixingNdim?: number },
+  params: { mixingBeta: number; maxSteps: number; diag: string; smearing?: string; degauss?: number; ecutwfcBoost?: number; convThr?: string; forcConvThr?: string; etotConvThr?: string; dftPlusULines?: string; dftPlusUNspin2?: boolean; mixingMode?: string; mixingNdim?: number; startingwfc?: string; startingpot?: string; diagoThrInit?: string },
 ): string {
   const totalAtoms = positions.length;
   const nTypes = elements.length;
-  const ELEMENT_CUTOFFS2: Record<string, number> = {
-    H: 100, O: 70, F: 80, N: 60, Cl: 60, S: 55, P: 55, Se: 50, Br: 50,
-    Li: 60, Be: 60, B: 55, C: 60, Na: 60, Mg: 55, Al: 50, Si: 50,
-    La: 55, Ce: 55, Pr: 55, Nd: 55, Sm: 55, Eu: 55, Gd: 55, Tb: 55,
-    Dy: 55, Ho: 55, Er: 55, Tm: 55, Yb: 55, Lu: 55, Sc: 50, Y: 50,
-    Th: 55,
-  };
-  const hasHydrogen2 = elements.includes("H");
-  const rawEcutwfc = elements.reduce((max, el) => Math.max(max, ELEMENT_CUTOFFS2[el] ?? 45), hasHydrogen2 ? 80 : 45);
-  // Screening minimum: 45 Ry non-H, 80 Ry H (PAW needs less than NCPP; saves ~30% vs 60/100)
-  const baseEcutwfc = Math.max(rawEcutwfc, hasHydrogen2 ? 80 : 45);
+  // Uses module-level SPECIES_ECUTWFC table. Screening minimum: 45 Ry non-H,
+  // 80 Ry H (PAW needs less than NCPP; saves ~30% vs 60/100). ecutwfcBoost
+  // comes from the retry ladder to escalate cutoff on non-convergence.
+  const baseEcutwfc = computeEcutwfc(elements, 0, 80, 45);
   const ecutwfc = baseEcutwfc + (params.ecutwfcBoost ?? 0);
   const ecutrho = ecutwfc * ecutrhoMultiplier(elements);
   const smearing = params.smearing || "mv";
@@ -2821,7 +2844,7 @@ ${magBlock}${hubbardBlock}/
   mixing_mode = '${params.mixingMode ?? "plain"}',
   mixing_ndim = ${params.mixingNdim ?? 8},
   diagonalization = '${params.diag}',
-  scf_must_converge = .false.,
+${params.diagoThrInit ? `  diago_thr_init = ${params.diagoThrInit},\n` : ""}${params.startingwfc ? `  startingwfc = '${params.startingwfc}',\n` : ""}${params.startingpot ? `  startingpot = '${params.startingpot}',\n` : ""}  scf_must_converge = .false.,
 /
 ATOMIC_SPECIES
 ${atomicSpecies}
@@ -2843,13 +2866,12 @@ function generateVCRelaxInput(
 ): string {
   const totalAtoms = positions.length;
   const nTypes = elements.length;
-  const ELEMENT_CUTOFFS_VCR: Record<string, number> = {
-    H: 100, O: 70, F: 80, N: 60, Cl: 60, S: 55, P: 55, Se: 50, Br: 50,
-    Li: 60, Be: 60, B: 55, C: 60, Na: 60, Mg: 55, Al: 50, Si: 50,
-  };
+  // Uses module-level SPECIES_ECUTWFC table. vc-relax path historically
+  // used a trimmed table (no lanthanides) but the full table is safe here —
+  // unknown elements fall through to the 45 Ry default.
   const hasHydrogen = elements.includes("H");
-  const rawEcutwfc = elements.reduce((max, el) => Math.max(max, ELEMENT_CUTOFFS_VCR[el] ?? 45), hasHydrogen ? 80 : 45);
-  const ecutwfc = Math.max(rawEcutwfc, hasHydrogen ? 100 : 60);
+  const baseEcutwfc = computeEcutwfc(elements, 0, 80, 45);
+  const ecutwfc = Math.max(baseEcutwfc, hasHydrogen ? 100 : 60);
   const ecutrho = ecutwfc * ecutrhoMultiplier(elements);
 
   const hasMagnetic = elements.some(el => el in MAGNETIC_ELEMENTS);
@@ -3037,7 +3059,12 @@ function parseVCRelaxOutput(stdout: string): VCRelaxResult {
     ];
   }
 
-  const posBlocks = [...stdout.matchAll(/ATOMIC_POSITIONS\s*\{?\s*(\w+)\s*\}?\s*\n([\s\S]*?)(?=\n\s*\n|\nEnd|\nCELL|\n\s*Writing)/g)];
+  // Match ATOMIC_POSITIONS blocks — terminator set expanded so we still
+  // capture the last geometry when vc-relax crashes without the usual
+  // trailing blank line / "End final coordinates" marker. Observed in
+  // exit=2 cases where timing banner ("PWSCF : ... WALL", "init_run :")
+  // immediately follows the positions block.
+  const posBlocks = [...stdout.matchAll(/ATOMIC_POSITIONS\s*\{?\s*(\w+)\s*\}?\s*\n([\s\S]*?)(?=\n\s*\n|\nEnd|\nCELL|\n\s*Writing|\n\s*PWSCF\b|\n\s*init_run\b|\n\s*electrons\b|\n\s*BFGS\b|\n\s*JOB DONE|\n\s*%%%%%%%%%%|\n\s*Error in routine|$)/g)];
   if (posBlocks.length > 0) {
     const lastBlock = posBlocks[posBlocks.length - 1];
     const coordType = lastBlock[1].toLowerCase();
@@ -3616,7 +3643,20 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     // path in generateSCFInputWithParams (line ~2599).
     if (opts?.forceSpin && !dftPlusUNspin2) {
       dftPlusUNspin2 = true;
-      console.log(`[QE-Worker] nspin=2 forced for TSC candidate ${formula} (spin-orbit gap physics)`);
+      // Must seed starting_magnetization for every species — QE aborts with
+      // "some starting_magnetization MUST be set" when nspin=2 is requested
+      // without any seed, and this path bypasses the magBlock generator in
+      // generateSCFInputWithParams (it's gated off when dftPlusUNspin2=true).
+      // Values follow aiida-qe defaults: larger seed on magnetic elements,
+      // small symmetry-breaking seed elsewhere.
+      for (let i = 0; i < elements.length; i++) {
+        const el = elements[i];
+        const seed = el in MAGNETIC_ELEMENTS
+          ? 0.4
+          : (TRANSITION_METALS.has(el) ? 0.2 : 0.1);
+        dftPlusULines += `  starting_magnetization(${i + 1}) = ${seed.toFixed(1)},\n`;
+      }
+      console.log(`[QE-Worker] nspin=2 forced for TSC candidate ${formula} (spin-orbit gap physics) + per-species magnetization seeds`);
     }
     // ----------------------------------------------------------
 
@@ -3669,7 +3709,7 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       console.log(`[QE-Worker] ${formula}: complex system (${elements.length} el, halogen=${hasHalogen}, highP-H=${isHighPHydride}) — using local-TF SCF schedule`);
     }
 
-    type RetryConfig = { mixingBeta: number; maxSteps: number; diag: string; smearing?: string; degauss?: number; ecutwfcBoost?: number; convThr?: string; forcConvThr?: string; etotConvThr?: string; mixingMode?: string; mixingNdim?: number };
+    type RetryConfig = { mixingBeta: number; maxSteps: number; diag: string; smearing?: string; degauss?: number; ecutwfcBoost?: number; convThr?: string; forcConvThr?: string; etotConvThr?: string; mixingMode?: string; mixingNdim?: number; startingwfc?: string; startingpot?: string; diagoThrInit?: string };
 
     // Very complex systems (F + quaternary, 5+ elements, or DFT+U magnetic):
     // Start immediately with local-TF at beta=0.15. Each attempt also widens
@@ -3712,8 +3752,15 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     let scfConverged = false;
     let retryCount = 0;
 
+    // Handler-driven retry override: mutated by the classifier at the end of
+    // each failed attempt, applied on top of the static retryConfigs[] entry
+    // for the NEXT attempt. Mirrors aiida-quantumespresso's PwBaseWorkChain
+    // handlers (`workflows/pw/base.py::handle_*`) where the ladder progresses
+    // based on what specifically went wrong, not a fixed sequence.
+    let handlerOverride: Partial<RetryConfig> = {};
+
     for (let attempt = firstAttempt; attempt < retryConfigs.length && !scfConverged; attempt++) {
-      const params = retryConfigs[attempt];
+      const params: RetryConfig = { ...retryConfigs[attempt], ...handlerOverride };
       const scfInput = generateSCFInputWithParams(formula, elements, counts, latticeA, positions, {
         ...params,
         dftPlusULines: dftPlusULines || undefined,
@@ -3749,19 +3796,35 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
 
         // XC functional conflicts (igcx/igcc) arise when a PP encodes a different
         // functional than input_dft — treating as a PP error skips wasteful retries.
-        const isPPError = combined.includes("read_upf") || combined.includes("readpp") ||
-          combined.includes("EOF marker") || combined.includes("pseudopotential") ||
+        //
+        // IMPORTANT: do NOT match bare "pseudopotential". QE prints a harmless
+        // startup banner "momentum in pseudopotentials (lmaxx) = 3" on every
+        // run — matching that substring previously misclassified >75 jobs
+        // whose real error was elsewhere (most often missing starting_magnetization).
+        // Match only on specific fatal PP strings.
+        const isPPError = combined.includes("from read_upf") || combined.includes("from readpp") ||
+          combined.includes("read_ps ") || combined.includes("Error reading pseudo") ||
+          combined.includes("EOF marker") ||
           combined.includes("conflicting values for igcx") || combined.includes("conflicting values for igcc") ||
-          combined.includes("set_dft_from_name");
+          combined.includes("set_dft_from_name") ||
+          // lmaxx overflow only when paired with iosys/init_us error, not the
+          // standalone diagnostic banner.
+          (combined.includes("lmaxx") && (combined.includes("init_us_1") || combined.includes("too small")));
         if (isPPError) {
-          // NB: QE prints "momentum in pseudopotentials (lmaxx) = 3" as a
-          // diagnostic banner on every startup, so seeing it in stdout does
-          // NOT mean an f-electron PP overflow. The real error is the line
-          // that follows "Error in routine iosys". Don't auto-blacklist
-          // elements on the lmaxx substring — 75 jobs previously misclassified
-          // here were actually failing on a missing starting_magnetization.
           result.scf.error = `Pseudopotential read failure: ${stdoutTail.slice(-300)}`;
           console.log(`[QE-Worker] PP error for ${formula}, no retry will help — skipping`);
+          recordFormulaFailure(formula);
+          break;
+        }
+        // Input-parse (iosys) errors abort instantly — retries won't help since
+        // the input template is the problem. Label distinctly so ops can tell
+        // config bugs from SCF non-convergence. Common: missing/ill-formed
+        // starting_magnetization, nbnd too small, bad CELL_PARAMETERS.
+        const iosysMatch = combined.match(/Error in routine\s+iosys[^\n]*\n\s*([^\n]{0,200})/);
+        if (iosysMatch) {
+          const detail = iosysMatch[1].trim();
+          result.scf.error = `Input error (iosys): ${detail}`;
+          console.log(`[QE-Worker] iosys input error for ${formula} — no retry will help: ${detail}`);
           recordFormulaFailure(formula);
           break;
         }
@@ -3783,6 +3846,10 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
         const errSummary = stdoutTail || scfResult.stderr.slice(-300);
         // Classify exit=-1 cases (generic process death) so ops can tell
         // timeout from OOM from segfault without spelunking raw stderr.
+        // Also classify exit=2 (QE's generic "check stdout" code) so the
+        // log line is actionable instead of "exited with code 2: 23 calls)"
+        // which leaks the timing-block tail with no diagnostic value.
+        // Error strings sourced from aiida-quantumespresso parse_raw/pw.py.
         let classifier = "";
         if (scfResult.exitCode === -1) {
           if (combined.includes("TIMEOUT")) classifier = " [TIMEOUT]";
@@ -3790,9 +3857,55 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
           else if (combined.includes("SIGSEGV") || combined.includes("Segmentation fault")) classifier = " [SEGFAULT]";
           else if (combined.includes("ENOENT") || combined.includes("command not found") || combined.includes("No such file")) classifier = " [BINARY_MISSING]";
           else classifier = " [PROCESS_DIED]";
+        } else if (scfResult.exitCode === 2) {
+          if (combined.includes("convergence NOT achieved")) classifier = " [SCF_NOT_CONVERGED]";
+          else if (combined.includes("charge is wrong")) classifier = " [CHARGE_WRONG]";
+          else if (combined.includes("S matrix not positive definite")) classifier = " [S_NOT_POSITIVE]";
+          else if (combined.includes("too many bands are not converged")) classifier = " [DIAG_NOT_CONVERGED]";
+          else if (combined.includes("eigenvalues not converged")) classifier = " [DIAG_NOT_CONVERGED]";
+          else if (combined.includes("wrong number of electrons")) classifier = " [WRONG_NELEC]";
+          else if (combined.includes("dE0s is positive")) classifier = " [BFGS_UPHILL]";
+          else if (combined.includes("smearing is needed")) classifier = " [SMEARING_NEEDED]";
         }
         result.scf.error = `pw.x exited with code ${scfResult.exitCode}${classifier}: ${errSummary}`;
         console.log(`[QE-Worker] SCF attempt ${attempt + 1} failed for ${formula}${classifier}: ${errSummary.slice(-200)}`);
+
+        // Handler-driven override for the NEXT attempt. Each branch targets
+        // the specific failure mode — mirrors aiida's PwBaseWorkChain
+        // handle_electronic_convergence_not_reached / handle_diagonalization_errors
+        // / handle_unconverged_cholesky etc. Overrides accumulate; the static
+        // retryConfigs[attempt+1] provides the base, we patch on top.
+        const nextOverride: Partial<RetryConfig> = { ...handlerOverride };
+        if (classifier === " [SCF_NOT_CONVERGED]") {
+          // Halve mixing_beta (floor 0.03), bump maxSteps, force local-TF if still plain.
+          nextOverride.mixingBeta = Math.max(0.03, (params.mixingBeta ?? 0.3) * 0.5);
+          nextOverride.maxSteps = Math.max(params.maxSteps, (params.maxSteps ?? 300) + 200);
+          if ((params.mixingMode ?? "plain") === "plain") nextOverride.mixingMode = "local-TF";
+          nextOverride.mixingNdim = Math.max(params.mixingNdim ?? 8, 16);
+        } else if (classifier === " [DIAG_NOT_CONVERGED]" || classifier === " [S_NOT_POSITIVE]") {
+          // Escalate diagonalization: david → cg → ppcg. Raise diago_thr_init
+          // so the initial diagonalization doesn't over-tighten before SCF.
+          const currentDiag = params.diag ?? "david";
+          nextOverride.diag = currentDiag === "david" ? "cg" : "ppcg";
+          nextOverride.diagoThrInit = "1.0d-4";
+        } else if (classifier === " [CHARGE_WRONG]") {
+          // Restart wavefunctions/potential from atomic superposition.
+          nextOverride.startingwfc = "random";
+          nextOverride.startingpot = "atomic";
+          nextOverride.mixingBeta = Math.max(0.05, (params.mixingBeta ?? 0.3) * 0.5);
+        } else if (classifier === " [SMEARING_NEEDED]") {
+          // Metal mis-detected as insulator: widen smearing + force MV.
+          nextOverride.smearing = "mv";
+          nextOverride.degauss = Math.max(params.degauss ?? 0.005, 0.03);
+        }
+        if (Object.keys(nextOverride).length > Object.keys(handlerOverride).length) {
+          const changed = Object.entries(nextOverride)
+            .filter(([k, v]) => (handlerOverride as any)[k] !== v)
+            .map(([k, v]) => `${k}=${v}`)
+            .join(", ");
+          console.log(`[QE-Worker] Handler override for ${formula} attempt ${attempt + 2}: ${changed}`);
+        }
+        handlerOverride = nextOverride;
         retryCount = attempt + 1;
       } else if (result.scf.converged) {
         scfConverged = true;
@@ -3936,12 +4049,10 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     if (scfUsable && result.scf?.fermiEnergy !== null) {
       try {
         const cOverAVal = estimateCOverA(elements, counts);
-        const ELEMENT_CUTOFFS_BANDS: Record<string, number> = {
-          H: 100, O: 70, F: 80, N: 60, Cl: 60, S: 55, P: 55, Se: 50, Br: 50,
-          Li: 60, Be: 60, B: 55, C: 60, Na: 60, Mg: 55, Al: 50, Si: 50,
-        };
+        // Uses module-level SPECIES_ECUTWFC. Must match the SCF-path cutoff
+        // so the bands calculation reads the same .save/ wavefunctions.
         const hasHydrogenBands = elements.includes("H");
-        const rawEcutwfcBands = elements.reduce((max, el) => Math.max(max, ELEMENT_CUTOFFS_BANDS[el] ?? 45), hasHydrogenBands ? 80 : 45);
+        const rawEcutwfcBands = computeEcutwfc(elements, 0, 80, 45);
         const baseEcutwfcBands = Math.max(rawEcutwfcBands, hasHydrogenBands ? 100 : 60);
         // Use the same broad detector as the SCF — bands must run with the
         // same nspin or it will fail to read the SCF .save/ wavefunctions.
