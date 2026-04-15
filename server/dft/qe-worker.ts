@@ -2263,20 +2263,29 @@ function generateHydrideCagePositions(
 }
 
 function autoPhononQGrid(elements: string[]): [number, number, number] {
+  // Screening-quality q-grid. Prior 6×6×6 hydride default = 216 q-points,
+  // which pushed ph.x past the wall-time budget on worker2 (LaH10: exit=-1
+  // after 2+h, no complete .dyn set → q2r.x fallback fails too). aiida's
+  // screening protocol uses 2×2×2 or 3×3×3; this is enough to detect
+  // imaginary modes and estimate α²F(ω). Coarse enough to finish within
+  // the pipeline budget, dense enough for hydride H-modes to sample.
   const hasHydrogen = elements.includes("H");
-  if (hasHydrogen) return [6, 6, 6];
-  return [4, 4, 4];
+  if (hasHydrogen) return [3, 3, 3];
+  return [2, 2, 2];
 }
 
 function generatePhononInput(formula: string, elements: string[] = []): string {
   const prefix = formula.replace(/[^a-zA-Z0-9]/g, "");
   const [nq1, nq2, nq3] = autoPhononQGrid(elements);
+  // tr2_ph=1.0d-12 is the aiida-quantumespresso screening default; the prior
+  // 1.0d-14 is publication-quality and costs 2-3x wall time without changing
+  // screening-level Tc estimates.
   return `Phonon dispersions on ${nq1}x${nq2}x${nq3} grid
 &INPUTPH
   prefix = '${prefix}',
   outdir = './tmp',
   fildyn = '${prefix}.dyn',
-  tr2_ph = 1.0d-14,
+  tr2_ph = 1.0d-12,
   ldisp = .true.,
   nq1 = ${nq1}, nq2 = ${nq2}, nq3 = ${nq3},
 /
@@ -3552,6 +3561,18 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       result.vcRelaxed = true;
     }
 
+    // Skip vc-relax for high-pressure ternary+ hydrides. Empirically these
+    // burn ~90 min per attempt on worker2 and produce no usable geometry
+    // (vc-relax exit=2, no final ATOMIC_POSITIONS block): e.g. YH9Na2,
+    // Li2LaH12, LaH11Li2 at 175-200 GPa — all three hit the same pathology
+    // in the Apr-15 run. Cell optimisation is extremely stiff at these
+    // pressures and BFGS destabilises. Use the xTB pre-relaxed geometry +
+    // prototype lattice directly and let SCF do its job.
+    if (!result.vcRelaxed && workerPressure >= 100 && elements.includes("H") && elements.length >= 3) {
+      console.log(`[QE-Worker] Skipping vc-relax for ${formula} — high-P ternary+ hydride (P=${workerPressure} GPa, ${elements.length} elements); cell optimisation unreliable above 100 GPa, proceeding with xTB geometry (saves ~90 min)`);
+      result.vcRelaxed = true;
+    }
+
     try {
       if (result.vcRelaxed) {
         // Already set from verified-compound shortcut, skip the actual run
@@ -3790,9 +3811,15 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
 
       if (scfResult.exitCode !== 0 && !result.scf.converged) {
         // QE writes the actual error to stdout; stderr only has MPI_ABORT boilerplate.
-        // Extract the meaningful tail of stdout (last 600 chars) for diagnosis.
+        // Two different views of the output:
+        //   - stdoutTail (600 chars): for the human-readable error summary.
+        //   - combined (full stdout + stderr): for classifier matching. The
+        //     diagnostic strings ("convergence NOT achieved", etc.) are
+        //     written BEFORE the ~1.5 KB timing footer, so a last-600-char
+        //     tail misses them on long runs (LaH12-class: 1h28m, huge
+        //     footer). Scan the whole output for the classifier keywords.
         const stdoutTail = scfResult.stdout.slice(-600);
-        const combined = scfResult.stderr + "\n" + stdoutTail;
+        const combined = scfResult.stderr + "\n" + scfResult.stdout;
 
         // XC functional conflicts (igcx/igcc) arise when a PP encodes a different
         // functional than input_dft — treating as a PP error skips wasteful retries.
@@ -3971,6 +3998,35 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
         (phResult.exitCode === 0 || result.phonon.converged || dynFilesExist);
       if (fallbackNeeded) {
         const prefix = formula.replace(/[^a-zA-Z0-9]/g, "");
+        // Guard: q2r.x needs the .dyn0 summary + every .dynN file listed
+        // inside it (one per irreducible q-point). If ph.x was killed
+        // mid-run (exit=-1 case), partial dyn sets will make q2r.x fail
+        // with exit=2 and no useful diagnostic. Validate the set first.
+        const dyn0Path = path.join(jobDir, `${prefix}.dyn0`);
+        let dynSetComplete = false;
+        let dynReason = "no dyn0 file";
+        if (fs.existsSync(dyn0Path)) {
+          try {
+            const dyn0Content = fs.readFileSync(dyn0Path, "utf8");
+            const qCountMatch = dyn0Content.trim().split("\n")[0]?.trim().split(/\s+/);
+            const nQ = qCountMatch ? parseInt(qCountMatch[0]) || parseInt(qCountMatch[2] || "0") : 0;
+            if (nQ > 0) {
+              let missing = 0;
+              for (let iq = 1; iq <= nQ; iq++) {
+                if (!fs.existsSync(path.join(jobDir, `${prefix}.dyn${iq}`))) missing++;
+              }
+              if (missing === 0) dynSetComplete = true;
+              else dynReason = `${missing}/${nQ} dyn files missing`;
+            } else {
+              dynReason = "could not parse q-point count from dyn0";
+            }
+          } catch (e: any) {
+            dynReason = `dyn0 read error: ${(e.message || "").slice(0, 80)}`;
+          }
+        }
+        if (!dynSetComplete) {
+          console.log(`[QE-Worker] Skipping q2r.x fallback for ${formula} — incomplete dyn set (${dynReason}); ph.x was likely killed before producing all q-points`);
+        } else {
         console.log(`[QE-Worker] Running q2r.x+matdyn.x fallback for ${formula} (exit=${phResult.exitCode}, conv=${result.phonon.converged}, dyn=${dynFilesExist})`);
         try {
           // q2r.x: convert dynamical matrices to real-space force constants
@@ -4029,6 +4085,7 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
         } catch (postErr: any) {
           console.log(`[QE-Worker] Phonon post-processing failed for ${formula}: ${postErr.message?.slice(0, 150)}`);
         }
+        } // close else (dyn set complete branch)
       }
 
       if (phResult.exitCode !== 0 && !result.phonon.converged) {

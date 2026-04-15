@@ -1082,6 +1082,22 @@ export async function computeDFTBandStructure(
   };
 
   try {
+    // Guard: bands calc is non-self-consistent — it reads the SCF charge
+    // density + wavefunctions from ${outdir}/${prefix}.save/. If the SCF
+    // save directory is missing (tmp cleaned, wrong prefix, SCF never
+    // finished its write), pw.x aborts immediately with MPI_ABORT=1 and
+    // no useful stderr. Check upfront so we log the real cause.
+    const cleanPrefix = formula.replace(/[^a-zA-Z0-9]/g, "");
+    const saveDir = path.join(jobDir, "tmp", `${cleanPrefix}.save`);
+    const chargeDensity = path.join(saveDir, "charge-density.dat");
+    const chargeDensityHdf5 = path.join(saveDir, "charge-density.hdf5");
+    if (!fs.existsSync(saveDir) || (!fs.existsSync(chargeDensity) && !fs.existsSync(chargeDensityHdf5))) {
+      result.error = `SCF save directory missing or incomplete (looked for ${saveDir}). Bands calculation cannot proceed without SCF wavefunctions.`;
+      console.log(`[BandCalc] Skipping bands for ${formula}: ${result.error}`);
+      result.wallTimeSeconds = (Date.now() - startTime) / 1000;
+      return result;
+    }
+
     const bandsInput = generateBandsInput(formula, elements, counts, latticeA, positions, kPath, ecutwfc, nspin, crystalSystem, cOverA, latticeB, ecutrho);
     const bandsInputFile = path.join(jobDir, "bands.in");
     fs.writeFileSync(bandsInputFile, bandsInput);
@@ -1096,8 +1112,15 @@ export async function computeDFTBandStructure(
     fs.writeFileSync(path.join(jobDir, "bands_pw.out"), pwResult.stdout);
 
     if (pwResult.exitCode !== 0 && !pwResult.stdout.includes("End of band structure calculation")) {
-      result.error = `pw.x bands exited with code ${pwResult.exitCode}: ${pwResult.stderr.slice(0, 300)}`;
-      console.log(`[BandCalc] pw.x bands failed for ${formula}: ${result.error.slice(0, 200)}`);
+      // stderr is almost always just the MPI_ABORT boilerplate ("rank 0 in
+      // communicator MPI_COMM_WORLD"). QE writes the real error to stdout.
+      // Extract the `Error in routine` / `%%%%` block if present, otherwise
+      // take the tail of stdout before the MPI_ABORT call.
+      const stdoutTail = pwResult.stdout.slice(-1000);
+      const iosysMatch = pwResult.stdout.match(/Error in routine[^\n]*\n\s*([^\n]{0,200})/);
+      const detail = iosysMatch ? iosysMatch[1].trim() : stdoutTail.slice(-300);
+      result.error = `pw.x bands exited with code ${pwResult.exitCode}: ${detail}`;
+      console.log(`[BandCalc] pw.x bands failed for ${formula}: ${result.error.slice(0, 250)}`);
       result.wallTimeSeconds = (Date.now() - startTime) / 1000;
       return result;
     }
