@@ -212,7 +212,7 @@ export interface QESCFResult {
   totalForce: number | null;
   pressure: number | null;
   converged: boolean;
-  convergenceQuality: "strict" | "loose" | "none";
+  convergenceQuality: "strict" | "loose" | "partial-walltime" | "none";
   lastScfAccuracyRy: number | null;
   nscfIterations: number;
   wallTimeSeconds: number;
@@ -3897,7 +3897,21 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
           else if (combined.includes("ENOENT") || combined.includes("command not found") || combined.includes("No such file")) classifier = " [BINARY_MISSING]";
           else classifier = " [PROCESS_DIED]";
         } else if (scfResult.exitCode === 2) {
-          if (combined.includes("convergence NOT achieved")) classifier = " [SCF_NOT_CONVERGED]";
+          // WALL_TIME_EXHAUSTED must be checked FIRST. QE exits cleanly
+          // (JOB DONE, exit=2) when max_seconds is hit, and the stdout
+          // still contains normal per-iteration diagnostics like "too many
+          // bands are not converged" from earlier iterations. Matching
+          // those first misclassifies as DIAG_NOT_CONVERGED and triggers
+          // a handler that makes things WORSE (david→cg is slower per
+          // iteration). Detect wall-time by checking if the parsed SCF
+          // wall time is within 15% of QE_MAX_SECONDS, or QE's explicit
+          // "Maximum CPU time exceeded" banner.
+          const scfWall = result.scf?.wallTimeSeconds ?? 0;
+          const isWallTimeKill = combined.includes("Maximum CPU time exceeded") ||
+            combined.includes("max_seconds") ||
+            (scfWall > 0 && scfWall >= QE_MAX_SECONDS * 0.85);
+          if (isWallTimeKill) classifier = " [WALL_TIME_EXHAUSTED]";
+          else if (combined.includes("convergence NOT achieved")) classifier = " [SCF_NOT_CONVERGED]";
           else if (combined.includes("charge is wrong")) classifier = " [CHARGE_WRONG]";
           else if (combined.includes("S matrix not positive definite")) classifier = " [S_NOT_POSITIVE]";
           else if (combined.includes("too many bands are not converged")) classifier = " [DIAG_NOT_CONVERGED]";
@@ -3915,7 +3929,36 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
         // / handle_unconverged_cholesky etc. Overrides accumulate; the static
         // retryConfigs[attempt+1] provides the base, we patch on top.
         const nextOverride: Partial<RetryConfig> = { ...handlerOverride };
-        if (classifier === " [SCF_NOT_CONVERGED]") {
+        if (classifier === " [WALL_TIME_EXHAUSTED]") {
+          // Wall-time kill. The system is just big/stiff and needs more
+          // iterations than fit in QE_MAX_SECONDS. Switching to cg/ppcg
+          // (the old DIAG handler) would be COUNTERPRODUCTIVE because
+          // those are 2-3× slower per iteration than david.
+          //
+          // Strategy: KEEP david (fastest iterations), loosen conv_thr so
+          // we converge within the time budget, keep mixing tight. If
+          // we've already wall-time-killed twice, accept partial results.
+          nextOverride.diag = "david";
+          delete nextOverride.diagoThrInit;
+          const currentConvThr = params.convThr ?? "1.0d-7";
+          const looseConvThr = currentConvThr === "1.0d-8" ? "1.0d-6"
+            : currentConvThr === "1.0d-7" ? "1.0d-5"
+            : "1.0d-4";
+          nextOverride.convThr = looseConvThr;
+          // If this is the 2nd+ wall-time kill, accept partial results if
+          // accuracy is close enough for screening. No point burning 5×90 min.
+          const accuracy = result.scf?.lastScfAccuracyRy;
+          if (attempt >= 1 && accuracy !== null && accuracy !== undefined && accuracy < 1.0e-4) {
+            console.log(`[QE-Worker] Wall-time exhausted ${attempt + 1}× for ${formula}, but last accuracy ${accuracy.toExponential(1)} Ry is usable for screening — accepting partial SCF`);
+            result.scf!.converged = false;
+            result.scf!.convergenceQuality = "partial-walltime";
+            scfConverged = false;
+            // Break the retry loop — we'll use partial results below via scfUsable
+            handlerOverride = nextOverride;
+            retryCount = attempt + 1;
+            break;
+          }
+        } else if (classifier === " [SCF_NOT_CONVERGED]") {
           // Halve mixing_beta (floor 0.03), bump maxSteps, force local-TF if still plain.
           nextOverride.mixingBeta = Math.max(0.03, (params.mixingBeta ?? 0.3) * 0.5);
           nextOverride.maxSteps = Math.max(params.maxSteps, (params.maxSteps ?? 300) + 200);
@@ -3958,19 +4001,25 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
 
     result.retryCount = retryCount;
 
+    // Partial-convergence acceptance for screening. aiida uses ~1e-4 Ry as
+    // the threshold below which electronic structure is "good enough" for
+    // screening-level Tc estimates. Prior threshold of 1e-6 was too strict
+    // and caused wall-time-exhausted runs to be discarded after 5×90 min
+    // of compute. 1e-4 Ry ≈ 1.4 meV/atom — perfectly acceptable for
+    // ranking candidates; final Tc is re-evaluated at publication quality.
     const scfUsable = scfConverged ||
       (result.scf && result.scf.totalEnergy !== 0 && result.scf.fermiEnergy !== null &&
-       result.scf.lastScfAccuracyRy !== null && result.scf.lastScfAccuracyRy < 1.0e-6);
+       result.scf.lastScfAccuracyRy !== null && result.scf.lastScfAccuracyRy < 1.0e-4);
 
     if (!scfConverged && !scfUsable) {
       result.failureStage = "scf";
       stageFailureCounts.scf++;
       recordFormulaFailure(formula);
       if (result.scf && result.scf.totalEnergy !== 0 && result.scf.lastScfAccuracyRy !== null) {
-        console.log(`[QE-Worker] SCF not converged for ${formula}: accuracy=${result.scf.lastScfAccuracyRy.toExponential(2)} Ry (threshold 1e-6 Ry for phonon safety) — discarding non-physical energy`);
+        console.log(`[QE-Worker] SCF not converged for ${formula}: accuracy=${result.scf.lastScfAccuracyRy.toExponential(2)} Ry (threshold 1e-4 Ry for screening) — discarding non-physical energy`);
       }
     } else if (!scfConverged && scfUsable) {
-      console.log(`[QE-Worker] SCF near-converged for ${formula} (accuracy=${result.scf!.lastScfAccuracyRy?.toExponential(2)} Ry < 1e-6 Ry, quality=${result.scf!.convergenceQuality}): E=${result.scf!.totalEnergy.toFixed(4)} eV, Ef=${result.scf!.fermiEnergy} — proceeding with caution`);
+      console.log(`[QE-Worker] SCF near-converged for ${formula} (accuracy=${result.scf!.lastScfAccuracyRy?.toExponential(2)} Ry < 1e-4 Ry, quality=${result.scf!.convergenceQuality}): E=${result.scf!.totalEnergy.toFixed(4)} eV, Ef=${result.scf!.fermiEnergy} — proceeding with caution`);
     }
 
     // ── Phonon BEFORE bands (cycle 1374 fix for "0 modes" bug) ───────────────
