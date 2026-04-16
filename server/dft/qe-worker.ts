@@ -1373,10 +1373,18 @@ function estimateBOverA(elements: string[], counts: Record<string, number>): num
 
 // Default kspacing (Å⁻¹) — matches aiida-quantumespresso "fast" protocol.
 // Lowering to 0.10 gives publication quality; raising to 0.30 gives
-// coarse screening. Override via env QE_KSPACING for whole-pipeline tuning.
+// Screening kspacing. Prior 0.157 Å⁻¹ was aiida's "balanced" protocol
+// (publication-adjacent quality) — way too dense for a screening pipeline
+// that tests hundreds of candidates. At a=5 Å + nspin=2, 0.157 generates
+// ~729 k-points (1458 spin channels) per SCF iteration vs. 0.25 → ~125
+// k-points (250 spin channels) — a 5–6× per-iteration speedup.
+// aiida "fast" = 0.50 Å⁻¹, aiida "balanced" = 0.15. We pick 0.25 as
+// the sweet spot: good enough for band structure + Tc screening (~0.1 eV
+// accuracy), fast enough to converge within wall-time on 3 MPI ranks.
+// Override via env QE_KSPACING for whole-pipeline tuning.
 const DEFAULT_KSPACING = (() => {
   const env = parseFloat(process.env.QE_KSPACING ?? "");
-  return Number.isFinite(env) && env > 0.02 && env < 0.5 ? env : 0.157;
+  return Number.isFinite(env) && env > 0.02 && env < 0.5 ? env : 0.25;
 })();
 
 function autoKPoints(latticeA: number, cOverA?: number, minK: number = 4, dimensionality?: string, kspacing: number = DEFAULT_KSPACING): string {
