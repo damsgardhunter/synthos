@@ -2958,19 +2958,27 @@ function generateVCRelaxInput(
   const hasMagneticEl = elements.some(el => el in MAGNETIC_ELEMENTS);
   const vcRelaxDegauss = hasMagneticEl ? 0.02 : 0.015;
 
+  // vc-relax has its own tighter wall-time cap. Empirically any vc-relax
+  // that hasn't converged in 30 min on worker2 won't converge at all —
+  // BFGS oscillates indefinitely on stiff cells (all-TM intermetallics,
+  // high-P hydrides, spin-polarised heavy-element systems). Cap at 30
+  // min; SCF will proceed from the unrelaxed xTB geometry if vc-relax
+  // didn't finish. Floor at 600s so trivially-simple cells still get
+  // a chance.
+  const VC_RELAX_MAX_SECONDS = Math.max(600, Math.min(QE_MAX_SECONDS, 1800));
   return `&CONTROL
   calculation = 'vc-relax',
   restart_mode = 'from_scratch',
   prefix = '${prefix}',
   outdir = './tmp',
-  disk_io = 'medium',
+  disk_io = 'nowf',
   pseudo_dir = '${QE_PSEUDO_DIR_INPUT}',
   tprnfor = .true.,
   tstress = .true.,
   forc_conv_thr = 1.0d-3,
   etot_conv_thr = 1.0d-4,
   nstep = 250,
-  max_seconds = ${QE_MAX_SECONDS},
+  max_seconds = ${VC_RELAX_MAX_SECONDS},
 /
 &SYSTEM
   ibrav = 0,
@@ -3635,6 +3643,18 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       result.vcRelaxed = true;
     }
 
+    // Skip vc-relax for all-TM intermetallics (3+ elements, every element
+    // a transition metal). Apr-16 run: Mo2Nb3Ti hit wall-time at 1h28m
+    // with no geometry. Multi-TM cells have dense d-band cross-talk during
+    // cell optimisation and BFGS destabilises long before convergence.
+    // The prototype or xTB-relaxed lattice is a fine starting point for
+    // SCF — the TM-TM bond lengths don't shift much even in the fully
+    // relaxed solution.
+    if (!result.vcRelaxed && elements.length >= 3 && elements.every(el => TRANSITION_METALS.has(el))) {
+      console.log(`[QE-Worker] Skipping vc-relax for ${formula} — all-TM intermetallic (${elements.length} TMs: ${elements.join(",")}); BFGS destabilises, proceeding with xTB geometry (saves ~90 min)`);
+      result.vcRelaxed = true;
+    }
+
     try {
       if (result.vcRelaxed) {
         // Already set from verified-compound shortcut, skip the actual run
@@ -3644,10 +3664,15 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       const vcRelaxFile = path.join(jobDir, "vc_relax.in");
       fs.writeFileSync(vcRelaxFile, vcRelaxInput);
 
+      // Match the input-file's VC_RELAX_MAX_SECONDS (30 min) + 60s grace.
+      // Prevents the outer QE_TIMEOUT_MS (90 min) from holding the worker
+      // slot open waiting for a vc-relax that's already exited.
+      const vcRelaxKillMs = 1800 * 1000 + 60_000;
       const vcResult = await runQECommand(
         path.posix.join(getQEBinDir(), "pw.x"),
         vcRelaxFile,
         jobDir,
+        vcRelaxKillMs,
       );
 
       fs.writeFileSync(path.join(jobDir, "vc_relax.out"), vcResult.stdout);
