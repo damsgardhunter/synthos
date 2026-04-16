@@ -77,23 +77,44 @@ export function toWslPath(winPath: string): string {
  * instead of Node.js stdin piping — this avoids a known WSL issue where wsl.exe
  * does not reliably forward piped stdin from a Node.js parent process.
  */
+/**
+ * Returns the MPI wrapper command + args if QE_MPI_RANKS is set (>= 2).
+ * Example with QE_MPI_RANKS=4: { cmd: "mpirun", args: ["-np", "4"] }.
+ * Override launcher via QE_MPI_WRAPPER (e.g. "srun") and pass extra args
+ * via QE_MPI_ARGS. The #1 throughput win for pw.x on a multi-core VM —
+ * typically 4-8× faster for 5-15 atom SCF on 4-8 ranks.
+ */
+function getMpiWrapper(): { cmd: string; args: string[] } | null {
+  const ranks = parseInt(process.env.QE_MPI_RANKS ?? "", 10);
+  if (!Number.isFinite(ranks) || ranks < 2) return null;
+  const cmd = process.env.QE_MPI_WRAPPER || "mpirun";
+  const extra = (process.env.QE_MPI_ARGS || "").split(/\s+/).filter(Boolean);
+  return { cmd, args: ["-np", String(ranks), ...extra] };
+}
+
 export function spawnQE(
   binary: string,
   options: { cwd: string; stdio: ("pipe" | "inherit" | "ignore")[]; wslInputFile?: string },
 ): ChildProcess {
+  const mpi = getMpiWrapper();
   if (IS_WINDOWS) {
     if (options.wslInputFile) {
       // Use bash -c with file redirection to bypass WSL stdin-pipe unreliability
-      const cmd = `'${binary}' < '${options.wslInputFile}'`;
+      const mpiPrefix = mpi ? `${mpi.cmd} ${mpi.args.map(a => `'${a}'`).join(" ")} ` : "";
+      const cmd = `${mpiPrefix}'${binary}' < '${options.wslInputFile}'`;
       return nodeSpawn("wsl.exe", ["-d", "Ubuntu", "--", "bash", "-c", cmd], {
         cwd: options.cwd,
         stdio: ["ignore", "pipe", "pipe"],
       });
     }
-    return nodeSpawn("wsl.exe", ["-d", "Ubuntu", "--", binary], {
+    const innerArgs = mpi ? [mpi.cmd, ...mpi.args, binary] : [binary];
+    return nodeSpawn("wsl.exe", ["-d", "Ubuntu", "--", ...innerArgs], {
       cwd: options.cwd,
       stdio: options.stdio as any,
     });
+  }
+  if (mpi) {
+    return nodeSpawn(mpi.cmd, [...mpi.args, binary], { cwd: options.cwd, stdio: options.stdio as any });
   }
   return nodeSpawn(binary, { cwd: options.cwd, stdio: options.stdio as any });
 }

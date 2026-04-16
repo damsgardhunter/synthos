@@ -1442,6 +1442,42 @@ function computeEcutwfc(elements: string[], extraBoost: number = 0, hydrogenFloo
   return raw + extraBoost;
 }
 
+// Explicit nbnd reduces iteration cost for heavy-5d systems where the
+// QE default (≈ nelec/2 + 20% buffer) drifts upward with total electron
+// count and wastes effort on high-lying unoccupied bands we never use.
+// Formula mirrors aiida-quantumespresso's PwBaseWorkChain default:
+// nbnd = ceil(nelec/2) + max(4, ceil(nelec * 0.10))
+// Doubled when nspin=2 because each band is per-spin in QE.
+function computeNbnd(elements: string[], counts: Record<string, number>, nspin: number = 1): number {
+  let nelec = 0;
+  for (const el of elements) {
+    const n = Math.round(counts[el] ?? 0);
+    nelec += n * getZValence(el);
+  }
+  const nbndSpin1 = Math.ceil(nelec / 2) + Math.max(4, Math.ceil(nelec * 0.10));
+  return nspin === 2 ? nbndSpin1 * 2 : nbndSpin1;
+}
+
+// Tiered max_seconds. 88 min is too tight for heavy-5d intermetallics
+// (N4W3, Re2Sn2W3) and high-P hydrides (LaH12, YH9Na2) — both burn the
+// full budget without converging. Give these classes a 3× budget; keep
+// the flat budget for everything else. Returns seconds.
+function computeMaxSeconds(elements: string[], pressureGpa: number = 0): number {
+  const base = QE_MAX_SECONDS;
+  const heavy5d = new Set(["Hf", "Ta", "W", "Re", "Os", "Ir", "Pt", "Au"]);
+  const heavy5dCount = elements.filter(el => heavy5d.has(el)).length;
+  const hasH = elements.includes("H");
+  // Heavy-TM (2+ heavy 5d) OR high-P hydride (P >= 100 GPa + H): 3× budget.
+  if (heavy5dCount >= 2 || (pressureGpa >= 100 && hasH)) {
+    return Math.floor(base * 3);
+  }
+  // Single heavy-TM or H-content only: 1.5× budget.
+  if (heavy5dCount >= 1 || hasH) {
+    return Math.floor(base * 1.5);
+  }
+  return base;
+}
+
 // Returns true if the system can plausibly carry a net spin moment and should
 // therefore be run with nspin=2. Catches cases the narrow MAGNETIC_ELEMENTS
 // list misses: 4d/5d TMs (Ru, Pd, Ta, W…), TM-hydrides, TM-nitrides, and
@@ -2774,7 +2810,7 @@ function generateSCFInputWithParams(
   counts: Record<string, number>,
   latticeA: number,
   positions: Array<{ element: string; x: number; y: number; z: number }>,
-  params: { mixingBeta: number; maxSteps: number; diag: string; smearing?: string; degauss?: number; ecutwfcBoost?: number; convThr?: string; forcConvThr?: string; etotConvThr?: string; dftPlusULines?: string; dftPlusUNspin2?: boolean; mixingMode?: string; mixingNdim?: number; startingwfc?: string; startingpot?: string; diagoThrInit?: string },
+  params: { mixingBeta: number; maxSteps: number; diag: string; smearing?: string; degauss?: number; ecutwfcBoost?: number; convThr?: string; forcConvThr?: string; etotConvThr?: string; dftPlusULines?: string; dftPlusUNspin2?: boolean; mixingMode?: string; mixingNdim?: number; startingwfc?: string; startingpot?: string; diagoThrInit?: string; restartFromScratch?: boolean; maxSecondsOverride?: number },
 ): string {
   const totalAtoms = positions.length;
   const nTypes = elements.length;
@@ -2821,18 +2857,26 @@ function generateSCFInputWithParams(
     : (broadMagnetic ? generateMagnetizationLines(elements, counts, isAFMCandidate(elements, counts), !hasMagEl) : "");
   const hubbardBlock = params.dftPlusULines ?? "";
 
+  const nspinOut = useNspin2 ? 2 : 1;
+  const nbnd = computeNbnd(elements, counts, nspinOut);
+  // restart_mode='restart' on retry attempts 2+ preserves the partial SCF
+  // charge density from the previous wall-time-killed attempt instead of
+  // throwing it away — aiida's standard move for ElectronicMaxStep /
+  // MaxSeconds restarts. Saves 30-60% wall time on the second attempt
+  // for slow-converging heavy-TM intermetallics.
+  const restartMode = params.restartFromScratch === false ? "restart" : "from_scratch";
   return `&CONTROL
   calculation = 'scf',
-  restart_mode = 'from_scratch',
+  restart_mode = '${restartMode}',
   prefix = '${formula.replace(/[^a-zA-Z0-9]/g, "")}',
   outdir = './tmp',
-  disk_io = 'medium',
+  disk_io = 'nowf',
   pseudo_dir = '${QE_PSEUDO_DIR_INPUT}',
   tprnfor = .true.,
   tstress = .true.,
   forc_conv_thr = ${forcConvThr},
   etot_conv_thr = ${etotConvThr},
-  max_seconds = ${QE_MAX_SECONDS},
+  max_seconds = ${params.maxSecondsOverride ?? QE_MAX_SECONDS},
 /
 &SYSTEM
   ibrav = 0,
@@ -2840,11 +2884,12 @@ function generateSCFInputWithParams(
   ntyp = ${nTypes},
   ecutwfc = ${ecutwfc},
   ecutrho = ${ecutrho},
+  nbnd = ${nbnd},
   input_dft = 'PBE',
   occupations = 'smearing',
   smearing = '${smearing}',
   degauss = ${degauss},
-  nspin = ${useNspin2 ? 2 : 1},
+  nspin = ${nspinOut},
 ${magBlock}${hubbardBlock}/
 &ELECTRONS
   electron_maxstep = ${params.maxSteps},
@@ -2853,7 +2898,8 @@ ${magBlock}${hubbardBlock}/
   mixing_mode = '${params.mixingMode ?? "plain"}',
   mixing_ndim = ${params.mixingNdim ?? 8},
   diagonalization = '${params.diag}',
-${params.diagoThrInit ? `  diago_thr_init = ${params.diagoThrInit},\n` : ""}${params.startingwfc ? `  startingwfc = '${params.startingwfc}',\n` : ""}${params.startingpot ? `  startingpot = '${params.startingpot}',\n` : ""}  scf_must_converge = .false.,
+  diago_thr_init = ${params.diagoThrInit ?? "1.0d-4"},
+${params.startingwfc ? `  startingwfc = '${params.startingwfc}',\n` : ""}${params.startingpot ? `  startingpot = '${params.startingpot}',\n` : ""}  scf_must_converge = .false.,
 /
 ATOMIC_SPECIES
 ${atomicSpecies}
@@ -3120,7 +3166,7 @@ function parseVCRelaxOutput(stdout: string): VCRelaxResult {
   return result;
 }
 
-function runQECommand(binary: string, inputFile: string, workDir: string): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+function runQECommand(binary: string, inputFile: string, workDir: string, timeoutMsOverride?: number): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   return new Promise((resolve) => {
     // On Windows, wsl.exe does not reliably forward Node.js piped stdin to the inner
     // process. Use bash -c file-redirection instead so I/O stays within WSL.
@@ -3159,6 +3205,10 @@ function runQECommand(binary: string, inputFile: string, workDir: string): Promi
     proc.stderr!.on("end", () => { stderrEnded = true; tryResolve(); });
 
     let killTimeout: ReturnType<typeof setTimeout> | null = null;
+    // +60s grace so QE's own max_seconds (set to wall-budget - 120s) fires
+    // first and produces a clean JOB DONE. Only if QE doesn't honor it do
+    // we force-kill here.
+    const killMs = (timeoutMsOverride ?? QE_TIMEOUT_MS) + 60_000;
     const timeout = setTimeout(() => {
       if (resolved) return;
       killProcessGracefully(proc);
@@ -3169,7 +3219,7 @@ function runQECommand(binary: string, inputFile: string, workDir: string): Promi
         try { inputStream?.destroy(); } catch {}
         resolve({ stdout, stderr: stderr + "\nTIMEOUT: QE calculation exceeded time limit", exitCode: -1 });
       }, 2000);
-    }, QE_TIMEOUT_MS);
+    }, killMs);
 
     proc.on("close", (code: number | null) => {
       exitCode = code ?? -1;
@@ -3742,7 +3792,7 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       console.log(`[QE-Worker] ${formula}: complex system (${elements.length} el, halogen=${hasHalogen}, highP-H=${isHighPHydride}) — using local-TF SCF schedule`);
     }
 
-    type RetryConfig = { mixingBeta: number; maxSteps: number; diag: string; smearing?: string; degauss?: number; ecutwfcBoost?: number; convThr?: string; forcConvThr?: string; etotConvThr?: string; mixingMode?: string; mixingNdim?: number; startingwfc?: string; startingpot?: string; diagoThrInit?: string };
+    type RetryConfig = { mixingBeta: number; maxSteps: number; diag: string; smearing?: string; degauss?: number; ecutwfcBoost?: number; convThr?: string; forcConvThr?: string; etotConvThr?: string; mixingMode?: string; mixingNdim?: number; startingwfc?: string; startingpot?: string; diagoThrInit?: string; restartFromScratch?: boolean };
 
     // Very complex systems (F + quaternary, 5+ elements, or DFT+U magnetic):
     // Start immediately with local-TF at beta=0.15. Each attempt also widens
@@ -3792,17 +3842,40 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     // based on what specifically went wrong, not a fixed sequence.
     let handlerOverride: Partial<RetryConfig> = {};
 
+    // Tiered wall-time budget. Heavy-5d intermetallics (W/Re/Os/Ir/Pt) and
+    // high-P hydrides need longer than the flat 88-min budget — empirically
+    // they hit it every single attempt on worker2 (Apr 16 run: N4W3,
+    // Re2Sn2W3, LaH12 all wall-timed ≥ 5 attempts each).
+    const effectiveMaxSeconds = computeMaxSeconds(elements, workerPressure);
+    const effectiveKillTimeoutMs = effectiveMaxSeconds * 1000 + 120_000;
+    if (effectiveMaxSeconds !== QE_MAX_SECONDS) {
+      console.log(`[QE-Worker] ${formula}: tier-adjusted max_seconds = ${effectiveMaxSeconds}s (${(effectiveMaxSeconds / 60).toFixed(0)} min) — heavy-TM or high-P hydride class`);
+    }
+
     for (let attempt = firstAttempt; attempt < retryConfigs.length && !scfConverged; attempt++) {
       const params: RetryConfig = { ...retryConfigs[attempt], ...handlerOverride };
+      // On retry attempts 2+ use restart_mode='restart' to recover the
+      // partial SCF charge density from the previous attempt (especially
+      // valuable when attempt 1 was killed on wall time at e.g. 200+
+      // iterations of SCF progress). attempt 0 and post-PP-reset attempts
+      // still use from_scratch.
+      const useRestart = attempt > firstAttempt && !(params as any).startingwfc;
       const scfInput = generateSCFInputWithParams(formula, elements, counts, latticeA, positions, {
         ...params,
+        restartFromScratch: useRestart ? false : true,
+        maxSecondsOverride: effectiveMaxSeconds - 120,
         dftPlusULines: dftPlusULines || undefined,
         dftPlusUNspin2: dftPlusUNspin2 || undefined,
       });
       const scfInputFile = path.join(jobDir, `scf_attempt${attempt}.in`);
       fs.writeFileSync(scfInputFile, scfInput);
 
-      if (attempt > 0) {
+      // Critical: only clean tmp when NOT restarting. restart_mode='restart'
+      // needs the previous attempt's ${prefix}.save/ directory intact — if
+      // we wipe it, pw.x aborts with "cannot open file". For from_scratch
+      // retries (e.g. after CHARGE_WRONG handler sets startingwfc=random),
+      // clean the tmp to avoid stale-state bugs.
+      if (attempt > 0 && !useRestart) {
         cleanQETmpDir(path.join(jobDir, "tmp"));
       }
 
@@ -3815,6 +3888,7 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
         path.posix.join(getQEBinDir(), "pw.x"),
         scfInputFile,
         jobDir,
+        effectiveKillTimeoutMs,
       );
 
       fs.writeFileSync(path.join(jobDir, `scf_attempt${attempt}.out`), scfResult.stdout);
