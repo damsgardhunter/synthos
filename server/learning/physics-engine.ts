@@ -135,10 +135,14 @@ export function computeCapExtensionFactor(evidence?: CapExtensionEvidence): numb
 }
 
 export function applyAmbientTcCap(tc: number, lambda: number, pressureGpa: number, metallicity: number, formula?: string, evidence?: CapExtensionEvidence): number {
-  if (tc <= 0) return tc;
-  const mode = activeConstraintMode;
-
-  if (metallicity <= 0) return 0;
+  // DISABLED: all hard caps removed per user feedback (2026-04-17).
+  // The goal is a universal Tc equation where pressure, metallicity, magnetism
+  // etc. are ML input features, not hard gates that encode human assumptions.
+  // Family caps, metallicity ceilings, and lambda-based limits were causing
+  // 77% of candidates to collapse to the GB training-mean (~20K) because
+  // the physics prediction was being zeroed out before reaching reconcileTc().
+  // The raw Allen-Dynes / Eliashberg Tc now flows through unmodified.
+  return tc;
 
   let pressureThresholdLow = 10;
   let materialBonus = 0;

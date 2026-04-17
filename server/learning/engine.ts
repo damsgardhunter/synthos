@@ -257,12 +257,12 @@ function clearGenerativeFeatureCache(): void {
   generativeFeatureCache.clear();
 }
 
-function computePhysicsOnlyTc(lambda: number, omegaLogCm1: number | null | undefined, muStar?: number, formula?: string): number {
+function computePhysicsOnlyTc(lambda: number, omegaLogCm1: number | null | undefined, muStar?: number, formula?: string, pressureGpa?: number): number {
   if (!lambda || lambda <= 0) return 0;
   const freq = omegaLogCm1 ?? 300;
   const mu = muStar ?? 0.12;
   const isHydride = formula ? detectHydrideForTc(formula) : false;
-  return allenDynesTcRaw(lambda, freq, mu, undefined, isHydride);
+  return allenDynesTcRaw(lambda, freq, mu, undefined, isHydride, formula, pressureGpa);
 }
 
 type HydrideClass = "none" | "hydrogen-doped" | "hydride" | "superhydride";
@@ -2291,13 +2291,13 @@ function computeEliashbergTc(lambda: number, omegaLog: number, muStar: number, f
   return Math.round(tc);
 }
 
-function estimateRawTc(lambdaML: number, logPhononFreq: number | null | undefined, muStar?: number, formula?: string): number {
+function estimateRawTc(lambdaML: number, logPhononFreq: number | null | undefined, muStar?: number, formula?: string, pressureGpa?: number): number {
   const freq = logPhononFreq ?? 200;
   const mu = muStar ?? 0.1;
   const lambda = Math.max(0.001, lambdaML);
   const isHydride = formula ? detectHydrideForTc(formula) : false;
 
-  const tc = allenDynesTcRaw(lambda, freq, mu, undefined, isHydride);
+  const tc = allenDynesTcRaw(lambda, freq, mu, undefined, isHydride, formula, pressureGpa);
   return Math.max(0, Math.round(tc));
 }
 
@@ -5578,27 +5578,25 @@ async function runAutonomousDiscoveryCycle(formula: string, opts?: { skipDbDupCh
     });
     const rawTc = physicsResult.eliashberg.predictedTc;
     const physicsTc = (Number.isFinite(rawTc) && rawTc > 0 && rawTc < 1000) ? rawTc : 0;
-    const cappedPhysicsTcAuto = physicsTc > 0
-      ? applyAmbientTcCap(Math.round(physicsTc), physicsResult.coupling.lambda, features.pressureGpa ?? 0, physicsResult.electronicStructure.metallicity ?? 0.5, formula)
-      : 0;
+    // No ambient Tc cap — the goal is to build a universal Tc equation where
+    // pressure, magnetism, band structure etc. are INPUT FEATURES, not hard gates.
+    // applyAmbientTcCap was encoding human assumptions that prevented discovering
+    // new physics (e.g., capping non-hydride ambient at 40K, metallicity-based
+    // ceilings). The ML model should learn these relationships from data.
+    const physicsTcRaw = physicsTc > 0 ? Math.round(physicsTc) : 0;
     const reconciledAuto = reconcileTc({
       gbPredicted: gbResult.tcPredicted > 0 ? Math.round(gbResult.tcPredicted) : undefined,
-      physicsTc: cappedPhysicsTcAuto > 0 ? cappedPhysicsTcAuto : undefined,
+      physicsTc: physicsTcRaw > 0 ? physicsTcRaw : undefined,
       physicsSigma: physicsResult.uncertaintyEstimate,
     });
-    const autoPhysExplicitlyZero = physicsTc === 0 && Number.isFinite(rawTc);
     let finalTc: number;
-    // Bug fix: when physics explicitly computes Tc=0 (Allen-Dynes returned a finite
-    // near-zero value that was floored to 0), the ML surrogate alone cannot override it.
-    // reconciledTc is built only from GB here (physicsTc=0 was excluded), so trusting
-    // it blindly causes all weak-coupling compounds (lambda~0.2) to survive at ~25 K
-    // (the GB training-set mean). Physics veto takes precedence.
-    if (autoPhysExplicitlyZero) {
-      finalTc = 0;
-    } else if (reconciledAuto.reconciledTc > 0) {
+    // When both physics and GB agree, use the reconciled value.
+    // When physics gives a valid prediction, trust it over the GB training-mean.
+    // When neither has a strong signal, use GB as a fallback.
+    if (reconciledAuto.reconciledTc > 0) {
       finalTc = reconciledAuto.reconciledTc;
-    } else if (cappedPhysicsTcAuto > 0) {
-      finalTc = cappedPhysicsTcAuto;
+    } else if (physicsTcRaw > 0) {
+      finalTc = physicsTcRaw;
     } else {
       finalTc = Math.round(gbResult.tcPredicted);
     }
