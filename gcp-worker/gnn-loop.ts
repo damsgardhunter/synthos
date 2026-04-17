@@ -146,11 +146,14 @@ function postJsonLongRunning(
         "Content-Type":   "application/json",
         "Content-Length": Buffer.byteLength(bodyStr),
       },
-      // Fail fast on connection issues (default TCP ETIMEDOUT is ~2 min on
-      // Linux). 30s is generous for localhost; if the service can't accept a
-      // TCP connection within 30s it's wedged and we should respawn it rather
-      // than waiting the full kernel SYN retry backoff.
-      timeout: 30_000,
+      // Connect timeout: the Python GNN service runs training epochs on GPU
+      // which block uvicorn's event loop for 60-120s per epoch. A 30s timeout
+      // causes every dispatched job to fail with ETIMEDOUT while the service is
+      // mid-epoch (it can't accept TCP connections until the epoch finishes).
+      // 180s allows the current epoch to complete before the connection attempt
+      // times out. Once connected, req.setTimeout(0) disables the timeout so
+      // the full training run (60+ min) isn't interrupted.
+      timeout: 180_000,
     };
 
     const req = http.request(opts, (res) => {
@@ -169,7 +172,7 @@ function postJsonLongRunning(
     });
 
     req.on("timeout", () => {
-      req.destroy(new Error(`connect ETIMEDOUT ${parsedUrl.hostname}:${parsedUrl.port} (30s connect timeout)`));
+      req.destroy(new Error(`connect ETIMEDOUT ${parsedUrl.hostname}:${parsedUrl.port} (180s connect timeout)`));
     });
     req.on("error", reject);
 
