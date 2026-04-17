@@ -15,6 +15,7 @@ import {
   classifyHydrogenBonding,
   type TcWithUncertainty,
 } from "./physics-engine";
+import { getStonerParameter } from "./elemental-data";
 import { estimateFamilyPressure } from "./candidate-generator";
 import { normalizeFormula, parseFormulaCounts as parseFormulaCountsCanonical } from "./utils";
 import { computeMiedemaFormationEnergy } from "./phase-diagram-engine";
@@ -931,6 +932,31 @@ export async function extractFeatures(formula: string, mat?: Partial<Material>, 
     familyPnictide,
     familyChalcogenide,
     familyHeavyFermion,
+    // ── Physics features for universal Tc equation ──
+    // These encode magnetism, band structure, hydrogen network topology, and
+    // pressure as continuous ML inputs rather than hard gates. The model learns
+    // their relationship to Tc from data instead of encoding human assumptions.
+    magneticFraction: (() => {
+      const MAGNETIC_ELS = new Set(["Mn","Cr","Co","Ni","Fe","Eu","Sm","Nd","Pr","Ce","Gd","Tb","Dy","Ho","Er","Tm"]);
+      return elements.filter(e => MAGNETIC_ELS.has(e)).reduce((s, e) => s + (counts[e] ?? 0), 0) / totalAtoms;
+    })(),
+    magneticElementCount: (() => {
+      const MAGNETIC_ELS = new Set(["Mn","Cr","Co","Ni","Fe","Eu","Sm","Nd","Pr","Ce","Gd","Tb","Dy","Ho","Er","Tm"]);
+      return elements.filter(e => MAGNETIC_ELS.has(e)).length;
+    })(),
+    bandGapEstimate: (electronic as any).bandGap ?? electronic.metallicity < 0.3 ? Math.max(0, (1 - electronic.metallicity) * 3) : 0,
+    metallicity: electronic.metallicity,
+    hMetalRatio: hydrogenRatio,
+    hFraction,
+    pressureGpa: effPressure,
+    stonerProduct: (() => {
+      let maxStoner = 0;
+      for (const el of elements) {
+        const I = getStonerParameter(el);
+        if (I !== null) maxStoner = Math.max(maxStoner, I * electronic.densityOfStatesAtFermi);
+      }
+      return maxStoner;
+    })(),
     _sourceFormula: normalizedFormula,
   };
   // Write to cache so subsequent callers (evolveRules, validateOnHeldOut, etc.) get a cache hit.
@@ -1431,13 +1457,13 @@ export async function runMLPrediction(
       if (isStronglyCorrelated) {
         const corrSuppression = Math.max(0.1, 1.0 - (corrStrength - 0.6) * 1.5);
         const rawAD = featureLambda > 0
-          ? allenDynesTcRaw(featureLambda, xgb.features.logPhononFreq ?? 300, effectiveMuStar, undefined, isHydrideML)
+          ? allenDynesTcRaw(featureLambda, xgb.features.logPhononFreq ?? 300, effectiveMuStar, undefined, isHydrideML, xgb.mat.formula, xgb.features.pressureGpa ?? 0)
           : 0;
         finalTc = Math.round(Math.max(0, rawAD * corrSuppression));
         tcMethod = `Allen-Dynes*corr_supp(${corrSuppression.toFixed(2)})`;
       } else {
         const allenDynesTc = featureLambda > 0
-          ? allenDynesTcRaw(featureLambda, xgb.features.logPhononFreq ?? 300, effectiveMuStar, undefined, isHydrideML)
+          ? allenDynesTcRaw(featureLambda, xgb.features.logPhononFreq ?? 300, effectiveMuStar, undefined, isHydrideML, xgb.mat.formula, xgb.features.pressureGpa ?? 0)
           : 0;
         finalTc = Math.round(allenDynesTc > 0 ? allenDynesTc : 0);
         tcMethod = "Allen-Dynes";
@@ -1543,12 +1569,12 @@ export async function runMLPrediction(
         if (isCorrelatedFB) {
           const suppression = Math.max(0.1, 1.0 - (corrStrengthFB - 0.6) * 1.5);
           const rawAD = featureLambda > 0
-            ? allenDynesTcRaw(featureLambda, c.features.logPhononFreq ?? 300, effectiveMuStarFB, undefined, isHydrideFB)
+            ? allenDynesTcRaw(featureLambda, c.features.logPhononFreq ?? 300, effectiveMuStarFB, undefined, isHydrideFB, c.mat.formula, c.features.pressureGpa ?? 0)
             : 0;
           finalTc = Math.round(Math.max(0, rawAD * suppression));
         } else {
           const physOnlyTc = featureLambda > 0
-            ? allenDynesTcRaw(featureLambda, c.features.logPhononFreq ?? 300, effectiveMuStarFB, undefined, isHydrideFB)
+            ? allenDynesTcRaw(featureLambda, c.features.logPhononFreq ?? 300, effectiveMuStarFB, undefined, isHydrideFB, c.mat.formula, c.features.pressureGpa ?? 0)
             : 0;
           finalTc = Math.round(Math.max(0, physOnlyTc));
         }
