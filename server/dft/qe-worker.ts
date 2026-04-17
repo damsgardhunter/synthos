@@ -3887,15 +3887,18 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
 
     for (let attempt = firstAttempt; attempt < retryConfigs.length && !scfConverged; attempt++) {
       const params: RetryConfig = { ...retryConfigs[attempt], ...handlerOverride };
-      // On retry attempts 2+ use restart_mode='restart' to recover the
-      // partial SCF charge density from the previous attempt (especially
-      // valuable when attempt 1 was killed on wall time at e.g. 200+
-      // iterations of SCF progress). attempt 0 and post-PP-reset attempts
-      // still use from_scratch.
-      const useRestart = attempt > firstAttempt && !(params as any).startingwfc;
+      // Recovery strategy on retry: disk_io='low' writes charge-density.dat
+      // but NOT .wfc files during wall-time-killed runs. restart_mode='restart'
+      // needs .wfc → davcio crash ("error reading file .wfc1"). Instead, use
+      // from_scratch + startingpot='file' which reads the charge density but
+      // generates fresh wavefunctions — recovers ~50-70% of SCF progress
+      // without needing the wfc files that wall-time kills never write.
+      const canRecover = attempt > firstAttempt && !(params as any).startingwfc;
+      const recoveryParams = canRecover ? { startingpot: "file" as string } : {};
       const scfInput = generateSCFInputWithParams(formula, elements, counts, latticeA, positions, {
         ...params,
-        restartFromScratch: useRestart ? false : true,
+        ...recoveryParams,
+        restartFromScratch: true,
         maxSecondsOverride: effectiveMaxSeconds - 120,
         dftPlusULines: dftPlusULines || undefined,
         dftPlusUNspin2: dftPlusUNspin2 || undefined,
@@ -3903,12 +3906,10 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       const scfInputFile = path.join(jobDir, `scf_attempt${attempt}.in`);
       fs.writeFileSync(scfInputFile, scfInput);
 
-      // Critical: only clean tmp when NOT restarting. restart_mode='restart'
-      // needs the previous attempt's ${prefix}.save/ directory intact — if
-      // we wipe it, pw.x aborts with "cannot open file". For from_scratch
-      // retries (e.g. after CHARGE_WRONG handler sets startingwfc=random),
-      // clean the tmp to avoid stale-state bugs.
-      if (attempt > 0 && !useRestart) {
+      // When canRecover=true, preserve tmp/ so startingpot='file' can read
+      // the charge density from the previous attempt. Otherwise clean to
+      // avoid stale-state bugs (e.g. after CHARGE_WRONG → startingwfc=random).
+      if (attempt > 0 && !canRecover) {
         cleanQETmpDir(path.join(jobDir, "tmp"));
       }
 
