@@ -4115,8 +4115,16 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     // and caused wall-time-exhausted runs to be discarded after 5×90 min
     // of compute. 1e-4 Ry ≈ 1.4 meV/atom — perfectly acceptable for
     // ranking candidates; final Tc is re-evaluated at publication quality.
+    // Two acceptance paths:
+    // 1. Normal: energy + Fermi level + accuracy < 1e-4 (full electronic structure)
+    // 2. Partial-walltime: energy + accuracy < 1e-4 but Fermi level may be missing
+    //    (QE only prints Ef after full convergence; wall-time-killed runs don't reach it).
+    //    Still usable for screening — the total energy and band structure are valid,
+    //    and Ef can be estimated from the last-iteration DOS if needed.
+    const isPartialWalltime = result.scf?.convergenceQuality === "partial-walltime";
     const scfUsable = scfConverged ||
-      (result.scf && result.scf.totalEnergy !== 0 && result.scf.fermiEnergy !== null &&
+      (result.scf && result.scf.totalEnergy !== 0 &&
+       (result.scf.fermiEnergy !== null || isPartialWalltime) &&
        result.scf.lastScfAccuracyRy !== null && result.scf.lastScfAccuracyRy < 1.0e-4);
 
     if (!scfConverged && !scfUsable) {
