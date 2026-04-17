@@ -4147,10 +4147,17 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
 
       console.log(`[QE-Worker] Starting phonon calculation for ${formula}`);
 
+      // Phonon is typically 3-10× more expensive than SCF. Give it the same
+      // tiered budget as the SCF path (effectiveMaxSeconds is already computed
+      // per-composition above). Heavy-5d systems need the full 264-min window;
+      // without this they hit the flat 90-min QE_TIMEOUT_MS and produce
+      // incomplete dyn sets (In2SnW, Re2Sn2W3 both failed this way Apr 17).
+      const phKillTimeoutMs = effectiveKillTimeoutMs * 2;
       const phResult = await runQECommand(
         path.posix.join(getQEBinDir(), "ph.x"),
         phInputFile,
         jobDir,
+        phKillTimeoutMs,
       );
 
       fs.writeFileSync(path.join(jobDir, "ph.out"), phResult.stdout);
