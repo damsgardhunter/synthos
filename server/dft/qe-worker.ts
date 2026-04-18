@@ -2306,21 +2306,28 @@ function generateHydrideCagePositions(
   return positions;
 }
 
-function autoPhononQGrid(elements: string[]): [number, number, number] {
-  // Screening-quality q-grid. Prior 6×6×6 hydride default = 216 q-points,
-  // which pushed ph.x past the wall-time budget on worker2 (LaH10: exit=-1
-  // after 2+h, no complete .dyn set → q2r.x fallback fails too). aiida's
-  // screening protocol uses 2×2×2 or 3×3×3; this is enough to detect
-  // imaginary modes and estimate α²F(ω). Coarse enough to finish within
-  // the pipeline budget, dense enough for hydride H-modes to sample.
-  const hasHydrogen = elements.includes("H");
-  if (hasHydrogen) return [3, 3, 3];
+function autoPhononQGrid(elements: string[], totalAtoms?: number): [number, number, number] {
+  // Screening-quality q-grid. Cost scales as n_atoms × n_q × 3*n_atoms
+  // perturbations — for a 15-atom hydride on 3×3×3 that's 15 × 27 × 45 =
+  // 18225 linear-response steps, each ~30s = 6+ days. Way beyond any
+  // reasonable screening budget.
+  //
+  // Scale the grid with atom count:
+  //   ≤ 4 atoms: 2×2×2 (8 q-points, manageable)
+  //   5-8 atoms: 2×2×2 (still OK)
+  //   9+ atoms:  1×1×1 (Gamma-only — just checks zone-center stability,
+  //              enough for screening-level imaginary mode detection)
+  //
+  // Prior 3×3×3 for hydrides was too expensive: LaH11Li2 (15 atoms) ran
+  // 9 hours and only completed 1/3 of q-points before wall-time kill.
+  const nAtoms = totalAtoms ?? 6;
+  if (nAtoms >= 9) return [1, 1, 1];
   return [2, 2, 2];
 }
 
-function generatePhononInput(formula: string, elements: string[] = []): string {
+function generatePhononInput(formula: string, elements: string[] = [], totalAtoms: number = 6): string {
   const prefix = formula.replace(/[^a-zA-Z0-9]/g, "");
-  const [nq1, nq2, nq3] = autoPhononQGrid(elements);
+  const [nq1, nq2, nq3] = autoPhononQGrid(elements, totalAtoms);
   // tr2_ph=1.0d-12 is the aiida-quantumespresso screening default; the prior
   // 1.0d-14 is publication-quality and costs 2-3x wall time without changing
   // screening-level Tc estimates.
@@ -4149,7 +4156,7 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     // diagnosis — not cleaning the dir wasn't enough because pw.x rewrites the
     // wfc files inside it.
     if (scfUsable) {
-      const phInput = generatePhononInput(formula, elements);
+      const phInput = generatePhononInput(formula, elements, positions.length);
       const phInputFile = path.join(jobDir, "ph.in");
       fs.writeFileSync(phInputFile, phInput);
 
