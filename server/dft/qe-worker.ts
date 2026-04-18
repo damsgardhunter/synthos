@@ -1466,21 +1466,36 @@ function computeNbnd(elements: string[], counts: Record<string, number>, nspin: 
   return nspin === 2 ? nbndSpin1 * 2 : nbndSpin1;
 }
 
-// Tiered max_seconds. 88 min is too tight for heavy-5d intermetallics
-// (N4W3, Re2Sn2W3) and high-P hydrides (LaH12, YH9Na2) — both burn the
-// full budget without converging. Give these classes a 3× budget; keep
-// the flat budget for everything else. Returns seconds.
+// Tiered max_seconds. Systems with heavy elements (Z ≥ 55) have many
+// valence electrons and large basis sets — each SCF iteration and phonon
+// perturbation is 3-10× more expensive than light-element systems.
+// The prior set (Hf-Au only) missed lanthanides (La-Lu), 6p metals
+// (Bi, Pb, Tl), and alkaline earths (Ba, Cs) which are equally expensive.
+// Apr-18: Bi2La2Y, Fe3LaSe4, BaBiLaTe3 all got the flat 88-min budget
+// and wall-timed on every attempt.
+const HEAVY_ELEMENTS = new Set([
+  // Lanthanides (Z=57-71)
+  "La", "Ce", "Pr", "Nd", "Pm", "Sm", "Eu", "Gd", "Tb", "Dy", "Ho", "Er", "Tm", "Yb", "Lu",
+  // 5d transition metals (Z=72-80)
+  "Hf", "Ta", "W", "Re", "Os", "Ir", "Pt", "Au", "Hg",
+  // 6p metals (Z=81-86)
+  "Tl", "Pb", "Bi", "Po",
+  // Actinides commonly used
+  "Th", "U",
+  // Heavy alkaline/alkaline-earth (large core, expensive PPs)
+  "Cs", "Ba",
+]);
+
 function computeMaxSeconds(elements: string[], pressureGpa: number = 0): number {
   const base = QE_MAX_SECONDS;
-  const heavy5d = new Set(["Hf", "Ta", "W", "Re", "Os", "Ir", "Pt", "Au"]);
-  const heavy5dCount = elements.filter(el => heavy5d.has(el)).length;
+  const heavyCount = elements.filter(el => HEAVY_ELEMENTS.has(el)).length;
   const hasH = elements.includes("H");
-  // Heavy-TM (2+ heavy 5d) OR high-P hydride (P >= 100 GPa + H): 3× budget.
-  if (heavy5dCount >= 2 || (pressureGpa >= 100 && hasH)) {
+  // 2+ heavy elements OR high-P hydride: 3× budget.
+  if (heavyCount >= 2 || (pressureGpa >= 100 && hasH)) {
     return Math.floor(base * 3);
   }
-  // Single heavy-TM or H-content only: 1.5× budget.
-  if (heavy5dCount >= 1 || hasH) {
+  // Single heavy element or H-content only: 1.5× budget.
+  if (heavyCount >= 1 || hasH) {
     return Math.floor(base * 1.5);
   }
   return base;
