@@ -3,11 +3,11 @@ import * as path from "path";
 import { IS_WINDOWS, killProcessGracefully, spawnQE } from "./platform-utils";
 
 const QE_BIN_DIR = process.env.QE_BIN_DIR ?? (IS_WINDOWS ? "/usr/bin" : "/nix/store/4rd771qjyb5mls5dkcs614clwdxsagql-quantum-espresso-7.2/bin");
-// 5 min was too short for heavy-5d systems with nspin=2 — In2SnW hit
-// exit=-1 at kpt 35/106 (292s cpu). Allow 30 min for the pw.x bands
-// run; heavy systems need ~8-10s per k-point × 100+ k-points = ~15-20 min.
+// BiLaPb hit exit=-1 at kpt 84/106 after 1784s (~30 min) — the 30-min
+// budget was 7 min short. Heavy-element nspin=2 systems need ~20s/kpt ×
+// 106 kpts = ~35-40 min. Set 60 min to cover worst case with margin.
 // Override via BANDS_TIMEOUT_MS env var if needed.
-const BANDS_TIMEOUT_MS = parseInt(process.env.BANDS_TIMEOUT_MS ?? "", 10) || 1_800_000;
+const BANDS_TIMEOUT_MS = parseInt(process.env.BANDS_TIMEOUT_MS ?? "", 10) || 3_600_000;
 
 export interface KPointOnPath {
   label: string;
