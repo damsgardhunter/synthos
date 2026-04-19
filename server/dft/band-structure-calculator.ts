@@ -3,11 +3,11 @@ import * as path from "path";
 import { IS_WINDOWS, killProcessGracefully, spawnQE } from "./platform-utils";
 
 const QE_BIN_DIR = process.env.QE_BIN_DIR ?? (IS_WINDOWS ? "/usr/bin" : "/nix/store/4rd771qjyb5mls5dkcs614clwdxsagql-quantum-espresso-7.2/bin");
-// BiLaPb hit exit=-1 at kpt 84/106 after 1784s (~30 min) — the 30-min
-// budget was 7 min short. Heavy-element nspin=2 systems need ~20s/kpt ×
-// 106 kpts = ~35-40 min. Set 60 min to cover worst case with margin.
-// Override via BANDS_TIMEOUT_MS env var if needed.
-const BANDS_TIMEOUT_MS = parseInt(process.env.BANDS_TIMEOUT_MS ?? "", 10) || 3_600_000;
+// Bands timeout scales with system size. Small cells (3-4 atoms) need
+// ~30 min, but 14-15 atom hydrides with nspin=2 need ~2.5h (90s/kpt ×
+// 106 kpts). Li2LaH12 timed out at kpt 37/106 after 60 min; LaH11Li2
+// at kpt 44/106. Use 3h as the base — env-overridable via BANDS_TIMEOUT_MS.
+const BANDS_TIMEOUT_MS = parseInt(process.env.BANDS_TIMEOUT_MS ?? "", 10) || 10_800_000;
 
 export interface KPointOnPath {
   label: string;

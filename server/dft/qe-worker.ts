@@ -4204,6 +4204,45 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
         (phResult.exitCode === 0 || result.phonon.converged || dynFilesExist);
       if (fallbackNeeded) {
         const prefix = formula.replace(/[^a-zA-Z0-9]/g, "");
+
+        // For Gamma-only phonon (1×1×1), q2r.x can't Fourier-transform
+        // from a single q-point and always exits with code 2. Parse the
+        // frequencies directly from the .dyn1 file instead — it contains
+        // the dynamical matrix eigenvalues in cm⁻¹ after "freq (" or
+        // "omega(" lines.
+        const [pnq1, pnq2, pnq3] = autoPhononQGrid(elements, positions.length);
+        if (pnq1 === 1 && pnq2 === 1 && pnq3 === 1) {
+          const dyn1Path = path.join(jobDir, `${prefix}.dyn1`);
+          if (fs.existsSync(dyn1Path)) {
+            try {
+              const dyn1Content = fs.readFileSync(dyn1Path, "utf8");
+              const freqValues: number[] = [];
+              // QE .dyn1 format: "freq (    1) =  ... [THz] =  ... [cm-1]"
+              // or "omega( 1) = ... [cm-1]"
+              for (const line of dyn1Content.split("\n")) {
+                const cm1Match = line.match(/\[\s*cm-1\s*\]\s*$/i) ? line.match(/([-\d.]+)\s*\[\s*cm-1\s*\]/i) : null;
+                const freqMatch = line.match(/freq\s*\(\s*\d+\)\s*=\s*([-\d.]+)\s*\[THz\]\s*=\s*([-\d.]+)\s*\[cm-1\]/i);
+                const omegaMatch = line.match(/omega\(\s*\d+\)\s*=\s*([-\d.]+)/);
+                const val = freqMatch ? parseFloat(freqMatch[2]) : (cm1Match ? parseFloat(cm1Match[1]) : (omegaMatch ? parseFloat(omegaMatch[1]) : NaN));
+                if (Number.isFinite(val) && val !== 0) freqValues.push(val);
+              }
+              if (freqValues.length > 0) {
+                result.phonon.frequencies = freqValues;
+                result.phonon.lowestFrequency = Math.min(...freqValues);
+                result.phonon.highestFrequency = Math.max(...freqValues);
+                result.phonon.imaginaryCount = freqValues.filter(f => f < -20).length;
+                result.phonon.hasImaginary = result.phonon.imaginaryCount > 0;
+                result.phonon.converged = true;
+                console.log(`[QE-Worker] Parsed ${freqValues.length} Gamma-only phonon modes from ${prefix}.dyn1 for ${formula} (lowest=${result.phonon.lowestFrequency.toFixed(1)} cm⁻¹)`);
+              } else {
+                console.log(`[QE-Worker] No frequencies found in ${prefix}.dyn1 for ${formula} — file may be malformed`);
+              }
+            } catch (dynErr: any) {
+              console.log(`[QE-Worker] Failed to parse ${prefix}.dyn1 for ${formula}: ${(dynErr.message || "").slice(0, 100)}`);
+            }
+          }
+          // Skip q2r.x+matdyn.x — not applicable for Gamma-only
+        } else {
         // Guard: q2r.x needs the .dyn0 summary + every .dynN file listed
         // inside it (one per irreducible q-point). If ph.x was killed
         // mid-run (exit=-1 case), partial dyn sets will make q2r.x fail
@@ -4292,6 +4331,7 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
           console.log(`[QE-Worker] Phonon post-processing failed for ${formula}: ${postErr.message?.slice(0, 150)}`);
         }
         } // close else (dyn set complete branch)
+        } // close else (non-Gamma q-grid → q2r.x path)
       }
 
       if (phResult.exitCode !== 0 && !result.phonon.converged) {
