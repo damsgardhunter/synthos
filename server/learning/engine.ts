@@ -9366,7 +9366,9 @@ async function backfillGBScores() {
 // pressure-aware predictions working (cycle 1382). Forces recalculatePhysics()
 // to re-score every existing candidate against the new model.
 // v24: computePhysicsTcUQ called WITH pressure in recalculation.
-const PHYSICS_VERSION = 24;
+// v25: isHydride fix (alkaline earth/chalcogen hosts), two-gap solver, spin-fluc
+//      suppression, mass-dependent anharmonic correction, d-band vertex correction.
+const PHYSICS_VERSION = 25;
 
 async function recalculatePhysics() {
   const yield_ = () => new Promise<void>(r => setTimeout(r, 100));
