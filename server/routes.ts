@@ -1,6 +1,7 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
+import { db } from "./db";
 import { insertMaterialSchema, insertResearchLogSchema, insertExperimentalValidationSchema, insertClientErrorSchema } from "@shared/schema";
 import { initWebSocket, startEngine, stopEngine, pauseEngine, resumeEngine, getStatus, getAutonomousLoopStats } from "./learning/engine";
 import { getSignalDefinitions } from "./learning/material-signal-scanner";
@@ -760,7 +761,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.get("/api/superconductor-candidates", async (req, res) => {
     const rawLim = Number(req.query.limit);
     const rawOffset = Number(req.query.offset);
-    const limit = Math.min(Number.isFinite(rawLim) && rawLim > 0 ? rawLim : 25, 1000);
+    const limit = Math.min(Number.isFinite(rawLim) && rawLim > 0 ? rawLim : 25, 10000);
     const offset = Number.isFinite(rawOffset) && rawOffset >= 0 ? rawOffset : 0;
     const elementsParam = typeof req.query.elements === "string" ? req.query.elements.trim() : "";
     const confidenceParam = typeof req.query.confidence === "string" ? req.query.confidence.trim() : "";
@@ -2872,11 +2873,14 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const inMemHistory = getGNNVersionHistory();
       const currentVersion = getGNNModelVersion();
 
-      // Fetch GCP GNN training results from DB (authoritative R², MAE, dataset size)
+      // Fetch GCP GNN training results from DB (authoritative R², MAE, dataset size).
+      // Cached for 60s — version history changes only after a training job
+      // completes (≈ minutes apart). Avoids stalling the dashboard during
+      // Neon connection-timeout windows.
       let dbJobs: any[] = [];
       try {
-        const completedJobs = await storage.getCompletedGnnJobs(20);
-        dbJobs = completedJobs.filter(j => j.r2 != null).reverse();
+        const completedJobs = await cache.getOrSetStale("gnn:completed-jobs:20", 60_000, () => storage.getCompletedGnnJobs(20));
+        dbJobs = completedJobs.filter((j: any) => j.r2 != null).reverse();
       } catch (e) { /* DB unavailable, use in-memory only */ }
 
       // Use DB data if available (it has the real GCP metrics), fall back to in-memory
@@ -2902,21 +2906,56 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         ? validDbJobs.map((j: any, i: number) => ({ version: i + 1, mae: j.mae }))
         : inMemHistory.slice(-10).map(h => ({ version: h.version, mae: h.mae }));
 
+      const localMetrics = latestMem
+        ? { r2: latestMem.r2, mae: latestMem.mae, rmse: latestMem.rmse, datasetSize: latestMem.datasetSize }
+        : null;
+
+      // Check live PyTorch GCP service status — cached 60s to avoid hammering
+      const pytorchUrl = process.env.GNN_PYTORCH_SERVICE_URL ?? "";
+      let pytorchStatus: { connected: boolean; nModels: number; device: string } = { connected: false, nModels: 0, device: "none" };
+      if (pytorchUrl) {
+        try {
+          const cached = await cache.getOrSetStale("pytorch:health", 60_000, async () => {
+            const healthRes = await fetch(`${pytorchUrl}/health`, { signal: AbortSignal.timeout(3000) });
+            if (!healthRes.ok) return { connected: false, nModels: 0, device: "none" };
+            const h = await healthRes.json() as any;
+            return { connected: true, nModels: h.n_models ?? 0, device: h.device ?? "unknown" };
+          });
+          pytorchStatus = cached;
+        } catch { /* unreachable — use defaults */ }
+      }
+
+      // Metrics source: if PyTorch is connected AND has models loaded, the GCP
+      // DB metrics ARE the inference model metrics. Otherwise they're training-only.
+      const metricsSource = pytorchStatus.connected && pytorchStatus.nModels > 0
+        ? "gcp-inference" : hasDBData ? "gcp-training-only" : "local";
+      const metricsWarning = !pytorchStatus.connected && hasDBData
+        ? "GCP model trained but not connected for inference — predictions use local model"
+        : undefined;
+
       res.json({
         currentVersion: hasDBData ? dbJobs.length : currentVersion,
         ensembleSize,
         latestMetrics,
+        localMetrics,
+        metricsSource,
+        metricsWarning,
+        pytorchStatus,
         r2Trend,
         maeTrend,
-        history: hasDBData ? dbJobs.map((j: any, i: number) => ({
-          version: i + 1,
-          r2: j.r2,
-          mae: j.mae,
-          rmse: j.rmse,
-          datasetSize: j.datasetSize,
-          ensembleSize: j.ensembleSize,
-          completedAt: j.completedAt,
-        })) : inMemHistory.slice(-20),
+        // Only show valid training runs (R² > -1) — early garbage runs and
+        // local startup warm-ups pollute the version history with R²=-99 etc.
+        history: hasDBData
+          ? validDbJobs.map((j: any, i: number) => ({
+              version: i + 1,
+              r2: j.r2,
+              mae: j.mae,
+              rmse: j.rmse,
+              datasetSize: j.datasetSize,
+              ensembleSize: j.ensembleSize,
+              completedAt: j.completedAt,
+            }))
+          : inMemHistory.filter(h => h.r2 > -1).slice(-20),
         uncertaintyMethods: ["ensemble-variance", "mc-dropout", "latent-distance"],
       });
     } catch (e: any) {
@@ -2958,11 +2997,14 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
-  app.get("/api/gnn/predict/:formula", generalLimiter, (req, res) => {
+  app.get("/api/gnn/predict/:formula", generalLimiter, async (req, res) => {
     try {
       const formula = decodeURIComponent(req.params.formula);
-      const prediction = gnnPredictWithUncertainty(formula);
+      // Use async version so we await the GCP PyTorch result instead of
+      // returning stale local ensemble predictions on first load.
+      const prediction = await gnnPredictWithUncertaintyAsync(formula);
       const graph = buildCrystalGraph(formula);
+      const isPytorch = prediction.uncertaintyBreakdown?.weightProfile?.mode === "pytorch";
       res.json({
         formula,
         prediction: {
@@ -2985,7 +3027,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           elements: [...new Set(graph.nodes.map(n => n.element))],
         },
         modelVersion: getGNNModelVersion(),
-        ensembleSize: 4,
+        ensembleSize: isPytorch ? 1 : 4,
+        source: isPytorch ? "gcp-pytorch" : "local-ensemble",
       });
     } catch (e: any) {
       res.status(500).json({ error: "Failed to predict with GNN", detail: e.message?.slice(0, 200) });
@@ -3000,7 +3043,26 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
-  app.get("/api/dos-surrogate/predict/:formula", generalLimiter, (req, res) => {
+  // GCP-authoritative metrics from system_state — written by gnn-loop.ts after
+  // each completed training job. Single DB read, no polling, no timeouts.
+  app.get("/api/gnn/gcp-metrics", generalLimiter, async (_req, res) => {
+    try {
+      const cached = await cache.getOrSetStale("gnn:gcp-metrics", 30_000, async () => {
+        const rows = await db.execute(
+          `SELECT value FROM system_state WHERE key = 'gnn_latest_metrics'`
+        );
+        const row = (rows as any).rows?.[0] ?? (Array.isArray(rows) ? rows[0] : undefined);
+        return row?.value ?? null;
+      });
+      if (!cached) return res.json({ available: false });
+      const metrics = typeof cached === "string" ? JSON.parse(cached) : cached;
+      res.json({ available: true, ...metrics });
+    } catch (e: any) {
+      res.status(500).json({ error: "Failed to fetch GCP metrics", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  app.get("/api/dos-surrogate/predict/:formula", generalLimiter, async (req, res) => {
     try {
       const formula = decodeURIComponent(req.params.formula);
       const useGNN = req.query.useGNN === "true";
@@ -3010,11 +3072,17 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
       if (useGNN) {
         try {
+          // Use async PyTorch path so DOS visualizer gets GCP model Tc
+          const pytorchPred = await gnnPredictWithUncertaintyAsync(formula);
+          if (pytorchPred.confidence > 0) {
+            gnnTc = pytorchPred.tc;
+          }
+          // Also get latent embedding from local model for DOS computation
           const singlePred = getGNNPrediction(formula);
           const embLatent = singlePred?.latentEmbedding;
           const hasValidLatent = embLatent && embLatent.length > 0 && embLatent.some(v => v !== 0 && isFinite(v));
           if (hasValidLatent) latent = embLatent;
-          gnnTc = singlePred?.predictedTc ?? null;
+          if (gnnTc == null) gnnTc = singlePred?.predictedTc ?? null;
         } catch {}
       }
 
@@ -5312,11 +5380,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   let _uciActive = 0;
   const _uciQueue: Array<() => void> = [];
   const UCI_CONCURRENCY = 4;
-  function runUnifiedCI(formula: string): Promise<unknown> {
+  function runUnifiedCI(formula: string, pressureGpa: number = 0): Promise<unknown> {
     return new Promise((resolve, reject) => {
       const run = () => {
         _uciActive++;
-        computeUnifiedCI(formula)
+        computeUnifiedCI(formula, pressureGpa)
           .then(resolve, reject)
           .finally(() => {
             _uciActive--;
@@ -5334,10 +5402,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       if (!formula || formula.length < 2 || formula.length > 100) {
         return res.status(400).json({ error: "Invalid formula" });
       }
+      const pressureGpa = Number(req.query.pressure) || 0;
       const result = await cache.getOrSetStale(
-        CACHE_KEYS.unifiedCI(formula),
+        CACHE_KEYS.unifiedCI(formula) + `:${pressureGpa}`,
         TTL.UNIFIED_CI,
-        () => runUnifiedCI(formula),
+        () => runUnifiedCI(formula, pressureGpa),
       );
       res.json(result);
     } catch (e: any) {

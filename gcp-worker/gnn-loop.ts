@@ -29,6 +29,9 @@ const GNN_SERVICE_PORT = process.env.GNN_SERVICE_PORT ?? "8765";
 const GNN_PY_SCRIPT    = path.join(path.dirname(fileURLToPath(import.meta.url)), "../gnn/server.py");
 
 let _pythonProcess: ChildProcess | null = null;
+// True while a /train request is in flight — prevents spawnPythonGNNService
+// from killing a busy-but-healthy Python process that's mid-training.
+let _pythonTrainingInProgress = false;
 
 /** Spawn the FastAPI GNN service and wait until it responds to /health. */
 async function spawnPythonGNNService(): Promise<void> {
@@ -38,6 +41,12 @@ async function spawnPythonGNNService(): Promise<void> {
   // only tests the ChildProcess reference — .killed is false even when the
   // process crashed on its own (it's only true after WE send a signal).
   if (_pythonProcess && !_pythonProcess.killed) {
+    // If a /train request is in flight, the single-worker uvicorn blocks on
+    // GPU training and CANNOT respond to /health. This is expected — don't
+    // kill it. Just return and let callPythonTrain's long-running request
+    // finish naturally.
+    if (_pythonTrainingInProgress) return;
+
     try {
       const ac = new AbortController();
       const t = setTimeout(() => ac.abort(), 10_000);
@@ -146,20 +155,15 @@ function postJsonLongRunning(
         "Content-Type":   "application/json",
         "Content-Length": Buffer.byteLength(bodyStr),
       },
-      // Connect timeout: the Python GNN service runs training epochs on GPU
-      // which block uvicorn's event loop for 60-120s per epoch. A 30s timeout
-      // causes every dispatched job to fail with ETIMEDOUT while the service is
-      // mid-epoch (it can't accept TCP connections until the epoch finishes).
-      // 180s allows the current epoch to complete before the connection attempt
-      // times out. Once connected, req.setTimeout(0) disables the timeout so
-      // the full training run (60+ min) isn't interrupted.
-      timeout: 180_000,
+      // Timeout disabled (0): Python's single-worker uvicorn blocks during GPU
+      // training and can't accept TCP connections or send response headers until
+      // the full training run finishes (30-90 min). Any finite socket timeout
+      // causes ETIMEDOUT for EVERY training job. The abortMs ceiling (4 hours)
+      // is the ONLY upper bound — it fires via the abortTimer below.
+      timeout: 0,
     };
 
     const req = http.request(opts, (res) => {
-      // Connection established — disable the 30s connect timeout so the long
-      // training run isn't killed by it. Only the abortMs ceiling applies now.
-      req.setTimeout(0);
       const chunks: Buffer[] = [];
       res.on("data",  (chunk: Buffer) => chunks.push(chunk));
       res.on("error", reject);
@@ -171,9 +175,8 @@ function postJsonLongRunning(
       });
     });
 
-    req.on("timeout", () => {
-      req.destroy(new Error(`connect ETIMEDOUT ${parsedUrl.hostname}:${parsedUrl.port} (180s connect timeout)`));
-    });
+    // timeout is 0 (disabled) — no timeout handler needed.
+    // The only upper bound is the abortTimer below.
     req.on("error", reject);
 
     // Hard ceiling: kill the request after abortMs (default 60 min). Without
@@ -204,6 +207,8 @@ async function callPythonTrain(
   wallSeconds: number;
   modelPath?: string;
   nSamples: number;
+  xgbR2: number | null; xgbMae: number | null;
+  xgbRmse: number | null; xgbNTrain: number | null;
 }> {
   // Cycle 1377 fix: ensure the Python child is alive before each /train call.
   // The exit handler in spawnPythonGNNService sets _pythonProcess = null when
@@ -224,19 +229,16 @@ async function callPythonTrain(
     startup_val_r2:      startupValR2 ?? null,
   };
 
-  // Cycle 1379 fix: postJsonLongRunning uses node:http directly to avoid
-  // undici's 5-minute headersTimeout. The ceiling here is the ONLY upper
-  // bound on training wall-time, so it must be longer than any plausibly
-  // successful training run. Cycle 1380 raised it from 60 min to 4 hours
-  // because the 62k-graph corpus actually takes 60-120 min (5 ensemble
-  // members × N epochs each + pretraining), and a 60-min ceiling killed
-  // training that was 80-90% complete, then forced four more retry attempts
-  // that also blew through the same cap. 4 hours leaves ~3x headroom for
-  // dataset growth and accidental slow runs. Override via the
-  // GNN_TRAIN_TIMEOUT_MS env var if you need to push it higher (e.g. on a
-  // CPU-only fallback host where training takes 6+ hours).
+  // The ceiling here is the ONLY upper bound on training wall-time.
+  // 4 hours leaves ~3x headroom for dataset growth and slow runs.
   const trainAbortMs = parseInt(process.env.GNN_TRAIN_TIMEOUT_MS ?? "", 10) || (4 * 60 * 60_000);
-  const res = await postJsonLongRunning(`${GNN_SERVICE_URL}/train`, body, trainAbortMs);
+  _pythonTrainingInProgress = true;
+  let res: Awaited<ReturnType<typeof postJsonLongRunning>>;
+  try {
+    res = await postJsonLongRunning(`${GNN_SERVICE_URL}/train`, body, trainAbortMs);
+  } finally {
+    _pythonTrainingInProgress = false;
+  }
 
   if (res.status < 200 || res.status >= 300) {
     throw new Error(`Python /train failed ${res.status}: ${res.rawText.slice(0, 200)}`);
@@ -284,8 +286,8 @@ async function recordPytorchModelPath(jobId: number, modelPath: string): Promise
 // via callPythonTrain() defined above.
 
 const POLL_INTERVAL_MS = 10_000;
-const MP_BATCH_SIZE = 500;          // records per progressive fetch
-const MP_MAX_CACHE = 10_000;        // stop fetching after this many cached records
+const MP_BATCH_SIZE = 1_000;        // records per progressive fetch (2x for faster ramp-up)
+const MP_MAX_CACHE = 1_000_000;     // effectively unlimited — let the GNN train on all available MP data
 const MP_SKIP_STATE_KEY = "mp_batch_skip";
 let running = true;
 
@@ -436,7 +438,42 @@ async function storeCalibrationMetric(
   }
 }
 
-// ── QE dataset augmentation (DFT-verified SC samples) ────────────────────────
+// ── Comprehensive metrics writer (system_state for frontend) ─────────────────
+// Writes all GNN + XGB metrics to a single system_state key so the frontend
+// can read them from the DB without polling individual training job rows.
+// This is the authoritative source for dashboard cards (GNN R², Active Learning
+// dataset size, XGB R², etc.).
+
+async function writeGnnMetricsToSystemState(
+  jobId: number,
+  metrics: {
+    r2: number; mae: number; rmse: number;
+    trainR2: number; trainMae: number; valN: number;
+    datasetSize: number;
+    xgbR2: number | null; xgbMae: number | null;
+    wallSeconds: number;
+    source: 'startup' | 'dispatched';
+    ci95Coverage?: number; ci95Width?: number;
+  },
+): Promise<void> {
+  try {
+    const payload = JSON.stringify({
+      jobId,
+      ...metrics,
+      updatedAt: new Date().toISOString(),
+    });
+    await db.execute(
+      `INSERT INTO system_state (key, value, updated_at)
+       VALUES ('gnn_latest_metrics', '${payload}'::jsonb, NOW())
+       ON CONFLICT (key) DO UPDATE SET value = '${payload}'::jsonb, updated_at = NOW()`
+    );
+    console.log(`[GNN-GCP] Wrote gnn_latest_metrics to system_state — R²=${metrics.r2.toFixed(4)} dataset=${metrics.datasetSize} xgbR²=${metrics.xgbR2?.toFixed(4) ?? 'N/A'}`);
+  } catch (err: any) {
+    console.warn(`[GNN-GCP] Failed to write gnn_latest_metrics: ${err.message?.slice(0, 80)}`);
+  }
+}
+
+// ── QE dataset augmentation (DFT-verified SC samples) ────��───────────────────
 
 async function loadQEDatasetSamples(existingFormulas: Set<string>): Promise<TrainingSample[]> {
   try {
@@ -714,6 +751,13 @@ async function processNextGnnJob(): Promise<boolean> {
     return false; // startup training holds the slot; try again next poll cycle
   }
 
+  // If a /train request is already in flight, Python is busy — don't claim
+  // another job. The DB-based check here replaces the old health-check approach
+  // which was unreliable (Python can't respond to /health while training).
+  if (_pythonTrainingInProgress) {
+    return false;
+  }
+
   const rows = await db.execute(
     `UPDATE gnn_training_jobs
      SET status = 'running', started_at = NOW()
@@ -912,6 +956,7 @@ async function processNextGnnJob(): Promise<boolean> {
         trainR2,
         trainMae,
         valN,
+        datasetSize: trainSet.length,
         completedAt: new Date(),
       } as any);
 
@@ -928,7 +973,7 @@ async function processNextGnnJob(): Promise<boolean> {
             status: "done",
             r2: pyResult.xgbR2,
             mae: pyResult.xgbMae ?? 0,
-            rmse: pyResult.xgbRmse ?? 0,
+
             completedAt: new Date(),
           } as any);
           console.log(`[GNN-GCP] XGB full-corpus metrics stored as job #${xgbJob.id} — R²=${pyResult.xgbR2.toFixed(4)}`);
@@ -937,6 +982,18 @@ async function processNextGnnJob(): Promise<boolean> {
         }
       }
     }
+
+    // Write comprehensive metrics to system_state for frontend consumption
+    await writeGnnMetricsToSystemState(jobId, {
+      r2, mae, rmse, trainR2, trainMae, valN,
+      datasetSize: trainSet.length,
+      xgbR2: pyResult.xgbR2 ?? null,
+      xgbMae: pyResult.xgbMae ?? null,
+      wallSeconds: pyResult.wallSeconds,
+      source: 'dispatched',
+      ci95Coverage: ci95Coverage > 0 ? ci95Coverage : undefined,
+      ci95Width: ci95Width > 0 ? ci95Width : undefined,
+    });
 
     const coverageStr = ci95Coverage > 0
       ? `CI95-cov=${(ci95Coverage * 100).toFixed(1)}% width=${ci95Width.toFixed(1)}K`
@@ -1291,7 +1348,15 @@ async function runStartupFullCorpusTraining(): Promise<void> {
         if (startupModelPath) await recordPytorchModelPath(insertedJob.id, startupModelPath);
         console.log(`[GNN-GCP] Startup results written to DB as new job #${insertedJob.id} — R²=${r2.toFixed(4)} MAE=${mae.toFixed(1)}K`);
       }
-      console.log(`[GNN-GCP] Startup metrics stored as job #${insertedJob.id}`);
+      // Write comprehensive metrics to system_state for frontend consumption
+      await writeGnnMetricsToSystemState(targetJobId || 0, {
+        r2, mae, rmse, trainR2, trainMae, valN,
+        datasetSize: trainSet.length,
+        xgbR2: pyResult?.xgbR2 ?? null,
+        xgbMae: pyResult?.xgbMae ?? null,
+        wallSeconds: pyResult?.wallSeconds ?? 0,
+        source: 'startup',
+      });
 
       // Cycle 1381: write XGB metrics to xgb_training_jobs so the local
       // server's startGCPXGBPoller picks up the full-corpus model (R²≈0.91).
@@ -1310,7 +1375,7 @@ async function runStartupFullCorpusTraining(): Promise<void> {
             status: "done",
             r2: pyResult.xgbR2,
             mae: pyResult.xgbMae ?? 0,
-            rmse: pyResult.xgbRmse ?? 0,
+
             completedAt: new Date(),
           } as any);
           console.log(`[GNN-GCP] XGB full-corpus metrics stored as job #${xgbJob.id} — R²=${pyResult.xgbR2.toFixed(4)}`);
@@ -1443,25 +1508,9 @@ export async function startGNNLoop(): Promise<void> {
   await new Promise(r => setTimeout(r, 125_000));
   console.log("[GNN-GCP] Job polling starting — startup training should hold the slot");
 
-  let pollCount = 0;
-  let lastHeartbeatMs = Date.now();
-  const HEARTBEAT_INTERVAL_MS = 5 * 60_000; // log alive every 5 minutes
-
   while (running) {
     try {
       const processed = await processNextGnnJob();
-      pollCount++;
-      if (!processed) {
-        const now = Date.now();
-        if (now - lastHeartbeatMs >= HEARTBEAT_INTERVAL_MS) {
-          const reason = !isGNNTrainingSlotFree() ? 'startup training in progress' : 'waiting for local server to dispatch';
-          console.log(`[GNN-GCP] Polling — idle (${pollCount} polls since start). ${reason}.`);
-          lastHeartbeatMs = now;
-        }
-      } else {
-        pollCount = 0;
-        lastHeartbeatMs = Date.now();
-      }
       await new Promise(r => setTimeout(r, processed ? 1000 : POLL_INTERVAL_MS));
     } catch (err: any) {
       const msg = err instanceof Error
