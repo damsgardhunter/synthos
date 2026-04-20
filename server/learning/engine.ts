@@ -2,6 +2,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import type { Server } from "http";
 import { storage } from "../storage";
 import { isConnectionError, drainIdleConnections, probeDBConnection } from "../db";
+import { engineInsightWriter, formulaScreenWriter, loadRecentInsights, loadScreenedFormulas, loadRejectedFormulas } from "./db-learning-store";
 import { fetchOQMDMaterials, fetchElementFocusedMaterials, fetchKnownMaterials, getNextOQMDOffset } from "./data-fetcher";
 import { analyzeBondingPatterns, analyzePropertyPredictionPatterns, classifyMaterialApplications } from "./nlp-engine";
 import { generateNovelFormulas, setBoundaryHuntingMode, setInverseDesignMode, setChemicalSpaceExpansionMode, getGenerationModes } from "./formula-generator";
@@ -16,7 +17,7 @@ import { constraintGuidedGenerate, checkPhysicsConstraints, updateConstraintWeig
 import { runPillarCycle, evaluatePillars, updatePillarWeightsFromReward, getPillarOptimizerStats, incorporateDFTFeedbackIntoPillars, getPillarDFTFeedbackStats } from "../inverse/sc-pillars-optimizer";
 import type { InverseCandidate } from "../inverse/target-schema";
 import { discoverSynthesisProcesses, discoverChemicalReactions, getNextReactionTopic } from "./synthesis-tracker";
-import { runFullPhysicsAnalysis, applyAmbientTcCap, setConstraintMode, getConstraintMode, parseFormulaElements, parseComposition, computeElectronicStructure, reconcileTc, FAMILY_TC_CAPS, computeCapExtensionFactor, allenDynesTcRaw } from "./physics-engine";
+import { runFullPhysicsAnalysis, applyAmbientTcCap, setConstraintMode, getConstraintMode, parseFormulaElements, parseComposition, computeElectronicStructure, computePhononSpectrum, computeElectronPhononCoupling, predictTcEliashberg as predictTcEliashbergPhysics, reconcileTc, FAMILY_TC_CAPS, computeCapExtensionFactor, allenDynesTcRaw, allenDynesTcUncalibrated, computePhysicsTcUQ } from "./physics-engine";
 import type { CapExtensionEvidence } from "./physics-engine";
 import { runPressureAnalysis } from "./pressure-engine";
 import { runStructurePredictionBatch, runGenerativeStructureDiscovery, getStructuralVariantCount, runNovelPrototypeGeneration, getNovelPrototypeCount, runEvolutionaryStructureSearch, setMutationIntensity, matchPrototype } from "./structure-predictor";
@@ -29,7 +30,7 @@ import type { PhysicsPrediction, MLFeatureVector } from "./ml-predictor";
 import { gbPredict, gbPredictWithUncertaintyAsync, incorporateFailureData, getFailureExampleCount, surrogateScreen, getSurrogateStats, incorporateSuccessData, retrainWithAccumulatedData, incorporateDFTResult, retrainXGBoostFromEvaluated, getEvaluatedDatasetStats, getModelVersionHistory, setActiveApplication, setCuriosityProvider, startGCPXGBPoller } from "./gradient-boost";
 import { normalizeFormula, classifyFamily, sanitizeForbiddenWords, isValidFormula } from "./utils";
 import { recordPhysicsResult } from "./physics-results-store";
-import { runMassiveGeneration, passesValenceFilter, passesElementCountCap, estimateFamilyPressure, mutatePressure, generatePressureVariants, type MassiveGenerationStats } from "./candidate-generator";
+import { runMassiveGeneration, passesValenceFilter, passesElementCountCap, estimateFamilyPressure, mutatePressure, generatePressureVariants, getSeedsFromClusterGuidance, type MassiveGenerationStats } from "./candidate-generator";
 import { deliberateOnCandidate, formatDeliberationSummary } from "./deliberative-evaluator";
 import { scanMaterialSignals } from "./material-signal-scanner";
 import { resolveDFTFeatures, describeDFTSources } from "./dft-feature-resolver";
@@ -49,12 +50,12 @@ import { applyFamilyFilter, rankCandidate, computeDiscoveryScore } from "./famil
 import { runPrototypeGeneration, type PrototypeCandidate } from "./prototype-generator";
 import { enumeratePrototypesForFormula, type PrototypeEnumResult } from "./crystal-prototypes";
 import { generatePrototypeFreeStructures, getLatticeGeneratorStats, seedEvoPopulation, addToEvoPopulation, runEvolutionaryGeneration, getEvoPopulationSummary, type GeneratedStructure } from "../crystal/lattice-generator";
-import { gnnPredictWithUncertainty } from "./graph-neural-net";
+import { gnnPredictWithUncertainty, gnnPredictBestPressureSync } from "./graph-neural-net";
 import { runActiveLearningCycle, getActiveLearningStats, runModelBenchmarks, startGCPWeightPoller, refreshMPTrainingData } from "./active-learning";
 import { predictPressureCurve, findOptimalPressure, getPressureCurveStats } from "./pressure-aware-surrogate";
 import { findStabilityPressureWindow, getEnthalpyStats } from "./enthalpy-stability";
 import { buildPressureResponseProfile, getPressurePropertyMapStats } from "./pressure-property-map";
-import { optimizePressureForFormula, getBayesianPressureStats, addPressureObservation } from "./bayesian-pressure-optimizer";
+import { optimizePressureForFormula, getBayesianPressureStats, addPressureObservation, rehydratePressureObservations } from "./bayesian-pressure-optimizer";
 import { recordClusterDiscovery, getPressureClusterStats, fastPressureScreen, samplePressureFromClusters } from "./pressure-screening";
 import { detectPhaseTransitions, getPhaseTransitionStats } from "./pressure-phase-detector";
 import { recordEvaluationResult, getCalibrationStats, notifyModelRetrain } from "./surrogate-fitness";
@@ -239,7 +240,7 @@ function inferDimensionalityFromStructure(
 }
 
 const generativeFeatureCache = new Map<string, MLFeatureVector>();
-const MAX_GEN_FEATURE_CACHE = 500;
+const MAX_GEN_FEATURE_CACHE = 10_000;  // compute cache — larger = fewer re-extractions
 
 async function getCachedFeatures(formula: string): Promise<MLFeatureVector> {
   const cached = generativeFeatureCache.get(formula);
@@ -583,10 +584,12 @@ let totalNovelSynthesisProposed = 0;
 let activeTasks: Set<string> = new Set();
 let lastCycleAt: string | null = null;
 let allInsights: string[] = [];
-const MAX_INSIGHTS = 500;  // ring-buffer cap — older insights are evicted when exceeded
+const MAX_INSIGHTS = 1_000_000;  // effectively unlimited — DB is the source of truth
 function pushInsights(newInsights: string[]): void {
   allInsights.push(...newInsights);
   if (allInsights.length > MAX_INSIGHTS) allInsights = allInsights.slice(-MAX_INSIGHTS);
+  // Write-through to DB so insights survive restarts and in-memory eviction
+  engineInsightWriter.pushMany(newInsights.map(text => ({ insightText: text, cycle: cycleCount })));
 }
 let isRunningCycle = false;
 let backgroundSeedingDone = false; // Prevents re-seeding on engine stop/start cycles
@@ -669,18 +672,26 @@ interface LastCycleCandidate {
 let lastCycleCandidates: LastCycleCandidate[] = [];
 let lastCycleFamilyCounts: Record<string, number> = {};
 let autonomousGNNRetrainCount = 0;
-const alreadyScreenedFormulas = new Set<string>();
-// 100k cap — Set.has() is O(1) so size doesn't affect lookup speed.
-// Larger = fewer re-screens of already-evaluated formulas across the 1M+ candidate space.
-// Eviction removes 20% at a time to avoid the O(n) cost of evicting 1 entry repeatedly.
-const MAX_SCREENED_CACHE_SIZE = 100_000;
+// DB-backed screened-formula set.  The subclass intercepts .add() to write-through
+// to formula_screen_log so the set survives restarts.  In-memory stays bounded at 1M
+// but the DB has the full history.
+class ScreenedFormulaSet extends Set<string> {
+  add(formula: string): this {
+    if (!this.has(formula)) {
+      formulaScreenWriter.push({ formula, status: "screened", reason: null, tc: null, lambda: null });
+    }
+    return super.add(formula);
+  }
+}
+const alreadyScreenedFormulas = new ScreenedFormulaSet();
+const MAX_SCREENED_CACHE_SIZE = 1_000_000;
 
 const familyDeferredQueue: Map<string, string[]> = new Map();
-const DEFERRED_QUEUE_MAX_PER_FAMILY = 50;
+const DEFERRED_QUEUE_MAX_PER_FAMILY = 500;
 const DEFERRED_QUEUE_MAX_AGE_CYCLES = 10;
 let deferredQueueLastPruneCycle = 0;
 const rejectedFormulas = new Map<string, { reason: string; tc: number; lambda?: number; timestamp: number }>();
-const MAX_REJECTED_CACHE_SIZE = 10_000;  // was 100K — sort(100K) caused ~300ms GC pauses
+const MAX_REJECTED_CACHE_SIZE = 1_000_000;  // DB-backed — in-memory serves as hot cache
 function pruneRejectedCache(): void {
   // Evict oldest 30% by walking insertion order (Maps iterate in insertion order).
   // O(n) with no array allocation — avoids the GC storm from sort().
@@ -693,8 +704,11 @@ function pruneRejectedCache(): void {
   }
 }
 function recordRejection(formula: string, reason: string, tc: number, lambda?: number): void {
-  rejectedFormulas.set(normalizeFormula(formula), { reason, tc, lambda, timestamp: Date.now() });
+  const norm = normalizeFormula(formula);
+  rejectedFormulas.set(norm, { reason, tc, lambda, timestamp: Date.now() });
   if (rejectedFormulas.size > MAX_REJECTED_CACHE_SIZE) pruneRejectedCache();
+  // Write-through: persist rejection so it survives restarts
+  formulaScreenWriter.push({ formula: norm, status: "rejected", reason, tc, lambda: lambda ?? null });
 }
 function getHydrideUnverifiedPenalty(formula: string): number {
   const counts = parseFormulaCounts(formula);
@@ -934,9 +948,15 @@ function updateTempo() {
   if (recentTcImproved || recentNewCandidates >= 3) {
     engineTempo = "excited";
     cycleIntervalMs = 10000;
-  } else if (cyclesSinceTcImproved > 10) {
+  } else if (cyclesSinceTcImproved > 10 && cyclesSinceTcImproved <= 25) {
     engineTempo = "contemplating";
     cycleIntervalMs = 22000;
+  } else if (cyclesSinceTcImproved > 25) {
+    // Deep stagnation: switch back to "exploring" to increase diversity.
+    // "contemplating" reduces exploration probability (15%) and focus areas (2),
+    // which is counterproductive when the search space is exhausted.
+    engineTempo = "exploring";
+    cycleIntervalMs = 15000;
   } else {
     engineTempo = "exploring";
     cycleIntervalMs = 15000;
@@ -1783,11 +1803,13 @@ async function insertCandidateWithStabilityCheck(candidateData: Parameters<typeo
     // Fail-open: if GNN is unavailable the material proceeds, it just won't be
     // pre-screened here — the acquisition function will still penalise it.
     try {
-      const gnnScreen = gnnPredictWithUncertainty(candidateData.formula, undefined, candidateData.pressureGpa ?? 0);
+      // Pressure sweep: find the best GNN prediction across pressures for this material.
+      const gnnSweep = gnnPredictBestPressureSync(candidateData.formula, undefined, candidateData.pressureGpa ?? undefined);
+      const gnnScreen = gnnSweep;
 
       // Rule 1: bandgap → insulator gate.
       // Many exemptions apply — see inline comments.
-      const pressureGpa = candidateData.pressureGpa ?? 0;
+      const pressureGpa = gnnSweep.optimalPressureGpa ?? (candidateData.pressureGpa ?? 0);
       const pc1 = parseComposition(candidateData.formula);
       const formulaElements = Object.keys(pc1.counts);
       const hasH = (pc1.counts["H"] ?? 0) > 0;
@@ -2253,6 +2275,11 @@ const reEvalApplied = new Map<string, { formula: string; lambda: number; omegaLo
 let cyclesSinceTcImproved = 0;
 let lastBestTcSeen = 0;
 let lastBestPairingSusc = 0;
+// Separate leaderboard for normal-constraint results only.
+// The plateau detector and BO acquisition compare against this, not the global
+// best which may include inflated Tc from relaxed-constraint exploration cycles.
+let lastBestTcNormal = 0;
+let lastBestPairingSuscNormal = 0;
 let explorationModeActive = false;
 let explorationModeSavedConstraints: { allowBeyondEmpirical: boolean; empiricalPenaltyStrength: number } | null = null;
 let currentMutationLevel = 1;
@@ -2305,19 +2332,48 @@ async function reEvaluateTopCandidates() {
   try {
     const topByTc = await storage.getSuperconductorCandidatesByTc(50);
 
-    const currentBestTc = Math.max(...topByTc.map(c => c.predictedTc ?? 0), 0);
-    const currentBestPairing = Math.max(...topByTc.map(c => {
+    // Exclude phonon-unstable candidates from best-Tc tracking — inflated Tc
+    // from unstable compounds (e.g. 500K with phonon_stable=false) should not
+    // drive the stagnation counter or show as "best Tc" on the dashboard.
+    const phononStableCandidates = topByTc.filter(c => {
+      const mlf = (c.mlFeatures as Record<string, any>) ?? {};
+      // If phononStable was never assessed, don't exclude the candidate
+      return mlf.phononStable !== false;
+    });
+
+    // Separate normal-constraint candidates from relaxed-constraint ones.
+    // The plateau detector and BO must only chase reproducible results.
+    const normalConstraintCandidates = phononStableCandidates.filter(c => {
+      const mlf = (c.mlFeatures as Record<string, any>) ?? {};
+      return mlf.constraintRelaxed !== true;
+    });
+
+    const currentBestTc = Math.max(...phononStableCandidates.map(c => c.predictedTc ?? 0), 0);
+    const currentBestPairing = Math.max(...phononStableCandidates.map(c => {
       const lambda = c.electronPhononCoupling ?? 0;
       const score = c.ensembleScore ?? 0;
       return lambda * 0.4 + score * 0.6;
     }), 0);
 
-    const tcMeaningfulGain = Math.max(5, lastBestTcSeen * 0.03);
-    const pairingMeaningfulGain = Math.max(0.05, lastBestPairingSusc * 0.05);
-    if (currentBestTc > lastBestTcSeen + tcMeaningfulGain || currentBestPairing > lastBestPairingSusc + pairingMeaningfulGain) {
+    const currentBestTcNormal = Math.max(...normalConstraintCandidates.map(c => c.predictedTc ?? 0), 0);
+    const currentBestPairingNormal = Math.max(...normalConstraintCandidates.map(c => {
+      const lambda = c.electronPhononCoupling ?? 0;
+      const score = c.ensembleScore ?? 0;
+      return lambda * 0.4 + score * 0.6;
+    }), 0);
+
+    // Update the global leaderboard (for display/logging)
+    lastBestTcSeen = Math.max(lastBestTcSeen, currentBestTc);
+    lastBestPairingSusc = Math.max(lastBestPairingSusc, currentBestPairing);
+
+    // Plateau detection uses ONLY normal-constraint best — relaxed-regime
+    // results must never anchor the stagnation counter or trigger expansion.
+    const tcMeaningfulGain = Math.max(5, lastBestTcNormal * 0.03);
+    const pairingMeaningfulGain = Math.max(0.05, lastBestPairingSuscNormal * 0.05);
+    if (currentBestTcNormal > lastBestTcNormal + tcMeaningfulGain || currentBestPairingNormal > lastBestPairingSuscNormal + pairingMeaningfulGain) {
       cyclesSinceTcImproved = 0;
-      lastBestTcSeen = Math.max(lastBestTcSeen, currentBestTc);
-      lastBestPairingSusc = Math.max(lastBestPairingSusc, currentBestPairing);
+      lastBestTcNormal = Math.max(lastBestTcNormal, currentBestTcNormal);
+      lastBestPairingSuscNormal = Math.max(lastBestPairingSuscNormal, currentBestPairingNormal);
     } else {
       cyclesSinceTcImproved++;
     }
@@ -2889,6 +2945,7 @@ async function runPhase10_Physics() {
         const existingMlFeatures = (candidate.mlFeatures as Record<string, any>) ?? {};
         const updatedMlFeatures = {
           ...existingMlFeatures,
+          phononStable: result.phononSpectrum.phononStable ?? !result.phononSpectrum.hasImaginaryModes,
           instabilityAnalysis: {
             nearestBoundary: instProx.nearestBoundary,
             overallProximity: instProx.overallProximity,
@@ -3073,13 +3130,28 @@ async function runPhase10_Physics() {
             }
           }
 
-          topoAnalysis = analyzeTopology(
-            candidate.formula,
-            electronicForTopo,
-            crystalInfo.lattice,
-            crystalInfo.prototype,
-            dftTopoClassification
-          );
+          // Physics consistency gate: stable ferromagnets cannot be topological SCs,
+          // QCP superconductors, or novel synthesis candidates. Running those analyses
+          // on ferromagnets produces physically contradictory outputs.
+          const isStableFM = result.spinSusceptibility?.isStableFerromagnet === true;
+          if (isStableFM) {
+            emit("log", {
+              phase: "phase-10",
+              event: "Ferromagnet consistency gate",
+              detail: `${candidate.formula}: I·N(Ef)=${result.spinSusceptibility.stonerProduct.toFixed(2)} — skipping topological/QCP/pairing/synthesis analyses (incompatible with stable ferromagnetism)`,
+              dataSource: "Physics Engine",
+            });
+          }
+
+          if (!isStableFM) {
+            topoAnalysis = analyzeTopology(
+              candidate.formula,
+              electronicForTopo,
+              crystalInfo.lattice,
+              crystalInfo.prototype,
+              dftTopoClassification
+            );
+          }
           recordEngineSuccess("topology");
           trackTopologyResult(topoAnalysis);
           crossEngineHub.recordInsight("topology", candidate.formula, topoAnalysis);
@@ -3184,7 +3256,7 @@ async function runPhase10_Physics() {
         }
 
         let pairingProfile: PairingProfile | undefined;
-        if (!isEngineDegraded("pairing")) {
+        if (!isEngineDegraded("pairing") && !isStableFM) {
           try {
             pairingProfile = computePairingProfile(candidate.formula, topoAnalysis);
             recordEngineSuccess("pairing");
@@ -3406,7 +3478,7 @@ async function runPhase10_Physics() {
         }
 
         let qcAnalysis: QuantumCriticalAnalysis | undefined;
-        try {
+        if (!isStableFM) try {
           qcAnalysis = detectQuantumCriticality(candidate.formula, {
             electronic: result.electronicStructure,
             coupling: result.coupling,
@@ -3668,7 +3740,7 @@ async function runPhase10_Physics() {
             }
           } catch (e) { console.error(`[Engine] Phase-10 synthesis analysis failed for ${candidate.formula}:`, e); }
 
-          if (updatedTc > 15) {
+          if (updatedTc > 15 && !isStableFM) {
             try {
               const hubInsights = crossEngineHub.getInsightsFor(candidate.formula);
               const multiInsights: MultiEngineInsights = {
@@ -3727,7 +3799,6 @@ async function runPhase10_Physics() {
               }
             } catch (e) { console.error(`[Engine] Phase-10 novel synthesis discovery failed for ${candidate.formula}:`, e); }
           }
-
           if (updatedTc > 25 && cycleCount % 3 === 0) {
             try {
               const expCandidate: ExperimentCandidate = {
@@ -5453,7 +5524,9 @@ async function runAutonomousDiscoveryCycle(formula: string, opts?: { skipDbDupCh
     // get full GNN scoring when it enters the normal fast-path screening pipeline.
     if (!opts?.skipGNN) {
       try {
-        gnnResult = gnnPredictWithUncertainty(formula, undefined, features.pressureGpa);
+        // Pressure sweep: find best Tc across pressures
+        const gnnSweep = gnnPredictBestPressureSync(formula, undefined, features.pressureGpa > 0 ? features.pressureGpa : undefined);
+        gnnResult = gnnSweep;
       } catch (e) { console.error(`[Autonomous] GNN prediction failed for ${formula}:`, e); }
     }
 
@@ -5828,7 +5901,10 @@ async function runAutonomousDiscoveryCycle(formula: string, opts?: { skipDbDupCh
       } catch (e) { console.error(`[Autonomous] Pressure pathway analysis failed for ${formula}:`, e); }
     }
 
-    if (finalTc > autonomousBestTc) {
+    // Only update the autonomous best Tc from normal-constraint results.
+    // Relaxed-regime discoveries are still stored in the DB (tagged), but
+    // must not anchor the BO acquisition baseline or plateau detector.
+    if (finalTc > autonomousBestTc && !explorationModeActive) {
       autonomousBestTc = finalTc;
     }
 
@@ -5922,6 +5998,15 @@ async function runAutonomousFastPath() {
       focusArea = explorationPool[Math.floor(Math.random() * explorationPool.length)];
     }
 
+    // Sync the RL agent's focus family so replay sampling stays on-distribution.
+    const reverseNameMap: Record<string, string> = {
+      Hydrides: "hydride", Cuprates: "cuprate", Chalcogenides: "chalcogenide",
+      Pnictides: "layered-pnictide", Intermetallics: "intermetallic",
+      Kagome: "kagome-metal", Oxides: "oxide-perovskite", Carbides: "boride",
+      Borides: "boride", Nitrides: "intermetallic",
+    };
+    rlAgent.setFocusFamily(reverseNameMap[focusArea] ?? null);
+
     let constraintGuidance: ReturnType<typeof getConstraintGuidanceForGenerator> | null = null;
     let graphGuidance: ReturnType<typeof getConstraintGraphGuidance> | null = null;
     try {
@@ -5948,14 +6033,34 @@ async function runAutonomousFastPath() {
     const shuffled = [...topCandidatesForGen].sort(() => Math.random() - 0.5);
     const { formulas: massiveCandidates, stats: genStats } = await runMassiveGeneration(shuffled, focusArea);
 
+    // Inject seeds from under-explored Fermi surface clusters so the guidance
+    // actually steers generation rather than just logging recommendations.
+    const fsGuidance = getClusterGuidance();
+    const fsClusterSeeds = getSeedsFromClusterGuidance(
+      fsGuidance.underExploredClusters.map(c => c.clusterId)
+    );
+    const fsClusterFormulas: string[] = [];
+    for (const pair of fsClusterSeeds) {
+      const stoichs = [[1, 1], [1, 2], [2, 1], [3, 1], [1, 3]];
+      for (const s of stoichs) {
+        let raw: string;
+        if (pair.length === 2) raw = `${pair[0]}${s[0]}${pair[1]}${s[1]}`;
+        else if (pair.length === 3) raw = `${pair[0]}${s[0]}${pair[1]}${s[1]}${pair[2]}${Math.max(1, s[1])}`;
+        else continue;
+        fsClusterFormulas.push(raw);
+      }
+    }
+    // Merge cluster-guided formulas into the massive candidate pool
+    const massiveWithClusters = [...new Set([...massiveCandidates, ...fsClusterFormulas])];
+
     // Let the BO propose its own formulas (neighbourhood exploration around best
     // observed compounds) rather than only ranking what other generators produced.
     const boProposed = bayesianOptimizer.generateCandidates(30).map(s => s.formula);
-    const boCandidatePool = [...new Set([...rlCandidates, ...massiveCandidates, ...boProposed])];
+    const boCandidatePool = [...new Set([...rlCandidates, ...massiveWithClusters, ...boProposed])];
     const boSuggestions = bayesianOptimizer.suggestNextCandidates(boCandidatePool, 50, "mixed");
     const boTopFormulas = boSuggestions.map(s => s.formula);
 
-    const remainingMassive = massiveCandidates.filter(f => !boTopFormulas.includes(f));
+    const remainingMassive = massiveWithClusters.filter(f => !boTopFormulas.includes(f));
 
     const pressureVariantFormulas: string[] = [];
     const candidatePressureMap = new Map<string, number>();
@@ -6165,7 +6270,8 @@ async function runAutonomousFastPath() {
 
           const protoPayloads = eligibleProtos.map(proto => {
             enumTotal++;
-            const gnnResult = gnnPredictWithUncertainty(normalized, proto.prototype, protoPressure);
+            // Pressure sweep for each prototype to find optimal Tc
+            const gnnResult = gnnPredictBestPressureSync(normalized, proto.prototype, protoPressure > 0 ? protoPressure : undefined);
 
             let predictedTc: number;
             const gnnHasStructure = gnnResult.confidence > 0.3 && gnnResult.tc > 0;
@@ -6190,12 +6296,14 @@ async function runAutonomousFastPath() {
 
           const insertResults = await Promise.allSettled(protoPayloads.map(async ({ proto, gnnResult, predictedTc, siteStr }) => {
             const id = `sc-protoenum-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+            // Use the optimal pressure from the GNN sweep if available
+            const optPressure = (gnnResult as any).optimalPressureGpa ?? protoPressure;
             return insertCandidateWithStabilityCheck({
               id,
               name: `${proto.prototype} ${normalized}`,
               formula: normalized,
               predictedTc,
-              pressureGpa: protoPressure,
+              pressureGpa: optPressure,
               meissnerEffect: false,
               zeroResistance: false,
               cooperPairMechanism: `${proto.prototype} structure enumeration`,
@@ -6214,6 +6322,8 @@ async function runAutonomousFastPath() {
                 gnnUncertainty: gnnResult.uncertainty,
                 gnnLambda: gnnResult.lambda,
                 gnnTc: gnnResult.tc,
+                gnnOptimalPressureGpa: optPressure,
+                pressureSweep: (gnnResult as any).pressureSweep,
               },
               xgboostScore: gbResult.score,
               neuralNetScore: gnnResult.confidence,
@@ -7023,7 +7133,11 @@ async function runAutonomousFastPath() {
             const hubIns = crossEngineHub.getInsightsFor(formula);
             const obsLambda = hubIns?.physics?.lambda ?? (result.physicsPred?.lambda ?? 0.5);
             const obsStability = 1 - (result.physicsPred?.hullDistance ?? 0.2);
-            bayesianOptimizer.addObservation(formula, result.tc, obsLambda, obsStability);
+            // Only feed normal-constraint results to BO — relaxed-regime Tc
+            // values would poison the acquisition function's baseline.
+            if (!explorationModeActive) {
+              bayesianOptimizer.addObservation(formula, result.tc, obsLambda, obsStability);
+            }
             if (hubIns?.topology && hubIns.topology.topologicalScore > 0.3 && !explorationModeActive) {
               await incorporateSuccessData(formula, result.tc, { topologicalScore: hubIns.topology.topologicalScore });
             }
@@ -7827,6 +7941,33 @@ async function runLearningCycle() {
         currentExploitFamily = null;
         exploitStagnantCycles = 0;
         exploitLastInsertCount = 0;
+
+        // Prune screened + rejected caches every 25 stagnation cycles so formulas
+        // can be re-evaluated with improved models — the "excited-only" pruning
+        // never fires during deep stagnation because tempo stays "contemplating".
+        if (cyclesSinceTcImproved % 25 === 0) {
+          const screenedBefore = alreadyScreenedFormulas.size;
+          const pruneCount = Math.floor(screenedBefore * 0.5);
+          const iter = alreadyScreenedFormulas.values();
+          for (let i = 0; i < pruneCount; i++) {
+            const v = iter.next().value;
+            if (v !== undefined) alreadyScreenedFormulas.delete(v);
+          }
+          const rejectedBefore = rejectedFormulas.size;
+          const rejPrune = Math.floor(rejectedBefore * 0.5);
+          const rIter = rejectedFormulas.keys();
+          for (let i = 0; i < rejPrune; i++) {
+            const k = rIter.next().value;
+            if (k !== undefined) rejectedFormulas.delete(k);
+          }
+          emit("log", {
+            phase: "engine",
+            event: "Stagnation cache purge",
+            detail: `Pruned screened cache ${screenedBefore}→${alreadyScreenedFormulas.size}, rejected cache ${rejectedBefore}→${rejectedFormulas.size} to allow re-evaluation after ${cyclesSinceTcImproved} stagnation cycles.`,
+            dataSource: "Engine",
+          });
+        }
+
         emit("log", {
           phase: "engine",
           event: "Tc plateau level-4 chemical space expansion",
@@ -8197,7 +8338,7 @@ async function runLearningCycle() {
           })();
         } catch (err: any) {
           lastActiveLearningCycle = cycleCount;
-          console.log(`[Active Learning] Error at cycle ${cycleCount}: ${err.message?.slice(0, 150)}`);
+          console.log(`[Active Learning] Error at cycle ${cycleCount}: ${err.message?.slice(0, 150)}\n${err.stack?.split('\n').slice(0, 5).join('\n')}`);
           emit("log", {
             phase: "engine",
             event: "Active learning error",
@@ -8329,14 +8470,15 @@ async function runLearningCycle() {
         try {
           const focusFamily = currentStrategyFocusAreas[0]?.area || "Carbides";
           const FAMILY_ELEMENT_SETS: Record<string, string[][]> = {
-            Carbides: [["Nb","C"],["Ti","C"],["Mo","C"],["V","C"],["Nb","Ti","C"],["Nb","Mo","C"]],
-            Borides: [["Nb","B"],["Ti","B"],["Zr","B"],["Mg","B"],["Nb","Ti","B"]],
-            Nitrides: [["Nb","N"],["Ti","N"],["Zr","N"],["V","N"],["Nb","Ti","N"]],
-            Hydrides: [["La","H"],["Y","H"],["Ca","H"],["Sr","H"],["La","Y","H"]],
-            Intermetallics: [["Nb","Sn"],["V","Si"],["Nb","Ge"],["Nb","Al"]],
+            Carbides: [["Nb","C"],["Ti","C"],["Mo","C"],["V","C"],["Nb","Ti","C"],["Nb","Mo","C"],["Ta","C"],["W","C"],["Hf","C"],["Zr","C"],["Sc","C"],["Y","C"],["Ta","Nb","C"],["V","Mo","C"],["Hf","Ti","C"]],
+            Borides: [["Nb","B"],["Ti","B"],["Zr","B"],["Mg","B"],["Nb","Ti","B"],["Mo","B"],["W","B"],["Ta","B"],["V","B"],["Hf","B"],["Y","B"],["La","B"],["Zr","Ti","B"],["Nb","Mo","B"]],
+            Nitrides: [["Nb","N"],["Ti","N"],["Zr","N"],["V","N"],["Nb","Ti","N"],["Mo","N"],["Ta","N"],["Hf","N"],["W","N"],["Cr","N"],["Ta","Nb","N"],["V","Ti","N"]],
+            Hydrides: [["La","H"],["Y","H"],["Ca","H"],["Sr","H"],["La","Y","H"],["Ba","H"],["Sc","H"],["Ce","H"],["Mg","H"],["Li","H"],["Be","H"],["Ca","Sr","H"],["La","Ce","H"],["Y","Ba","H"],["Th","H"],["Ac","H"]],
+            Intermetallics: [["Nb","Sn"],["V","Si"],["Nb","Ge"],["Nb","Al"],["Nb","Ga"],["V","Ga"],["Mo","Re"],["Ta","V"],["Nb","Ti"],["V","Cr"],["Nb","Ir"],["Pd","H"],["La","Ni"],["Y","Pd"],["Mo","Ir"],["Nb","Pt"]],
           };
           const elementSets = FAMILY_ELEMENT_SETS[focusFamily] || FAMILY_ELEMENT_SETS["Carbides"];
-          const chosenSet = elementSets[cycleCount % elementSets.length];
+          // Shuffle selection to avoid repeating the same sets in order
+          const chosenSet = elementSets[(cycleCount + Math.floor(cycleCount / elementSets.length) * 7) % elementSets.length];
           const optimalResults = await findOptimalRegion(chosenSet, emit);
           const seedFormulas = optimalResults
             .filter(r => r.predictedTc > 10 && r.hullDistance < 0.3)
@@ -8425,7 +8567,7 @@ async function runLearningCycle() {
             const protoIsClathrate = pc.prototype?.toLowerCase().includes("clathrate");
             const baseFamilyPressure = estimateFamilyPressure(normalized);
             const protoPressure = protoIsClathrate ? Math.max(150, baseFamilyPressure) : baseFamilyPressure;
-            const gnnResult = gnnPredictWithUncertainty(normalized, pc.prototype, protoPressure);
+            const gnnResult = gnnPredictBestPressureSync(normalized, pc.prototype, protoPressure > 0 ? protoPressure : undefined);
 
             if (!gnnResult) continue;
 
@@ -9223,10 +9365,11 @@ async function backfillGBScores() {
 // data leakage fixed (cycle 1384), KNOWN_LAMBDA injected (cycle 1383),
 // pressure-aware predictions working (cycle 1382). Forces recalculatePhysics()
 // to re-score every existing candidate against the new model.
-const PHYSICS_VERSION = 17;
+// v24: computePhysicsTcUQ called WITH pressure in recalculation.
+const PHYSICS_VERSION = 24;
 
 async function recalculatePhysics() {
-  const yield_ = () => new Promise<void>(r => setTimeout(r, 200));
+  const yield_ = () => new Promise<void>(r => setTimeout(r, 100));
   try {
     let totalRecalculated = 0;
     const batchSize = 50;
@@ -9260,20 +9403,20 @@ async function recalculatePhysics() {
           const ensemble = Math.min(0.95, gb.score * 0.4 + nnScore * 0.6);
           dbErrorCount = 0; // reset on success
 
-          const featureLambda = features.electronPhononLambda ?? 0;
           const metalScore = features.metallicity ?? 0.5;
 
-          // Use GCP XGBoost Tc as the primary prediction when available,
-          // falling back to physics-only Allen-Dynes Tc
+          // Use computePhysicsTcUQ with the candidate's stored pressure.
+          // This is the same function the unified-ci endpoint uses (now also
+          // with pressure). Both paths use allenDynesTcUncalibrated with all
+          // 10 corrections, formula, and pressure.
           let newTc: number | null = null;
-          if (gcpXgb.tcMean > 0) {
-            newTc = Math.round(gcpXgb.tcMean);
-          } else if (featureLambda > 0) {
-            const adTc = computePhysicsOnlyTc(featureLambda, features.logPhononFreq, features.muStarEstimate, c.formula);
-            newTc = adTc > 0 ? Math.round(adTc) : 0;
-          }
-          if (newTc != null) {
-            newTc = Math.round(applyAmbientTcCap(newTc, featureLambda, recalcPressure, metalScore, c.formula));
+          try {
+            const uq = computePhysicsTcUQ(c.formula, recalcPressure);
+            newTc = uq.mean > 0 ? Math.round(uq.mean * 10) / 10 : 0;
+          } catch {
+            if (gcpXgb.tcMean > 0) {
+              newTc = Math.round(gcpXgb.tcMean);
+            }
           }
 
           const isRoomTemp = (newTc ?? 0) > 273 &&
@@ -9347,6 +9490,39 @@ export async function startEngine() {
   // pool connections may have gone zombie while timers were paused. Proactively
   // clearing them here prevents the first-cycle DB storm of authentication timeouts.
   await drainIdleConnections().catch(() => {});
+
+  // ── Rehydrate learning caches from DB ─────────────────────────────────
+  // Delayed 5s so the connection pool isn't hit on the very first tick.
+  setTimeout(async () => {
+    try {
+      const [dbInsights, dbScreened, dbRejected] = await Promise.all([
+        loadRecentInsights(100_000),
+        loadScreenedFormulas(),
+        loadRejectedFormulas(),
+      ]);
+      if (dbInsights.length > 0) {
+        // Merge without re-writing to DB (they already exist there)
+        const merged = new Set(allInsights);
+        for (const ins of dbInsights) merged.add(ins);
+        allInsights = [...merged];
+        console.log(`[Engine] Rehydrated ${dbInsights.length} insights from DB`);
+      }
+      if (dbScreened.size > 0) {
+        for (const f of dbScreened) Set.prototype.add.call(alreadyScreenedFormulas, f); // bypass write-through
+        console.log(`[Engine] Rehydrated ${dbScreened.size} screened formulas from DB`);
+      }
+      if (dbRejected.size > 0) {
+        for (const [f, data] of dbRejected) {
+          if (!rejectedFormulas.has(f)) rejectedFormulas.set(f, data);
+        }
+        console.log(`[Engine] Rehydrated ${dbRejected.size} rejected formulas from DB`);
+      }
+    } catch (e: any) {
+      console.warn(`[Engine] Learning cache rehydration failed (non-fatal): ${e?.message?.slice(0, 120)}`);
+    }
+    // Rehydrate pressure observations — delayed further to avoid DB contention
+    setTimeout(() => rehydratePressureObservations().catch(() => {}), 3_000);
+  }, 5_000);
 
   // Restore the in-memory semantic dedup cache from DB so insights already
   // seen before the last restart don't slip through as "novel" again.
@@ -9479,7 +9655,7 @@ export async function startEngine() {
     runBackfillAndRecalc().finally(() => {
       setTimeout(scheduleRecalc, 1_200_000); // re-run every 20 min
     });
-  }, 1_200_000); // first run 20 min after startup
+  }, 120_000); // first run 2 min after startup
 
   // ── Background: systematic space-group sweep ─────────────────────────────────
   // Runs once at startup (15 min delay) then every 6 hours. Generates prototype

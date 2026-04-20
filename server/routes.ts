@@ -35,7 +35,7 @@ import {
   type DesignProgram, type DesignGraph,
 } from "./inverse/design-representations";
 import { getCalibrationData, getConfidenceBand, getEvaluatedDatasetStats, gbPredictWithUncertainty, gbPredictWithUncertaintyAsync, getXGBEnsembleStats, getModelVersionHistory, getFailureExampleCount, startPoolInit } from "./learning/gradient-boost";
-import { gnnPredictWithUncertainty, gnnPredictWithUncertaintyAsync, getGNNVersionHistory, getGNNModelVersion, getDFTTrainingDatasetStats, buildCrystalGraph, getHeldOutValidationSet, getGNNPrediction } from "./learning/graph-neural-net";
+import { gnnPredictWithUncertainty, gnnPredictWithUncertaintyAsync, gnnPredictBestPressure, getGNNVersionHistory, getGNNModelVersion, getDFTTrainingDatasetStats, buildCrystalGraph, getHeldOutValidationSet, getGNNPrediction } from "./learning/graph-neural-net";
 import { predictPressureCurve, findOptimalPressure, pressureSensitivity, getPressureCurveStats, getPressureExplorationStats } from "./learning/pressure-aware-surrogate";
 import { detectPhaseTransitions, getPhaseTransitionStats } from "./learning/pressure-phase-detector";
 import { computeEnthalpyPressureCurve, findStabilityPressureWindow, getEnthalpyStats } from "./learning/enthalpy-stability";
@@ -3000,9 +3000,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.get("/api/gnn/predict/:formula", generalLimiter, async (req, res) => {
     try {
       const formula = decodeURIComponent(req.params.formula);
-      // Use async version so we await the GCP PyTorch result instead of
-      // returning stale local ensemble predictions on first load.
-      const prediction = await gnnPredictWithUncertaintyAsync(formula);
+      const pressureHint = req.query.pressure != null ? Number(req.query.pressure) : undefined;
+      // Sweep pressures to find the max-Tc prediction for this material.
+      const prediction = await gnnPredictBestPressure(formula, undefined, pressureHint);
       const graph = buildCrystalGraph(formula);
       const isPytorch = prediction.uncertaintyBreakdown?.weightProfile?.mode === "pytorch";
       res.json({
@@ -3019,6 +3019,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           confidence: prediction.confidence,
           latentDistance: prediction.latentDistance,
         },
+        optimalPressureGpa: prediction.optimalPressureGpa,
+        pressureSweep: prediction.pressureSweep,
         uncertaintyBreakdown: prediction.uncertaintyBreakdown,
         graphStats: {
           nodes: graph.nodes.length,
@@ -3032,6 +3034,61 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       });
     } catch (e: any) {
       res.status(500).json({ error: "Failed to predict with GNN", detail: e.message?.slice(0, 200) });
+    }
+  });
+
+  // ── Re-score all candidates with pressure sweep ────────────────────────
+  // POST /api/gnn/rescore-pressure — sweeps pressures for every candidate in the DB
+  // and updates predictedTc / pressureGpa to the pressure-optimized max.
+  let _rescoreRunning = false;
+  app.post("/api/gnn/rescore-pressure", engineLimiter, async (_req, res) => {
+    if (_rescoreRunning) {
+      return res.status(409).json({ error: "Rescore already in progress" });
+    }
+    _rescoreRunning = true;
+    res.json({ status: "started", message: "Pressure-sweep rescore started in background" });
+
+    try {
+      const candidates = await storage.getSuperconductorCandidates(5000, 0);
+      console.log(`[Rescore] Starting pressure-sweep rescore for ${candidates.length} candidates`);
+      let updated = 0;
+      let errors = 0;
+      const batch: { id: string; updates: any }[] = [];
+
+      for (const c of candidates) {
+        try {
+          const result = await gnnPredictBestPressure(
+            c.formula,
+            (c.mlFeatures as any)?.prototype,
+            c.pressureGpa ?? undefined,
+          );
+
+          // Only update if the pressure-swept Tc is higher than what we had
+          if (result.tc > (c.predictedTc ?? 0) || result.optimalPressureGpa !== (c.pressureGpa ?? 0)) {
+            const mlFeatures = { ...(c.mlFeatures as any ?? {}), gnnTc: result.tc, gnnOptimalPressureGpa: result.optimalPressureGpa, pressureSweep: result.pressureSweep, gnnLambda: result.lambda };
+            batch.push({
+              id: c.id,
+              updates: {
+                predictedTc: Math.round(Math.max(result.tc, c.predictedTc ?? 0)),
+                pressureGpa: result.optimalPressureGpa,
+                mlFeatures,
+              },
+            });
+            updated++;
+          }
+        } catch (e) {
+          errors++;
+        }
+      }
+
+      if (batch.length > 0) {
+        await storage.bulkUpdateSuperconductorCandidates(batch);
+      }
+      console.log(`[Rescore] Done: ${updated} candidates updated, ${errors} errors out of ${candidates.length} total`);
+    } catch (e: any) {
+      console.error(`[Rescore] Failed:`, e.message?.slice(0, 200));
+    } finally {
+      _rescoreRunning = false;
     }
   });
 
@@ -5945,6 +6002,12 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       gnnLambda: number;
       ensembleTc: number;
       reasoning: string[];
+      /** Best GNN Tc found across all swept pressures */
+      gnnBestTc?: number;
+      /** Pressure at which the GNN predicts the highest Tc */
+      gnnOptimalPressureGpa?: number;
+      /** Full (pressure, Tc) sweep data */
+      pressureSweep?: { pressureGpa: number; tc: number }[];
     };
     accuracy: {
       tcErrorK: number;
@@ -5968,10 +6031,16 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         if (ref.textbook.lambda != null) (features as any).electronPhononLambda = ref.textbook.lambda;
         if (ref.textbook.omegaLog != null) (features as any).logPhononFreq = ref.textbook.omegaLog;
         const xgb = await gbPredictWithUncertaintyAsync(features, ref.formula, ref.textbook.pressureGpa ?? 0);
-        const gnn = await gnnPredictWithUncertaintyAsync(ref.formula, undefined, ref.textbook.pressureGpa ?? 0);
+
+        // Pressure sweep: find the best GNN Tc across pressures.
+        // Pass the textbook pressure as a hint so it's always in the sweep grid.
+        const gnnBest = await gnnPredictBestPressure(ref.formula, undefined, ref.textbook.pressureGpa ?? undefined);
+        // Also get the single-pressure prediction at the textbook pressure for comparison
+        const gnnAtTextbook = await gnnPredictWithUncertaintyAsync(ref.formula, undefined, ref.textbook.pressureGpa ?? 0);
 
         const xgboostTc = xgb.tcMean ?? 0;
-        const gnnTc = gnn.tc ?? 0;
+        // Use the best GNN Tc from the pressure sweep for the ensemble
+        const gnnTc = gnnBest.tc ?? 0;
         // XGBoost (with known lambda) is far more accurate than GNN for these materials.
         // Weight XGBoost heavily; GNN contributes mainly for uncertainty/stability signal.
         const ensembleTc = (xgboostTc * 0.8 + gnnTc * 0.2);
@@ -5980,8 +6049,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         const tcErrorPercent = ref.textbook.tc > 0 ? (tcError / ref.textbook.tc) * 100 : 0;
 
         let lambdaError: number | null = null;
-        if (ref.textbook.lambda > 0 && gnn.lambda > 0) {
-          lambdaError = Math.abs(gnn.lambda - ref.textbook.lambda);
+        if (ref.textbook.lambda > 0 && gnnBest.lambda > 0) {
+          lambdaError = Math.abs(gnnBest.lambda - ref.textbook.lambda);
         }
 
         let rating = "poor";
@@ -5997,11 +6066,14 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           predicted: {
             xgboostTc: Math.round(xgboostTc * 10) / 10,
             xgboostScore: Math.round((xgb.score ?? 0) * 1000) / 1000,
-            gnnTc: Math.round(gnnTc * 10) / 10,
-            gnnUncertainty: Math.round((gnn.uncertainty ?? 0) * 10) / 10,
-            gnnLambda: Math.round((gnn.lambda ?? 0) * 1000) / 1000,
+            gnnTc: Math.round((gnnAtTextbook.tc ?? 0) * 10) / 10,
+            gnnUncertainty: Math.round((gnnBest.uncertainty ?? 0) * 10) / 10,
+            gnnLambda: Math.round((gnnBest.lambda ?? 0) * 1000) / 1000,
             ensembleTc: Math.round(ensembleTc * 10) / 10,
             reasoning: (xgb.reasoning ?? []).slice(0, 5),
+            gnnBestTc: Math.round(gnnBest.tc * 10) / 10,
+            gnnOptimalPressureGpa: gnnBest.optimalPressureGpa,
+            pressureSweep: gnnBest.pressureSweep,
           },
           accuracy: {
             tcErrorK: Math.round(tcError * 10) / 10,

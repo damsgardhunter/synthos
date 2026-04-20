@@ -33,7 +33,7 @@ import {
 } from "./elemental-data";
 import { gbPredict, getConfidenceBand, gbPredictWithUncertainty, type XGBUncertaintyResult } from "./gradient-boost";
 import type { DFTResolvedFeatures } from "./dft-feature-resolver";
-import { getGNNPrediction, gnnPredictWithUncertainty, type GNNPrediction, type GNNPredictionWithUncertainty } from "./graph-neural-net";
+import { getGNNPrediction, gnnPredictWithUncertainty, gnnPredictWithUncertaintyAsync, gnnPredictBestPressure, type GNNPrediction, type GNNPredictionWithUncertainty } from "./graph-neural-net";
 import { getPhysicsFeatures, getDerivedFeatures } from "./physics-results-store";
 import { predictLambda, recordLambdaValidation } from "./lambda-regressor";
 import { predictTBProperties } from "../physics/tb-ml-surrogate";
@@ -66,6 +66,10 @@ export interface UnifiedCIResult {
     lambdaCI95: [number, number];
     confidence: number;
     weight: number;
+    /** Pressure (GPa) at which GNN predicts the highest Tc */
+    optimalPressureGpa?: number;
+    /** Full pressure sweep data */
+    pressureSweep?: { pressureGpa: number; tc: number }[];
   };
   xgb: {
     tcMean: number;
@@ -109,9 +113,11 @@ let _sweepGuardActive = false;
 export function setSweepGuardActive(v: boolean) { _sweepGuardActive = v; }
 export function isSweepGuardActive(): boolean { return _sweepGuardActive; }
 
-export async function computeUnifiedCI(formula: string): Promise<UnifiedCIResult> {
+export async function computeUnifiedCI(formula: string, pressureGpa: number = 0): Promise<UnifiedCIResult> {
+  // Pressure sweep: find the GNN's best Tc across pressures for this material.
+  // The pressureGpa hint ensures the caller's requested pressure is always in the grid.
   const [gnnResult, { features, xgbResult }] = await Promise.all([
-    Promise.resolve(gnnPredictWithUncertainty(formula)),
+    gnnPredictBestPressure(formula, undefined, pressureGpa > 0 ? pressureGpa : undefined),
     (async () => {
       const features = await extractFeatures(formula);
       const xgbResult = await gbPredictWithUncertainty(features, formula);
@@ -235,6 +241,8 @@ export async function computeUnifiedCI(formula: string): Promise<UnifiedCIResult
       lambdaCI95: gnnResult.lambdaCI95,
       confidence: gnnResult.confidence,
       weight: r(wGnn / wTotal),
+      optimalPressureGpa: (gnnResult as any).optimalPressureGpa,
+      pressureSweep: (gnnResult as any).pressureSweep,
     },
     xgb: {
       tcMean: xgbResult.tcMean,
@@ -260,7 +268,7 @@ export async function computeUnifiedCI(formula: string): Promise<UnifiedCIResult
     mahalanobisDistance: ood.mahalanobisDistance,
     physicsUQ: (() => {
       try {
-        const puq = computePhysicsTcUQ(formula);
+        const puq = computePhysicsTcUQ(formula, pressureGpa);
         return {
           tcMean: puq.mean,
           tcStd: puq.std,

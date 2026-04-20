@@ -1012,6 +1012,10 @@ def _train_xgboost(
     X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)
 
     # Exact Colab hyperparams
+    # Use CPU for XGBoost: tree_method="hist" is fast on CPU at this data size
+    # (~53K samples), and avoids the cuda→cpu device mismatch at predict time
+    # (predict receives numpy arrays on CPU; a cuda-trained model triggers
+    # "Falling back to prediction using DMatrix due to mismatched devices").
     xgb_model = xgb.XGBRegressor(
         n_estimators=600,
         max_depth=7,
@@ -1022,7 +1026,7 @@ def _train_xgboost(
         gamma=0.1,
         random_state=42,
         tree_method="hist",
-        device="cuda" if torch.cuda.is_available() else "cpu",
+        device="cpu",
     )
     xgb_model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
 

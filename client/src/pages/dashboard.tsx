@@ -399,6 +399,10 @@ function GNNActiveLearningCard() {
     currentVersion: number;
     ensembleSize: number;
     latestMetrics: { r2: number; mae: number; rmse: number; datasetSize: number } | null;
+    localMetrics?: { r2: number; mae: number; rmse: number; datasetSize: number } | null;
+    metricsSource?: string;
+    metricsWarning?: string;
+    pytorchStatus?: { connected: boolean; nModels: number; device: string };
     r2Trend: { version: number; r2: number; datasetSize?: number }[];
     maeTrend: { version: number; mae: number }[];
     history: any[];
@@ -458,6 +462,15 @@ function GNNActiveLearningCard() {
           ) : (
             <p className="text-xs text-muted-foreground italic" data-testid="gnn-no-data">GNN model initializing...</p>
           )}
+          {gnnVersionData?.pytorchStatus?.connected ? (
+            <p className="text-[10px] text-emerald-400/80 bg-emerald-900/20 px-2 py-1 rounded border border-emerald-500/20">
+              GCP PyTorch inference active ({gnnVersionData.pytorchStatus.nModels} model{gnnVersionData.pytorchStatus.nModels !== 1 ? "s" : ""} on {gnnVersionData.pytorchStatus.device})
+            </p>
+          ) : gnnVersionData?.metricsWarning ? (
+            <p className="text-[10px] text-amber-400/80 bg-amber-900/20 px-2 py-1 rounded border border-amber-500/20">
+              {gnnVersionData.metricsWarning}
+            </p>
+          ) : null}
 
           {alStats && (
             <div className="space-y-2">
@@ -491,6 +504,18 @@ function GNNActiveLearningCard() {
                   )}
                 </div>
               )}
+              {alStats.recentCycles?.length > 0 && (() => {
+                const recent = alStats.recentCycles.slice(-3);
+                const totalUseful = recent.reduce((s: number, c: any) => s + (c.discoveryEfficiency?.usefulDiscoveries ?? 0), 0);
+                const totalEvals = recent.reduce((s: number, c: any) => s + (c.discoveryEfficiency?.totalEvaluations ?? 0), 0);
+                const eff = totalEvals > 0 ? totalUseful / totalEvals : 0;
+                if (totalEvals === 0) return null;
+                return (
+                  <div className={`text-[10px] px-2 py-1 rounded border ${eff === 0 ? "text-red-400/80 bg-red-950/20 border-red-500/20" : eff < 0.2 ? "text-amber-400/80 bg-amber-950/20 border-amber-500/20" : "text-emerald-400/80 bg-emerald-950/20 border-emerald-500/20"}`}>
+                    Discovery efficiency: {(eff * 100).toFixed(0)}% ({totalUseful}/{totalEvals} useful){eff === 0 && " — all candidates failing phonon stability"}
+                  </div>
+                );
+              })()}
             </div>
           )}
 
@@ -567,6 +592,9 @@ interface BenchmarkCompound {
     gnnLambda: number;
     ensembleTc: number;
     reasoning: string[];
+    gnnBestTc?: number;
+    gnnOptimalPressureGpa?: number;
+    pressureSweep?: { pressureGpa: number; tc: number }[];
   };
   accuracy: {
     tcErrorK: number;
@@ -711,6 +739,14 @@ function ReferenceBenchmarkCard() {
                     <span className="text-muted-foreground">GNN Tc</span>
                     <span className="font-mono">{compound.predicted.gnnTc} K</span>
                   </div>
+                  {compound.predicted.gnnBestTc != null && compound.predicted.gnnBestTc !== compound.predicted.gnnTc && (
+                    <div className="flex justify-between col-span-2 bg-emerald-50 dark:bg-emerald-950/30 rounded px-1">
+                      <span className="text-muted-foreground">GNN Best Tc</span>
+                      <span className="font-mono font-semibold text-emerald-700 dark:text-emerald-400">
+                        {compound.predicted.gnnBestTc} K @ {compound.predicted.gnnOptimalPressureGpa} GPa
+                      </span>
+                    </div>
+                  )}
                   <div className="flex justify-between">
                     <span className="text-muted-foreground">Uncertainty</span>
                     <span className="font-mono text-muted-foreground">+/-{compound.predicted.gnnUncertainty} K</span>
@@ -1721,11 +1757,18 @@ function DistortionClassifierCard() {
               </div>
             )}
 
-            {classifierStats.recentPredictions.length > 0 && (
+            {(() => {
+              const validPredictions = classifierStats.recentPredictions.filter(p => p.prediction !== "unknown" && p.confidence > 0);
+              if (validPredictions.length === 0) {
+                return classifierStats.trainCount < 10 ? (
+                  <p className="text-[10px] text-muted-foreground italic">Needs 10+ training samples before predictions are available</p>
+                ) : null;
+              }
+              return (
               <div className="space-y-1">
                 <div className="text-[10px] text-muted-foreground font-medium">Recent Predictions</div>
                 <div className="space-y-1 max-h-32 overflow-y-auto">
-                  {classifierStats.recentPredictions.slice(0, 6).map((p, i) => (
+                  {validPredictions.slice(0, 6).map((p, i) => (
                     <div key={i} className="flex items-center justify-between text-[10px] bg-muted/50 rounded px-2 py-1" data-testid={`row-classifier-${i}`}>
                       <span className="font-mono font-medium">{p.formula}</span>
                       <div className="flex items-center gap-1.5">
@@ -1740,7 +1783,8 @@ function DistortionClassifierCard() {
                   ))}
                 </div>
               </div>
-            )}
+              );
+            })()}
           </div>
         )}
       </CardContent>
@@ -1779,11 +1823,14 @@ function FeedbackLoopCard() {
       </CardHeader>
       <CardContent className="space-y-3">
         <div className="grid grid-cols-3 gap-2">
-          <div className="p-2 bg-muted/40 rounded-md border border-border/30" data-testid="feedback-mae">
+          <div className={`p-2 rounded-md border ${data.globalMeanAbsError > 50 ? "bg-red-950/30 border-red-500/30" : "bg-muted/40 border-border/30"}`} data-testid="feedback-mae">
             <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Mean Abs Error</p>
             <p className={`text-lg font-mono font-bold ${data.globalMeanAbsError > 30 ? "text-red-600 dark:text-red-400" : data.globalMeanAbsError > 15 ? "text-amber-600 dark:text-amber-400" : "text-emerald-600 dark:text-emerald-400"}`}>
               {data.globalMeanAbsError.toFixed(1)}K
             </p>
+            {data.globalMeanAbsError > 50 && (
+              <p className="text-[9px] text-red-400/80 mt-1">Predictions unreliable</p>
+            )}
           </div>
           <div className="p-2 bg-muted/40 rounded-md border border-border/30" data-testid="feedback-overestimate">
             <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Overestimate Rate</p>
@@ -1866,9 +1913,17 @@ function FeedbackLoopCard() {
             </div>
           </div>
         )}
-        {data.pillarDFTFeedback && data.pillarDFTFeedback.length > 0 && (
+        {data.pillarDFTFeedback && data.pillarDFTFeedback.length > 0 && (() => {
+          const zeroPillars = data.pillarDFTFeedback.filter(pf => pf.accuracy === 0).length;
+          const totalPillars = data.pillarDFTFeedback.length;
+          return (
           <div className="space-y-1" data-testid="feedback-pillar-accuracy">
-            <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Pillar DFT Accuracy</p>
+            <p className="text-[10px] text-muted-foreground uppercase tracking-wider">
+              Pillar DFT Accuracy
+              {zeroPillars > totalPillars * 0.5 && (
+                <span className="text-amber-400/80 ml-1">({zeroPillars}/{totalPillars} unvalidated)</span>
+              )}
+            </p>
             <div className="grid grid-cols-2 gap-1">
               {data.pillarDFTFeedback.slice(0, 8).map(pf => (
                 <div key={pf.pillar} className="flex items-center justify-between text-[10px] px-1.5 py-0.5 bg-muted/30 rounded" data-testid={`pillar-accuracy-${pf.pillar}`}>
@@ -1880,7 +1935,8 @@ function FeedbackLoopCard() {
               ))}
             </div>
           </div>
-        )}
+          );
+        })()}
       </CardContent>
     </Card>
   );
@@ -2224,16 +2280,16 @@ export default function Dashboard() {
         ) : (
           <>
             <StatCard title="Elements Learned" value={stats?.elementsLearned ?? 0} icon={Atom} sub="of 118 known elements" history={getHistory("elements")} />
-            <StatCard title="Materials Indexed" value={(stats?.materialsIndexed ?? 0).toLocaleString()} icon={Database} sub="from 4 scientific databases" history={getHistory("materials")} />
-            <StatCard title="Predictions Made" value={stats?.predictionsGenerated ?? 0} icon={FlaskConical} sub="novel material candidates" history={getHistory("predictions")} />
+            <StatCard title="Materials Processed" value={(stats?.materialsIndexed ?? 0).toLocaleString()} icon={Database} sub="analyzed from external databases" history={getHistory("materials")} />
+            <StatCard title="Candidates Evaluated" value={stats?.predictionsGenerated ?? 0} icon={FlaskConical} sub="through ML screening pipeline" history={getHistory("predictions")} />
             <StatCard title="SC Candidates" value={stats?.superconductorCandidates ?? 0} icon={Zap} sub="superconductor predictions" history={getHistory("sc")} />
             <StatCard title="Synthesis Paths" value={stats?.synthesisProcesses ?? 0} icon={Microscope} sub="lab creation processes" history={getHistory("synthesis")} />
             <StatCard title="Reactions Learned" value={stats?.chemicalReactions ?? 0} icon={BookOpen} sub="chemical reaction database" history={getHistory("reactions")} />
-            <StatCard title="Overall Progress" value={`${(stats?.overallProgress ?? 0).toFixed(1)}%`} icon={Brain} sub="across 12 learning phases" history={getHistory("progress")} />
+            <StatCard title="Phase Completion" value={`${(stats?.overallProgress ?? 0).toFixed(1)}%`} icon={Brain} sub="curriculum coverage (not prediction quality)" history={getHistory("progress")} />
             <StatCard title="Active Phases" value={`${phases?.filter(p => p.status === "active").length ?? 0} / ${phases?.length ?? 12}`} icon={TrendingUp} sub="currently running" />
             <StatCard title="Milestones" value={milestoneData?.total ?? 0} icon={Star} sub="research milestones" history={getHistory("milestones")} />
             <StatCard title="DFT Enriched" value={dftStatus?.dftEnrichedCount ?? 0} icon={Cpu} sub={`${dftStatus?.breakdown?.high ?? 0} high / ${dftStatus?.breakdown?.medium ?? 0} medium confidence`} data-testid="stat-dft-enriched" />
-            <StatCard title="Band Structure" value={bandCalcStats?.totalCalcs ?? 0} icon={Activity} sub={`${bandCalcStats?.succeeded ?? 0} converged${bandAnalysisStats?.totalAnalyses ? ` / ${bandAnalysisStats.withPockets} pockets / ${bandAnalysisStats.withBandInversions} inversions` : bandCalcStats?.failed ? ` / ${bandCalcStats.failed} failed` : ""}`} data-testid="stat-band-structure" />
+            <StatCard title="DFT Band Structure" value={bandCalcStats?.totalCalcs ?? 0} icon={Activity} sub={`${bandCalcStats?.succeeded ?? 0} converged${bandCalcStats?.totalCalcs === 0 ? " (surrogate-only mode)" : ""}${bandAnalysisStats?.totalAnalyses ? ` / ${bandAnalysisStats.withPockets} pockets / ${bandAnalysisStats.withBandInversions} inversions` : bandCalcStats?.failed ? ` / ${bandCalcStats.failed} failed` : ""}`} data-testid="stat-band-structure" />
           </>
         )}
       </div>
@@ -2409,23 +2465,22 @@ export default function Dashboard() {
           </CardHeader>
           <CardContent>
             {(() => {
-              const loopStats = engineMemory?.autonomousLoopStats;
               const candidates = scData?.candidates ?? [];
-              const withStability = candidates.filter((c: any) => c.stabilityScore != null);
-              const stableCount = withStability.filter((c: any) => (c.stabilityScore ?? 0) >= 0.95).length;
-              const nearHullCount = withStability.filter((c: any) => {
-                const s = c.stabilityScore ?? 0;
-                return s >= 0.5 && s < 0.95;
+              const withHull = candidates.filter((c: any) => c.mlFeatures?.stabilityGate?.hullDistance != null);
+              const stableCount = withHull.filter((c: any) => (c.mlFeatures.stabilityGate.hullDistance ?? 1) <= 0.005).length;
+              const nearHullCount = withHull.filter((c: any) => {
+                const h = c.mlFeatures.stabilityGate.hullDistance ?? 1;
+                return h > 0.005 && h <= 0.05;
               }).length;
-              const metastableCount = withStability.filter((c: any) => {
-                const s = c.stabilityScore ?? 0;
-                return s > 0 && s < 0.5;
+              const metastableCount = withHull.filter((c: any) => {
+                const h = c.mlFeatures.stabilityGate.hullDistance ?? 1;
+                return h > 0.05 && h <= 0.1;
               }).length;
-              const totalScreened = loopStats?.totalScreened ?? 0;
-              const totalPassed = loopStats?.totalPassed ?? 0;
-              const rejected = totalScreened - totalPassed;
+              const totalScreened = withHull.length;
+              const totalPassed = stableCount + nearHullCount + metastableCount;
+              const rejected = withHull.filter((c: any) => (c.mlFeatures.stabilityGate.hullDistance ?? 1) > 0.1).length;
 
-              if (totalScreened === 0 && withStability.length === 0) {
+              if (totalScreened === 0) {
                 return (
                   <p className="text-sm text-muted-foreground italic" data-testid="hull-placeholder">
                     Stability data will appear once the engine screens candidates
@@ -2437,11 +2492,11 @@ export default function Dashboard() {
                 <div className="space-y-3">
                   <div className="grid grid-cols-2 gap-3">
                     <div className="p-2.5 bg-muted/50 rounded-md" data-testid="hull-screened">
-                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Screened</p>
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Hull-Assessed</p>
                       <p className="text-xl font-mono font-bold">{totalScreened}</p>
                     </div>
                     <div className="p-2.5 bg-muted/50 rounded-md" data-testid="hull-pass-rate">
-                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Pass Rate</p>
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Pass Rate (≤0.1 eV/atom)</p>
                       <p className="text-xl font-mono font-bold">
                         {totalScreened > 0 ? `${((totalPassed / totalScreened) * 100).toFixed(1)}%` : "--"}
                       </p>
@@ -3110,7 +3165,7 @@ export default function Dashboard() {
               </CardTitle>
             </CardHeader>
             <CardContent>
-              {theoryReport ? (
+              {theoryReport && (theoryReport.summary?.totalDiscoveryRuns ?? 0) > 0 ? (
                 <div className="space-y-3">
                   <div className="grid grid-cols-2 gap-2 text-center">
                     <div className="p-2 bg-muted/50 rounded-md" data-testid="disc-total-runs">

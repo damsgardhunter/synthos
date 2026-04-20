@@ -4381,10 +4381,16 @@ async function fetchPyTorchPrediction(
       aleatoricUncertainty: Math.round(alStd * 100) / 100,
       totalStd:             Math.round(totalStd * 100) / 100,
     };
-  } catch {
+  } catch (err: any) {
+    // Log first failure per formula so we can diagnose connectivity issues
+    if (!_pytorchFailLogged) {
+      console.warn(`[PyTorch-GNN] Fetch failed for ${formula}: ${err?.message?.slice(0, 100) ?? "unknown"} (URL: ${PYTORCH_SERVICE_URL})`);
+      _pytorchFailLogged = true;
+    }
     return null;
   }
 }
+let _pytorchFailLogged = false;
 
 export function getGNNPrediction(formula: string, structure?: any, prototype?: string): GNNPrediction {
   const weights = getGNNModel();
@@ -4415,6 +4421,8 @@ export function gnnPredictWithUncertainty(formula: string, prototype?: string, p
   // 10 MC-dropout passes = 50 synchronous forward passes (~87s per candidate),
   // blocking the Node.js event loop. Returning confidence=0 tells all callers
   // the result is unavailable; callers use GB surrogate as fallback.
+  // Note: when GCP IS configured, the local model uses GCP-trained weights
+  // loaded from gnn_training_jobs table via applySerializedWeights().
   if (!PYTORCH_SERVICE_URL) {
     return {
       tc: 0, omegaLog: 0, formationEnergy: 0, lambda: 0, bandgap: 0, dosProxy: 0,
@@ -4690,6 +4698,150 @@ export async function gnnPredictWithUncertaintyAsync(
   return gnnPredictWithUncertainty(formula, prototype, pressureGpa);
 }
 
+/**
+ * Result from pressure-sweep prediction: the best GNN prediction across a range
+ * of pressures, plus metadata about which pressure was optimal.
+ */
+export interface PressureOptimizedPrediction extends GNNPredictionWithUncertainty {
+  /** The pressure (GPa) at which the GNN predicts the highest Tc for this material. */
+  optimalPressureGpa: number;
+  /** All (pressure, Tc) pairs evaluated during the sweep. */
+  pressureSweep: { pressureGpa: number; tc: number }[];
+}
+
+/**
+ * Default pressure grid for the sweep.  Coarse grid from 0–300 GPa, with extra
+ * density in the 100–250 GPa range where most high-pressure hydride Tc peaks live.
+ */
+const PRESSURE_SWEEP_GRID = [0, 10, 25, 50, 75, 100, 125, 150, 175, 200, 225, 250, 275, 300];
+
+/**
+ * For materials that are clearly not high-pressure (non-hydrides, ambient SCs),
+ * use a minimal grid so we don't waste compute.
+ */
+const PRESSURE_SWEEP_GRID_AMBIENT = [0, 5, 10, 25, 50];
+
+/**
+ * Predict Tc at multiple pressures and return the prediction with the highest Tc.
+ *
+ * For hydrides (H fraction ≥ 15%) the full 0–300 GPa grid is used.
+ * For non-hydrides a small ambient grid is used (most conventional SCs peak at
+ * low or zero pressure, but a small sweep catches pressure-enhanced Tc).
+ *
+ * The `pressureHint` parameter lets callers supply a known operating pressure
+ * (e.g. from textbook data or candidate metadata) — it's added to the sweep
+ * grid so the known point is always evaluated.
+ */
+export async function gnnPredictBestPressure(
+  formula: string,
+  prototype?: string,
+  pressureHint?: number,
+): Promise<PressureOptimizedPrediction> {
+  // Decide sweep grid based on hydrogen content
+  const elMatches = formula.match(/[A-Z][a-z]*/g) ?? [];
+  const counts: Record<string, number> = {};
+  const raw = formula.replace(/([A-Z][a-z]?)(\d*)/g, (_, el, n) => {
+    counts[el] = (counts[el] ?? 0) + (n ? parseInt(n, 10) : 1);
+    return "";
+  });
+  const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
+  const hRatio = (counts["H"] ?? 0) / Math.max(totalAtoms, 1);
+
+  const isHydride = hRatio >= 0.15;
+  let grid = isHydride ? [...PRESSURE_SWEEP_GRID] : [...PRESSURE_SWEEP_GRID_AMBIENT];
+
+  // Inject the hint pressure if provided
+  if (pressureHint != null && pressureHint > 0 && !grid.includes(pressureHint)) {
+    grid.push(pressureHint);
+    // Also add ±25 GPa around the hint for fine resolution near known optimum
+    for (const offset of [-25, -10, 10, 25]) {
+      const p = Math.max(0, Math.min(350, pressureHint + offset));
+      if (!grid.includes(p)) grid.push(p);
+    }
+  }
+  grid.sort((a, b) => a - b);
+
+  // Run predictions at all pressures (async → parallel HTTP to PyTorch service)
+  const results = await Promise.all(
+    grid.map(async (p) => {
+      const pred = await gnnPredictWithUncertaintyAsync(formula, prototype, p);
+      return { pressureGpa: p, pred };
+    }),
+  );
+
+  // Find the pressure that yields the highest Tc
+  let bestIdx = 0;
+  for (let i = 1; i < results.length; i++) {
+    if (results[i].pred.tc > results[bestIdx].pred.tc) {
+      bestIdx = i;
+    }
+  }
+
+  const best = results[bestIdx];
+  const pressureSweep = results.map(r => ({
+    pressureGpa: r.pressureGpa,
+    tc: Math.round(r.pred.tc * 10) / 10,
+  }));
+
+  console.log(
+    `[GNN-PressureSweep] ${formula}: best Tc=${best.pred.tc.toFixed(1)}K ` +
+    `@ ${best.pressureGpa} GPa (swept ${grid.length} pressures, ` +
+    `range ${pressureSweep[0].tc}K–${pressureSweep[pressureSweep.length - 1].tc}K)`
+  );
+
+  return {
+    ...best.pred,
+    optimalPressureGpa: best.pressureGpa,
+    pressureSweep,
+  };
+}
+
+/**
+ * Synchronous pressure sweep using the local TS ensemble.
+ * Uses a coarser grid to limit compute (each pressure = 50 forward passes).
+ */
+export function gnnPredictBestPressureSync(
+  formula: string,
+  prototype?: string,
+  pressureHint?: number,
+): PressureOptimizedPrediction {
+  const counts: Record<string, number> = {};
+  formula.replace(/([A-Z][a-z]?)(\d*)/g, (_, el, n) => {
+    counts[el] = (counts[el] ?? 0) + (n ? parseInt(n, 10) : 1);
+    return "";
+  });
+  const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
+  const hRatio = (counts["H"] ?? 0) / Math.max(totalAtoms, 1);
+
+  const isHydride = hRatio >= 0.15;
+  // Coarser grid for sync path to limit event-loop blocking
+  let grid = isHydride ? [0, 50, 100, 150, 200, 250, 300] : [0, 10, 25, 50];
+
+  if (pressureHint != null && pressureHint > 0 && !grid.includes(pressureHint)) {
+    grid.push(pressureHint);
+    grid.sort((a, b) => a - b);
+  }
+
+  let bestPred = gnnPredictWithUncertainty(formula, prototype, grid[0]);
+  let bestPressure = grid[0];
+  const pressureSweep = [{ pressureGpa: grid[0], tc: Math.round(bestPred.tc * 10) / 10 }];
+
+  for (let i = 1; i < grid.length; i++) {
+    const pred = gnnPredictWithUncertainty(formula, prototype, grid[i]);
+    pressureSweep.push({ pressureGpa: grid[i], tc: Math.round(pred.tc * 10) / 10 });
+    if (pred.tc > bestPred.tc) {
+      bestPred = pred;
+      bestPressure = grid[i];
+    }
+  }
+
+  return {
+    ...bestPred,
+    optimalPressureGpa: bestPressure,
+    pressureSweep,
+  };
+}
+
 export function getUncertaintyDecomposition(formula: string): UncertaintyBreakdown {
   const pred = gnnPredictWithUncertainty(formula);
   return pred.uncertaintyBreakdown;
@@ -4935,25 +5087,26 @@ if (isMainThread) setTimeout(async () => {
     // loop stays responsive. GCP will build the full 5-model ensemble.
     // =====================================================================
     const gcpMode = process.env.OFFLOAD_GNN_TO_GCP === "true";
+
+    // When GCP is active, skip ALL local training — the GCP PyTorch service
+    // handles inference directly via /predict. Local training produces a
+    // garbage model (R²≈-0.007) that pollutes the version history and wastes
+    // 8+ seconds of event loop time on startup.
+    if (gcpMode) {
+      console.log(`[GNN] GCP mode — skipping all local training. PyTorch service handles inference.`);
+      console.log(`[GNN] Startup complete: SUPERCON=${superconSeeded}, dftDataset=${dftTrainingDataset.length}`);
+      return;
+    }
+
     const superconSamples = await buildSuperconSamples();
     let currentTrainingData = superconSamples;
 
     // Quick startup model: 1 member, 5 FE epochs → ~8s instead of ~85s.
-    // GCP will replace it with a full 5-model ensemble shortly after.
     let ensembleModels = await trainEnsembleAsync(currentTrainingData, 1, 5);
     invalidateGNNModel();
     setCachedEnsemble(ensembleModels, currentTrainingData.map(t => ({ formula: t.formula, tc: t.tc })));
-    const v1 = logGNNVersion("startup-supercon", currentTrainingData.length, dftTrainingDataset.length, 0);
-    console.log(`[GNN] Phase 1 (SUPERCON N=${currentTrainingData.length}): R²=${v1.r2}`);
-
-    // If GCP offloading is active, skip phases 2-3 — GCP will train a full
-    // ensemble with the same (and richer) dataset. Blocking the event loop
-    // for 3+ extra minutes adds no value when GCP returns results in ~3 min.
-    if (gcpMode) {
-      console.log(`[GNN] GCP mode — skipping startup phases 2-3 (GCP will train full ensemble)`);
-      console.log(`[GNN] Startup warm-up complete: N=${currentTrainingData.length}, SUPERCON=${superconSeeded}, dftDataset=${dftTrainingDataset.length}`);
-      return;
-    }
+    const warmupR2 = getLatestR2();
+    console.log(`[GNN] Phase 1 warm-up (SUPERCON N=${currentTrainingData.length}): R²=${warmupR2.toFixed(4)}`);
 
     // Yield so other event loop work (HTTP, DFT, etc.) can proceed between phases
     await new Promise<void>(resolve => setTimeout(resolve, 0));
