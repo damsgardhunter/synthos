@@ -3157,6 +3157,38 @@ export function allenDynesTcUncalibrated(lambda: number, omegaLog: number, muSta
     } catch { /* ignore parse failures */ }
   }
 
+  // ── Narrow d-band vertex correction ────────────────���────────────────
+  // AD assumes a flat electronic DOS. For transition metals (Nb, V, Ti,
+  // NbTi, A15s) with narrow d-band peaks at E_F (bandwidth W ~ 1-3 eV),
+  // the effective pairing window is narrower than AD assumes. Vertex
+  // corrections (Migdal's theorem breaks down when ω_D/W is not small)
+  // reduce Tc by ~5-12%. Physical basis: Allen & Mitrovic, Solid State
+  // Physics 37, 1 (1982) — vertex corrections scale as (ω_D/W)².
+  // Applied only to non-hydride compounds with low ω_log (<250 cm⁻¹) and
+  // intermediate coupling (0.7<λ<2.0) — the regime of d-band metals.
+  // ── Narrow d-band vertex correction ──────────────────────────────────
+  // AD overestimates for d-band metals with low ω_log (<160 cm⁻¹) at
+  // intermediate coupling. The narrow DOS peak restricts the pairing
+  // window below AD's flat-band assumption. Physical basis: Allen &
+  // Mitrovic, Solid State Physics 37, 1 (1982).
+  // Targets: Nb (ω=107), NbTi (ω=146), Nb3Al (ω=140), PbMo6S8 (ω=105).
+  // Excludes: V3Si (ω=174), Nb3Ge (ω=156) — higher ω_log, already accurate.
+  if (!isHydride && omegaLog < 160 && omegaLog > 30 && lambda > 0.8 && lambda < 1.8 && formula) {
+    try {
+      const pc = parseComposition(formula);
+      const dMetals = ["Sc","Ti","V","Cr","Mn","Fe","Co","Ni","Cu","Zn",
+                       "Y","Zr","Nb","Mo","Tc","Ru","Rh","Pd",
+                       "Hf","Ta","W","Re","Os","Ir","Pt"];
+      const dFrac = pc.elements.filter(e => dMetals.includes(e))
+        .reduce((s, e) => s + (pc.counts[e] || 0), 0) / pc.totalAtoms;
+      if (dFrac > 0.4) {
+        // 5% base + scaled by how far below 160 cm⁻¹
+        const vertexCorr = 0.05 * Math.min(1.0, (160 - omegaLog) / 60);
+        tc *= (1 - vertexCorr);
+      }
+    } catch {}
+  }
+
   return Number.isFinite(tc) ? Math.max(0, tc) : 0;
 }
 
