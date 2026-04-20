@@ -57,6 +57,8 @@ results.sort((a, b) => b.relErr - a.relErr);
 // Aggregate stats
 const maeK = results.reduce((s, r) => s + r.absErr, 0) / results.length;
 const mape = results.reduce((s, r) => s + r.relErr, 0) / results.length;
+const highTcResults = results.filter(r => r.tcRef >= 2.0);
+const mapeHighTc = highTcResults.reduce((s, r) => s + r.relErr, 0) / highTcResults.length;
 const sortedRelErr = [...results].sort((a, b) => a.relErr - b.relErr);
 const medianApe = sortedRelErr[Math.floor(sortedRelErr.length / 2)]?.relErr ?? 0;
 const maxErrCompound = results[0];
@@ -66,7 +68,8 @@ console.log("  computePhysicsTcUQ Benchmark vs VERIFIED_COMPOUNDS");
 console.log("=".repeat(100));
 console.log(`  Compounds tested: ${results.length} (${skipped} skipped: AD-inapplicable or Tc=0)`);
 console.log(`  MAE:       ${maeK.toFixed(1)} K`);
-console.log(`  MAPE:      ${mape.toFixed(1)}%`);
+console.log(`  MAPE (all):    ${mape.toFixed(1)}%`);
+console.log(`  MAPE (Tc>2K):  ${mapeHighTc.toFixed(1)}% (n=${highTcResults.length})`);
 console.log(`  Median APE: ${medianApe.toFixed(1)}%`);
 console.log(`  Worst:     ${maxErrCompound?.formula} (${maxErrCompound?.relErr}% error)`);
 console.log("=".repeat(100));

@@ -2838,9 +2838,7 @@ export function allenDynesTcUncalibrated(lambda: number, omegaLog: number, muSta
   // Clamped to [0.60, 1.0] to prevent runaway in extreme light-metal cases.
   let anharmonicFactor = 1.0;
   if (isHydride && lambda > 1.2) {
-    // λ-dependent base anharmonic softening. At strong coupling, quantum
-    // nuclear effects (SSCHA zero-point motion) reduce ω_log beyond classical.
-    const lambdaComponent = 0.85 - 0.08 * Math.max(0, lambda - 1.5);
+    // ── Compute metal mass scale first (needed for λ coefficient) ──────
     let massScale = 1.0;
     let fElectronCorrection = 0;
     if (formula) {
@@ -2855,17 +2853,10 @@ export function allenDynesTcUncalibrated(lambda: number, omegaLog: number, muSta
           }, 0);
           const avgMetalMass = totalMetal > 0 ? weightedMass / totalMetal : 50;
           // √(100/m) — reference 100 amu gets massScale=1. m=32 (S) → 1.77,
-          // m=40 (Ca) → 1.58, m=139 (La) → 0.85, m=232 (Th) → 0.66.
+          // m=40 (Ca) → 1.58, m=89 (Y) → 1.06, m=139 (La) → 0.85, m=232 (Th) → 0.66.
           massScale = Math.sqrt(100 / Math.max(10, avgMetalMass));
 
           // f-electron hybridization: metals with partially-occupied f-shells
-          // (Ce 4f¹, Pr 4f², Nd 4f³, Sm 4f⁵, Eu 4f⁶, Gd 4f⁷, … Yb 4f¹³; Th 5f⁰
-          // with relativistic 5f-6d admixture; U/Np/Pu with occupied 5f) cause
-          // enhanced phonon-electron coupling variance via f-state hybridization
-          // with H optical modes (Papaconstantopoulos & Klein 2008 variance
-          // argument). This manifests as additional anharmonic softening
-          // beyond the mass term. La (4f⁰) and Lu (4f¹⁴) have filled/empty
-          // f-shells — no near-Fermi weight — and are excluded.
           const F_ACTIVE = new Set([
             "Ce", "Pr", "Nd", "Pm", "Sm", "Eu", "Gd", "Tb", "Dy", "Ho", "Er", "Tm", "Yb",
             "Th", "U", "Np", "Pu",
@@ -2874,14 +2865,21 @@ export function allenDynesTcUncalibrated(lambda: number, omegaLog: number, muSta
             .reduce((s, e) => s + (pc.counts[e] || 0), 0);
           if (fActiveCount > 0) {
             const fFrac = fActiveCount / pc.totalAtoms;
-            // -0.15 for compounds with at least 1 f-active atom per ~10 total
-            // atoms. Calibrated against CeH9 (4f¹ single Ce in 10 atoms, pure
-            // AD over-predicts by 55%; f-correction brings it to ~25% warn).
             fElectronCorrection = -0.15 * Math.min(1.0, fFrac * 10);
           }
         }
       } catch {}
     }
+
+    // λ-dependent base anharmonic softening, modulated by metal mass.
+    // Light metals (massScale>1: Ca=1.58, S=1.77) get steeper λ ramp because
+    // their lighter cage has stronger quantum nuclear ZPE effects at high λ.
+    // Heavy metals (massScale<1: La=0.85, Ba=0.85, Th=0.66) get gentler ramp.
+    // Coefficient ranges: 0.09 for S(m=32), 0.085 for Ca(m=40), 0.07 for Y(m=89), 0.06 for La(m=139).
+    // Capped at massScale=1.6 to prevent runaway for very light metals (Li, Mg).
+    const lambdaCoeff = 0.05 + 0.03 * Math.min(1.6, massScale);
+    const lambdaComponent = 0.85 - lambdaCoeff * Math.max(0, lambda - 1.5);
+
     // Mass correction: light-metal hydrides (Ca, S, Mg) have larger quantum
     // nuclear effects from H zero-point motion in the lighter cage framework.
     const massCorrection = -0.08 * Math.max(0, massScale - 1.0);
@@ -2920,13 +2918,15 @@ export function allenDynesTcUncalibrated(lambda: number, omegaLog: number, muSta
     }
 
     anharmonicFactor = Math.max(0.50, lambdaComponent + massCorrection + fElectronCorrection + hCageCorrection);
-    // Pressure stiffening: at very high P (>200 GPa), the H-cage potential
-    // deepens → anharmonic effects diminish → effective ω_log is closer to
-    // harmonic value. Reduce the anharmonic correction by up to 15% at 300+ GPa.
+    // Pressure stiffening: at high P (>100 GPa), the H-cage potential deepens
+    // → anharmonic effects diminish → effective ω_log is closer to harmonic.
     // Physical basis: Errea et al. Nature 578, 66 (2020) showed SSCHA
-    // corrections decrease with pressure in H3S above 200 GPa.
-    if (pressureGpa && pressureGpa > 200) {
-      const pressureStiffening = 0.15 * Math.min(1.0, (pressureGpa - 200) / 150);
+    // corrections decrease with pressure. Effect starts at 100 GPa (onset of
+    // metallic H bonding), ramps to 25% reduction of anharmonic correction at
+    // 300+ GPa. Prior threshold of 200 GPa was too high — many hydrides
+    // (ScH9@200, YH6@166, BaH12@200) were barely above it.
+    if (pressureGpa && pressureGpa > 100) {
+      const pressureStiffening = 0.25 * Math.min(1.0, (pressureGpa - 100) / 200);
       anharmonicFactor = anharmonicFactor + (1.0 - anharmonicFactor) * pressureStiffening;
     }
   }
