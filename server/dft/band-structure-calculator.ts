@@ -781,11 +781,11 @@ function analyzeBands(
     };
   }
 
-  for (const kpt of eigenvalues) {
-    for (let i = 0; i < kpt.energies.length; i++) {
-      kpt.energies[i] -= fermiEnergy;
-    }
-  }
+  // Eigenvalues are ALREADY Fermi-shifted in parseBandsOutput (line 556)
+  // and parseBandsDatFile (line 644). Do NOT subtract fermiEnergy again —
+  // double subtraction pushes all bands negative so no Fermi crossings are
+  // detected, producing the contradictory "metallic=false, gap=0.000".
+  // CaPbY, Bi2CuSe3 both hit this bug.
 
   let globalMin = Infinity;
   let globalMax = -Infinity;
@@ -1117,17 +1117,41 @@ export async function computeDFTBandStructure(
     fs.writeFileSync(path.join(jobDir, "bands_pw.out"), pwResult.stdout);
 
     if (pwResult.exitCode !== 0 && !pwResult.stdout.includes("End of band structure calculation")) {
-      // stderr is almost always just the MPI_ABORT boilerplate ("rank 0 in
-      // communicator MPI_COMM_WORLD"). QE writes the real error to stdout.
-      // Extract the `Error in routine` / `%%%%` block if present, otherwise
-      // take the tail of stdout before the MPI_ABORT call.
-      const stdoutTail = pwResult.stdout.slice(-1000);
-      const iosysMatch = pwResult.stdout.match(/Error in routine[^\n]*\n\s*([^\n]{0,200})/);
-      const detail = iosysMatch ? iosysMatch[1].trim() : stdoutTail.slice(-300);
-      result.error = `pw.x bands exited with code ${pwResult.exitCode}: ${detail}`;
-      console.log(`[BandCalc] pw.x bands failed for ${formula}: ${result.error.slice(0, 250)}`);
-      result.wallTimeSeconds = (Date.now() - startTime) / 1000;
-      return result;
+      // Exit 139 = SIGSEGV, almost always OOM on heavy-element PAW systems
+      // (W: addusdens alone is 415 MB). Retry with MPI ranks=1 to give
+      // the process all available memory. One-shot retry, not a full ladder.
+      if (pwResult.exitCode === 139 && process.env.QE_MPI_RANKS && parseInt(process.env.QE_MPI_RANKS) > 1) {
+        console.log(`[BandCalc] pw.x bands OOM (exit=139) for ${formula} at ${process.env.QE_MPI_RANKS} ranks — retrying with 1 rank for more memory per process`);
+        const savedRanks = process.env.QE_MPI_RANKS;
+        process.env.QE_MPI_RANKS = "1";
+        try {
+          const retryResult = await runQEBands(
+            path.posix.join(QE_BIN_DIR, "pw.x"),
+            bandsInputFile,
+            jobDir,
+          );
+          fs.writeFileSync(path.join(jobDir, "bands_pw_retry.out"), retryResult.stdout);
+          if (retryResult.exitCode === 0 || retryResult.stdout.includes("End of band structure calculation")) {
+            // Retry succeeded — continue with the bands post-processing
+            console.log(`[BandCalc] pw.x bands OOM retry succeeded for ${formula} (1 rank)`);
+            Object.assign(pwResult, retryResult);
+          }
+        } catch (retryErr: any) {
+          console.log(`[BandCalc] pw.x bands OOM retry also failed for ${formula}: ${(retryErr.message || "").slice(0, 100)}`);
+        } finally {
+          process.env.QE_MPI_RANKS = savedRanks;
+        }
+      }
+      // Still failed after retry (or no retry attempted)?
+      if (pwResult.exitCode !== 0 && !pwResult.stdout.includes("End of band structure calculation")) {
+        const stdoutTail = pwResult.stdout.slice(-1000);
+        const iosysMatch = pwResult.stdout.match(/Error in routine[^\n]*\n\s*([^\n]{0,200})/);
+        const detail = iosysMatch ? iosysMatch[1].trim() : stdoutTail.slice(-300);
+        result.error = `pw.x bands exited with code ${pwResult.exitCode}: ${detail}`;
+        console.log(`[BandCalc] pw.x bands failed for ${formula}: ${result.error.slice(0, 250)}`);
+        result.wallTimeSeconds = (Date.now() - startTime) / 1000;
+        return result;
+      }
     }
 
     const bandsPostInput = generateBandsPostInput(formula);

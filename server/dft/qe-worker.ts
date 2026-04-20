@@ -2323,20 +2323,21 @@ function generateHydrideCagePositions(
 
 function autoPhononQGrid(elements: string[], totalAtoms?: number): [number, number, number] {
   // Screening-quality q-grid. Cost scales as n_atoms × n_q × 3*n_atoms
-  // perturbations — for a 15-atom hydride on 3×3×3 that's 15 × 27 × 45 =
-  // 18225 linear-response steps, each ~30s = 6+ days. Way beyond any
-  // reasonable screening budget.
+  // perturbations. Each perturbation is a mini-SCF, and heavy elements
+  // make each one 3-10× more expensive than light elements.
   //
-  // Scale the grid with atom count:
-  //   ≤ 4 atoms: 2×2×2 (8 q-points, manageable)
-  //   5-8 atoms: 2×2×2 (still OK)
-  //   9+ atoms:  1×1×1 (Gamma-only — just checks zone-center stability,
-  //              enough for screening-level imaginary mode detection)
+  // Scale the grid with atom count AND element weight:
+  //   ≤ 4 atoms, all light:  2×2×2 (8 q-points, manageable)
+  //   5-8 atoms, all light:  2×2×2 (still OK)
+  //   5-8 atoms, any heavy:  1×1×1 (Gamma-only — Bi2CuSe3 7 atoms 2×2×2
+  //     ran ~16h before wall-time kill; C3SnW4 8 atoms similar)
+  //   9+ atoms:              1×1×1 (always Gamma-only)
   //
-  // Prior 3×3×3 for hydrides was too expensive: LaH11Li2 (15 atoms) ran
-  // 9 hours and only completed 1/3 of q-points before wall-time kill.
+  // Gamma-only is enough for screening: detects imaginary modes at the
+  // zone center, which catches the most common instabilities.
   const nAtoms = totalAtoms ?? 6;
   if (nAtoms >= 9) return [1, 1, 1];
+  if (nAtoms >= 5 && elements.some(el => HEAVY_ELEMENTS.has(el))) return [1, 1, 1];
   return [2, 2, 2];
 }
 
@@ -3827,14 +3828,24 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     const totalAtomCount = positions.length;
     const isHighPHydride = hCount > 0 && (hCount / totalAtomCount) >= 0.5 && workerPressure > 50;
 
+    // All-heavy quaternary+ systems (BaBiLaTe3 class) have pathological charge
+    // sloshing — mixed-valence states (Bi³⁺/Bi⁵⁺) + heterogeneous ionic/covalent
+    // layers create multiple local minima that plain or local-TF mixing can't resolve.
+    // accuracy=2.49 Ry after 5 attempts on BaBiLaTe3 (Apr-18 run).
+    const allHeavy = elements.length >= 3 && elements.every(el => HEAVY_ELEMENTS.has(el));
+    const isExtremeSystem = allHeavy && isQuaternaryPlus;
+
     // "Very complex": F + quaternary, 5+ elements, DFT+U magnetic, alkali-hydride,
-    // or high-pressure (>50 GPa) hydride with ≥3 elements.
+    // high-pressure (>50 GPa) hydride with ≥3 elements, or all-heavy quaternary+.
     const isVeryComplexSystem = (hasFluorine && isQuaternaryPlus) || isPentanaryPlus
       || dftPlusUNspin2 || isAlkaliHydride
-      || (isHighPHydride && elements.length >= 3);
-    const isComplexSystem = hasHalogen || isQuaternaryPlus || isHighPHydride;
+      || (isHighPHydride && elements.length >= 3)
+      || isExtremeSystem;
+    const isComplexSystem = hasHalogen || isQuaternaryPlus || isHighPHydride || allHeavy;
 
-    if (isVeryComplexSystem) {
+    if (isExtremeSystem) {
+      console.log(`[QE-Worker] ${formula}: extreme system [all-heavy quaternary+: ${elements.join(",")}] — using ultra-gentle SCF schedule (beta=0.07, atomic+random, degauss=0.03)`);
+    } else if (isVeryComplexSystem) {
       const reasons = [
         hasFluorine && isQuaternaryPlus && "F+quaternary",
         isPentanaryPlus && `${elements.length} elements`,
@@ -3848,6 +3859,19 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     }
 
     type RetryConfig = { mixingBeta: number; maxSteps: number; diag: string; smearing?: string; degauss?: number; ecutwfcBoost?: number; convThr?: string; forcConvThr?: string; etotConvThr?: string; mixingMode?: string; mixingNdim?: number; startingwfc?: string; startingpot?: string; diagoThrInit?: string; restartFromScratch?: boolean };
+
+    // Extreme systems (all-heavy quaternary+: BaBiLaTe3 class).
+    // Start with very gentle mixing (beta=0.07), wide smearing (degauss=0.03),
+    // and startingwfc='atomic+random' to break mixed-valence symmetry traps.
+    // BaBiLaTe3 scored accuracy=2.49 Ry (literal, not 2.49e-X) after 5 attempts
+    // on the normal "very complex" ladder — it never even began to converge.
+    const retryConfigsExtreme: RetryConfig[] = [
+      { mixingBeta: 0.07, maxSteps: 500, diag: "david", degauss: 0.03,  convThr: "1.0d-6", forcConvThr: "1.0d-3", etotConvThr: "1.0d-5", mixingMode: "local-TF", mixingNdim: 16, startingwfc: "atomic+random" },
+      { mixingBeta: 0.05, maxSteps: 600, diag: "david", degauss: 0.03,  convThr: "1.0d-5", forcConvThr: "1.0d-3", etotConvThr: "1.0d-5", mixingMode: "local-TF", mixingNdim: 20, ecutwfcBoost: 10 },
+      { mixingBeta: 0.03, maxSteps: 800, diag: "cg",    degauss: 0.02,  convThr: "1.0d-5", forcConvThr: "1.0d-2", etotConvThr: "1.0d-4", mixingMode: "local-TF", mixingNdim: 24, ecutwfcBoost: 15, startingwfc: "random" },
+      { mixingBeta: 0.02, maxSteps: 800, diag: "cg",    degauss: 0.01,  convThr: "1.0d-4", forcConvThr: "1.0d-2", etotConvThr: "1.0d-4", mixingMode: "local-TF", mixingNdim: 24, ecutwfcBoost: 20, smearing: "mp" },
+      { mixingBeta: 0.01, maxSteps: 1000, diag: "cg",   degauss: 0.005, convThr: "1.0d-4", forcConvThr: "1.0d-2", etotConvThr: "1.0d-3", mixingMode: "local-TF", mixingNdim: 24, ecutwfcBoost: 25, smearing: "mp" },
+    ];
 
     // Very complex systems (F + quaternary, 5+ elements, or DFT+U magnetic):
     // Start immediately with local-TF at beta=0.15. Each attempt also widens
@@ -3882,7 +3906,8 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       { mixingBeta: 0.05, maxSteps: 800, diag: "cg",    degauss: 0.005, smearing: "mp",   convThr: "1.0d-5", forcConvThr: "1.0d-2", etotConvThr: "1.0d-4", mixingMode: "local-TF", mixingNdim: 20, ecutwfcBoost: 25 },
     ];
 
-    const retryConfigs = isVeryComplexSystem ? retryConfigsVeryComplex
+    const retryConfigs = isExtremeSystem ? retryConfigsExtreme
+      : isVeryComplexSystem ? retryConfigsVeryComplex
       : isComplexSystem ? retryConfigsComplex
       : retryConfigsSimple;
 
