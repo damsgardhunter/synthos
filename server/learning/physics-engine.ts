@@ -2857,6 +2857,11 @@ export function allenDynesTcUncalibrated(lambda: number, omegaLog: number, muSta
           massScale = Math.sqrt(100 / Math.max(10, avgMetalMass));
 
           // f-electron hybridization: metals with partially-occupied f-shells
+          // f-electron correction: elements with f-orbital activity near E_F
+          // cause enhanced anharmonic softening via f-phonon hybridization.
+          // Ce (4f¹) has the strongest effect. Th (5f⁰ but strong 5f-6d
+          // hybridization in hydrides) also needs significant correction —
+          // ThH9/ThH10 DFT shows 5f virtual states couple to H-cage modes.
           const F_ACTIVE = new Set([
             "Ce", "Pr", "Nd", "Pm", "Sm", "Eu", "Gd", "Tb", "Dy", "Ho", "Er", "Tm", "Yb",
             "Th", "U", "Np", "Pu",
@@ -2926,7 +2931,10 @@ export function allenDynesTcUncalibrated(lambda: number, omegaLog: number, muSta
     // 300+ GPa. Prior threshold of 200 GPa was too high — many hydrides
     // (ScH9@200, YH6@166, BaH12@200) were barely above it.
     if (pressureGpa && pressureGpa > 100) {
-      const pressureStiffening = 0.25 * Math.min(1.0, (pressureGpa - 100) / 200);
+      // Pressure stiffening: H-cage potential deepens at high P → anharmonic
+      // effects diminish. 30% max recovery at 300 GPa. Calibrated to balance
+      // ScH9@200GPa (needs stiffening) vs CaH6@172GPa (mustn't over-stiffen).
+      const pressureStiffening = 0.30 * Math.min(1.0, (pressureGpa - 100) / 200);
       anharmonicFactor = anharmonicFactor + (1.0 - anharmonicFactor) * pressureStiffening;
     }
   }
