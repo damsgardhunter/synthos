@@ -3037,6 +3037,10 @@ async function runPhase10_Physics() {
         };
 
         const crystalInfo = extractCrystalInfo(candidate.crystalStructure);
+        // Declare outside the try block so it's accessible by pairing/synthesis
+        // gates below even if the topology try block throws before reaching the
+        // spinSusceptibility check.
+        const isStableFM = result.spinSusceptibility?.isStableFerromagnet === true;
         let topoAnalysis: TopologicalAnalysis | undefined;
         try {
           const mlFeaturesForDFT = (candidate.mlFeatures as Record<string, any>) ?? {};
@@ -3133,7 +3137,7 @@ async function runPhase10_Physics() {
           // Physics consistency gate: stable ferromagnets cannot be topological SCs,
           // QCP superconductors, or novel synthesis candidates. Running those analyses
           // on ferromagnets produces physically contradictory outputs.
-          const isStableFM = result.spinSusceptibility?.isStableFerromagnet === true;
+          // (isStableFM is declared outside the try block for scope visibility)
           if (isStableFM) {
             emit("log", {
               phase: "phase-10",
@@ -9368,7 +9372,9 @@ async function backfillGBScores() {
 // v24: computePhysicsTcUQ called WITH pressure in recalculation.
 // v25: isHydride fix (alkaline earth/chalcogen hosts), two-gap solver, spin-fluc
 //      suppression, mass-dependent anharmonic correction, d-band vertex correction.
-const PHYSICS_VERSION = 25;
+// v26: forced full recalc — v25 set physicsVersion tag but DB timeouts
+//      prevented predicted_tc from being written for most candidates.
+const PHYSICS_VERSION = 26;
 
 async function recalculatePhysics() {
   const yield_ = () => new Promise<void>(r => setTimeout(r, 100));
@@ -9383,11 +9389,17 @@ async function recalculatePhysics() {
       physBatchNum++;
       if (physBatchNum === 1) {
         emit("log", { phase: "engine", event: "Physics recalculation running", detail: `Recalculating Tc and ensemble scores for candidates on physics version ${PHYSICS_VERSION}...`, dataSource: "Internal" });
+      } else if (physBatchNum % 5 === 0) {
+        emit("log", { phase: "engine", event: "Physics recalculation progress", detail: `Recalculated ${totalRecalculated} candidates so far (batch ${physBatchNum}, v${PHYSICS_VERSION})`, dataSource: "Internal" });
       }
 
+      // Warm the DB connection before each batch to avoid timeout on first query
+      try { await storage.getSuperconductorCount(); } catch { await new Promise(r => setTimeout(r, 2000)); }
       let dbErrorCount = 0;
       for (let i = 0; i < needsRecalc.length; i++) {
-        await new Promise<void>(r => setTimeout(r, 0)); // yield after every candidate
+        // Yield 50ms every 5 candidates to prevent event loop starvation
+        // (computePhysicsTcUQ is CPU-intensive — 500 MC samples per call)
+        await new Promise<void>(r => setTimeout(r, i % 5 === 0 ? 50 : 0));
         const c = needsRecalc[i];
         try {
           const features = await getCachedFeatures(c.formula);
@@ -9460,11 +9472,11 @@ async function recalculatePhysics() {
           console.error("[Engine] Physics recalculation update failed:", e);
           dbErrorCount++;
           // Abort this batch on persistent DB issues — don't starve the connection pool
-          if (dbErrorCount >= 3) {
-            console.warn("[Engine] Physics recalculation: 3 consecutive DB errors, deferring remainder");
+          if (dbErrorCount >= 8) {
+            console.warn("[Engine] Physics recalculation: 8 consecutive DB errors, deferring remainder");
             break;
           }
-          await new Promise<void>(r => setTimeout(r, 2000)); // back off on errors
+          await new Promise<void>(r => setTimeout(r, 3000)); // back off on errors
         }
       }
 
