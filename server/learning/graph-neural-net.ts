@@ -4415,24 +4415,20 @@ export function getGNNPrediction(formula: string, structure?: any, prototype?: s
 
 
 export function gnnPredictWithUncertainty(formula: string, prototype?: string, pressureGpa?: number): GNNPredictionWithUncertainty {
-  // ── PyTorch GNN disabled — skip local ensemble ───────────────────────────
-  // When PYTORCH_SERVICE_URL is empty (PyTorch inference disabled), skip the
-  // local TypeScript ensemble entirely. The local ensemble runs 5 models ×
-  // 10 MC-dropout passes = 50 synchronous forward passes (~87s per candidate),
-  // blocking the Node.js event loop. Returning confidence=0 tells all callers
-  // the result is unavailable; callers use GB surrogate as fallback.
-  // Note: when GCP IS configured, the local model uses GCP-trained weights
-  // loaded from gnn_training_jobs table via applySerializedWeights().
-  if (!PYTORCH_SERVICE_URL) {
-    return {
-      tc: 0, omegaLog: 0, formationEnergy: 0, lambda: 0, bandgap: 0, dosProxy: 0,
-      stabilityProbability: 0, uncertainty: 1, phononStability: true,
-      confidence: 0, latentDistance: 0, tcCI95: [0, 0], lambdaCI95: [0, 0],
-      epistemicUncertainty: 1, aleatoricUncertainty: 0, totalStd: 1,
-      uncertaintyBreakdown: { ensemble: 1, mcDropout: 0, aleatoric: 0, latentDistance: 0,
-        perTarget: { tc: 1, formationEnergy: 0, lambda: 0, bandgap: 0 } },
-    };
-  }
+  // ── NEVER use local TS ensemble ──────────────────────────────────────────
+  // The local TypeScript GNN ensemble is broken, slow (87s per prediction),
+  // blocks the event loop, and produces garbage/identical predictions.
+  // ALL GNN predictions must go through the async path (GCP PyTorch service).
+  // This sync function always returns confidence=0 to signal "unavailable"
+  // — callers should use gbPredictWithUncertaintyAsync or physics engine.
+  return {
+    tc: 0, omegaLog: 0, formationEnergy: 0, lambda: 0, bandgap: 0, dosProxy: 0,
+    stabilityProbability: 0, uncertainty: 1, phononStability: true,
+    confidence: 0, latentDistance: 0, tcCI95: [0, 0], lambdaCI95: [0, 0],
+    epistemicUncertainty: 1, aleatoricUncertainty: 0, totalStd: 1,
+    uncertaintyBreakdown: { ensemble: 1, mcDropout: 0, aleatoric: 0, latentDistance: 0,
+      perTarget: { tc: 1, formationEnergy: 0, lambda: 0, bandgap: 0 } },
+  };
 
   // ── Elemental-metal shortcut ─────────────────────────────────────────────
   // Single-element formulas are deeply OOD for the TS GNN (trained on

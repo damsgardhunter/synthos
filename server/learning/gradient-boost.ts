@@ -1344,19 +1344,22 @@ async function backfillPool(remaining: { formula: string; tc: number; pressureGP
   try {
     const { X, y, formulas } = trainingPool.getTrainingData();
     if (X.length >= 10) {
-      const trainStart = Date.now();
-      console.log(`[GradientBoost] Phase 2 (full) training — ${X.length} samples, 45 trees...`);
-      cachedModel = await trainGradientBoosting(X, y, 45, 0.12, 4);
-      cachedCalibration = await computeCalibration(cachedModel);
-      await logModelVersion("full-training", X.length);
-      console.log(`[GradientBoost] Phase 2 model ready in ${Date.now() - trainStart}ms`);
+      if (process.env.OFFLOAD_XGB_TO_GCP === "true") {
+        // Dispatch full training to GCP instead of blocking the event loop locally.
+        // Local training of 45 trees + 300-tree×5 ensemble blocks for 2-5 minutes,
+        // causing feed freezes and DB connection storms.
+        console.log(`[GradientBoost] Phase 2: OFFLOAD_XGB_TO_GCP=true — dispatching ${X.length} samples to GCP (skipping local training)`);
+        dispatchXGBJobToGCP(X, y, formulas).catch(err => console.warn("[GradientBoost] GCP Phase 2 dispatch failed:", err.message));
+      } else {
+        const trainStart = Date.now();
+        console.log(`[GradientBoost] Phase 2 (full) training — ${X.length} samples, 45 trees...`);
+        cachedModel = await trainGradientBoosting(X, y, 45, 0.12, 4);
+        cachedCalibration = await computeCalibration(cachedModel);
+        await logModelVersion("full-training", X.length);
+        console.log(`[GradientBoost] Phase 2 model ready in ${Date.now() - trainStart}ms`);
 
-      setTimeout(async () => {
-        try {
-          if (process.env.OFFLOAD_XGB_TO_GCP === "true") {
-            console.log(`[GradientBoost] OFFLOAD_XGB_TO_GCP=true — dispatching deferred ensemble to GCP (${X.length} samples)`);
-            dispatchXGBJobToGCP(X, y, formulas).catch(err => console.warn("[GradientBoost] GCP XGB dispatch failed:", err.message));
-          } else {
+        setTimeout(async () => {
+          try {
             const isOffloaded = process.env.OFFLOAD_GNN_TO_GCP === "true";
             console.log(`[GradientBoost] Deferred ensemble training — ${X.length} samples, ${isOffloaded ? "100" : "300"} trees × 5 models + variance ensemble...`);
             const ensStart = Date.now();
@@ -1367,9 +1370,9 @@ async function backfillPool(remaining: { formula: string; tc: number; pressureGP
             console.log(`[GradientBoost] Variance ensemble done in ${Date.now() - varStart}ms — XGBoost fully ready`);
             cachedGlobalFeatureImportance = null;
             buildFeatureImportanceCache();
-          }
-        } catch (e) { console.error("[GradientBoost] Deferred ensemble training failed:", e); }
-      }, 45000);
+          } catch (e) { console.error("[GradientBoost] Deferred ensemble training failed:", e); }
+        }, 45000);
+      }
     }
   } catch (e) {
     console.error("[GradientBoost] Full training failed:", e);
@@ -1551,7 +1554,12 @@ export interface XGBUncertaintyResult {
 // ── Colab XGBoost GCP service cache ──────────────────────────────────────────
 const _xgbServiceURL = process.env.GNN_PYTORCH_SERVICE_URL ?? "";
 const _xgbCache = new Map<string, { result: XGBUncertaintyResult; fetchedAt: number }>();
-const XGB_CACHE_TTL_MS = 5 * 60 * 1000;
+// 24-hour TTL: GCP Python service is often busy training (60-90 min per run)
+// and can't serve /predict-xgb during training. The disk-backed cache has
+// 15k+ valid predictions from previous GCP runs that should be used as the
+// primary source. When GCP finishes training and becomes available, fresh
+// predictions will overwrite the cache entries naturally.
+const XGB_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
 // Disk-backed cache so Colab XGBoost predictions survive server restarts.
 // Written every time a fresh prediction arrives; loaded eagerly at startup.
@@ -1667,6 +1675,9 @@ export async function gbPredictWithUncertainty(features: MLFeatureVector, formul
     if (cached && Date.now() - cached.fetchedAt < XGB_CACHE_TTL_MS) {
       return cached.result;
     }
+    // Try to refresh from GCP in background (non-blocking).
+    // If GCP is busy training, this will timeout (4s) and return null — that's OK,
+    // the 24h cached value is still valid.
     fetchColabXGBPrediction(resolvedFormula, pressureGpa).then(result => {
       if (result) {
         _xgbCache.set(cacheKey, { result, fetchedAt: Date.now() });
@@ -1674,6 +1685,13 @@ export async function gbPredictWithUncertainty(features: MLFeatureVector, formul
         console.log(`[Colab-XGB] ${resolvedFormula}${pressureGpa > 0 ? ` @${pressureGpa}GPa` : ''}: Tc=${result.tcMean}K`);
       }
     }).catch(() => {});
+
+    // For uncached materials, try the 0-pressure key as fallback (many candidates
+    // are stored without pressure suffix in the cache)
+    if (!cached || Date.now() - cached.fetchedAt >= XGB_CACHE_TTL_MS) {
+      const fallbackCached = _xgbCache.get(resolvedFormula);
+      if (fallbackCached) return fallbackCached.result;
+    }
   }
 
   const resolvedModel = await getTrainedModel();
