@@ -4342,7 +4342,8 @@ async function fetchPyTorchPrediction(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body,
-      signal: AbortSignal.timeout(8000),
+      // 15s timeout: with 2 uvicorn workers, at least one should be free
+      signal: AbortSignal.timeout(15_000),
     });
     if (!res.ok) return null;
     const d = await res.json() as Record<string, number | boolean>;

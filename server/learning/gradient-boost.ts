@@ -1598,11 +1598,14 @@ async function fetchColabXGBPrediction(formula: string, pressureGpa = 0): Promis
   if (!_xgbServiceURL) return null;
   if (!formula || formula === "null" || formula === "undefined") return null;
   try {
+    // 10s timeout: with 2 uvicorn workers on GCP, at least one should be free
+    // to serve predictions even during training. The old 4s timeout was too
+    // tight and caused every request to fail during single-worker training.
     const res = await fetch(`${_xgbServiceURL}/predict-xgb`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ formula, pressure_gpa: pressureGpa }),
-      signal: AbortSignal.timeout(4000),
+      signal: AbortSignal.timeout(10_000),
     });
     if (!res.ok) return null;
     const d = await res.json() as { tc: number; r2: number };

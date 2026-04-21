@@ -72,6 +72,9 @@ _ensemble:    List[SuperconductorGNN] = []
 _ood:         MahalanobisOOD          = MahalanobisOOD()
 _last_metrics: Dict[str, Any]         = {}
 _train_lock   = asyncio.Lock()
+# File-based lock for multi-worker training coordination
+_TRAIN_LOCK_FILE = WEIGHTS_DIR / ".training.lock"
+_ensemble_mtime: float = 0.0  # Track when the ensemble file was last modified
 
 # ── XGBoost ───────────────────────────────────────────────────────────────────
 import pickle
@@ -604,7 +607,23 @@ async def train(req: TrainRequest):
     """
     global _ensemble, _last_metrics
 
-    async with _train_lock:   # Only one training job at a time
+    # File-based lock: if another worker is already training (lock file
+    # modified within the last 2 hours), this worker skips training.
+    # The lock file is created at training start and deleted on completion.
+    try:
+        if _TRAIN_LOCK_FILE.exists():
+            age = time.time() - _TRAIN_LOCK_FILE.stat().st_mtime
+            if age < 7200:  # 2 hours
+                return TrainResponse(
+                    job_id=req.job_id, status="failed",
+                    reason=f"Another worker is training (lock age {age:.0f}s)",
+                    metrics=MetricsResponse(),
+                )
+        _TRAIN_LOCK_FILE.write_text(str(req.job_id))
+    except Exception:
+        pass  # Non-fatal — proceed with per-process lock only
+
+    async with _train_lock:   # Per-process lock
         job_id = req.job_id
         t0     = time.perf_counter()
 
@@ -913,6 +932,12 @@ async def train(req: TrainRequest):
         except Exception as e:
             log.warning(f"[Job#{job_id}] XGBoost training failed (GNN still saved): {e}")
 
+        # Release file lock so the other worker can accept training requests
+        try:
+            _TRAIN_LOCK_FILE.unlink(missing_ok=True)
+        except Exception:
+            pass
+
         return TrainResponse(job_id=job_id, status="done", metrics=metrics)
 
 
@@ -1073,12 +1098,33 @@ def _train_xgboost(
     }
 
 
+def _maybe_reload_ensemble():
+    """Check if ensemble weights on disk are newer than in-memory and reload."""
+    global _ensemble, _ensemble_mtime
+    try:
+        # Find the latest ensemble .pt file
+        pts = sorted(WEIGHTS_DIR.glob("ensemble_job*.pt"), key=lambda p: p.stat().st_mtime)
+        if not pts:
+            return
+        latest = pts[-1]
+        mtime = latest.stat().st_mtime
+        if mtime > _ensemble_mtime:
+            loaded = load_latest_ensemble()
+            if loaded:
+                _ensemble = loaded
+                _ensemble_mtime = mtime
+                log.info(f"Reloaded ensemble from {latest.name} ({len(_ensemble)} models)")
+    except Exception as e:
+        log.warning(f"Ensemble reload check failed: {e}")
+
+
 @app.post("/predict", response_model=PredictResponse)
 async def predict(req: PredictRequest):
     """
     Single-formula prediction.
     Uses the current ensemble with MC Dropout for uncertainty quantification.
     """
+    _maybe_reload_ensemble()  # Pick up new weights from training worker
     if not _ensemble:
         raise HTTPException(503, "No trained models available — POST /train first")
 
@@ -1170,11 +1216,17 @@ async def reload_weights(path: Optional[str] = None):
 
 if __name__ == "__main__":
     log.info(f"Starting GNN service on port {PORT}")
+    # 2 workers: one can serve /predict, /predict-xgb, /health while the other
+    # trains. Each worker gets its own CUDA context (spawn, not fork).
+    # Both load the ensemble from disk on startup; after training, the training
+    # worker updates _ensemble in-memory, and other workers pick up the new
+    # weights on their next /predict call via the on-disk ensemble file.
+    # L4 GPU has 24GB — ensemble (~200MB) × 2 workers fits easily.
     uvicorn.run(
         "server:app",
         host    = "0.0.0.0",
         port    = PORT,
-        workers = 1,          # Single worker — GPU state is not fork-safe
+        workers = 2,
         log_level = LOG_LEVEL.lower(),
         access_log = False,   # Reduce noise; GNN-Service logs its own
         h11_max_incomplete_event_size = 500 * 1024 * 1024,  # 500 MB request body limit
