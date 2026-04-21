@@ -512,10 +512,12 @@ async def startup_event():
     await asyncio.get_event_loop().run_in_executor(None, load_xgb)
 
 
+_is_training = False
+
 @app.get("/health")
 async def health():
     return {
-        "status":       "ok",
+        "status":       "training" if _is_training else "ok",
         "n_models":     len(_ensemble),
         "device":       str(device),
         "cuda":         torch.cuda.is_available(),
@@ -624,6 +626,8 @@ async def train(req: TrainRequest):
         pass  # Non-fatal — proceed with per-process lock only
 
     async with _train_lock:   # Per-process lock
+        global _is_training
+        _is_training = True
         job_id = req.job_id
         t0     = time.perf_counter()
 
@@ -932,7 +936,8 @@ async def train(req: TrainRequest):
         except Exception as e:
             log.warning(f"[Job#{job_id}] XGBoost training failed (GNN still saved): {e}")
 
-        # Release file lock so the other worker can accept training requests
+        _is_training = False
+        # Release file lock
         try:
             _TRAIN_LOCK_FILE.unlink(missing_ok=True)
         except Exception:
@@ -1216,17 +1221,17 @@ async def reload_weights(path: Optional[str] = None):
 
 if __name__ == "__main__":
     log.info(f"Starting GNN service on port {PORT}")
-    # 2 workers: one can serve /predict, /predict-xgb, /health while the other
-    # trains. Each worker gets its own CUDA context (spawn, not fork).
-    # Both load the ensemble from disk on startup; after training, the training
-    # worker updates _ensemble in-memory, and other workers pick up the new
-    # weights on their next /predict call via the on-disk ensemble file.
-    # L4 GPU has 24GB — ensemble (~200MB) × 2 workers fits easily.
+    # Single worker: CUDA contexts are not fork-safe on Linux (child process
+    # inherits parent's CUDA state and segfaults). Instead, the /train endpoint
+    # uses run_in_executor() which runs training in a thread — the GIL is
+    # released during CUDA operations so the event loop can serve /predict and
+    # /health between GPU kernel launches. For CPU-bound phases (graph building,
+    # metrics), we add asyncio.sleep(0) yields to keep the server responsive.
     uvicorn.run(
         "server:app",
         host    = "0.0.0.0",
         port    = PORT,
-        workers = 2,
+        workers = 1,
         log_level = LOG_LEVEL.lower(),
         access_log = False,   # Reduce noise; GNN-Service logs its own
         h11_max_incomplete_event_size = 500 * 1024 * 1024,  # 500 MB request body limit
