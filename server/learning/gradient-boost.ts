@@ -1678,23 +1678,19 @@ export async function gbPredictWithUncertainty(features: MLFeatureVector, formul
     if (cached && Date.now() - cached.fetchedAt < XGB_CACHE_TTL_MS) {
       return cached.result;
     }
-    // Try to refresh from GCP in background (non-blocking).
-    // If GCP is busy training, this will timeout (4s) and return null — that's OK,
-    // the 24h cached value is still valid.
-    fetchColabXGBPrediction(resolvedFormula, pressureGpa).then(result => {
-      if (result) {
-        _xgbCache.set(cacheKey, { result, fetchedAt: Date.now() });
-        _saveXGBCacheToDisk();
-        console.log(`[Colab-XGB] ${resolvedFormula}${pressureGpa > 0 ? ` @${pressureGpa}GPa` : ''}: Tc=${result.tcMean}K`);
-      }
-    }).catch(() => {});
-
-    // For uncached materials, try the 0-pressure key as fallback (many candidates
-    // are stored without pressure suffix in the cache)
-    if (!cached || Date.now() - cached.fetchedAt >= XGB_CACHE_TTL_MS) {
-      const fallbackCached = _xgbCache.get(resolvedFormula);
-      if (fallbackCached) return fallbackCached.result;
+    // AWAIT the GCP fetch so the first call gets the pressure-correct answer.
+    // Falls back to 0-pressure cache if GCP is unreachable (10s timeout).
+    const gcpResult = await fetchColabXGBPrediction(resolvedFormula, pressureGpa);
+    if (gcpResult) {
+      _xgbCache.set(cacheKey, { result: gcpResult, fetchedAt: Date.now() });
+      _saveXGBCacheToDisk();
+      console.log(`[Colab-XGB] ${resolvedFormula}${pressureGpa > 0 ? ` @${pressureGpa}GPa` : ''}: Tc=${gcpResult.tcMean}K`);
+      return gcpResult;
     }
+
+    // GCP unreachable — try 0-pressure cache as fallback
+    const fallbackCached = _xgbCache.get(resolvedFormula);
+    if (fallbackCached) return fallbackCached.result;
   }
 
   const resolvedModel = await getTrainedModel();

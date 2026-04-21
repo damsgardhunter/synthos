@@ -120,7 +120,7 @@ export async function computeUnifiedCI(formula: string, pressureGpa: number = 0)
     gnnPredictBestPressure(formula, undefined, pressureGpa > 0 ? pressureGpa : undefined),
     (async () => {
       const features = await extractFeatures(formula);
-      const xgbResult = await gbPredictWithUncertainty(features, formula);
+      const xgbResult = await gbPredictWithUncertainty(features, formula, pressureGpa);
       return { features, xgbResult };
     })(),
   ]);
