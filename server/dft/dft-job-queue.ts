@@ -1,4 +1,5 @@
 import { storage } from "../storage";
+import { db } from "../db";
 import { runFullDFT, isQEAvailable, isFormulaBlocked, getStageFailureCounts, scheduleQEAvailabilityProbe } from "./qe-worker";
 export { scheduleQEAvailabilityProbe };
 import { scheduleParetoRecompute } from "../inverse/pareto-optimizer";
@@ -180,6 +181,100 @@ export async function promoteDFTJob(formula: string, newPriority: number): Promi
     console.log(`[DFT-Queue] Failed to promote ${formula}: ${err.message?.slice(0, 80)}`);
     return false;
   }
+}
+
+/**
+ * Re-prioritize all queued DFT jobs based on the candidate's current acquisition
+ * score (predictedTc × uncertainty). This ensures the GCP worker always picks
+ * up the highest-value candidates first, even if the queue was filled before
+ * the models were retrained.
+ *
+ * Also promotes the top acquisition-score candidates into the queue if they
+ * aren't already there.
+ */
+export async function syncQueueWithAcquisitionRanking(): Promise<{ reprioritized: number; promoted: number }> {
+  let reprioritized = 0;
+  let promoted = 0;
+
+  try {
+    // 1. Re-prioritize existing queued jobs based on their candidate's current scores
+    const queuedJobs = await storage.getQueuedDftJobs(200);
+    const queuedFormulas = new Set(queuedJobs.map(j => j.formula));
+
+    // Look up candidate scores for queued formulas
+    const candidates = await storage.getSuperconductorCandidatesByFormulas(
+      queuedJobs.map(j => j.formula)
+    );
+    const candidateMap = new Map<string, typeof candidates[0]>();
+    for (const c of candidates) {
+      const existing = candidateMap.get(c.formula);
+      if (!existing || (c.ensembleScore ?? 0) > (existing.ensembleScore ?? 0)) {
+        candidateMap.set(c.formula, c);
+      }
+    }
+
+    for (const job of queuedJobs) {
+      // Don't touch manually promoted (priority >= 91) or critical (9999) jobs
+      if ((job.priority ?? 0) >= 91) continue;
+
+      const c = candidateMap.get(job.formula);
+      if (!c) continue;
+
+      // Compute acquisition priority: 50% Tc (norm 300K) + 50% uncertainty
+      const tcNorm = Math.min(1.0, (c.predictedTc ?? 0) / 300);
+      const unc = c.uncertaintyEstimate ?? 0;
+      const acquisitionScore = 0.5 * tcNorm + 0.5 * unc;
+      const newPriority = Math.min(90, Math.round(acquisitionScore * 100));
+
+      if (newPriority !== (job.priority ?? 0)) {
+        await storage.updateDftJobIfStatus(job.id, "queued", { priority: newPriority } as any);
+        reprioritized++;
+      }
+    }
+
+    // 2. Promote top acquisition candidates that aren't in the queue yet
+    const topCandidates = await storage.getCandidatesForDFTRefill(50);
+    const sorted = topCandidates
+      .filter(c => {
+        const mlFeatures = (c.mlFeatures as Record<string, any>) ?? {};
+        if (mlFeatures.qeDFT) return false;
+        const counts = parseFormulaCounts(c.formula);
+        const totalAtoms = Object.values(counts).reduce((s, v) => s + v, 0);
+        return totalAtoms <= 16;
+      })
+      .map(c => {
+        const tcNorm = Math.min(1.0, (c.predictedTc ?? 0) / 300);
+        const unc = c.uncertaintyEstimate ?? 0;
+        return { ...c, acquisitionScore: 0.5 * tcNorm + 0.5 * unc };
+      })
+      .sort((a, b) => b.acquisitionScore - a.acquisitionScore)
+      .slice(0, 10);
+
+    for (const c of sorted) {
+      if (queuedFormulas.has(c.formula)) continue;
+      if (isFormulaBlocked(c.formula)) continue;
+
+      try {
+        const { activeJob } = await storage.hasActiveOrRecentFailedDftJobs(c.formula);
+        if (activeJob) continue;
+
+        const priority = Math.min(90, Math.round(c.acquisitionScore * 100));
+        const job = await submitDFTJob(c.formula, null, priority, "scf", true);
+        if (job) {
+          promoted++;
+          queuedFormulas.add(c.formula);
+        }
+      } catch {}
+    }
+
+    if (reprioritized > 0 || promoted > 0) {
+      console.log(`[DFT-Queue] Sync with acquisition ranking: ${reprioritized} reprioritized, ${promoted} new promoted`);
+    }
+  } catch (err: any) {
+    console.error(`[DFT-Queue] syncQueueWithAcquisitionRanking error: ${err.message?.slice(0, 100)}`);
+  }
+
+  return { reprioritized, promoted };
 }
 
 async function processNextJob(): Promise<boolean> {
@@ -751,6 +846,12 @@ async function refillQueueIfLow(): Promise<number> {
         (refillErrors > 0 ? `, ${refillErrors} insert errors` : ""),
       );
     }
+    // After refill, re-prioritize the entire queue so top acquisition candidates
+    // are always served first to the GCP worker.
+    if (submitted > 0) {
+      syncQueueWithAcquisitionRanking().catch(() => {});
+    }
+
     return submitted;
   } catch (err: any) {
     console.log(`[DFT-Queue] Queue refill error: ${err.message}`);
@@ -944,17 +1045,35 @@ export async function getDFTQueueStats() {
 
   const currentActiveFormulas = Array.from(activeJobs.values()).map(j => j.formula);
 
+  // Also query DB for running jobs (GCP worker sets status='running' in DB,
+  // but the local server's activeWorkers counter stays 0 since DFT is offloaded).
+  let runningFormulasFromDB: string[] = [];
+  try {
+    const runningRows = await db.execute(
+      `SELECT formula FROM dft_jobs WHERE status = 'running' ORDER BY priority DESC LIMIT 20`
+    );
+    runningFormulasFromDB = ((runningRows as any).rows || runningRows || []).map((r: any) => r.formula);
+  } catch {}
+
+  // Merge local + GCP-reported running jobs (deduplicate)
+  const _seenFormulas = new Set<string>();
+  const allActiveFormulas: string[] = [];
+  for (const f of currentActiveFormulas.concat(runningFormulasFromDB)) {
+    if (!_seenFormulas.has(f)) { _seenFormulas.add(f); allActiveFormulas.push(f); }
+  }
+  const effectiveActiveWorkers = Math.max(activeWorkers, dbStats.running || 0);
+
   return {
     ...dbStats,
     totalProcessed: dbCompleted,
     totalSucceeded: dbSucceeded,
     totalFailed: adjustedFailed,
     staleJobsCleaned: staleCount,
-    isProcessing: activeWorkers > 0,
-    activeWorkers,
+    isProcessing: effectiveActiveWorkers > 0,
+    activeWorkers: effectiveActiveWorkers,
     maxConcurrent: MAX_CONCURRENT,
-    currentFormula: currentActiveFormulas[0] || null,
-    activeFormulas: currentActiveFormulas,
+    currentFormula: allActiveFormulas[0] || null,
+    activeFormulas: allActiveFormulas,
     qeAvailable: isQEAvailable(),
     stabilityGateEvAtom: STABILITY_GATE_EV_ATOM,
     stageFailures: getStageFailureCounts(),

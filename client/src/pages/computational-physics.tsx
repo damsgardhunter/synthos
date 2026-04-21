@@ -1285,7 +1285,9 @@ interface DFTQueueStatsData {
   totalSucceeded: number;
   totalFailed: number;
   isProcessing: boolean;
+  activeWorkers: number;
   currentFormula: string | null;
+  activeFormulas: string[];
   qeAvailable: boolean;
   recentJobs: DFTQueueJob[];
 }
@@ -1294,7 +1296,7 @@ function DFTQueuePanel() {
   const { messages } = useWebSocket();
   const { data: queueStats, isLoading } = useQuery<DFTQueueStatsData>({
     queryKey: ["/api/dft-queue/stats"],
-    refetchInterval: false,
+    refetchInterval: 30_000, // Refresh every 30s so running status stays up to date
   });
 
   const lastMessage = messages[messages.length - 1];
@@ -1353,13 +1355,22 @@ function DFTQueuePanel() {
           </div>
         </div>
 
-        {queueStats.currentFormula && (
-          <div className="p-3 rounded-md bg-amber-500/5 border border-amber-200 flex items-center gap-3" data-testid="dft-current-job">
-            <Loader2 className="h-4 w-4 animate-spin text-amber-600" />
-            <div>
-              <p className="text-sm font-medium">Currently computing: {queueStats.currentFormula}</p>
-              <p className="text-xs text-muted-foreground">PBE/SCF + Phonon via pw.x / ph.x</p>
+        {queueStats.isProcessing && (queueStats.activeFormulas?.length > 0 || queueStats.currentFormula) && (
+          <div className="p-3 rounded-md bg-amber-500/5 border border-amber-200 space-y-1" data-testid="dft-current-job">
+            <div className="flex items-center gap-2">
+              <Loader2 className="h-4 w-4 animate-spin text-amber-600" />
+              <p className="text-sm font-medium">
+                Running {queueStats.activeWorkers || 1} DFT job{(queueStats.activeWorkers || 1) > 1 ? "s" : ""} on GCP
+              </p>
             </div>
+            <div className="flex flex-wrap gap-1.5 ml-6">
+              {(queueStats.activeFormulas?.length > 0 ? queueStats.activeFormulas : [queueStats.currentFormula]).map(f => f && (
+                <Badge key={f} variant="outline" className="text-[10px] bg-amber-500/10 text-amber-700 border-amber-300 font-mono">
+                  {f}
+                </Badge>
+              ))}
+            </div>
+            <p className="text-xs text-muted-foreground ml-6">PBE/SCF + Phonon via pw.x / ph.x</p>
           </div>
         )}
 

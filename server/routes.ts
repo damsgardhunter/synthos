@@ -8,7 +8,7 @@ import { getSignalDefinitions } from "./learning/material-signal-scanner";
 import { enumeratePrototypesForFormula } from "./learning/crystal-prototypes";
 import { isDFTAvailable, getDFTMethodInfo, getXTBStats, runLandscapeExploration, getLandscapeStats as getEnergyLandscapeStats } from "./dft/qe-dft-engine";
 import { generateDopedVariants, generateDopedVariantsWithRelaxation, getDopingEngineStats, getDopingRecommendations, runDopingBatch, detectSCSignals, runDopingSearchLoop, analyzeHessianPhonons, detectAnharmonicVibrations, runMDSampling, computeDebyeTemp, computeDynamicLatticeScore } from "./learning/doping-engine";
-import { getDFTQueueStats, startDFTWorkerLoop, submitDFTJob, promoteDFTJob } from "./dft/dft-job-queue";
+import { getDFTQueueStats, startDFTWorkerLoop, submitDFTJob, promoteDFTJob, syncQueueWithAcquisitionRanking } from "./dft/dft-job-queue";
 import {
   createPipeline as createNextGenPipeline,
   runPipelineIteration as runNextGenIteration,
@@ -983,6 +983,16 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json({ queued, promoted, failed, priority });
     } catch (e: any) {
       res.status(500).json({ error: e?.message ?? "Failed to promote DFT jobs" });
+    }
+  });
+
+  // Sync queue priorities with current acquisition scores and promote top candidates.
+  app.post("/api/dft-queue/sync-priorities", engineLimiter, async (_req, res) => {
+    try {
+      const result = await syncQueueWithAcquisitionRanking();
+      res.json({ success: true, ...result });
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message ?? "Failed to sync DFT queue priorities" });
     }
   });
 
