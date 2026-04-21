@@ -4239,11 +4239,10 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
         if (pnq1 === 1 && pnq2 === 1 && pnq3 === 1) {
           const dyn1Path = path.join(jobDir, `${prefix}.dyn1`);
           if (fs.existsSync(dyn1Path)) {
+            // Step 1: Try parsing freq lines directly from .dyn1
             try {
               const dyn1Content = fs.readFileSync(dyn1Path, "utf8");
               const freqValues: number[] = [];
-              // QE .dyn1 format: "freq (    1) =  ... [THz] =  ... [cm-1]"
-              // or "omega( 1) = ... [cm-1]"
               for (const line of dyn1Content.split("\n")) {
                 const cm1Match = line.match(/\[\s*cm-1\s*\]\s*$/i) ? line.match(/([-\d.]+)\s*\[\s*cm-1\s*\]/i) : null;
                 const freqMatch = line.match(/freq\s*\(\s*\d+\)\s*=\s*([-\d.]+)\s*\[THz\]\s*=\s*([-\d.]+)\s*\[cm-1\]/i);
@@ -4259,11 +4258,77 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
                 result.phonon.hasImaginary = result.phonon.imaginaryCount > 0;
                 result.phonon.converged = true;
                 console.log(`[QE-Worker] Parsed ${freqValues.length} Gamma-only phonon modes from ${prefix}.dyn1 for ${formula} (lowest=${result.phonon.lowestFrequency.toFixed(1)} cm⁻¹)`);
-              } else {
-                console.log(`[QE-Worker] No frequencies found in ${prefix}.dyn1 for ${formula} — file may be malformed`);
               }
             } catch (dynErr: any) {
               console.log(`[QE-Worker] Failed to parse ${prefix}.dyn1 for ${formula}: ${(dynErr.message || "").slice(0, 100)}`);
+            }
+
+            // Step 2: If .dyn1 didn't have freq lines, run dynmat.x to extract
+            // frequencies from the raw dynamical matrix. This is the standard QE
+            // workflow for Gamma-only: ph.x writes the dynamical matrix in binary/
+            // numerical format, dynmat.x diagonalizes it and prints frequencies.
+            if (result.phonon.frequencies.length === 0) {
+              try {
+                const dynmatInput = `&INPUT\n  fildyn = '${prefix}.dyn1',\n  asr = 'simple',\n/\n`;
+                const dynmatInputFile = path.join(jobDir, "dynmat.in");
+                fs.writeFileSync(dynmatInputFile, dynmatInput);
+                console.log(`[QE-Worker] Running dynmat.x for Gamma-only phonon of ${formula}`);
+                const dynmatResult = await runQECommand(
+                  path.posix.join(getQEBinDir(), "dynmat.x"),
+                  dynmatInputFile, jobDir,
+                );
+                fs.writeFileSync(path.join(jobDir, "dynmat.out"), dynmatResult.stdout);
+
+                if (dynmatResult.exitCode === 0) {
+                  // dynmat.x prints: "mode   N     freq(cm**-1) = X.XXXX"
+                  // or standard "freq (N) = ... [THz] = ... [cm-1]" and
+                  // also "omega(N) = X.XX [cm-1]" format
+                  const dynmatPhonon = parsePhononOutput(dynmatResult.stdout);
+                  if (dynmatPhonon.frequencies.length > 0) {
+                    result.phonon = dynmatPhonon;
+                    result.phonon.converged = true;
+                    console.log(`[QE-Worker] dynmat.x extracted ${dynmatPhonon.frequencies.length} modes for ${formula} (lowest=${dynmatPhonon.lowestFrequency.toFixed(1)} cm⁻¹)`);
+                  } else {
+                    // dynmat.x may print in different format — try parsing directly
+                    const freqValues: number[] = [];
+                    for (const line of dynmatResult.stdout.split("\n")) {
+                      // "     1              X.XXXX    0.0000    0.0000"
+                      // or "mode   N     freq(cm**-1) = X.XXXX"
+                      const modeMatch = line.match(/mode\s+\d+\s+freq\s*\(\s*cm\*?\*?-1\s*\)\s*=\s*([-\d.]+)/i);
+                      if (modeMatch) {
+                        const val = parseFloat(modeMatch[1]);
+                        if (Number.isFinite(val)) freqValues.push(val);
+                      }
+                    }
+                    if (freqValues.length > 0) {
+                      result.phonon.frequencies = freqValues;
+                      result.phonon.lowestFrequency = Math.min(...freqValues);
+                      result.phonon.highestFrequency = Math.max(...freqValues);
+                      result.phonon.imaginaryCount = freqValues.filter(f => f < -20).length;
+                      result.phonon.hasImaginary = result.phonon.imaginaryCount > 0;
+                      result.phonon.converged = true;
+                      console.log(`[QE-Worker] dynmat.x mode-parse extracted ${freqValues.length} frequencies for ${formula}`);
+                    } else {
+                      console.log(`[QE-Worker] dynmat.x produced no parseable frequencies for ${formula}`);
+                    }
+                  }
+                } else {
+                  console.log(`[QE-Worker] dynmat.x failed for ${formula}: exit ${dynmatResult.exitCode}`);
+                }
+              } catch (dynmatErr: any) {
+                console.log(`[QE-Worker] dynmat.x error for ${formula}: ${(dynmatErr.message || "").slice(0, 120)}`);
+              }
+            }
+          }
+
+          // Also try parsing ph.x stdout — for Gamma-only with ldisp=.true.,
+          // some QE versions print frequencies directly to stdout
+          if (result.phonon.frequencies.length === 0) {
+            const stdoutPhonon = parsePhononOutput(phResult.stdout);
+            if (stdoutPhonon.frequencies.length > 0) {
+              result.phonon = stdoutPhonon;
+              result.phonon.converged = true;
+              console.log(`[QE-Worker] Found ${stdoutPhonon.frequencies.length} modes in ph.x stdout for Gamma-only ${formula}`);
             }
           }
           // Skip q2r.x+matdyn.x — not applicable for Gamma-only

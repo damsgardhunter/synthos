@@ -253,6 +253,7 @@ export async function syncQueueWithAcquisitionRanking(): Promise<{ reprioritized
     for (const c of sorted) {
       if (queuedFormulas.has(c.formula)) continue;
       if (isFormulaBlocked(c.formula)) continue;
+      if (hasLmaxxIncompatibleElement(c.formula)) continue;
 
       try {
         const { activeJob } = await storage.hasActiveOrRecentFailedDftJobs(c.formula);
@@ -646,6 +647,46 @@ async function cleanupOverstoichiometricJobs() {
   }
 }
 
+// Elements whose PPs require lmaxx>3, which our QE build doesn't support.
+// Reject at queue level to avoid wasting a GCP worker slot on immediate failure.
+const LMAXX_INCOMPATIBLE_QUEUE = new Set([
+  // Lanthanides with 4f projectors
+  "Ce", "Pr", "Nd", "Pm", "Sm", "Eu", "Gd", "Tb", "Dy", "Ho", "Er", "Tm",
+  // Actinides with 5f projectors
+  "Th", "Pa", "U", "Np", "Pu", "Am",
+]);
+
+async function cleanupFBlockElementJobs() {
+  try {
+    const queued = await storage.getDftJobsByStatus("queued");
+    let cancelled = 0;
+    for (const job of queued) {
+      const counts = parseFormulaCounts(job.formula);
+      const elements = Object.keys(counts);
+      const badEl = elements.find(el => LMAXX_INCOMPATIBLE_QUEUE.has(el));
+      if (badEl) {
+        await storage.updateDftJob(job.id, {
+          status: "failed",
+          completedAt: new Date(),
+          errorMessage: `Pre-filter rejected: unsupported element ${badEl} (PPs require lmaxx>3; QE rebuild or scalar-relativistic PP needed)`,
+        } as any);
+        cancelled++;
+      }
+    }
+    if (cancelled > 0) {
+      console.log(`[DFT-Queue] Cancelled ${cancelled} queued jobs with f-block elements (lmaxx incompatible)`);
+    }
+  } catch (err: any) {
+    console.log(`[DFT-Queue] F-block cleanup error: ${err.message}`);
+  }
+}
+
+/** Check if a formula contains any element that will fail the PP pre-filter. */
+function hasLmaxxIncompatibleElement(formula: string): boolean {
+  const counts = parseFormulaCounts(formula);
+  return Object.keys(counts).some(el => LMAXX_INCOMPATIBLE_QUEUE.has(el));
+}
+
 async function cleanupStaleJobs() {
   try {
     const staleRunning = await storage.getDftJobsByStatus("running");
@@ -698,6 +739,8 @@ async function refillQueueIfLow(): Promise<number> {
       const counts = parseFormulaCounts(c.formula);
       const totalAtoms = Object.values(counts).reduce((s, v) => s + v, 0);
       if (totalAtoms > 16) return false;
+      // f-block element gate — PPs need lmaxx>3 which our QE build doesn't support
+      if (Object.keys(counts).some(el => LMAXX_INCOMPATIBLE_QUEUE.has(el))) return false;
       // Phonon stability gate — skip candidates already flagged as dynamically unstable
       // by the surrogate phonon model or prior QE phonon run. Queuing them wastes DFT
       // slots and produces empty/imaginary frequency results.
@@ -903,8 +946,9 @@ export function startDFTWorkerLoop() {
   // but still run the queue refill loop so GCP always has work to pick up.
   if (process.env.OFFLOAD_DFT_TO_GCP === "true") {
     console.log("[DFT-Queue] OFFLOAD_DFT_TO_GCP=true — running queue-refill only (GCP worker handles calculations)");
-    // One-time cleanup of any overstoichiometric jobs already in the queue
+    // One-time cleanup of invalid jobs already in the queue
     cleanupOverstoichiometricJobs().catch(() => {});
+    cleanupFBlockElementJobs().catch(() => {});
 
     // Ensure critical candidates are at the front before the regular refill runs
     setTimeout(() => bootstrapCriticalCandidates().catch(() => {}), 3_000);
