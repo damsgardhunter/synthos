@@ -609,23 +609,14 @@ async def train(req: TrainRequest):
     """
     global _ensemble, _last_metrics
 
-    # File-based lock: if another worker is already training (lock file
-    # modified within the last 2 hours), this worker skips training.
-    # The lock file is created at training start and deleted on completion.
+    # Clean up stale lock file from previous runs (single worker — no
+    # cross-process coordination needed, just the per-process asyncio lock).
     try:
-        if _TRAIN_LOCK_FILE.exists():
-            age = time.time() - _TRAIN_LOCK_FILE.stat().st_mtime
-            if age < 7200:  # 2 hours
-                return TrainResponse(
-                    job_id=req.job_id, status="failed",
-                    reason=f"Another worker is training (lock age {age:.0f}s)",
-                    metrics=MetricsResponse(),
-                )
-        _TRAIN_LOCK_FILE.write_text(str(req.job_id))
+        _TRAIN_LOCK_FILE.unlink(missing_ok=True)
     except Exception:
-        pass  # Non-fatal — proceed with per-process lock only
+        pass
 
-    async with _train_lock:   # Per-process lock
+    async with _train_lock:
         global _is_training
         _is_training = True
         job_id = req.job_id
@@ -937,11 +928,6 @@ async def train(req: TrainRequest):
             log.warning(f"[Job#{job_id}] XGBoost training failed (GNN still saved): {e}")
 
         _is_training = False
-        # Release file lock
-        try:
-            _TRAIN_LOCK_FILE.unlink(missing_ok=True)
-        except Exception:
-            pass
 
         return TrainResponse(job_id=job_id, status="done", metrics=metrics)
 
