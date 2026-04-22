@@ -2347,6 +2347,28 @@ function generatePhononInput(formula: string, elements: string[] = [], totalAtom
   // tr2_ph=1.0d-12 is the aiida-quantumespresso screening default; the prior
   // 1.0d-14 is publication-quality and costs 2-3x wall time without changing
   // screening-level Tc estimates.
+  //
+  // Gamma-only (1×1×1): use ldisp=.false. so ph.x prints omega(N) = X [THz]
+  // = Y [cm-1] directly to stdout, which parsePhononOutput already handles.
+  // ldisp=.true. with 1×1×1 writes the dynamical matrix to .dyn files in a
+  // binary/numerical format that dynmat.x must post-process, and the various
+  // parsers fail to match dynmat.x's tabular output → "0 modes" bug.
+  const isGammaOnly = nq1 === 1 && nq2 === 1 && nq3 === 1;
+  if (isGammaOnly) {
+    // QE ph.x with ldisp=.false. REQUIRES an explicit q-point card after the
+    // namelist. Without it, some QE versions read garbage or crash. Specify
+    // Gamma (0 0 0) explicitly.
+    return `Gamma-only phonon calculation
+&INPUTPH
+  prefix = '${prefix}',
+  outdir = './tmp',
+  fildyn = '${prefix}.dyn',
+  tr2_ph = 1.0d-12,
+  ldisp = .false.,
+/
+0.0 0.0 0.0
+`;
+  }
   return `Phonon dispersions on ${nq1}x${nq2}x${nq3} grid
 &INPUTPH
   prefix = '${prefix}',
@@ -2492,6 +2514,29 @@ function parsePhononOutput(stdout: string): QEPhononResult {
     const matdynMatches = stdout.matchAll(/\d+\s+freq\s*=\s*([-\d.]+)\s+\[THz\]\s*=\s*([-\d.]+)\s+\[cm-1\]/g);
     for (const m of matdynMatches) {
       result.frequencies.push(parseFloat(m[2]));
+    }
+  }
+
+  if (result.frequencies.length === 0) {
+    // dynmat.x tabular format (QE 6.x/7.x):
+    //   # mode   [cm-1]   [THz]  IR
+    //      1      123.45   3.678    0.123
+    //      2       45.67   1.234    0.456
+    let inTabular = false;
+    for (const line of stdout.split("\n")) {
+      if (line.match(/#\s*mode\s+\[cm-1\]/i)) {
+        inTabular = true;
+        continue;
+      }
+      if (inTabular) {
+        const cols = line.trim().split(/\s+/);
+        if (cols.length >= 2 && /^\d+$/.test(cols[0])) {
+          const val = parseFloat(cols[1]);
+          if (Number.isFinite(val)) result.frequencies.push(val);
+        } else if (line.trim() === "" || line.startsWith("*")) {
+          inTabular = false;
+        }
+      }
     }
   }
 
@@ -4195,7 +4240,10 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     // The earlier "Do NOT clean ./tmp" comment in the bands block was a partial
     // diagnosis — not cleaning the dir wasn't enough because pw.x rewrites the
     // wfc files inside it.
-    if (scfUsable) {
+    // Skip phonon for partial-walltime SCFs: disk_io='low' does NOT save
+    // wavefunctions (.wfc files) during wall-time-killed runs, so ph.x would
+    // fail to read them and either crash or produce 0 modes.
+    if (scfUsable && !isPartialWalltime) {
       const phInput = generatePhononInput(formula, elements, positions.length);
       const phInputFile = path.join(jobDir, "ph.in");
       fs.writeFileSync(phInputFile, phInput);
@@ -4237,16 +4285,21 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
         // "omega(" lines.
         const [pnq1, pnq2, pnq3] = autoPhononQGrid(elements, positions.length);
         if (pnq1 === 1 && pnq2 === 1 && pnq3 === 1) {
+          // ldisp=.false. writes {prefix}.dyn; ldisp=.true. writes {prefix}.dyn1.
+          // Check both so this fallback works regardless of which mode was used.
           const dyn1Path = path.join(jobDir, `${prefix}.dyn1`);
-          if (fs.existsSync(dyn1Path)) {
-            // Step 1: Try parsing freq lines directly from .dyn1
+          const dynPath = path.join(jobDir, `${prefix}.dyn`);
+          const dynFilePath = fs.existsSync(dyn1Path) ? dyn1Path : (fs.existsSync(dynPath) ? dynPath : null);
+          if (dynFilePath) {
+            const dynFileName = path.basename(dynFilePath);
+            // Step 1: Try parsing freq lines directly from .dyn/.dyn1
             try {
-              const dyn1Content = fs.readFileSync(dyn1Path, "utf8");
+              const dynContent = fs.readFileSync(dynFilePath, "utf8");
               const freqValues: number[] = [];
-              for (const line of dyn1Content.split("\n")) {
+              for (const line of dynContent.split("\n")) {
                 const cm1Match = line.match(/\[\s*cm-1\s*\]\s*$/i) ? line.match(/([-\d.]+)\s*\[\s*cm-1\s*\]/i) : null;
                 const freqMatch = line.match(/freq\s*\(\s*\d+\)\s*=\s*([-\d.]+)\s*\[THz\]\s*=\s*([-\d.]+)\s*\[cm-1\]/i);
-                const omegaMatch = line.match(/omega\(\s*\d+\)\s*=\s*([-\d.]+)/);
+                const omegaMatch = line.match(/omega\s*\(\s*\d+\)\s*=\s*([-\d.]+)/);
                 const val = freqMatch ? parseFloat(freqMatch[2]) : (cm1Match ? parseFloat(cm1Match[1]) : (omegaMatch ? parseFloat(omegaMatch[1]) : NaN));
                 if (Number.isFinite(val) && val !== 0) freqValues.push(val);
               }
@@ -4257,19 +4310,18 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
                 result.phonon.imaginaryCount = freqValues.filter(f => f < -20).length;
                 result.phonon.hasImaginary = result.phonon.imaginaryCount > 0;
                 result.phonon.converged = true;
-                console.log(`[QE-Worker] Parsed ${freqValues.length} Gamma-only phonon modes from ${prefix}.dyn1 for ${formula} (lowest=${result.phonon.lowestFrequency.toFixed(1)} cm⁻¹)`);
+                console.log(`[QE-Worker] Parsed ${freqValues.length} Gamma-only phonon modes from ${dynFileName} for ${formula} (lowest=${result.phonon.lowestFrequency.toFixed(1)} cm⁻¹)`);
               }
             } catch (dynErr: any) {
-              console.log(`[QE-Worker] Failed to parse ${prefix}.dyn1 for ${formula}: ${(dynErr.message || "").slice(0, 100)}`);
+              console.log(`[QE-Worker] Failed to parse ${dynFileName} for ${formula}: ${(dynErr.message || "").slice(0, 100)}`);
             }
 
-            // Step 2: If .dyn1 didn't have freq lines, run dynmat.x to extract
-            // frequencies from the raw dynamical matrix. This is the standard QE
-            // workflow for Gamma-only: ph.x writes the dynamical matrix in binary/
-            // numerical format, dynmat.x diagonalizes it and prints frequencies.
+            // Step 2: If .dyn file didn't have freq lines, run dynmat.x to extract
+            // frequencies from the raw dynamical matrix. dynmat.x diagonalizes the
+            // matrix and prints frequencies.
             if (result.phonon.frequencies.length === 0) {
               try {
-                const dynmatInput = `&INPUT\n  fildyn = '${prefix}.dyn1',\n  asr = 'simple',\n/\n`;
+                const dynmatInput = `&INPUT\n  fildyn = '${path.basename(dynFilePath)}',\n  asr = 'simple',\n/\n`;
                 const dynmatInputFile = path.join(jobDir, "dynmat.in");
                 fs.writeFileSync(dynmatInputFile, dynmatInput);
                 console.log(`[QE-Worker] Running dynmat.x for Gamma-only phonon of ${formula}`);
@@ -4280,24 +4332,40 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
                 fs.writeFileSync(path.join(jobDir, "dynmat.out"), dynmatResult.stdout);
 
                 if (dynmatResult.exitCode === 0) {
-                  // dynmat.x prints: "mode   N     freq(cm**-1) = X.XXXX"
-                  // or standard "freq (N) = ... [THz] = ... [cm-1]" and
-                  // also "omega(N) = X.XX [cm-1]" format
                   const dynmatPhonon = parsePhononOutput(dynmatResult.stdout);
                   if (dynmatPhonon.frequencies.length > 0) {
                     result.phonon = dynmatPhonon;
                     result.phonon.converged = true;
                     console.log(`[QE-Worker] dynmat.x extracted ${dynmatPhonon.frequencies.length} modes for ${formula} (lowest=${dynmatPhonon.lowestFrequency.toFixed(1)} cm⁻¹)`);
                   } else {
-                    // dynmat.x may print in different format — try parsing directly
+                    // dynmat.x outputs in multiple formats depending on QE version:
+                    //   "mode   N     freq(cm**-1) = X.XXXX"
+                    //   tabular: "# mode   [cm-1]   [THz]  IR\n   1   123.45   3.678   0.12"
                     const freqValues: number[] = [];
+                    let inTabular = false;
                     for (const line of dynmatResult.stdout.split("\n")) {
-                      // "     1              X.XXXX    0.0000    0.0000"
-                      // or "mode   N     freq(cm**-1) = X.XXXX"
+                      // Format 1: "mode   N     freq(cm**-1) = X.XXXX"
                       const modeMatch = line.match(/mode\s+\d+\s+freq\s*\(\s*cm\*?\*?-1\s*\)\s*=\s*([-\d.]+)/i);
                       if (modeMatch) {
                         const val = parseFloat(modeMatch[1]);
                         if (Number.isFinite(val)) freqValues.push(val);
+                        continue;
+                      }
+                      // Format 2: tabular — header "# mode   [cm-1]" followed by
+                      // "   N      XXX.XX    Y.YYYY    Z.ZZZZ" lines
+                      if (line.match(/#\s*mode\s+\[cm-1\]/i)) {
+                        inTabular = true;
+                        continue;
+                      }
+                      if (inTabular) {
+                        const cols = line.trim().split(/\s+/);
+                        // Expect: modeNumber  freq_cm1  freq_THz  [IR_activity ...]
+                        if (cols.length >= 2 && /^\d+$/.test(cols[0])) {
+                          const val = parseFloat(cols[1]);
+                          if (Number.isFinite(val)) freqValues.push(val);
+                        } else if (line.trim() === "" || line.startsWith("*")) {
+                          inTabular = false;
+                        }
                       }
                     }
                     if (freqValues.length > 0) {
@@ -4321,8 +4389,8 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
             }
           }
 
-          // Also try parsing ph.x stdout — for Gamma-only with ldisp=.true.,
-          // some QE versions print frequencies directly to stdout
+          // Also try parsing ph.x stdout directly — with ldisp=.false.,
+          // ph.x prints frequencies to stdout in omega(N) format
           if (result.phonon.frequencies.length === 0) {
             const stdoutPhonon = parsePhononOutput(phResult.stdout);
             if (stdoutPhonon.frequencies.length > 0) {
@@ -4439,7 +4507,7 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     // after this point. DFPT EPC below uses runDFPTEPC which writes its own
     // ph.in and reads only the lambda/omega from its own stdout — it does not
     // depend on .save/ wavefunctions surviving the bands step.
-    if (scfUsable && result.scf?.fermiEnergy !== null) {
+    if (scfUsable && !isPartialWalltime && result.scf?.fermiEnergy !== null) {
       try {
         const cOverAVal = estimateCOverA(elements, counts);
         // Uses module-level SPECIES_ECUTWFC. Must match the SCF-path cutoff
