@@ -1,26 +1,108 @@
 import { storage } from "../storage";
 import type { EventEmitter } from "./engine";
-import { classifyFamily } from "./utils";
+import { classifyFamily, parseFormulaCounts } from "./utils";
+import { checkFormulaNovelty } from "./cod-client";
 
 interface MilestoneState {
   knownFamilies: Set<string>;
+  // Tracks compositionally distinct candidates per family. A family is only
+  // "confirmed" once it reaches MIN_FAMILY_CORROBORATION *distinct* hits.
+  familyCandidateCounts: Map<string, { count: number; formulas: string[]; elementSets: Set<string>[]; stoichiometries: Record<string, number>[] }>;
   bestTcEver: number;
   maxPipelineStage: number;
   maxFamilyDiversity: number;
   knowledgeThresholds: Set<number>;
   lastCascadeCycle: number;
+  // Cache novelty lookups to avoid repeated DB/API calls
+  noveltyCache: Map<string, boolean>;
+}
+
+const MIN_FAMILY_CORROBORATION = 3;
+// Jaccard threshold for element-set overlap. Two candidates with >= this overlap
+// are considered near-duplicates and only one counts toward corroboration.
+const MAX_CORROBORATOR_OVERLAP = 0.8;
+// Cosine-similarity threshold for stoichiometric ratios. If two formulas have
+// the same elements (or very similar element sets) AND their stoichiometric
+// ratio vectors are >= this similar, they're treated as near-duplicates.
+// This catches Co2HKLi5Sb vs Co2HKLi3Sb (same elements, similar ratios).
+const MAX_STOICHIOMETRY_SIMILARITY = 0.92;
+
+/** Compute cosine similarity between two stoichiometry vectors.
+ *  Both are Records mapping element → count. Missing elements are treated as 0. */
+function stoichiometrySimilarity(a: Record<string, number>, b: Record<string, number>): number {
+  const allElements = new Set([...Object.keys(a), ...Object.keys(b)]);
+  let dot = 0, magA = 0, magB = 0;
+  for (const el of allElements) {
+    const va = a[el] ?? 0;
+    const vb = b[el] ?? 0;
+    dot += va * vb;
+    magA += va * va;
+    magB += vb * vb;
+  }
+  if (magA === 0 || magB === 0) return 0;
+  return dot / (Math.sqrt(magA) * Math.sqrt(magB));
+}
+
+/** Returns true if `elSet` is compositionally distinct from all existing corroborators.
+ *  Two candidates are "too similar" when EITHER:
+ *  (a) their element-set Jaccard similarity >= 0.8, OR
+ *  (b) their elements overlap significantly AND their stoichiometric ratios are
+ *      very similar (cosine >= 0.92), catching Co2HKLi5Sb vs Co2HKLi3Sb. */
+function isCompositionallyDistinct(
+  elSet: Set<string>,
+  stoich: Record<string, number>,
+  existing: Set<string>[],
+  existingStoich: Record<string, number>[],
+): boolean {
+  for (let i = 0; i < existing.length; i++) {
+    const other = existing[i];
+    let intersection = 0;
+    for (const el of elSet) {
+      if (other.has(el)) intersection++;
+    }
+    const union = new Set([...elSet, ...other]).size;
+    // Check 1: element-set Jaccard overlap
+    if (union > 0 && intersection / union >= MAX_CORROBORATOR_OVERLAP) return false;
+    // Check 2: stoichiometric similarity for overlapping element sets
+    // If elements overlap >= 60% AND stoichiometry is very similar, it's a near-duplicate
+    if (union > 0 && intersection / union >= 0.6 && existingStoich[i]) {
+      const sim = stoichiometrySimilarity(stoich, existingStoich[i]);
+      if (sim >= MAX_STOICHIOMETRY_SIMILARITY) return false;
+    }
+  }
+  return true;
 }
 
 const state: MilestoneState = {
   knownFamilies: new Set(),
+  familyCandidateCounts: new Map(),
   bestTcEver: 0,
   maxPipelineStage: 0,
   maxFamilyDiversity: 0,
   knowledgeThresholds: new Set(),
   lastCascadeCycle: -10,
+  noveltyCache: new Map(),
 };
 
 let initialized = false;
+
+/** Check if a formula is a known compound (in COD, Materials Project, etc.).
+ *  Results are cached to avoid repeated DB lookups. */
+async function isKnownCompound(formula: string): Promise<boolean> {
+  if (state.noveltyCache.has(formula)) return state.noveltyCache.get(formula)!;
+  try {
+    const result = await checkFormulaNovelty(formula);
+    state.noveltyCache.set(formula, result.isKnown);
+    // Cap cache size
+    if (state.noveltyCache.size > 500) {
+      const firstKey = state.noveltyCache.keys().next().value;
+      if (firstKey) state.noveltyCache.delete(firstKey);
+    }
+    return result.isKnown;
+  } catch {
+    return false; // If check fails, assume novel (don't penalize)
+  }
+}
 
 async function initState() {
   if (initialized) return;
@@ -32,7 +114,24 @@ async function initState() {
 
     const candidates = await storage.getSuperconductorCandidates(100);
     for (const c of candidates) {
-      state.knownFamilies.add(classifyFamily(c.formula));
+      const family = classifyFamily(c.formula);
+      const entry = state.familyCandidateCounts.get(family) ?? { count: 0, formulas: [], elementSets: [], stoichiometries: [] };
+      const counts = parseFormulaCounts(c.formula);
+      const elSet = new Set(Object.keys(counts));
+      if (isCompositionallyDistinct(elSet, counts, entry.elementSets, entry.stoichiometries)) {
+        // Don't count known compounds toward corroboration during init
+        const known = await isKnownCompound(c.formula);
+        if (!known) {
+          entry.count++;
+          if (entry.formulas.length < 5) entry.formulas.push(c.formula);
+        }
+        entry.elementSets.push(elSet);
+        entry.stoichiometries.push(counts);
+      }
+      state.familyCandidateCounts.set(family, entry);
+      if (entry.count >= MIN_FAMILY_CORROBORATION) {
+        state.knownFamilies.add(family);
+      }
       if ((c.predictedTc ?? 0) > state.bestTcEver) state.bestTcEver = c.predictedTc ?? 0;
       if ((c.verificationStage ?? 0) > state.maxPipelineStage) state.maxPipelineStage = c.verificationStage ?? 0;
     }
@@ -65,6 +164,20 @@ async function initState() {
           state.knowledgeThresholds.add(threshold * 1000 + 4);
         }
       }
+      // Restore previously confirmed families so we never re-fire the event.
+      // This is the primary deduplication mechanism — even if in-memory state
+      // is lost on restart, we rebuild from persisted milestones.
+      if (m.type === "new-family" && m.title) {
+        const familyMatch = m.title.match(/New material family confirmed:\s*(.+)/);
+        if (familyMatch) {
+          state.knownFamilies.add(familyMatch[1].trim());
+        }
+        // Also try matching the expansion event format
+        const expandMatch = m.title.match(/(.+?)\s+family expanded/);
+        if (expandMatch) {
+          state.knownFamilies.add(expandMatch[1].trim());
+        }
+      }
     }
   } catch {}
   initialized = true;
@@ -92,12 +205,30 @@ export async function checkMilestones(
 
     for (const c of candidates) {
       const family = classifyFamily(c.formula);
-      if (!state.knownFamilies.has(family)) {
+      const entry = state.familyCandidateCounts.get(family) ?? { count: 0, formulas: [], elementSets: [], stoichiometries: [] };
+      const counts = parseFormulaCounts(c.formula);
+      const elSet = new Set(Object.keys(counts));
+      if (!entry.formulas.includes(c.formula) && isCompositionallyDistinct(elSet, counts, entry.elementSets, entry.stoichiometries)) {
+        // Only count NOVEL compounds as corroboration — skip known/textbook materials
+        const known = await isKnownCompound(c.formula);
+        if (!known) {
+          entry.count++;
+          if (entry.formulas.length < 5) entry.formulas.push(c.formula);
+        }
+        // Always track element sets/stoichiometries for deduplication, even for
+        // known compounds (so future near-duplicates of known compounds are also caught)
+        entry.elementSets.push(elSet);
+        entry.stoichiometries.push(counts);
+        state.familyCandidateCounts.set(family, entry);
+      }
+      // Family confirmation: fires ONCE per family, then never again.
+      // After confirmation, expansion events track new additions.
+      if (!state.knownFamilies.has(family) && entry.count >= MIN_FAMILY_CORROBORATION) {
         state.knownFamilies.add(family);
         detected.push({
           type: "new-family",
-          title: `New material family: ${family}`,
-          description: `First candidate from the ${family} family discovered: ${c.formula}. Expanding chemical search space.`,
+          title: `New material family confirmed: ${family}`,
+          description: `${entry.count} novel candidates from the ${family} family corroborated (${entry.formulas.slice(0, 3).join(", ")}). Expanding chemical search space.`,
           significance: 2,
           relatedFormula: c.formula,
         });
