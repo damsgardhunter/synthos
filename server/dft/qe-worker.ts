@@ -3357,11 +3357,16 @@ async function runDFPTEPC(
   const phInputFile = path.join(jobDir, "dfpt_ph.in");
   fs.writeFileSync(phInputFile, phInput);
 
-  console.log(`[QE-Worker] DFPT EPC: running ph.x for ${formula} (${nqGrid.join("×")} q-grid, P=${pressureGpa} GPa)`);
+  // DFPT ph.x on 2×2×2 is much heavier than screening phonon: each of 8
+  // q-points × 3N perturbations is a mini-SCF. Budget 8 hours (heavy systems
+  // need it), capped below the main phonon 24h cap since DFPT is secondary.
+  const DFPT_PH_TIMEOUT_MS = 8 * 3600 * 1000;
+  console.log(`[QE-Worker] DFPT EPC: running ph.x for ${formula} (${nqGrid.join("×")} q-grid, P=${pressureGpa} GPa, timeout=8h)`);
   const phResult = await runQECommand(
     path.posix.join(getQEBinDir(), "ph.x"),
     phInputFile,
     jobDir,
+    DFPT_PH_TIMEOUT_MS,
   );
   const phOut = path.join(jobDir, "dfpt_ph.out");
   fs.writeFileSync(phOut, phResult!.stdout);
@@ -3380,10 +3385,12 @@ async function runDFPTEPC(
     const q2rInput = generateQ2RInput(prefix, nqGrid[0], nqGrid[1], nqGrid[2]);
     const q2rFile = path.join(jobDir, "dfpt_q2r.in");
     fs.writeFileSync(q2rFile, q2rInput);
+    const POST_PROCESS_TIMEOUT_MS = 5 * 60 * 1000; // 5 min — these are fast tools
     const q2rResult = await runQECommand(
       path.posix.join(getQEBinDir(), "q2r.x"),
       q2rFile,
       jobDir,
+      POST_PROCESS_TIMEOUT_MS,
     );
     q2rDone = q2rResult.exitCode === 0;
     if (!q2rDone) warnings.push(`q2r.x exited ${q2rResult.exitCode}`);
@@ -3396,6 +3403,7 @@ async function runDFPTEPC(
   let matdynDone = false;
   if (q2rDone) {
     try {
+      const POST_PROCESS_TIMEOUT_MS = 5 * 60 * 1000;
       const matdynInput = generateMatdynDOSInput(prefix, 20, 20, 20);
       const matdynFile = path.join(jobDir, "dfpt_matdyn.in");
       fs.writeFileSync(matdynFile, matdynInput);
@@ -3403,6 +3411,7 @@ async function runDFPTEPC(
         path.posix.join(getQEBinDir(), "matdyn.x"),
         matdynFile,
         jobDir,
+        POST_PROCESS_TIMEOUT_MS,
       );
       matdynDone = matdynResult.exitCode === 0;
       if (!matdynDone) warnings.push(`matdyn.x exited ${matdynResult.exitCode}`);
@@ -4392,6 +4401,7 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
                 const dynmatResult = await runQECommand(
                   path.posix.join(getQEBinDir(), "dynmat.x"),
                   dynmatInputFile, jobDir,
+                  5 * 60 * 1000, // 5 min — dynmat.x is a fast diagonalization
                 );
                 fs.writeFileSync(path.join(jobDir, "dynmat.out"), dynmatResult.stdout);
 
@@ -4503,6 +4513,7 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
           const q2rResult = await runQECommand(
             path.posix.join(getQEBinDir(), "q2r.x"),
             q2rInputFile, jobDir,
+            5 * 60 * 1000, // 5 min cap
           );
           fs.writeFileSync(path.join(jobDir, "q2r.out"), q2rResult.stdout);
           console.log(`[QE-Worker] q2r.x exit=${q2rResult.exitCode} for ${formula}`);
@@ -4515,6 +4526,7 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
             const matdynResult = await runQECommand(
               path.posix.join(getQEBinDir(), "matdyn.x"),
               matdynInputFile, jobDir,
+              5 * 60 * 1000, // 5 min cap
             );
             fs.writeFileSync(path.join(jobDir, "matdyn.out"), matdynResult.stdout);
 
@@ -4561,6 +4573,15 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
         result.failureStage = "phonon";
         stageFailureCounts.phonon++;
         console.log(`[QE-Worker] Phonon failed for ${formula}: ${result.phonon.error.slice(-200)}`);
+      } else if (result.phonon.frequencies.length === 0) {
+        // ph.x may have exited 0 (via max_seconds clean exit) but produced
+        // no frequencies. This is still a failure — mark it explicitly so
+        // downstream consumers (DFPT, Tc estimation) don't run on empty data.
+        const reason = phTimedOut ? "timeout (all perturbations not completed)" : "no frequencies parsed from output";
+        result.phonon.error = `Phonon produced 0 modes: ${reason}`;
+        result.failureStage = "phonon";
+        stageFailureCounts.phonon++;
+        console.log(`[QE-Worker] Phonon failed for ${formula}: 0 modes — ${reason} (exit=${phResult!.exitCode})`);
       } else {
         console.log(`[QE-Worker] Phonon done for ${formula}: ${result.phonon.frequencies.length} modes, lowest=${result.phonon.lowestFrequency.toFixed(1)} cm-1`);
       }
@@ -4623,11 +4644,15 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     // (ensembleScore > 0.7) because ph.x with electron_phonon adds significant
     // wall time. Phonon stability is pre-checked: if the fast phonon step above
     // found imaginary modes beyond threshold, skip DFPT to avoid wasting compute.
-    const phononPhysicallyStable = result.phonon
-      ? result.phonon.lowestFrequency > -10.0
-      : true;
-    if (scfUsable && phononPhysicallyStable && (opts?.ensembleScore ?? 0) > 0.7 && !opts?.skipEph) {
-      console.log(`[QE-Worker] ${formula} qualifies for DFPT EPC (ensembleScore=${opts!.ensembleScore!.toFixed(3)})`);
+    // DFPT gate: require phonon to have ACTUAL frequencies (not just lowestFrequency > -10).
+    // When phonon has 0 modes (timeout/crash), lowestFrequency=0 which passes the old
+    // check, causing DFPT to waste 2-8 hours on a system with no phonon data.
+    const phononHasResults = result.phonon != null && result.phonon.frequencies.length > 0;
+    const phononPhysicallyStable = phononHasResults
+      ? result.phonon!.lowestFrequency > -10.0
+      : false; // No phonon data = don't waste compute on DFPT
+    if (scfUsable && phononHasResults && phononPhysicallyStable && (opts?.ensembleScore ?? 0) > 0.7 && !opts?.skipEph) {
+      console.log(`[QE-Worker] ${formula} qualifies for DFPT EPC (ensembleScore=${opts!.ensembleScore!.toFixed(3)}, phononModes=${result.phonon!.frequencies.length}, lowestFreq=${result.phonon!.lowestFrequency.toFixed(1)} cm⁻¹)`);
       try {
         result.dfpt = await runDFPTEPC(formula, elements, counts, jobDir, workerPressure);
       } catch (dfptErr: any) {
@@ -4635,6 +4660,8 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       }
     } else if (opts?.skipEph) {
       console.log(`[QE-Worker] ${formula} DFPT EPC skipped — Stoner ferromagnet flag set`);
+    } else if (!phononHasResults && (opts?.ensembleScore ?? 0) > 0.7) {
+      console.log(`[QE-Worker] ${formula} DFPT EPC skipped — phonon produced 0 modes (timeout/crash), no data to build on`);
     }
   } catch (err: any) {
     result.error = err.message;
