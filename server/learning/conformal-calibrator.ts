@@ -70,6 +70,10 @@ let meanNCS = 0;
 let medianNCS = 0;
 let samplesSinceLastCalibration = 0;
 
+// Multiplicative bias correction: tracks median(predicted/actual) and applies inverse
+let globalBiasMultiplier = 1.0;
+const familyBiasMultipliers = new Map<string, number>();
+
 
 function computeQuantile(sortedValues: number[], alpha: number): number {
   const n = sortedValues.length;
@@ -121,6 +125,51 @@ function normalQuantile(p: number): number {
   return 0;
 }
 
+// Empirical residual statistics computed from the calibration dataset.
+// Used as sigma fallback instead of the old heuristic (30% of Tc).
+// Updated every time recalibrateFromLedger() runs.
+let globalEmpiricalRMSE = 0;
+const familyEmpiricalRMSE = new Map<string, number>();
+
+/** Compute per-family and global RMSE from calibration dataset.
+ *  Called during recalibration so fallback sigmas reflect actual model errors. */
+function updateEmpiricalResiduals(entries: CalibrationEntry[]): void {
+  if (entries.length === 0) return;
+
+  // Global RMSE
+  let sumSq = 0;
+  for (const e of entries) sumSq += e.absError * e.absError;
+  globalEmpiricalRMSE = Math.sqrt(sumSq / entries.length);
+
+  // Per-family RMSE
+  familyEmpiricalRMSE.clear();
+  const byFamily = new Map<string, number[]>();
+  for (const e of entries) {
+    const arr = byFamily.get(e.family) || [];
+    arr.push(e.absError);
+    byFamily.set(e.family, arr);
+  }
+  const famEntries = Array.from(byFamily.entries());
+  for (const [family, errors] of famEntries) {
+    if (errors.length < 3) continue;
+    const famSumSq = errors.reduce((s: number, e: number) => s + e * e, 0);
+    familyEmpiricalRMSE.set(family, Math.sqrt(famSumSq / errors.length));
+  }
+}
+
+/** Get empirical sigma for a formula based on its family's RMSE.
+ *  Falls back to global RMSE if family has insufficient data. */
+export function getEmpiricalSigma(formula: string): number {
+  const family = classifyFamily(formula);
+  const familyRMSE = familyEmpiricalRMSE.get(family);
+  if (familyRMSE != null && familyRMSE > 0) return familyRMSE;
+  if (globalEmpiricalRMSE > 0) return globalEmpiricalRMSE;
+  // True cold start: no calibration data at all. Use a deliberately wide
+  // sigma that honestly says "we have no idea." This is the ONLY place
+  // a non-data-driven fallback is acceptable — and it's flagged as such.
+  return 30; // ~30K = "we genuinely don't know"
+}
+
 async function getPredictedSigmaForEntry(entry: PredictionRealityEntry): Promise<number> {
   if (entry.predicted_sigma != null && Number.isFinite(entry.predicted_sigma) && entry.predicted_sigma > 0) {
     return entry.predicted_sigma;
@@ -155,13 +204,15 @@ async function getPredictedSigmaForEntry(entry: PredictionRealityEntry): Promise
     if (xgbSigma > 0) return xgbSigma;
     if (gnnSigma > 0) return gnnSigma;
 
-    return Math.max(10, Math.abs(entry.model_prediction.Tc) * 0.3);
+    // Fallback: use empirical RMSE from calibration dataset (family-specific if available).
+    // This is data-driven — reflects actual model errors, not a heuristic percentage.
+    return getEmpiricalSigma(entry.formula);
   } catch {
-    return Math.max(10, Math.abs(entry.model_prediction.Tc) * 0.3);
+    return getEmpiricalSigma(entry.formula);
   }
 }
 
-const MAX_CALIBRATION_WINDOW = 1000;
+const MAX_CALIBRATION_WINDOW = 500_000;  // wider window — better drift detection over long horizons
 
 async function buildCalibrationDataset(): Promise<CalibrationEntry[]> {
   const ledgerSize = getLedgerSize();
@@ -218,9 +269,40 @@ function fitTemperatureScale(entries: CalibrationEntry[]): number {
   return Math.round(bestT * 100) / 100;
 }
 
+/**
+ * Compute a multiplicative bias correction factor from prediction/actual ratios.
+ * Uses the median ratio to be robust to outliers. Returns a multiplier such that
+ * correctedPrediction = prediction * multiplier should center errors around zero.
+ */
+function computeBiasMultiplier(entries: CalibrationEntry[]): number {
+  const ratios: number[] = [];
+  for (const e of entries) {
+    if (e.actualTc > 1) {  // skip near-zero Tc to avoid division issues
+      ratios.push(e.predictedTc / e.actualTc);
+    }
+  }
+  if (ratios.length < 5) return 1.0;
+
+  ratios.sort((a, b) => a - b);
+  const mid = ratios.length >> 1;
+  const medianRatio = ratios.length % 2 === 0
+    ? (ratios[mid - 1] + ratios[mid]) / 2
+    : ratios[mid];
+
+  if (!Number.isFinite(medianRatio) || medianRatio <= 0) return 1.0;
+
+  // Inverse of median ratio, clamped to [0.2, 5.0] to avoid extreme corrections
+  const multiplier = 1.0 / medianRatio;
+  return Math.max(0.2, Math.min(5.0, Math.round(multiplier * 1000) / 1000));
+}
+
 export async function recalibrateFromLedger(): Promise<CalibrationState> {
   const entries = await buildCalibrationDataset();
   calibrationDataset = entries;
+
+  // Update empirical residuals BEFORE any other processing — these are used
+  // as the sigma fallback for entries where the model can't produce uncertainty.
+  updateEmpiricalResiduals(entries);
 
   if (entries.length < MIN_CALIBRATION_SAMPLES) {
     lastCalibrationTimestamp = Date.now();
@@ -231,26 +313,39 @@ export async function recalibrateFromLedger(): Promise<CalibrationState> {
 
   eceBefore = computeECE(entries, 1.0);
 
-  temperatureScale = fitTemperatureScale(entries);
+  // Compute and apply bias correction BEFORE temperature scaling.
+  // This shifts predictions to center around ground truth, then temperature
+  // scaling adjusts the uncertainty bands around the corrected center.
+  globalBiasMultiplier = computeBiasMultiplier(entries);
+
+  // Apply bias correction to the calibration entries for downstream ECE/quantile computation
+  const biasCorrectedEntries: CalibrationEntry[] = entries.map(e => ({
+    ...e,
+    predictedTc: e.predictedTc * globalBiasMultiplier,
+    absError: Math.abs(e.predictedTc * globalBiasMultiplier - e.actualTc),
+    nonconformityScore: Math.abs(e.predictedTc * globalBiasMultiplier - e.actualTc) / Math.max(1e-4, e.predictedSigma),
+  }));
+
+  temperatureScale = fitTemperatureScale(biasCorrectedEntries);
 
   const SIGMA_FLOOR = 1e-4;
-  const scaledScores = entries.map(e => e.absError / Math.max(SIGMA_FLOOR, e.predictedSigma * temperatureScale));
+  const scaledScores = biasCorrectedEntries.map(e => e.absError / Math.max(SIGMA_FLOOR, e.predictedSigma * temperatureScale));
   scaledScores.sort((a, b) => a - b);
 
   conformalQ90 = computeQuantile(scaledScores, 0.10);
   conformalQ95 = computeQuantile(scaledScores, 0.05);
   conformalQ99 = computeQuantile(scaledScores, 0.01);
 
-  eceAfter = computeECE(entries, temperatureScale);
+  eceAfter = computeECE(biasCorrectedEntries, temperatureScale);
 
   let covered95 = 0;
-  for (const e of entries) {
+  for (const e of biasCorrectedEntries) {
     const sigma = Math.max(SIGMA_FLOOR, e.predictedSigma * temperatureScale);
     if (Math.abs(e.predictedTc - e.actualTc) <= conformalQ95 * sigma) {
       covered95++;
     }
   }
-  coverageAtQ95 = entries.length > 0 ? covered95 / entries.length : 0.95;
+  coverageAtQ95 = biasCorrectedEntries.length > 0 ? covered95 / biasCorrectedEntries.length : 0.95;
 
   meanNCS = scaledScores.reduce((s, v) => s + v, 0) / scaledScores.length;
   const midIdx = Math.floor(scaledScores.length / 2);
@@ -264,16 +359,17 @@ export async function recalibrateFromLedger(): Promise<CalibrationState> {
     const targetCov = (b + 1) / binCount;
     const confQ = computeQuantile(scaledScores, 1 - targetCov);
     let covered = 0;
-    for (const e of entries) {
+    for (const e of biasCorrectedEntries) {
       const sigma = Math.max(SIGMA_FLOOR, e.predictedSigma * temperatureScale);
       if (Math.abs(e.predictedTc - e.actualTc) <= confQ * sigma) covered++;
     }
-    const obsCov = covered / entries.length;
+    const obsCov = covered / biasCorrectedEntries.length;
     maxCalGap = Math.max(maxCalGap, Math.abs(obsCov - targetCov));
   }
   mceValue = maxCalGap;
 
   familyQuantiles.clear();
+  familyBiasMultipliers.clear();
   const byFamily = new Map<string, CalibrationEntry[]>();
   for (const e of entries) {
     const arr = byFamily.get(e.family) || [];
@@ -281,14 +377,25 @@ export async function recalibrateFromLedger(): Promise<CalibrationState> {
     byFamily.set(e.family, arr);
   }
 
-  const MIN_FAMILY_SAMPLES = 20;
+  const MIN_FAMILY_SAMPLES = 5;
   for (const [family, famEntries] of byFamily) {
     if (famEntries.length < MIN_FAMILY_SAMPLES) continue;
-    const famScores = famEntries
+
+    // Per-family bias correction
+    const famBias = computeBiasMultiplier(famEntries);
+    familyBiasMultipliers.set(family, famBias);
+
+    const correctedFamEntries = famEntries.map(e => ({
+      ...e,
+      predictedTc: e.predictedTc * famBias,
+      absError: Math.abs(e.predictedTc * famBias - e.actualTc),
+    }));
+
+    const famScores = correctedFamEntries
       .map(e => e.absError / Math.max(SIGMA_FLOOR, e.predictedSigma * temperatureScale))
       .sort((a, b) => a - b);
 
-    const famECE = computeECE(famEntries, temperatureScale);
+    const famECE = computeECE(correctedFamEntries, temperatureScale);
 
     familyQuantiles.set(family, {
       q90: computeQuantile(famScores, 0.10),
@@ -303,7 +410,7 @@ export async function recalibrateFromLedger(): Promise<CalibrationState> {
   lastCalibrationLedgerSize = getLedgerSize();
   samplesSinceLastCalibration = 0;
 
-  console.log(`[Conformal] Calibrated on ${entries.length} samples: T=${temperatureScale}, Q95=${conformalQ95.toFixed(3)}, ECE=${eceBefore.toFixed(4)}->${eceAfter.toFixed(4)}, coverage@95%=${(coverageAtQ95 * 100).toFixed(1)}%`);
+  console.log(`[Conformal] Calibrated on ${entries.length} samples: T=${temperatureScale}, biasMultiplier=${globalBiasMultiplier}, Q95=${conformalQ95.toFixed(3)}, ECE=${eceBefore.toFixed(4)}->${eceAfter.toFixed(4)}, coverage@95%=${(coverageAtQ95 * 100).toFixed(1)}%`);
 
   return getCalibrationState();
 }
@@ -315,17 +422,29 @@ export function getConformalInterval(
   family?: string
 ): ConformalInterval {
   if (!Number.isFinite(predictedTc) || !Number.isFinite(predictedSigma) || predictedSigma <= 0) {
-    const fallbackSigma = Math.max(10, Math.abs(predictedTc || 0) * 0.3);
+    // Use empirical RMSE instead of heuristic. If family is known, use
+    // family-specific RMSE for chemistry-appropriate uncertainty.
+    const fallbackSigma = family
+      ? (familyEmpiricalRMSE.get(family) ?? (globalEmpiricalRMSE || 30))
+      : (globalEmpiricalRMSE || 30);
+    const q = coverage >= 0.99 ? conformalQ99 : coverage >= 0.95 ? conformalQ95 : conformalQ90;
+    const halfWidth = q * fallbackSigma * temperatureScale;
     return {
-      lower: Math.max(0, (predictedTc || 0) - 1.96 * fallbackSigma),
-      upper: (predictedTc || 0) + 1.96 * fallbackSigma,
+      lower: Math.max(0, Math.round(((predictedTc || 0) - halfWidth) * 10) / 10),
+      upper: Math.round(((predictedTc || 0) + halfWidth) * 10) / 10,
       coverage,
-      quantile: 1.96,
-      temperatureScaledSigma: fallbackSigma,
-      rawSigma: fallbackSigma,
+      quantile: Math.round(q * 1000) / 1000,
+      temperatureScaledSigma: Math.round(fallbackSigma * temperatureScale * 100) / 100,
+      rawSigma: Math.round(fallbackSigma * 100) / 100,
       method: "fallback",
     };
   }
+
+  // Apply bias correction: shift predicted Tc by the learned multiplier
+  const biasM = (family && familyBiasMultipliers.has(family))
+    ? familyBiasMultipliers.get(family)!
+    : globalBiasMultiplier;
+  const correctedTc = predictedTc * biasM;
 
   let oodInflation = 1.0;
   try {
@@ -353,8 +472,8 @@ export function getConformalInterval(
   const halfWidth = q * tempSigma;
 
   return {
-    lower: Math.max(0, Math.round((predictedTc - halfWidth) * 10) / 10),
-    upper: Math.round((predictedTc + halfWidth) * 10) / 10,
+    lower: Math.max(0, Math.round((correctedTc - halfWidth) * 10) / 10),
+    upper: Math.round((correctedTc + halfWidth) * 10) / 10,
     coverage,
     quantile: Math.round(q * 1000) / 1000,
     temperatureScaledSigma: Math.round(tempSigma * 100) / 100,
@@ -413,6 +532,11 @@ export function getCalibrationState(): CalibrationState {
     meanNonconformityScore: Math.round(meanNCS * 1000) / 1000,
     medianNonconformityScore: Math.round(medianNCS * 1000) / 1000,
   };
+}
+
+export function getBiasMultiplier(family?: string): number {
+  if (family && familyBiasMultipliers.has(family)) return familyBiasMultipliers.get(family)!;
+  return globalBiasMultiplier;
 }
 
 export interface IntervalValidationResult {
@@ -484,6 +608,7 @@ export function getCalibrationSummaryForLLM(): string {
     "=== Conformal Calibration State ===",
     `Dataset: ${state.calibrationDatasetSize} samples`,
     `Temperature scale: T=${state.temperatureScale} (raw sigma * T = calibrated sigma)`,
+    `Bias correction: global multiplier=${globalBiasMultiplier} (prediction * multiplier = corrected prediction)`,
     `Conformal quantiles: Q90=${state.conformalQ90}, Q95=${state.conformalQ95}, Q99=${state.conformalQ99}`,
     `ECE: ${state.eceBefore} -> ${state.eceAfter} (improvement: ${(state.eceBefore - state.eceAfter).toFixed(4)})`,
     `MCE (max calibration error): ${state.mce}`,

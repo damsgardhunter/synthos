@@ -150,10 +150,14 @@ export async function recordPredictionVsReality(
     } else if (gnnSigma > 0) {
       predicted_sigma = gnnSigma;
     } else {
-      predicted_sigma = Math.max(10, Math.abs(prediction.Tc) * 0.3);
+      // No model uncertainty available — leave null so the conformal calibrator
+      // uses its empirical RMSE fallback (family-specific, data-driven) instead
+      // of a hardcoded heuristic. The old `Math.max(10, Tc * 0.3)` produced
+      // identical ±22K CIs for all chemistries regardless of data coverage.
+      predicted_sigma = null;
     }
   } catch {
-    predicted_sigma = Math.max(10, Math.abs(prediction.Tc) * 0.3);
+    predicted_sigma = null;
   }
 
   const entry: PredictionRealityEntry = {
