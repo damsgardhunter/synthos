@@ -2341,12 +2341,22 @@ function autoPhononQGrid(elements: string[], totalAtoms?: number): [number, numb
   return [2, 2, 2];
 }
 
-function generatePhononInput(formula: string, elements: string[] = [], totalAtoms: number = 6): string {
+function generatePhononInput(formula: string, elements: string[] = [], totalAtoms: number = 6, opts?: { maxSeconds?: number; recover?: boolean }): string {
   const prefix = formula.replace(/[^a-zA-Z0-9]/g, "");
   const [nq1, nq2, nq3] = autoPhononQGrid(elements, totalAtoms);
   // tr2_ph=1.0d-12 is the aiida-quantumespresso screening default; the prior
   // 1.0d-14 is publication-quality and costs 2-3x wall time without changing
   // screening-level Tc estimates.
+  //
+  // recover=.true. tells ph.x to resume from checkpoint if a previous run was
+  // interrupted by max_seconds. max_seconds triggers a clean exit with
+  // checkpoint data so the next invocation picks up where it left off.
+  //
+  // alpha_mix(1)=0.3: default 0.7 can be slow for heavy-element systems;
+  // 0.3 converges perturbation SCFs faster at the cost of occasional
+  // oscillation (acceptable for screening).
+  const recoverLine = opts?.recover ? `  recover = .true.,\n` : "";
+  const maxSecLine = opts?.maxSeconds ? `  max_seconds = ${opts.maxSeconds},\n` : "";
   //
   // Gamma-only (1×1×1): use ldisp=.false. so ph.x prints omega(N) = X [THz]
   // = Y [cm-1] directly to stdout, which parsePhononOutput already handles.
@@ -2364,8 +2374,9 @@ function generatePhononInput(formula: string, elements: string[] = [], totalAtom
   outdir = './tmp',
   fildyn = '${prefix}.dyn',
   tr2_ph = 1.0d-12,
+  alpha_mix(1) = 0.3,
   ldisp = .false.,
-/
+${recoverLine}${maxSecLine}/
 0.0 0.0 0.0
 `;
   }
@@ -2375,9 +2386,10 @@ function generatePhononInput(formula: string, elements: string[] = [], totalAtom
   outdir = './tmp',
   fildyn = '${prefix}.dyn',
   tr2_ph = 1.0d-12,
+  alpha_mix(1) = 0.3,
   ldisp = .true.,
   nq1 = ${nq1}, nq2 = ${nq2}, nq3 = ${nq3},
-/
+${recoverLine}${maxSecLine}/
 `;
 }
 
@@ -3352,15 +3364,15 @@ async function runDFPTEPC(
     jobDir,
   );
   const phOut = path.join(jobDir, "dfpt_ph.out");
-  fs.writeFileSync(phOut, phResult.stdout);
+  fs.writeFileSync(phOut, phResult!.stdout);
 
-  const phParsed = parseLambdaOutput(phResult.stdout);
-  const phConverged = phResult.exitCode === 0 && phParsed.lambda > 0;
+  const phParsed = parseLambdaOutput(phResult!.stdout);
+  const phConverged = phResult!.exitCode === 0 && phParsed.lambda > 0;
 
   if (!phConverged && phParsed.lambda === 0) {
-    warnings.push(`ph.x exited ${phResult.exitCode}; no lambda parsed from stdout`);
+    warnings.push(`ph.x exited ${phResult!.exitCode}; no lambda parsed from stdout`);
   }
-  console.log(`[QE-Worker] DFPT ph.x for ${formula}: exit=${phResult.exitCode}, λ=${phParsed.lambda.toFixed(3)}, ω_log=${phParsed.omegaLog.toFixed(0)} K`);
+  console.log(`[QE-Worker] DFPT ph.x for ${formula}: exit=${phResult!.exitCode}, λ=${phParsed.lambda.toFixed(3)}, ω_log=${phParsed.omegaLog.toFixed(0)} K`);
 
   // --- q2r.x: build interatomic force constants ---
   let q2rDone = false;
@@ -4244,37 +4256,89 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     // wavefunctions (.wfc files) during wall-time-killed runs, so ph.x would
     // fail to read them and either crash or produce 0 modes.
     if (scfUsable && !isPartialWalltime) {
-      const phInput = generatePhononInput(formula, elements, positions.length);
-      const phInputFile = path.join(jobDir, "ph.in");
-      fs.writeFileSync(phInputFile, phInput);
+      // Phonon budget: scale with atom count × electron weight. Heavy hydrides
+      // (K2LaH8, LaH12) have 33+ perturbations × expensive mini-SCFs. The old
+      // 4× SCF-time multiplier gave ~9h for K2LaH8 which was borderline —
+      // ph.x was killed 1 perturbation short → 0 modes.
+      //
+      // New approach: atom-count-aware budget, capped at 24 hours.
+      // ph.x perturbation cost scales as ~N_atoms² × N_electrons, so heavier
+      // systems need disproportionately more time.
+      const nAtoms = positions.length;
+      const heavyCount = elements.filter(el => HEAVY_ELEMENTS.has(el)).length;
+      // Base: 6× SCF time. Scale up for heavy/large systems.
+      let phMultiplier = 6;
+      if (nAtoms >= 8) phMultiplier = 8;
+      if (nAtoms >= 12) phMultiplier = 10;
+      if (heavyCount >= 2) phMultiplier = Math.max(phMultiplier, 10);
+      const MAX_PHONON_TIMEOUT_MS = 24 * 3600 * 1000; // 24 hours absolute cap
+      const phKillTimeoutMs = Math.min(effectiveKillTimeoutMs * phMultiplier, MAX_PHONON_TIMEOUT_MS);
+      // max_seconds for ph.x: 120s before the kill timeout so QE can checkpoint
+      // cleanly and write recover data for the next attempt.
+      const phMaxSeconds = Math.floor(phKillTimeoutMs / 1000) - 120;
 
-      console.log(`[QE-Worker] Starting phonon calculation for ${formula}`);
+      // First attempt: no recover (fresh start).
+      // If ph.x times out, retry once with recover=.true. to resume from checkpoint.
+      let phResult: { stdout: string; stderr: string; exitCode: number } | null = null;
+      let phTimedOut = false;
+      // Initialize phonon result so downstream code always has a non-null object.
+      result.phonon = parsePhononOutput("");
 
-      // Phonon is typically 3-10× more expensive than SCF. Give it a generous
-      // budget — ph.x does N_atoms × N_irreducible_q × 3*N_atoms perturbations,
-      // each ~1 mini-SCF. BiCo (2 atoms, 2×2×2, nspin=2) needed ~3.2h but
-      // the 2× multiplier gave only ~3h → killed with 1/2 dyn files done.
-      // Bump to 4× to cover the worst realistic case.
-      const phKillTimeoutMs = effectiveKillTimeoutMs * 4;
-      const phResult = await runQECommand(
-        path.posix.join(getQEBinDir(), "ph.x"),
-        phInputFile,
-        jobDir,
-        phKillTimeoutMs,
-      );
+      for (let phAttempt = 0; phAttempt < 2; phAttempt++) {
+        const isRetry = phAttempt > 0;
+        const phInput = generatePhononInput(formula, elements, positions.length, {
+          maxSeconds: phMaxSeconds,
+          recover: isRetry,
+        });
+        const phInputFile = path.join(jobDir, "ph.in");
+        fs.writeFileSync(phInputFile, phInput);
 
-      fs.writeFileSync(path.join(jobDir, "ph.out"), phResult.stdout);
-      result.phonon = parsePhononOutput(phResult.stdout);
+        const phHours = (phKillTimeoutMs / 3600_000).toFixed(1);
+        console.log(`[QE-Worker] Starting phonon calculation for ${formula} (attempt ${phAttempt + 1}/2, timeout=${phHours}h, max_seconds=${phMaxSeconds}${isRetry ? ", recover=.true." : ""})`);
 
-      // ldisp=.true. writes frequencies to dynmat files, not stdout.
-      // Run q2r.x + matdyn.x to extract actual phonon frequencies.
-      // ldisp=.true. writes frequencies to .dyn files; ph.x may exit non-zero
-      // during post-processing but the dyn files are still written. Run the
-      // q2r/matdyn fallback whenever we have no frequencies AND ph.x either
-      // converged OR any .dyn file was produced.
-      const dynFilesExist = fs.readdirSync(jobDir).some(f => /\.dyn\d*$/.test(f));
-      const fallbackNeeded = result.phonon.frequencies.length === 0 &&
-        (phResult.exitCode === 0 || result.phonon.converged || dynFilesExist);
+        phResult = await runQECommand(
+          path.posix.join(getQEBinDir(), "ph.x"),
+          phInputFile,
+          jobDir,
+          phKillTimeoutMs,
+        );
+
+        // Check if ph.x timed out: exit -1 with TIMEOUT marker, or QE's own
+        // "Maximum CPU time exceeded" / "JOB DONE" from max_seconds.
+        const combined = phResult!.stdout + phResult!.stderr;
+        phTimedOut = phResult!.exitCode === -1 ||
+          combined.includes("Maximum CPU time exceeded") ||
+          combined.includes("max_seconds");
+
+        // Parse what we got
+        result.phonon = parsePhononOutput(phResult!.stdout);
+
+        if (result.phonon.frequencies.length > 0) {
+          // Got frequencies — success, no need to retry
+          break;
+        }
+        if (!phTimedOut) {
+          // ph.x finished (didn't timeout) but produced no frequencies — retry
+          // won't help, it's a convergence or crash issue.
+          console.log(`[QE-Worker] ph.x exited (code=${phResult!.exitCode}) with 0 frequencies for ${formula} — not a timeout, skipping retry`);
+          break;
+        }
+        if (isRetry) {
+          console.log(`[QE-Worker] ph.x timed out on retry for ${formula} — giving up on phonon`);
+        } else {
+          console.log(`[QE-Worker] ph.x timed out for ${formula} (attempt 1/2, exit=${phResult!.exitCode}) — retrying with recover=.true. to resume from checkpoint`);
+        }
+      }
+
+      fs.writeFileSync(path.join(jobDir, "ph.out"), phResult!.stdout);
+      // result.phonon was already parsed inside the retry loop above.
+
+      // Fallback: try extracting frequencies from .dyn files / dynmat.x.
+      // Skip if ph.x was killed (exit -1 / timeout) — .dyn files are likely
+      // incomplete and dynmat.x will just waste time on garbage data.
+      const dynFilesExist = !phTimedOut && fs.readdirSync(jobDir).some(f => /\.dyn\d*$/.test(f));
+      const fallbackNeeded = result.phonon.frequencies.length === 0 && !phTimedOut &&
+        (phResult!.exitCode === 0 || result.phonon.converged || dynFilesExist);
       if (fallbackNeeded) {
         const prefix = formula.replace(/[^a-zA-Z0-9]/g, "");
 
@@ -4392,7 +4456,7 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
           // Also try parsing ph.x stdout directly — with ldisp=.false.,
           // ph.x prints frequencies to stdout in omega(N) format
           if (result.phonon.frequencies.length === 0) {
-            const stdoutPhonon = parsePhononOutput(phResult.stdout);
+            const stdoutPhonon = parsePhononOutput(phResult!.stdout);
             if (stdoutPhonon.frequencies.length > 0) {
               result.phonon = stdoutPhonon;
               result.phonon.converged = true;
@@ -4430,7 +4494,7 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
         if (!dynSetComplete) {
           console.log(`[QE-Worker] Skipping q2r.x fallback for ${formula} — incomplete dyn set (${dynReason}); ph.x was likely killed before producing all q-points`);
         } else {
-        console.log(`[QE-Worker] Running q2r.x+matdyn.x fallback for ${formula} (exit=${phResult.exitCode}, conv=${result.phonon.converged}, dyn=${dynFilesExist})`);
+        console.log(`[QE-Worker] Running q2r.x+matdyn.x fallback for ${formula} (exit=${phResult!.exitCode}, conv=${result.phonon.converged}, dyn=${dynFilesExist})`);
         try {
           // q2r.x: convert dynamical matrices to real-space force constants
           const q2rInput = `&INPUT\n  fildyn = '${prefix}.dyn',\n  zasr = 'simple',\n  flfrc = '${prefix}.fc'\n/\n`;
@@ -4492,8 +4556,8 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
         } // close else (non-Gamma q-grid → q2r.x path)
       }
 
-      if (phResult.exitCode !== 0 && !result.phonon.converged) {
-        result.phonon.error = `ph.x exited with code ${phResult.exitCode}: ${phResult.stderr.slice(-500)}`;
+      if (phResult!.exitCode !== 0 && !result.phonon.converged) {
+        result.phonon.error = `ph.x exited with code ${phResult!.exitCode}: ${phResult!.stderr.slice(-500)}`;
         result.failureStage = "phonon";
         stageFailureCounts.phonon++;
         console.log(`[QE-Worker] Phonon failed for ${formula}: ${result.phonon.error.slice(-200)}`);
