@@ -2341,7 +2341,7 @@ function autoPhononQGrid(elements: string[], totalAtoms?: number): [number, numb
   return [2, 2, 2];
 }
 
-function generatePhononInput(formula: string, elements: string[] = [], totalAtoms: number = 6, opts?: { maxSeconds?: number; recover?: boolean }): string {
+function generatePhononInput(formula: string, elements: string[] = [], totalAtoms: number = 6, opts?: { maxSeconds?: number; recover?: boolean; tr2Ph?: string; alphaMix?: number }): string {
   const prefix = formula.replace(/[^a-zA-Z0-9]/g, "");
   const [nq1, nq2, nq3] = autoPhononQGrid(elements, totalAtoms);
   // tr2_ph=1.0d-12 is the aiida-quantumespresso screening default; the prior
@@ -2357,6 +2357,8 @@ function generatePhononInput(formula: string, elements: string[] = [], totalAtom
   // oscillation (acceptable for screening).
   const recoverLine = opts?.recover ? `  recover = .true.,\n` : "";
   const maxSecLine = opts?.maxSeconds ? `  max_seconds = ${opts.maxSeconds},\n` : "";
+  const tr2Ph = opts?.tr2Ph ?? "1.0d-12";
+  const alphaMix = opts?.alphaMix ?? 0.3;
   //
   // Gamma-only (1×1×1): use ldisp=.false. so ph.x prints omega(N) = X [THz]
   // = Y [cm-1] directly to stdout, which parsePhononOutput already handles.
@@ -2373,8 +2375,8 @@ function generatePhononInput(formula: string, elements: string[] = [], totalAtom
   prefix = '${prefix}',
   outdir = './tmp',
   fildyn = '${prefix}.dyn',
-  tr2_ph = 1.0d-12,
-  alpha_mix(1) = 0.3,
+  tr2_ph = ${tr2Ph},
+  alpha_mix(1) = ${alphaMix},
   ldisp = .false.,
 ${recoverLine}${maxSecLine}/
 0.0 0.0 0.0
@@ -2385,8 +2387,8 @@ ${recoverLine}${maxSecLine}/
   prefix = '${prefix}',
   outdir = './tmp',
   fildyn = '${prefix}.dyn',
-  tr2_ph = 1.0d-12,
-  alpha_mix(1) = 0.3,
+  tr2_ph = ${tr2Ph},
+  alpha_mix(1) = ${alphaMix},
   ldisp = .true.,
   nq1 = ${nq1}, nq2 = ${nq2}, nq3 = ${nq3},
 ${recoverLine}${maxSecLine}/
@@ -2958,7 +2960,7 @@ function generateSCFInputWithParams(
   restart_mode = '${restartMode}',
   prefix = '${formula.replace(/[^a-zA-Z0-9]/g, "")}',
   outdir = './tmp',
-  disk_io = 'low',
+  disk_io = 'medium',
   pseudo_dir = '${QE_PSEUDO_DIR_INPUT}',
   tprnfor = .true.,
   tstress = .true.,
@@ -4000,12 +4002,12 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
 
     for (let attempt = firstAttempt; attempt < retryConfigs.length && !scfConverged; attempt++) {
       const params: RetryConfig = { ...retryConfigs[attempt], ...handlerOverride };
-      // Recovery strategy on retry: disk_io='low' writes charge-density.dat
-      // but NOT .wfc files during wall-time-killed runs. restart_mode='restart'
-      // needs .wfc → davcio crash ("error reading file .wfc1"). Instead, use
+      // Recovery strategy on retry: disk_io='medium' writes charge-density
+      // and wavefunctions, but wall-time-killed runs may not flush .wfc files.
+      // restart_mode='restart' needs .wfc → davcio crash. Instead, use
       // from_scratch + startingpot='file' which reads the charge density but
       // generates fresh wavefunctions — recovers ~50-70% of SCF progress
-      // without needing the wfc files that wall-time kills never write.
+      // without needing the wfc files that wall-time kills may not write.
       const canRecover = attempt > firstAttempt && !(params as any).startingwfc;
       const recoveryParams = canRecover ? { startingpot: "file" as string } : {};
       const scfInput = generateSCFInputWithParams(formula, elements, counts, latticeA, positions, {
@@ -4261,9 +4263,9 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     // The earlier "Do NOT clean ./tmp" comment in the bands block was a partial
     // diagnosis — not cleaning the dir wasn't enough because pw.x rewrites the
     // wfc files inside it.
-    // Skip phonon for partial-walltime SCFs: disk_io='low' does NOT save
-    // wavefunctions (.wfc files) during wall-time-killed runs, so ph.x would
-    // fail to read them and either crash or produce 0 modes.
+    // Skip phonon for partial-walltime SCFs: wall-time-killed runs may not
+    // flush wavefunctions (.wfc files) to disk, so ph.x would fail to read
+    // them and either crash or produce 0 modes.
     if (scfUsable && !isPartialWalltime) {
       // Phonon budget: scale with atom count × electron weight. Heavy hydrides
       // (K2LaH8, LaH12) have 33+ perturbations × expensive mini-SCFs. The old
@@ -4288,22 +4290,29 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
 
       // First attempt: no recover (fresh start).
       // If ph.x times out, retry once with recover=.true. to resume from checkpoint.
+      // If ph.x crashes (non-timeout exit=1), retry with looser convergence and
+      // gentler mixing — catches perturbation-SCF divergence and some wfc-read issues.
       let phResult: { stdout: string; stderr: string; exitCode: number } | null = null;
       let phTimedOut = false;
+      let prevCrashed = false; // true if previous attempt was a non-timeout crash
       // Initialize phonon result so downstream code always has a non-null object.
       result.phonon = parsePhononOutput("");
 
       for (let phAttempt = 0; phAttempt < 2; phAttempt++) {
         const isRetry = phAttempt > 0;
+        // On crash-retry: use looser convergence + gentler mixing instead of
+        // recover=.true. (checkpoint data from a crash is likely garbage).
         const phInput = generatePhononInput(formula, elements, positions.length, {
           maxSeconds: phMaxSeconds,
-          recover: isRetry,
+          recover: isRetry && !prevCrashed,
+          ...(prevCrashed ? { tr2Ph: "1.0d-10", alphaMix: 0.1 } : {}),
         });
         const phInputFile = path.join(jobDir, "ph.in");
         fs.writeFileSync(phInputFile, phInput);
 
         const phHours = (phKillTimeoutMs / 3600_000).toFixed(1);
-        console.log(`[QE-Worker] Starting phonon calculation for ${formula} (attempt ${phAttempt + 1}/2, timeout=${phHours}h, max_seconds=${phMaxSeconds}${isRetry ? ", recover=.true." : ""})`);
+        const retryInfo = prevCrashed ? ", tr2_ph=1e-10, alpha_mix=0.1" : (isRetry ? ", recover=.true." : "");
+        console.log(`[QE-Worker] Starting phonon calculation for ${formula} (attempt ${phAttempt + 1}/2, timeout=${phHours}h, max_seconds=${phMaxSeconds}${retryInfo})`);
 
         phResult = await runQECommand(
           path.posix.join(getQEBinDir(), "ph.x"),
@@ -4327,10 +4336,26 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
           break;
         }
         if (!phTimedOut) {
-          // ph.x finished (didn't timeout) but produced no frequencies — retry
-          // won't help, it's a convergence or crash issue.
-          console.log(`[QE-Worker] ph.x exited (code=${phResult!.exitCode}) with 0 frequencies for ${formula} — not a timeout, skipping retry`);
-          break;
+          // ph.x finished (didn't timeout) but produced no frequencies.
+          // Log stderr so we can actually diagnose the crash.
+          const phStderrTail = phResult!.stderr.slice(-600);
+          const phStdoutTail = phResult!.stdout.slice(-400);
+          console.log(`[QE-Worker] ph.x exited (code=${phResult!.exitCode}) with 0 frequencies for ${formula} — not a timeout`);
+          if (phStderrTail) console.log(`[QE-Worker] ph.x stderr for ${formula}: ${phStderrTail}`);
+          if (phStdoutTail) console.log(`[QE-Worker] ph.x stdout tail for ${formula}: ${phStdoutTail}`);
+          // Save stderr for post-mortem before retrying
+          try { fs.writeFileSync(path.join(jobDir, "ph.err"), phResult!.stderr); } catch {}
+          if (isRetry) {
+            // Already retried with looser params — give up
+            console.log(`[QE-Worker] ph.x crashed on retry for ${formula} — giving up on phonon`);
+            break;
+          }
+          // First attempt crashed: retry with looser convergence + gentler mixing.
+          // Crashes from missing wfc files, memory errors, or perturbation-SCF
+          // divergence can sometimes be recovered with different parameters.
+          prevCrashed = true;
+          console.log(`[QE-Worker] Retrying ph.x for ${formula} with tr2_ph=1e-10, alpha_mix=0.1`);
+          continue;
         }
         if (isRetry) {
           console.log(`[QE-Worker] ph.x timed out on retry for ${formula} — giving up on phonon`);
@@ -4340,6 +4365,9 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       }
 
       fs.writeFileSync(path.join(jobDir, "ph.out"), phResult!.stdout);
+      if (phResult!.stderr) {
+        try { fs.writeFileSync(path.join(jobDir, "ph.err"), phResult!.stderr); } catch {}
+      }
       // result.phonon was already parsed inside the retry loop above.
 
       // Fallback: try extracting frequencies from .dyn files / dynmat.x.
