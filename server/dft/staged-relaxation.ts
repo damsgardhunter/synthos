@@ -128,26 +128,39 @@ function computeStage1Params(elements: string[], totalAtoms: number): {
 } {
   const heavyCount = elements.filter(e => HEAVY_ELEMENTS.has(e)).length;
   const hasMagnetic = elements.some(e => MAGNETIC_ELS.has(e));
+  // "Semi-heavy" elements (Z >= 37, 4d/5p block): not as expensive as 6p/lanthanides
+  // but still significantly more costly than light elements
+  const SEMI_HEAVY = new Set(["Rb", "Sr", "Y", "Zr", "Nb", "Mo", "Tc", "Ru", "Rh", "Pd", "Ag", "Cd", "In", "Sn", "Sb", "Te", "I"]);
+  const semiHeavyCount = elements.filter(e => SEMI_HEAVY.has(e)).length;
 
-  // Time scaling: heavy elements and magnetic systems need more budget
+  // Time scaling: compound cost based on element weight, atom count, and magnetism.
+  // Each SCF iteration cost scales roughly as N_atoms^2 * N_electrons.
+  // Heavy 6p elements (Bi, Pb, Tl) have 3-5x more electrons than light elements.
   let timeMult = 1.0;
-  if (heavyCount >= 2) timeMult *= 2.0;      // 2+ heavy → 2x time
-  else if (heavyCount === 1) timeMult *= 1.5; // 1 heavy → 1.5x time
+
+  // Element weight scaling
+  if (heavyCount >= 3) timeMult *= 3.0;       // 3+ heavy (e.g., Bi3SbSn) → 3x
+  else if (heavyCount >= 2) timeMult *= 2.0;  // 2 heavy → 2x
+  else if (heavyCount === 1) timeMult *= 1.5; // 1 heavy → 1.5x
+  if (semiHeavyCount >= 2 && heavyCount === 0) timeMult *= 1.5; // semi-heavy without full heavy
   if (hasMagnetic) timeMult *= 1.5;           // magnetic → 1.5x (nspin=2)
-  if (totalAtoms >= 8) timeMult *= 1.3;       // large cell → 1.3x
-  if (totalAtoms >= 12) timeMult *= 1.5;      // very large → 1.5x more
+
+  // Atom count scaling — continuous, not just thresholds
+  // More atoms = more bands = more SCF cost per iteration
+  if (totalAtoms >= 4) timeMult *= 1.0 + (totalAtoms - 3) * 0.15; // +15% per atom above 3
 
   const timeoutMs = Math.min(STAGE1_BASE_TIMEOUT_MS * timeMult, 3_600_000); // cap at 60 min
 
   // Ecutwfc scaling: for screening, heavy systems can use ~80% of production cutoff
   let ecutwfcScale = 1.0;
-  if (heavyCount >= 2 || totalAtoms >= 8) ecutwfcScale = 0.85;
-  if (heavyCount >= 3 || totalAtoms >= 12) ecutwfcScale = 0.75;
+  if (heavyCount >= 2 || totalAtoms >= 6) ecutwfcScale = 0.85;
+  if (heavyCount >= 3 || totalAtoms >= 10) ecutwfcScale = 0.75;
 
   // K-spacing: coarser for heavy/large systems during screening
   let kspacing = KSPACING_RELAX; // 0.40 base
-  if (heavyCount >= 2 || totalAtoms >= 8) kspacing = 0.50;
-  if (totalAtoms >= 12) kspacing = 0.60;
+  if (heavyCount >= 1 || totalAtoms >= 5) kspacing = 0.50;
+  if (heavyCount >= 2 || totalAtoms >= 8) kspacing = 0.55;
+  if (totalAtoms >= 12) kspacing = 0.65;
 
   const maxSeconds = Math.floor(timeoutMs / 1000) - 60;
 
@@ -401,11 +414,12 @@ ${cellBlock}
     failReasons.push("no final positions in output");
   }
   if (parsed.maxForce != null && parsed.maxForce > STAGE1_FORCE_THR) {
-    // Soft fail: if we have positions, still use them — BFGS made progress
-    // even if forces didn't reach threshold
-    if (parsed.positions.length > 0 && parsed.maxForce < 0.5) {
-      // Forces under 0.5 Ry/bohr = structure is plausible, just not converged
-      // Don't fail — let Stage 2 finish the job
+    // Soft pass: Stage 1 is screening — if BFGS produced positions and forces
+    // are under 1.0 Ry/bohr, the structure is plausible enough for Stage 2
+    // vc-relax to finish converging. Only hard-fail on truly insane forces
+    // (> 1.0) which indicate the structure is completely wrong.
+    if (parsed.positions.length > 0 && parsed.maxForce < 1.0) {
+      // BFGS made progress. Don't fail — Stage 2 will handle convergence.
     } else {
       failReasons.push(`max force ${parsed.maxForce.toExponential(2)} > threshold ${STAGE1_FORCE_THR}`);
     }
