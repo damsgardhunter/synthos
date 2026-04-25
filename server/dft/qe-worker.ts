@@ -3844,7 +3844,15 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
           formula,
           elements,
           counts,
-          candidates: structureCandidates,
+          // Replace crude grid positions in Vegard candidates with proper
+          // generateAtomicPositions() output — uses prototypes, Wyckoff sites,
+          // cage placement for hydrides. Keep the Vegard lattice constant.
+          candidates: structureCandidates.map(c => ({
+            ...c,
+            positions: c.positions.length > 0 && c.prototype !== "MP-direct"
+              ? generateAtomicPositions(elements, counts, formula, c.latticeA)
+              : c.positions,
+          })),
           pressureGPa: workerPressure,
           jobDir,
           callbacks: qeCallbacks,

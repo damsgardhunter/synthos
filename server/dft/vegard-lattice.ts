@@ -42,6 +42,8 @@ export interface BinaryEndpoint {
   spaceGroup: string;
   isMetallic: boolean | null;
   source: "AFLOW" | "MP";
+  /** Atomic positions from MP (fractional coordinates). Null for AFLOW-only entries. */
+  positions: Array<{ element: string; x: number; y: number; z: number }> | null;
 }
 
 export interface VegardEstimate {
@@ -51,6 +53,8 @@ export interface VegardEstimate {
   endpointsUsed: string[];    // formulas of compounds used
   method: "vegard" | "vegard-volume" | "volume-sum-fallback";
   isMetallic: boolean | null; // consensus from endpoints
+  /** Raw binary endpoints with positions (for VCA position interpolation). */
+  binaryEndpoints?: BinaryEndpoint[];
 }
 
 export interface StructureCandidate {
@@ -135,18 +139,18 @@ async function fetchBinaryEndpoints(el1: string, el2: string): Promise<BinaryEnd
         spaceGroup: entry.spaceGroupSymbol,
         isMetallic: entry.bandgap != null ? entry.bandgap < 0.01 : null,
         source: "AFLOW",
+        positions: null,  // AFLOW doesn't return positions in our query
       });
     }
   }
 
-  // Process MP results
+  // Process MP results — these include actual atomic positions
   for (let i = 0; i < mpResults.length; i++) {
     const r = mpResults[i];
     if (r.status !== "fulfilled" || !r.value) continue;
     const mp = r.value as MPStructureData;
     const formula = stoichs[i];
 
-    // Estimate volume per atom from lattice params (cubic approximation)
     const vol = mp.latticeParams.a * mp.latticeParams.b * mp.latticeParams.c;
     const nAtoms = mp.atomicPositions.length || 1;
 
@@ -161,6 +165,7 @@ async function fetchBinaryEndpoints(el1: string, el2: string): Promise<BinaryEnd
       spaceGroup: mp.spaceGroup ?? "",
       isMetallic: null,
       source: "MP",
+      positions: mp.atomicPositions,  // Real Wyckoff positions from DFT
     });
   }
 
@@ -290,6 +295,7 @@ export async function vegardEstimate(
         endpointsUsed,
         method: "vegard-volume",
         isMetallic,
+        binaryEndpoints: allEndpoints,
       };
     }
   }
@@ -307,6 +313,7 @@ export async function vegardEstimate(
       endpointsUsed,
       method: "vegard",
       isMetallic,
+      binaryEndpoints: allEndpoints,
     };
   }
 
@@ -346,6 +353,130 @@ function estimateBulkModulusFromElements(elements: string[]): number {
     }
   }
   return count > 0 ? sumB / count : 100; // Default 100 GPa
+}
+
+// ---------------------------------------------------------------------------
+// Virtual Crystal Approximation (VCA) for atomic positions
+// ---------------------------------------------------------------------------
+
+/**
+ * Interpolate atomic positions for an N-ary compound from known binary structures.
+ *
+ * Analogous to Vegard's law for lattice constants: if we know the positions of
+ * atoms in BiGe (from MP) and BiSb (from MP), we can construct plausible
+ * positions for BiGeSb by:
+ * 1. Finding the binary with the most similar stoichiometry to the target
+ * 2. Scaling positions to match the target atom count
+ * 3. Substituting missing elements into appropriate sites
+ *
+ * Falls back to null if no binary positions are available.
+ */
+function interpolatePositionsFromEndpoints(
+  elements: string[],
+  counts: Record<string, number>,
+  allEndpoints: BinaryEndpoint[],
+): Array<{ element: string; x: number; y: number; z: number }> | null {
+  const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
+
+  // Find endpoints with real atomic positions (from MP)
+  const withPositions = allEndpoints.filter(e => e.positions && e.positions.length > 0);
+  if (withPositions.length === 0) return null;
+
+  // Score each endpoint by how useful it is for the target compound:
+  // - Prefer endpoints whose elements overlap with the target
+  // - Prefer endpoints with similar atom counts
+  // - Prefer endpoints from MP (have positions) over AFLOW
+  const scored = withPositions.map(ep => {
+    const overlap = ep.elements.filter(e => elements.includes(e)).length;
+    const atomRatio = ep.positions!.length / totalAtoms;
+    const sizeScore = 1 - Math.abs(1 - atomRatio);  // Closer to 1:1 is better
+    return { ep, score: overlap * 2 + sizeScore };
+  });
+  scored.sort((a, b) => b.score - a.score);
+
+  const best = scored[0];
+  if (!best || !best.ep.positions) return null;
+
+  const templatePositions = best.ep.positions;
+  const templateElements = new Set(templatePositions.map(p => p.element));
+
+  // Build target positions by adapting the template:
+  // 1. Keep positions for elements that exist in both template and target
+  // 2. Replace template-only elements with target elements (by similarity)
+  // 3. Add/remove atoms to match target stoichiometry
+  const result: Array<{ element: string; x: number; y: number; z: number }> = [];
+
+  // Map template elements to target elements
+  const templateEls = [...templateElements];
+  const targetEls = [...elements];
+  const mapping: Record<string, string> = {};
+
+  // Direct matches first
+  for (const tel of templateEls) {
+    if (targetEls.includes(tel)) {
+      mapping[tel] = tel;
+    }
+  }
+
+  // Map remaining template elements to unmapped target elements
+  const unmappedTemplate = templateEls.filter(e => !mapping[e]);
+  const unmappedTarget = targetEls.filter(e => !Object.values(mapping).includes(e));
+  for (let i = 0; i < unmappedTemplate.length && i < unmappedTarget.length; i++) {
+    mapping[unmappedTemplate[i]] = unmappedTarget[i];
+  }
+
+  // Build positions using the mapping
+  const elementCounts: Record<string, number> = {};
+  for (const pos of templatePositions) {
+    const targetEl = mapping[pos.element];
+    if (!targetEl) continue;
+    const needed = counts[targetEl] || 0;
+    const placed = elementCounts[targetEl] || 0;
+    if (placed >= needed) continue;
+
+    result.push({
+      element: targetEl,
+      x: pos.x,
+      y: pos.y,
+      z: pos.z,
+    });
+    elementCounts[targetEl] = placed + 1;
+  }
+
+  // Fill any remaining target atoms by duplicating with offsets
+  for (const el of elements) {
+    const needed = Math.round(counts[el] || 0);
+    const placed = elementCounts[el] || 0;
+    const deficit = needed - placed;
+    if (deficit <= 0) continue;
+
+    // Find existing positions of this element (or similar) to perturb
+    const existing = result.filter(p => p.element === el);
+    for (let i = 0; i < deficit; i++) {
+      if (existing.length > 0) {
+        const ref = existing[i % existing.length];
+        result.push({
+          element: el,
+          x: (ref.x + 0.2 + i * 0.15) % 1.0,
+          y: (ref.y + 0.3 + i * 0.1) % 1.0,
+          z: (ref.z + 0.1 + i * 0.2) % 1.0,
+        });
+      } else {
+        // No reference — place on a grid offset
+        const n = Math.ceil(Math.cbrt(totalAtoms));
+        const idx = result.length;
+        result.push({
+          element: el,
+          x: ((idx % n) + 0.5) / n,
+          y: ((Math.floor(idx / n) % n) + 0.5) / n,
+          z: ((Math.floor(idx / (n * n)) % n) + 0.5) / n,
+        });
+      }
+    }
+    elementCounts[el] = needed;
+  }
+
+  return result.length > 0 ? result : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -434,7 +565,26 @@ export async function generateStructureCandidates(
       }
     }
 
-    // Also generate a simple cubic candidate with Vegard lattice
+    // VCA position interpolation: use binary endpoint positions to build
+    // physically-motivated atomic positions (analogous to Vegard for lattice).
+    const vcaPositions = vegard.binaryEndpoints
+      ? interpolatePositionsFromEndpoints(elements, counts, vegard.binaryEndpoints)
+      : null;
+
+    if (vcaPositions && vcaPositions.length > 0) {
+      candidates.push({
+        latticeA: vegard.latticeA,
+        positions: vcaPositions,
+        prototype: "VCA-interpolated",
+        crystalSystem: "cubic",
+        spaceGroup: "",
+        source: `VCA positions from ${vegard.binaryEndpoints?.filter(e => e.positions).length ?? 0} binary structures`,
+        confidence: vegard.confidence * 0.70,
+        isMetallic: vegard.isMetallic,
+      });
+    }
+
+    // Fallback: simple grid positions with Vegard lattice (low quality)
     const simpleCubicPositions = generateSimplePositions(elements, counts, totalAtoms);
     if (simpleCubicPositions.length > 0) {
       candidates.push({
