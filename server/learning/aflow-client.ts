@@ -500,12 +500,13 @@ export async function fetchAflowByElements(
 
   // AFLUX query: all binary compounds of these two elements
   // species() requires alphabetical order, nspecies(2) restricts to binaries
-  const query = `species(${sorted[0]}${sorted[1]}),nspecies(2),paging(10),$auid,$compound,$volume_atom,$lattice_system_relax,$spacegroup_relax,$sg2,$enthalpy_formation_atom,$Egap`;
+  // AFLUX species() requires comma-separated elements: species(Bi,Ge) not species(BiGe)
+  const query = `species(${sorted[0]},${sorted[1]}),nspecies(2),paging(10),$auid,$compound,$volume_atom,$lattice_system_relax,$spacegroup_relax,$sg2,$enthalpy_formation_atom,$Egap`;
 
   const rawEntries = await aflowFetch(query);
   if (!rawEntries || rawEntries.length === 0) {
-    // Cache the empty result to avoid repeated API hits
-    await setAflowCachedData(cacheKey, "vegard_endpoint", []);
+    // Don't cache empty results — the API may have been unreachable or the
+    // query syntax may have been wrong. Let the next call retry fresh.
     return [];
   }
 
@@ -550,11 +551,11 @@ export async function fetchAflowByTernaryElements(
   const cached = await getAflowCachedData(cacheKey, "vegard_endpoint");
   if (cached && Array.isArray(cached)) return cached as AflowStructureEndpoint[];
 
-  const query = `species(${sorted.join("")}),nspecies(3),paging(5),$auid,$compound,$volume_atom,$lattice_system_relax,$spacegroup_relax,$sg2,$enthalpy_formation_atom,$Egap`;
+  // AFLUX species() requires comma-separated elements
+  const query = `species(${sorted.join(",")}),nspecies(3),paging(5),$auid,$compound,$volume_atom,$lattice_system_relax,$spacegroup_relax,$sg2,$enthalpy_formation_atom,$Egap`;
 
   const rawEntries = await aflowFetch(query);
   if (!rawEntries || rawEntries.length === 0) {
-    await setAflowCachedData(cacheKey, "vegard_endpoint", []);
     return [];
   }
 
