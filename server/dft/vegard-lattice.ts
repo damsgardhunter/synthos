@@ -400,13 +400,34 @@ function interpolatePositionsFromEndpoints(
   const templatePositions = best.ep.positions;
   const templateElements = new Set(templatePositions.map(p => p.element));
 
-  // Build target positions by adapting the template:
-  // 1. Keep positions for elements that exist in both template and target
-  // 2. Replace template-only elements with target elements (by similarity)
-  // 3. Add/remove atoms to match target stoichiometry
+  // Build target positions by adapting the template with chemical-aware
+  // site assignment. Large electropositives (Ca, Ba, Sr, K, etc.) should
+  // map to sites that held large atoms in the template — NOT to framework
+  // sites that held small metallic/covalent atoms. This prevents placing
+  // Ca on a Bi site (ionic vs metallic bonding mismatch).
   const result: Array<{ element: string; x: number; y: number; z: number }> = [];
 
-  // Map template elements to target elements
+  // Chemical character classification
+  const LARGE_ELECTROPOSITIVE = new Set([
+    "K", "Rb", "Cs", "Ca", "Sr", "Ba", "Na", "Li",
+    "La", "Ce", "Pr", "Nd", "Sm", "Eu", "Gd", "Y", "Sc",
+  ]);
+  const ANION_LIKE = new Set(["O", "F", "S", "Se", "Te", "N", "P", "As", "Cl", "Br", "I"]);
+
+  function getChemicalClass(el: string): "electropositive" | "anion" | "framework" {
+    if (LARGE_ELECTROPOSITIVE.has(el)) return "electropositive";
+    if (ANION_LIKE.has(el)) return "anion";
+    return "framework"; // metals, semimetals, etc.
+  }
+
+  // Estimate "site size" from the template: sites that held large atoms
+  // should receive large target atoms
+  function getAtomicSize(el: string): number {
+    const d = getElementData(el);
+    return d?.atomicRadius ?? 130;
+  }
+
+  // Map template elements to target elements respecting chemical character
   const templateEls = Array.from(templateElements);
   const targetEls = [...elements];
   const mapping: Record<string, string> = {};
@@ -418,11 +439,43 @@ function interpolatePositionsFromEndpoints(
     }
   }
 
-  // Map remaining template elements to unmapped target elements
+  // Map remaining by chemical similarity: match electropositives to
+  // electropositives, anions to anions, framework to framework.
+  // Within each class, match by atomic radius similarity.
   const unmappedTemplate = templateEls.filter(e => !mapping[e]);
   const unmappedTarget = targetEls.filter(e => !Object.values(mapping).includes(e));
-  for (let i = 0; i < unmappedTemplate.length && i < unmappedTarget.length; i++) {
-    mapping[unmappedTemplate[i]] = unmappedTarget[i];
+
+  // Sort both by chemical class priority then by size
+  const classOrder = { "electropositive": 0, "anion": 1, "framework": 2 };
+
+  for (const tel of unmappedTemplate) {
+    const telClass = getChemicalClass(tel);
+    const telSize = getAtomicSize(tel);
+
+    // Find best matching unmapped target element:
+    // 1. Same chemical class preferred
+    // 2. Within class, closest atomic radius
+    let bestTarget: string | null = null;
+    let bestScore = -Infinity;
+
+    const availableTargets = unmappedTarget.filter(e => !Object.values(mapping).includes(e));
+    for (const te of availableTargets) {
+      const teClass = getChemicalClass(te);
+      const teSize = getAtomicSize(te);
+
+      let score = 0;
+      if (teClass === telClass) score += 100;  // Same chemical class: strong preference
+      score -= Math.abs(telSize - teSize) * 0.5; // Penalize size mismatch
+
+      if (score > bestScore) {
+        bestScore = score;
+        bestTarget = te;
+      }
+    }
+
+    if (bestTarget) {
+      mapping[tel] = bestTarget;
+    }
   }
 
   // Build positions using the mapping
