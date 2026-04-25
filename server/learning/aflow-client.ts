@@ -485,9 +485,48 @@ export interface AflowStructureEndpoint {
 }
 
 /**
+ * Direct AFLOW fetch for Vegard endpoint lookups.
+ * Bypasses the shared aflowFetch() circuit breaker so that engine-cycle
+ * AFLOW failures don't block the critical-path Vegard structure lookups.
+ */
+async function vegardAflowFetch(query: string): Promise<any[] | null> {
+  try {
+    const url = `${AFLOW_API_BASE}/?${query},format(json)`;
+    const response = await fetch(url, {
+      headers: { "Accept": "application/json" },
+      signal: AbortSignal.timeout(45000),
+    });
+    if (!response.ok) return null;
+    const text = await response.text();
+    if (!text || !text.trim().startsWith("[") && !text.trim().startsWith("{")) return null;
+    const data = JSON.parse(text);
+    // AFLOW returns paginated objects like {"1 of 139": {...}, "2 of 139": {...}}
+    // or arrays. Handle both formats.
+    if (Array.isArray(data)) return data;
+    if (typeof data === "object" && data !== null) {
+      // Paginated object format: extract values
+      const entries: any[] = [];
+      for (const key of Object.keys(data)) {
+        if (typeof data[key] === "object" && data[key] !== null) {
+          entries.push(data[key]);
+        }
+      }
+      return entries.length > 0 ? entries : null;
+    }
+    return null;
+  } catch (err: any) {
+    console.log(`[AFLOW-Vegard] Fetch failed: ${err?.message?.slice(0, 80) ?? "unknown"}`);
+    return null;
+  }
+}
+
+/**
  * Fetch all AFLOW entries containing exactly the given elements (binary pair).
  * Uses the AFLUX `species()` + `nspecies()` filters so we get every known
  * stoichiometry for that element pair (e.g., BiGe, Bi2Ge, BiGe2, Bi3Ge5, ...).
+ *
+ * Uses its own fetch function (vegardAflowFetch) independent of the shared
+ * AFLOW circuit breaker, so engine-cycle AFLOW failures don't block Vegard.
  *
  * Results are cached per element pair with 7-day TTL via the existing
  * mpMaterialCache table (dataType = "vegard_endpoint").
@@ -502,19 +541,18 @@ export async function fetchAflowByElements(
 
   // Check cache first
   const cached = await getAflowCachedData(cacheKey, "vegard_endpoint");
-  if (cached && Array.isArray(cached)) return cached as AflowStructureEndpoint[];
+  if (cached && Array.isArray(cached) && cached.length > 0) return cached as AflowStructureEndpoint[];
 
-  // AFLUX query: all binary compounds of these two elements
-  // species() requires alphabetical order, nspecies(2) restricts to binaries
-  // AFLUX species() requires comma-separated elements: species(Bi,Ge) not species(BiGe)
+  // AFLUX species() requires comma-separated elements: species(Bi,Ge)
   const query = `species(${sorted[0]},${sorted[1]}),nspecies(2),paging(10),$auid,$compound,$volume_atom,$lattice_system_relax,$spacegroup_relax,$sg2,$enthalpy_formation_atom,$Egap`;
 
-  const rawEntries = await aflowFetch(query);
+  console.log(`[AFLOW-Vegard] Fetching binary endpoints for ${cacheKey}...`);
+  const rawEntries = await vegardAflowFetch(query);
   if (!rawEntries || rawEntries.length === 0) {
-    // Don't cache empty results — the API may have been unreachable or the
-    // query syntax may have been wrong. Let the next call retry fresh.
+    console.log(`[AFLOW-Vegard] No entries for ${cacheKey}`);
     return [];
   }
+  console.log(`[AFLOW-Vegard] Got ${rawEntries.length} raw entries for ${cacheKey}`);
 
   const endpoints: AflowStructureEndpoint[] = [];
   for (const entry of rawEntries) {
@@ -555,15 +593,18 @@ export async function fetchAflowByTernaryElements(
   const cacheKey = `${sorted[0]}-${sorted[1]}-${sorted[2]}`;
 
   const cached = await getAflowCachedData(cacheKey, "vegard_endpoint");
-  if (cached && Array.isArray(cached)) return cached as AflowStructureEndpoint[];
+  if (cached && Array.isArray(cached) && cached.length > 0) return cached as AflowStructureEndpoint[];
 
   // AFLUX species() requires comma-separated elements
   const query = `species(${sorted.join(",")}),nspecies(3),paging(5),$auid,$compound,$volume_atom,$lattice_system_relax,$spacegroup_relax,$sg2,$enthalpy_formation_atom,$Egap`;
 
-  const rawEntries = await aflowFetch(query);
+  console.log(`[AFLOW-Vegard] Fetching ternary endpoints for ${cacheKey}...`);
+  const rawEntries = await vegardAflowFetch(query);
   if (!rawEntries || rawEntries.length === 0) {
+    console.log(`[AFLOW-Vegard] No ternary entries for ${cacheKey}`);
     return [];
   }
+  console.log(`[AFLOW-Vegard] Got ${rawEntries.length} ternary entries for ${cacheKey}`);
 
   const endpoints: AflowStructureEndpoint[] = [];
   for (const entry of rawEntries) {
