@@ -199,43 +199,32 @@ export async function vegardEstimate(
     fractions[el] = (counts[el] || 1) / totalAtoms;
   }
 
-  // Fetch all binary subsystem endpoints in parallel, with 30s total timeout
+  // Fetch binary subsystem endpoints in parallel. Binary data is the
+  // critical input for Vegard interpolation — ternary queries almost always
+  // 504 from AFLOW and are not needed (binary pairwise volumes are sufficient).
+  // Ternary data is fetched separately as fire-and-forget enrichment.
   const binaryPairs = combinations(elements, 2);
-  const ternaryTriples = elements.length >= 3 ? combinations(elements, 3) : [];
-
-  const fetchPromises: Promise<BinaryEndpoint[]>[] = [
-    ...binaryPairs.map(([a, b]) => fetchBinaryEndpoints(a, b)),
-    ...ternaryTriples.map(([a, b, c]) =>
-      fetchAflowByTernaryElements(a, b, c).then(entries =>
-        entries.map(e => ({
-          compound: e.compound,
-          elements: e.elements,
-          volumePerAtom: e.volumeAtom,
-          latticeA: null,
-          latticeB: null,
-          latticeC: null,
-          latticeSystem: e.latticeSystem,
-          spaceGroup: e.spaceGroupSymbol,
-          isMetallic: e.bandgap != null ? e.bandgap < 0.01 : null,
-          source: "AFLOW" as const,
-        }))
-      )
-    ),
-  ];
 
   let allEndpoints: BinaryEndpoint[] = [];
   try {
-    const results = await Promise.race([
-      Promise.allSettled(fetchPromises),
-      new Promise<PromiseSettledResult<BinaryEndpoint[]>[]>(resolve =>
-        setTimeout(() => resolve([]), 30000)
-      ),
-    ]);
-    for (const r of results) {
+    // Binary lookups only — cached ones return in <100ms from Neon DB,
+    // fresh ones take 2-5s from AFLOW. No ternary 504s to block.
+    const binaryResults = await Promise.allSettled(
+      binaryPairs.map(([a, b]) => fetchBinaryEndpoints(a, b))
+    );
+    for (const r of binaryResults) {
       if (r.status === "fulfilled") allEndpoints.push(...r.value);
     }
   } catch {
-    // Timeout or network failure — proceed with fallback
+    // Network failure — proceed with fallback
+  }
+
+  // Fire-and-forget: ternary enrichment (don't block Vegard on these)
+  if (elements.length >= 3) {
+    const ternaryTriples = combinations(elements, 3);
+    for (const [a, b, c] of ternaryTriples) {
+      fetchAflowByTernaryElements(a, b, c).catch(() => {}); // populate cache for future use
+    }
   }
 
   const endpointsUsed = allEndpoints.map(e => e.compound);
