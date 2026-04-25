@@ -95,7 +95,7 @@ const KSPACING_SCF = 0.25;
 const KSPACING_SCF_METAL = 0.20;
 
 // Stage time caps (ms)
-const STAGE1_TIMEOUT_MS = 600_000;      // 10 min
+const STAGE1_TIMEOUT_MS = 900_000;      // 15 min (was 10 — too tight for 5+ concurrent jobs)
 const STAGE2_TIMEOUT_MS = 1_800_000;    // 30 min
 const STAGE4_TIMEOUT_MS = 1_800_000;    // 30 min
 
@@ -336,6 +336,12 @@ ${cellBlock}
   const failReasons: string[] = [];
 
   if (parsed.positions.length === 0) {
+    // Log diagnostic: what did QE actually output?
+    const hasAtomPos = result.stdout.includes("ATOMIC_POSITIONS");
+    const hasBfgs = result.stdout.includes("bfgs converged") || result.stdout.includes("BFGS Geometry Optimization");
+    const hasMaxSec = result.stdout.includes("Maximum CPU time exceeded");
+    const tail = result.stdout.slice(-300);
+    console.log(`[Staged-Relax] ${formula} S1 parse fail: hasATOMIC_POSITIONS=${hasAtomPos}, hasBFGS=${hasBfgs}, maxSecHit=${hasMaxSec}, tail=${tail.slice(-150)}`);
     failReasons.push("no final positions in output");
   }
   if (parsed.maxForce != null && parsed.maxForce > STAGE1_FORCE_THR) {
@@ -637,8 +643,9 @@ function parseRelaxOutput(stdout: string): RelaxParsed {
     if (val) result.maxForce = parseFloat(val[0]);
   }
 
-  // Parse final ATOMIC_POSITIONS block
-  const posBlocks = stdout.match(/ATOMIC_POSITIONS\s*\{?\s*crystal\s*\}?\n([\s\S]*?)(?=\n(?:CELL_PARAMETERS|K_POINTS|End|$|\n\s*\n))/g);
+  // Parse final ATOMIC_POSITIONS block — QE uses both {crystal} and (crystal) formats
+  // Also handle angstrom, bohr, alat, etc. Match any ATOMIC_POSITIONS header.
+  const posBlocks = stdout.match(/ATOMIC_POSITIONS\s*[{(]?\s*(?:crystal|angstrom|bohr|alat)?\s*[})]?\s*\n([\s\S]*?)(?=\n\s*(?:CELL_PARAMETERS|K_POINTS|End final|End of|ATOMIC_SPECIES|\n\s*\n)|$)/gi);
   if (posBlocks && posBlocks.length > 0) {
     const lastBlock = posBlocks[posBlocks.length - 1];
     const lines = lastBlock.split("\n").slice(1); // skip header
@@ -651,6 +658,29 @@ function parseRelaxOutput(stdout: string): RelaxParsed {
           y: parseFloat(m[3]),
           z: parseFloat(m[4]),
         });
+      }
+    }
+  }
+
+  // If no positions found yet, try a simpler line-by-line scan for atom-like lines
+  // after the last "ATOMIC_POSITIONS" header
+  if (result.positions.length === 0) {
+    const lastPosIdx = stdout.lastIndexOf("ATOMIC_POSITIONS");
+    if (lastPosIdx >= 0) {
+      const tail = stdout.slice(lastPosIdx);
+      const lines = tail.split("\n").slice(1); // skip the header line
+      for (const line of lines) {
+        const m = line.trim().match(/^([A-Z][a-z]?)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)/);
+        if (m) {
+          result.positions.push({
+            element: m[1],
+            x: parseFloat(m[2]),
+            y: parseFloat(m[3]),
+            z: parseFloat(m[4]),
+          });
+        } else if (line.trim().length > 0 && !line.trim().match(/^[A-Z][a-z]?\s/) && result.positions.length > 0) {
+          break; // Hit a non-atom line after collecting some atoms
+        }
       }
     }
   }
@@ -704,7 +734,7 @@ function parseVcRelaxOutput(stdout: string): VcRelaxParsed {
   }
 
   // Parse final CELL_PARAMETERS block
-  const cellBlocks = stdout.match(/CELL_PARAMETERS\s*\{?\s*(?:angstrom|bohr)\s*\}?\n([\s\S]*?)(?=\n(?:ATOMIC_POSITIONS|$|\n\s*\n))/gi);
+  const cellBlocks = stdout.match(/CELL_PARAMETERS\s*[{(]?\s*(?:angstrom|bohr|alat)?\s*[})]?\s*\n([\s\S]*?)(?=\n\s*(?:ATOMIC_POSITIONS|End|$|\n\s*\n))/gi);
   if (cellBlocks && cellBlocks.length > 0) {
     const lastCell = cellBlocks[cellBlocks.length - 1];
     const lines = lastCell.split("\n").slice(1);
@@ -723,8 +753,8 @@ function parseVcRelaxOutput(stdout: string): VcRelaxParsed {
     }
   }
 
-  // Parse final ATOMIC_POSITIONS
-  const posBlocks = stdout.match(/ATOMIC_POSITIONS\s*\{?\s*crystal\s*\}?\n([\s\S]*?)(?=\n(?:CELL_PARAMETERS|K_POINTS|End|$|\n\s*\n))/g);
+  // Parse final ATOMIC_POSITIONS — handle both {crystal} and (crystal)
+  const posBlocks = stdout.match(/ATOMIC_POSITIONS\s*[{(]?\s*(?:crystal|angstrom|bohr|alat)?\s*[})]?\s*\n([\s\S]*?)(?=\n\s*(?:CELL_PARAMETERS|K_POINTS|End final|End of|ATOMIC_SPECIES|\n\s*\n)|$)/gi);
   if (posBlocks && posBlocks.length > 0) {
     const lastBlock = posBlocks[posBlocks.length - 1];
     const lines = lastBlock.split("\n").slice(1);
