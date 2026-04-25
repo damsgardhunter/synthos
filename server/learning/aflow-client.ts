@@ -461,3 +461,125 @@ export function crossValidateWithAflow(
 
   return results;
 }
+
+// ---------------------------------------------------------------------------
+// Binary/ternary endpoint lookup for Vegard's law lattice estimation
+// ---------------------------------------------------------------------------
+
+export interface AflowStructureEndpoint {
+  compound: string;
+  elements: string[];
+  volumeAtom: number;        // Å³/atom
+  latticeSystem: string;     // "cubic" | "hexagonal" | "tetragonal" | ...
+  spaceGroupNumber: number;
+  spaceGroupSymbol: string;
+  enthalpyFormationAtom: number | null;  // eV/atom
+  bandgap: number | null;    // eV — 0 means metallic
+  source: "AFLOW";
+}
+
+/**
+ * Fetch all AFLOW entries containing exactly the given elements (binary pair).
+ * Uses the AFLUX `species()` + `nspecies()` filters so we get every known
+ * stoichiometry for that element pair (e.g., BiGe, Bi2Ge, BiGe2, Bi3Ge5, ...).
+ *
+ * Results are cached per element pair with 7-day TTL via the existing
+ * mpMaterialCache table (dataType = "vegard_endpoint").
+ */
+export async function fetchAflowByElements(
+  el1: string,
+  el2: string,
+): Promise<AflowStructureEndpoint[]> {
+  // Canonical key: alphabetical order
+  const sorted = [el1, el2].sort();
+  const cacheKey = `${sorted[0]}-${sorted[1]}`;
+
+  // Check cache first
+  const cached = await getAflowCachedData(cacheKey, "vegard_endpoint");
+  if (cached && Array.isArray(cached)) return cached as AflowStructureEndpoint[];
+
+  // AFLUX query: all binary compounds of these two elements
+  // species() requires alphabetical order, nspecies(2) restricts to binaries
+  const query = `species(${sorted[0]}${sorted[1]}),nspecies(2),paging(10),$auid,$compound,$volume_atom,$lattice_system_relax,$spacegroup_relax,$sg2,$enthalpy_formation_atom,$Egap`;
+
+  const rawEntries = await aflowFetch(query);
+  if (!rawEntries || rawEntries.length === 0) {
+    // Cache the empty result to avoid repeated API hits
+    await setAflowCachedData(cacheKey, "vegard_endpoint", []);
+    return [];
+  }
+
+  const endpoints: AflowStructureEndpoint[] = [];
+  for (const entry of rawEntries) {
+    const volAtom = entry.volume_atom != null ? Number(entry.volume_atom) : null;
+    if (volAtom == null || volAtom <= 0) continue;  // Skip entries without volume data
+
+    endpoints.push({
+      compound: entry.compound ?? `${sorted[0]}${sorted[1]}`,
+      elements: sorted,
+      volumeAtom: volAtom,
+      latticeSystem: (entry.lattice_system_relax ?? "").toLowerCase(),
+      spaceGroupNumber: entry.spacegroup_relax != null ? Number(entry.spacegroup_relax) : 0,
+      spaceGroupSymbol: entry.sg2 ?? "",
+      enthalpyFormationAtom: entry.enthalpy_formation_atom != null ? Number(entry.enthalpy_formation_atom) : null,
+      bandgap: entry.Egap != null ? Number(entry.Egap) : null,
+      source: "AFLOW",
+    });
+  }
+
+  await setAflowCachedData(cacheKey, "vegard_endpoint", endpoints);
+  if (endpoints.length > 0) {
+    console.log(`[AFLOW] Cached ${endpoints.length} binary endpoints for ${cacheKey} (vol range: ${endpoints.map(e => e.volumeAtom.toFixed(1)).join(", ")} Å³/atom)`);
+  }
+
+  return endpoints;
+}
+
+/**
+ * Fetch AFLOW endpoints for a ternary element combination.
+ * Same approach as binary but with nspecies(3).
+ */
+export async function fetchAflowByTernaryElements(
+  el1: string,
+  el2: string,
+  el3: string,
+): Promise<AflowStructureEndpoint[]> {
+  const sorted = [el1, el2, el3].sort();
+  const cacheKey = `${sorted[0]}-${sorted[1]}-${sorted[2]}`;
+
+  const cached = await getAflowCachedData(cacheKey, "vegard_endpoint");
+  if (cached && Array.isArray(cached)) return cached as AflowStructureEndpoint[];
+
+  const query = `species(${sorted.join("")}),nspecies(3),paging(5),$auid,$compound,$volume_atom,$lattice_system_relax,$spacegroup_relax,$sg2,$enthalpy_formation_atom,$Egap`;
+
+  const rawEntries = await aflowFetch(query);
+  if (!rawEntries || rawEntries.length === 0) {
+    await setAflowCachedData(cacheKey, "vegard_endpoint", []);
+    return [];
+  }
+
+  const endpoints: AflowStructureEndpoint[] = [];
+  for (const entry of rawEntries) {
+    const volAtom = entry.volume_atom != null ? Number(entry.volume_atom) : null;
+    if (volAtom == null || volAtom <= 0) continue;
+
+    endpoints.push({
+      compound: entry.compound ?? sorted.join(""),
+      elements: sorted,
+      volumeAtom: volAtom,
+      latticeSystem: (entry.lattice_system_relax ?? "").toLowerCase(),
+      spaceGroupNumber: entry.spacegroup_relax != null ? Number(entry.spacegroup_relax) : 0,
+      spaceGroupSymbol: entry.sg2 ?? "",
+      enthalpyFormationAtom: entry.enthalpy_formation_atom != null ? Number(entry.enthalpy_formation_atom) : null,
+      bandgap: entry.Egap != null ? Number(entry.Egap) : null,
+      source: "AFLOW",
+    });
+  }
+
+  await setAflowCachedData(cacheKey, "vegard_endpoint", endpoints);
+  if (endpoints.length > 0) {
+    console.log(`[AFLOW] Cached ${endpoints.length} ternary endpoints for ${cacheKey}`);
+  }
+
+  return endpoints;
+}

@@ -26,6 +26,14 @@ import {
   computePhononSpectrum,
   type ElectronPhononCoupling,
 } from "../learning/physics-engine";
+import { generateStructureCandidates, vegardEstimate, type StructureCandidate, type VegardEstimate } from "./vegard-lattice";
+import {
+  runStagedRelaxation,
+  runStage4GammaPhonon,
+  type QERunnerCallbacks,
+  type StagedRelaxationResult,
+  type StageResult,
+} from "./staged-relaxation";
 
 // Resolve the QE binary directory lazily (on first DFT call).
 // Running execSync WSL probes at module-load time would block the Node.js event loop
@@ -270,6 +278,23 @@ export interface QEFullResult {
   estimatedPressureGPa?: number;
   qeDFTPlusU?: boolean;
   dftPlusUTcModifier?: number;
+  // Staged relaxation pipeline results
+  vegardEstimate?: { latticeA: number; confidence: number; endpointsUsed: string[]; method: string };
+  structureCandidatesEvaluated?: number;
+  stagedRelaxation?: {
+    stages: Array<{
+      stage: number;
+      passed: boolean;
+      failReason?: string;
+      totalEnergy: number;
+      maxForce?: number;
+      wallTimeSeconds: number;
+    }>;
+    finalStage: number;
+    success: boolean;
+    totalWallTime: number;
+  };
+  gammaPhononPassed?: boolean;
 }
 
 const HASH_CACHE_MAX = 2000;
@@ -1387,13 +1412,42 @@ const DEFAULT_KSPACING = (() => {
   return Number.isFinite(env) && env > 0.02 && env < 0.5 ? env : 0.25;
 })();
 
-function autoKPoints(latticeA: number, cOverA?: number, minK: number = 4, dimensionality?: string, kspacing: number = DEFAULT_KSPACING): string {
+function autoKPoints(
+  latticeA: number,
+  cOverA?: number,
+  minK: number = 4,
+  dimensionality?: string,
+  kspacing: number = DEFAULT_KSPACING,
+  adaptiveOpts?: { stage?: "relax" | "vc-relax" | "scf" | "phonon"; isMetallic?: boolean; totalAtoms?: number },
+): string {
   // Density-based k-point grid: n_i = ceil(2π / (kspacing * a_i)).
   // kspacing=0.157 Å⁻¹ ≈ densityFactor=40 (legacy); aiida's "fast" protocol
   // uses 0.15 (screening), "moderate" 0.125, "precise" 0.10.
   // For a 3.5Å cell this gives k≈12 per direction (4096 k-pts); precise
   // protocol ~19 (6859 k-pts) — 2-8× slower for ~0.05 eV energy improvement.
-  const densityFactor = (2 * Math.PI) / kspacing;
+  //
+  // Adaptive k-grid: stage-dependent spacing + metallicity boost.
+  // Relax stages use coarser grids (forces converge with fewer k-points);
+  // SCF/phonon use finer grids for energy/DOS accuracy.
+  let effectiveKspacing = kspacing;
+  if (adaptiveOpts?.stage) {
+    switch (adaptiveOpts.stage) {
+      case "relax":    effectiveKspacing = 0.40; break;
+      case "vc-relax": effectiveKspacing = 0.30; break;
+      case "scf":      effectiveKspacing = adaptiveOpts.isMetallic ? 0.20 : 0.25; break;
+      case "phonon":   effectiveKspacing = 0.25; break;
+    }
+  }
+  // Metallicity boost: metals need denser k-grids for Fermi surface resolution
+  if (adaptiveOpts?.isMetallic && !adaptiveOpts?.stage) {
+    effectiveKspacing *= 0.77;  // ~1.3x denser
+  }
+  // Large cells (>8 atoms) already sample well; slightly coarsen to save compute
+  if (adaptiveOpts?.totalAtoms && adaptiveOpts.totalAtoms > 8) {
+    effectiveKspacing *= 1.15;
+  }
+
+  const densityFactor = (2 * Math.PI) / effectiveKspacing;
   const isLayered = dimensionality === "quasi-2D" || dimensionality === "2D";
   const layeredBoost = isLayered ? 1.5 : 1.0;
   const effCOverA = cOverA ?? 1.0;
@@ -1740,7 +1794,7 @@ ${atomicSpecies}
 ATOMIC_POSITIONS {crystal}
 ${atomicPositions}
 K_POINTS {automatic}
-${autoKPoints(latticeA, cOverA, bOverA)}
+${autoKPoints(latticeA, cOverA, bOverA, undefined, DEFAULT_KSPACING, { stage: "scf", totalAtoms: positions.length })}
 ${cellBlock}
 `;
 }
@@ -2996,7 +3050,7 @@ ${atomicSpecies}
 ATOMIC_POSITIONS {crystal}
 ${atomicPositions}
 K_POINTS {automatic}
-${autoKPoints(latticeA, cOverA2, bOverA2)}
+${autoKPoints(latticeA, cOverA2, bOverA2, undefined, DEFAULT_KSPACING, { stage: "scf", totalAtoms: positions.length })}
 ${cellBlock2}
 `;
 }
@@ -3103,7 +3157,7 @@ ${atomicSpecies}
 ATOMIC_POSITIONS {crystal}
 ${atomicPositions}
 K_POINTS {automatic}
-${autoKPoints(latticeA, cOverA, bOverAVcr)}
+${autoKPoints(latticeA, cOverA, bOverAVcr, undefined, DEFAULT_KSPACING, { stage: "vc-relax", totalAtoms })}
 ${cellBlock}
 `;
 }
@@ -3499,6 +3553,35 @@ async function runDFPTEPC(
   };
 }
 
+/** Build callbacks for staged-relaxation.ts from qe-worker internal functions. */
+function buildQERunnerCallbacks(): QERunnerCallbacks {
+  return {
+    runPwx: (inputFile, workDir, timeoutMs) =>
+      runQECommand(path.posix.join(getQEBinDir(), "pw.x"), inputFile, workDir, timeoutMs),
+    runPhx: (inputFile, workDir, timeoutMs) =>
+      runQECommand(path.posix.join(getQEBinDir(), "ph.x"), inputFile, workDir, timeoutMs),
+    getQEBinDir,
+    getPseudoDir: () => QE_PSEUDO_DIR,
+    getPseudoDirInput: () => QE_PSEUDO_DIR_INPUT,
+    cleanTmpDir: cleanQETmpDir,
+    resolveEcutwfc: (elements) => {
+      const hasH = elements.includes("H");
+      const base = computeEcutwfc(elements, 0, 80, 45);
+      return Math.max(base, hasH ? 100 : 60);
+    },
+    resolveEcutrho: (elements, ecutwfc) => ecutwfc * ecutrhoMultiplier(elements),
+    resolvePPFilename,
+    getAtomicMass,
+    autoKPoints: (latticeA, cOverA?, kspacing?) =>
+      autoKPoints(latticeA, cOverA, 4, undefined, kspacing ?? DEFAULT_KSPACING),
+    hasMagneticElements: (elements) => mayHaveMagneticMoment(elements),
+    generateMagnetizationLines: (elements, counts) =>
+      generateMagnetizationLines(elements, counts, isAFMCandidate(elements, counts), !elements.some(el => el in MAGNETIC_ELEMENTS)),
+    estimateCOverA,
+    generateCellParameters,
+  };
+}
+
 export async function runFullDFT(formula: string, opts?: { startAttempt?: number; pressureGpa?: number; ensembleScore?: number; forceSpin?: boolean; skipEph?: boolean }): Promise<QEFullResult> {
   const startTime = Date.now();
   const result: QEFullResult = {
@@ -3590,7 +3673,46 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
 
     result.ppValidated = true;
     const workerPressure = result.estimatedPressureGPa ?? 0;
-    let latticeA = estimateLatticeConstant(elements, counts, workerPressure);
+
+    // --- Vegard's law enhanced lattice estimation ---
+    // Try Vegard interpolation from AFLOW/MP binary endpoints for a better
+    // starting lattice. Falls back to the existing volume-sum estimate if
+    // insufficient endpoint data is available (< 30s total with caching).
+    let vegardResult: VegardEstimate | null = null;
+    let structureCandidates: StructureCandidate[] = [];
+    try {
+      const vegardT0 = Date.now();
+      [vegardResult, structureCandidates] = await Promise.all([
+        vegardEstimate(elements, counts, workerPressure).catch(() => null),
+        generateStructureCandidates(formula, elements, counts, workerPressure, 5).catch(() => []),
+      ]);
+      const vegardMs = Date.now() - vegardT0;
+      if (vegardResult && vegardResult.confidence > 0.2) {
+        console.log(`[QE-Worker] Vegard estimate for ${formula}: a=${vegardResult.latticeA.toFixed(3)} A (conf=${vegardResult.confidence.toFixed(2)}, method=${vegardResult.method}, ${vegardResult.endpointsUsed.length} endpoints, ${vegardMs}ms)`);
+      }
+      if (structureCandidates.length > 0) {
+        console.log(`[QE-Worker] ${structureCandidates.length} structure candidates for ${formula}`);
+      }
+      result.vegardEstimate = vegardResult ? {
+        latticeA: vegardResult.latticeA,
+        confidence: vegardResult.confidence,
+        endpointsUsed: vegardResult.endpointsUsed,
+        method: vegardResult.method,
+      } : undefined;
+      result.structureCandidatesEvaluated = structureCandidates.length;
+    } catch (vegardErr: any) {
+      console.log(`[QE-Worker] Vegard/candidate generation failed for ${formula}: ${vegardErr.message?.slice(0, 150)}, using volume-sum fallback`);
+    }
+
+    // Use Vegard lattice if confident, otherwise fall back to volume-sum
+    let latticeA: number;
+    if (vegardResult && vegardResult.confidence > 0.3) {
+      latticeA = vegardResult.latticeA;
+      console.log(`[QE-Worker] Using Vegard lattice for ${formula}: ${latticeA.toFixed(3)} A (conf=${vegardResult.confidence.toFixed(2)})`);
+    } else {
+      latticeA = estimateLatticeConstant(elements, counts, workerPressure);
+      console.log(`[QE-Worker] Using volume-sum lattice for ${formula}: ${latticeA.toFixed(3)} A (Vegard conf=${vegardResult?.confidence?.toFixed(2) ?? "N/A"})`);
+    }
     result.initialLatticeA = latticeA;
 
     if (workerPressure > 0) {
@@ -3694,7 +3816,70 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
 
     const cOverA = estimateCOverA(elements, counts);
     const bOverAFull = estimateBOverA(elements, counts);
-    result.kPoints = autoKPoints(latticeA, cOverA, 12, protoDimensionality).trim();
+    result.kPoints = autoKPoints(latticeA, cOverA, 12, protoDimensionality, DEFAULT_KSPACING, { stage: "scf", isMetallic: vegardResult?.isMetallic ?? undefined, totalAtoms: positions.length }).trim();
+
+    // --- Stage 1: Atomic relax (fixed cell, positions only) ---
+    // Quick 10-min sanity check: optimizes atomic positions with the cell fixed.
+    // Catches badly-placed atoms early before wasting 30 min on vc-relax.
+    const normFormula = formula.replace(/\s+/g, "");
+    const VERIFIED_LATTICE_A: Record<string, number> = {
+      LaH10: 5.10, H3S: 3.10, YH6: 3.95, YH9: 4.20, CeH9: 4.85,
+      CaH6: 3.85, MgB2: 3.09, Nb3Sn: 5.29, Nb3Ge: 5.14, NbN: 4.39,
+      NbC: 4.47, V3Si: 4.72, NbTi: 3.30, ScH3: 4.48, YH3: 5.14,
+      ScH9: 4.20, ThH9: 4.62, ThH10: 4.79, SrH6: 4.10, BaH2: 4.16, CaH2: 3.59,
+    };
+    const isKnownCompound = !!VERIFIED_LATTICE_A[normFormula];
+
+    if (!isKnownCompound && structureCandidates.length > 0) {
+      // Run staged relaxation (Stage 1 + Stage 2) on structure candidates
+      const qeCallbacks = buildQERunnerCallbacks();
+      const skipVcRelax = (
+        (workerPressure >= 100 && elements.includes("H") && elements.length >= 2) ||
+        !!opts?.forceSpin ||
+        (elements.length >= 3 && elements.every(el => TRANSITION_METALS.has(el)))
+      );
+
+      try {
+        const stagedResult = await runStagedRelaxation({
+          formula,
+          elements,
+          counts,
+          candidates: structureCandidates,
+          pressureGPa: workerPressure,
+          jobDir,
+          callbacks: qeCallbacks,
+          skipVcRelax,
+          skipRelaxation: isKnownCompound,
+          maxStage1Candidates: 3,
+          isMetallic: vegardResult?.isMetallic ?? undefined,
+        });
+
+        result.stagedRelaxation = {
+          stages: stagedResult.stages.map(s => ({
+            stage: s.stage,
+            passed: s.passed,
+            failReason: s.failReason,
+            totalEnergy: s.totalEnergy,
+            maxForce: s.maxForce,
+            wallTimeSeconds: s.wallTimeSeconds,
+          })),
+          finalStage: stagedResult.finalStage,
+          success: stagedResult.success,
+          totalWallTime: stagedResult.totalWallTime,
+        };
+
+        // Use staged results if any stage passed
+        if (stagedResult.bestPositions.length > 0 && stagedResult.stages.some(s => s.passed)) {
+          positions = stagedResult.bestPositions;
+          latticeA = stagedResult.bestLatticeA;
+          console.log(`[QE-Worker] Staged relaxation improved geometry for ${formula}: a=${latticeA.toFixed(3)} A, source=${stagedResult.candidateSource}`);
+        } else {
+          console.log(`[QE-Worker] Staged relaxation did not improve geometry for ${formula}, using pre-staged positions`);
+        }
+      } catch (stagedErr: any) {
+        console.log(`[QE-Worker] Staged relaxation failed for ${formula}: ${stagedErr.message?.slice(0, 200)}, continuing with existing flow`);
+      }
+    }
 
     result.vcRelaxed = false;
     const preVcLatticeA = latticeA;
@@ -3703,13 +3888,6 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     // vc-relax routinely times out at 90 min for high-pressure hydrides without
     // converging — wasting compute on geometries we already know experimentally.
     // Override latticeA with the literature value and proceed straight to SCF.
-    const VERIFIED_LATTICE_A: Record<string, number> = {
-      LaH10: 5.10, H3S: 3.10, YH6: 3.95, YH9: 4.20, CeH9: 4.85,
-      CaH6: 3.85, MgB2: 3.09, Nb3Sn: 5.29, Nb3Ge: 5.14, NbN: 4.39,
-      NbC: 4.47, V3Si: 4.72, NbTi: 3.30, ScH3: 4.48, YH3: 5.14,
-      ScH9: 4.20, ThH9: 4.62, ThH10: 4.79, SrH6: 4.10, BaH2: 4.16, CaH2: 3.59,
-    };
-    const normFormula = formula.replace(/\s+/g, "");
     if (VERIFIED_LATTICE_A[normFormula]) {
       const litA = VERIFIED_LATTICE_A[normFormula];
       console.log(`[QE-Worker] Skipping vc-relax for ${formula} — using literature lattice a=${litA} Å (saves ~90 min wall time)`);
@@ -3805,7 +3983,7 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       cleanQETmpDir(path.join(jobDir, "tmp"));
     }
 
-    result.kPoints = autoKPoints(latticeA, cOverA, bOverAFull).trim();
+    result.kPoints = autoKPoints(latticeA, cOverA, bOverAFull, undefined, DEFAULT_KSPACING, { stage: "scf", isMetallic: vegardResult?.isMetallic ?? undefined, totalAtoms: positions.length }).trim();
     if (Math.abs(latticeA - preVcLatticeA) > 0.01) {
       console.log(`[QE-Worker] K-points recomputed for ${formula} after vc-relax lattice change (${preVcLatticeA.toFixed(3)} -> ${latticeA.toFixed(3)} A): ${result.kPoints}`);
     }
@@ -4242,6 +4420,32 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
        (result.scf.fermiEnergy !== null || isPartialWalltime) &&
        result.scf.lastScfAccuracyRy !== null && result.scf.lastScfAccuracyRy < 1.0e-4);
 
+    // --- Stage 3 post-SCF diagnostics ---
+    // After SCF converges, check residual forces and stress from tprnfor/tstress
+    // output to assess relaxation quality. Warnings only — don't gate on these.
+    if (scfUsable && result.scf) {
+      const scfForce = result.scf.totalForce;
+      const scfPressure = result.scf.pressure;
+      if (scfForce != null && scfForce > 0.05) {
+        console.log(`[QE-Worker] Stage 3 diagnostic: ${formula} residual force ${scfForce.toFixed(4)} Ry/bohr > 0.05 — structure may benefit from better relaxation`);
+      }
+      if (scfPressure != null && Math.abs(scfPressure) > 5) {
+        console.log(`[QE-Worker] Stage 3 diagnostic: ${formula} residual pressure ${scfPressure.toFixed(1)} kbar > 5 — cell may not be fully relaxed`);
+      }
+      if (result.scf.isMetallic === false && result.scf.bandGap != null && result.scf.bandGap > 0.5) {
+        const metalExpected = vegardResult?.isMetallic;
+        if (metalExpected === true) {
+          console.log(`[QE-Worker] Stage 3 diagnostic: ${formula} bandgap=${result.scf.bandGap.toFixed(3)} eV but Vegard/MP data suggests metallic — smearing or structure issue?`);
+        }
+      }
+      if (result.scf.fermiEnergy != null) {
+        // Sanity check: Fermi energy should be within a reasonable range
+        if (Math.abs(result.scf.fermiEnergy) > 50) {
+          console.log(`[QE-Worker] Stage 3 diagnostic: ${formula} Ef=${result.scf.fermiEnergy.toFixed(2)} eV — unusually large, check for smearing artifacts`);
+        }
+      }
+    }
+
     if (!scfConverged && !scfUsable) {
       result.failureStage = "scf";
       stageFailureCounts.scf++;
@@ -4266,7 +4470,57 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     // Skip phonon for partial-walltime SCFs: wall-time-killed runs may not
     // flush wavefunctions (.wfc files) to disk, so ph.x would fail to read
     // them and either crash or produce 0 modes.
-    if (scfUsable && !isPartialWalltime) {
+    // --- Stage 4: Gamma-point phonon stability check ---
+    // Fast dynamical stability screen (5-30 min) before committing to the
+    // full phonon grid (2-24h). Catches structures with large imaginary modes
+    // early — e.g., BiGeSb had 4/9 imaginary modes that would have been caught
+    // here in ~10 min instead of wasting 14.5h on the full pipeline.
+    let gammaPhononPassed = true;
+    if (scfUsable && !isPartialWalltime && result.scf) {
+      try {
+        const qeCallbacks = buildQERunnerCallbacks();
+        const hasH = elements.includes("H");
+        const ecutwfc = Math.max(computeEcutwfc(elements, 0, 80, 45), hasH ? 100 : 60);
+        const gammaResult = await runStage4GammaPhonon({
+          formula,
+          elements,
+          counts,
+          positions,
+          latticeA,
+          cellVectors: undefined,
+          jobDir,
+          callbacks: qeCallbacks,
+          ecutwfc,
+        });
+
+        if (!gammaResult.passed) {
+          gammaPhononPassed = false;
+          result.gammaPhononPassed = false;
+          console.log(`[QE-Worker] Gamma phonon check FAILED for ${formula}: ${gammaResult.failReason} — skipping full phonon grid`);
+          // Store gamma phonon results as a diagnostic
+          if (gammaResult.frequencies && gammaResult.frequencies.length > 0) {
+            result.phonon = {
+              frequencies: gammaResult.frequencies,
+              hasImaginary: gammaResult.frequencies.some(f => f < -10),
+              imaginaryCount: gammaResult.frequencies.filter(f => f < -10).length,
+              lowestFrequency: Math.min(...gammaResult.frequencies),
+              highestFrequency: Math.max(...gammaResult.frequencies),
+              converged: false,
+              wallTimeSeconds: gammaResult.wallTimeSeconds,
+              error: "Gamma phonon check failed: " + (gammaResult.failReason ?? "unknown"),
+            };
+          }
+        } else {
+          result.gammaPhononPassed = true;
+          console.log(`[QE-Worker] Gamma phonon check PASSED for ${formula} — proceeding to full phonon grid`);
+        }
+      } catch (gammaErr: any) {
+        console.log(`[QE-Worker] Gamma phonon check error for ${formula}: ${gammaErr.message?.slice(0, 150)} — proceeding to full phonon anyway`);
+        // Don't block on Gamma check errors — fall through to full phonon
+      }
+    }
+
+    if (scfUsable && !isPartialWalltime && gammaPhononPassed) {
       // Phonon budget: scale with atom count × electron weight. Heavy hydrides
       // (K2LaH8, LaH12) have 33+ perturbations × expensive mini-SCFs. The old
       // 4× SCF-time multiplier gave ~9h for K2LaH8 which was borderline —
@@ -4612,6 +4866,20 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
         console.log(`[QE-Worker] Phonon failed for ${formula}: 0 modes — ${reason} (exit=${phResult!.exitCode})`);
       } else {
         console.log(`[QE-Worker] Phonon done for ${formula}: ${result.phonon.frequencies.length} modes, lowest=${result.phonon.lowestFrequency.toFixed(1)} cm-1`);
+
+        // --- Stage 5 convergence diagnostic ---
+        // Compare full-grid phonon with Gamma check (Stage 4) to detect
+        // q-grid convergence issues. If full grid finds significantly more
+        // negative modes than Gamma, the structure may need a denser q-grid.
+        if (result.gammaPhononPassed && result.phonon.hasImaginary) {
+          console.log(`[QE-Worker] Stage 5 warning: ${formula} Gamma check passed but full grid found ${result.phonon.imaginaryCount} imaginary modes (lowest=${result.phonon.lowestFrequency.toFixed(1)} cm-1) — q-grid convergence issue or zone-boundary instability`);
+        }
+        // Log full-grid vs Gamma frequency comparison for monitoring
+        if (result.phonon.frequencies.length > 0) {
+          const fullLowest = result.phonon.lowestFrequency;
+          const fullHighest = result.phonon.highestFrequency;
+          console.log(`[QE-Worker] Stage 5 spectrum: ${formula} ${result.phonon.frequencies.length} modes, range [${fullLowest.toFixed(1)}, ${fullHighest.toFixed(1)}] cm-1, ${result.phonon.imaginaryCount} imaginary`);
+        }
       }
     }
 
