@@ -496,10 +496,56 @@ async function vegardAflowFetch(query: string): Promise<any[] | null> {
       headers: { "Accept": "application/json" },
       signal: AbortSignal.timeout(45000),
     });
-    if (!response.ok) return null;
+    if (!response.ok) {
+      console.log(`[AFLOW-Vegard] HTTP ${response.status} for query: ${query.slice(0, 80)}`);
+      return null;
+    }
     const text = await response.text();
-    if (!text || !text.trim().startsWith("[") && !text.trim().startsWith("{")) return null;
-    const data = JSON.parse(text);
+    if (!text || text.trim().length < 3) {
+      console.log(`[AFLOW-Vegard] Empty response for query: ${query.slice(0, 80)}`);
+      return null;
+    }
+    const trimmed = text.trim();
+    // Debug: log first 300 chars of response to diagnose parsing
+    console.log(`[AFLOW-Vegard] Response (${trimmed.length} chars): ${trimmed.slice(0, 300)}`);
+
+    // AFLOW can return multiple paginated JSON objects concatenated: {...}{...}
+    // JSON.parse only handles one object, so we need to handle this.
+    // Strategy: try parsing as-is first; if that fails, try extracting first object.
+    let data: any;
+    try {
+      data = JSON.parse(trimmed);
+    } catch {
+      // Concatenated objects: extract the first complete JSON object
+      const firstClose = trimmed.indexOf("}", 1);
+      if (firstClose > 0) {
+        // Find the matching opening brace depth
+        let depth = 0;
+        let endIdx = -1;
+        for (let i = 0; i < trimmed.length; i++) {
+          if (trimmed[i] === "{") depth++;
+          else if (trimmed[i] === "}") {
+            depth--;
+            if (depth === 0) { endIdx = i; break; }
+          }
+        }
+        if (endIdx > 0) {
+          try {
+            data = JSON.parse(trimmed.slice(0, endIdx + 1));
+          } catch {
+            console.log(`[AFLOW-Vegard] JSON parse failed even for first object`);
+            return null;
+          }
+        } else {
+          console.log(`[AFLOW-Vegard] Cannot find complete JSON object in response`);
+          return null;
+        }
+      } else {
+        console.log(`[AFLOW-Vegard] JSON parse failed: ${trimmed.slice(0, 100)}`);
+        return null;
+      }
+    }
+
     // AFLOW returns paginated objects like {"1 of 139": {...}, "2 of 139": {...}}
     // or arrays. Handle both formats.
     if (Array.isArray(data)) return data;
@@ -511,6 +557,7 @@ async function vegardAflowFetch(query: string): Promise<any[] | null> {
           entries.push(data[key]);
         }
       }
+      console.log(`[AFLOW-Vegard] Extracted ${entries.length} entries from paginated response (${Object.keys(data).length} keys)`);
       return entries.length > 0 ? entries : null;
     }
     return null;
