@@ -285,7 +285,6 @@ async function recordPytorchModelPath(jobId: number, modelPath: string): Promise
 // training is now delegated to the Python FastAPI service (gnn/server.py)
 // via callPythonTrain() defined above.
 
-const POLL_INTERVAL_MS = 10_000;
 const MP_BATCH_SIZE = 1_000;        // records per progressive fetch (2x for faster ramp-up)
 const MP_MAX_CACHE = 1_000_000;     // effectively unlimited — let the GNN train on all available MP data
 const MP_SKIP_STATE_KEY = "mp_batch_skip";
@@ -1419,13 +1418,74 @@ async function runStartupFullCorpusTraining(): Promise<void> {
   }
 }
 
+// ── Midnight scheduler helpers ───────────────────────────────────────────────
+
+/** Returns ms until the next midnight UTC. */
+function msUntilMidnightUTC(): number {
+  const now = new Date();
+  const nextMidnight = new Date(Date.UTC(
+    now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 0, 0, 0,
+  ));
+  return nextMidnight.getTime() - now.getTime();
+}
+
+let _midnightTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Schedule the next nightly training run at midnight UTC. */
+function scheduleNightlyTraining(): void {
+  if (!running) return;
+  const delayMs = msUntilMidnightUTC();
+  const delayHours = (delayMs / 3_600_000).toFixed(1);
+  const nextRun = new Date(Date.now() + delayMs).toISOString();
+  console.log(`[GNN-GCP] Next training scheduled for midnight UTC (${nextRun}, ${delayHours}h from now)`);
+
+  _midnightTimer = setTimeout(async () => {
+    if (!running) return;
+    console.log('[GNN-GCP] ════════════════════════════════════════════════════════');
+    console.log('[GNN-GCP]  NIGHTLY TRAINING — Midnight UTC');
+    console.log('[GNN-GCP] ════════════════════════════════════════════════════════');
+
+    const NIGHTLY_MAX_ATTEMPTS = 3;
+    for (let attempt = 1; attempt <= NIGHTLY_MAX_ATTEMPTS; attempt++) {
+      try {
+        // Reset the startup flag so runStartupFullCorpusTraining can run again
+        _startupCorpusRan = false;
+        _startupCorpusActive = true;
+        await runStartupFullCorpusTraining();
+        if (_startupCorpusRan) {
+          console.log('[GNN-GCP] Nightly training completed successfully');
+          // Fetch next MP batch to enrich tomorrow's training data
+          fetchNextMPBatch().catch(() => {});
+          break;
+        }
+      } catch (err: any) {
+        console.error(
+          `[GNN-GCP] Nightly training attempt ${attempt}/${NIGHTLY_MAX_ATTEMPTS} failed: ${err?.message ?? String(err)}`
+        );
+      } finally {
+        _startupCorpusActive = false;
+      }
+      if (attempt < NIGHTLY_MAX_ATTEMPTS) {
+        const waitMs = 5 * 60_000;
+        console.log(`[GNN-GCP] Waiting ${waitMs / 1000}s before retrying nightly training…`);
+        await new Promise(r => setTimeout(r, waitMs));
+      }
+    }
+
+    // Schedule the next night's training
+    scheduleNightlyTraining();
+  }, delayMs);
+}
+
 // ── Main loop ─────────────────────────────────────────────────────────────────
 
 export async function startGNNLoop(): Promise<void> {
-  console.log(`[GNN-GCP] GNN training worker started — poll every ${POLL_INTERVAL_MS / 1000}s`);
+  console.log('[GNN-GCP] GNN worker started — trains once daily at midnight UTC, serves predictions otherwise');
   console.log(`[GNN-GCP] Progressive MP fetch: ${MP_BATCH_SIZE} records/cycle, max cache ${MP_MAX_CACHE}`);
 
   // ── Start Python GNN service ──────────────────────────────────────────────
+  // The Python service stays alive permanently for /predict and /predict-xgb.
+  // Training (/train) only fires at midnight UTC.
   console.log("[GNN-GCP] Starting Python GNN service (FastAPI)…");
   try {
     await spawnPythonGNNService();
@@ -1437,34 +1497,10 @@ export async function startGNNLoop(): Promise<void> {
   }
   console.log("[GNN-GCP] Python GNN service ready on " + GNN_SERVICE_URL);
 
-  // Reset any jobs left in 'running' state from a previous crashed/restarted process.
-  // Without this, the local server sees an active job and won't dispatch new ones.
-  try {
-    const reset = await db.execute(
-      `UPDATE gnn_training_jobs SET status = 'queued', started_at = NULL
-       WHERE status = 'running'
-         AND (started_at IS NULL OR started_at < NOW() - INTERVAL '5 minutes')
-       RETURNING id`
-    );
-    const resetIds: number[] = ((reset as any).rows ?? (Array.isArray(reset) ? reset : [])).map((r: any) => r.id);
-    if (resetIds.length > 0) {
-      console.log(`[GNN-GCP] Reset ${resetIds.length} stale running job(s) back to queued: #${resetIds.join(', #')}`);
-    }
-  } catch (err: any) {
-    console.warn(`[GNN-GCP] Stale job reset failed (non-fatal): ${err.message?.slice(0, 80)}`);
-  }
-
-  // Phase 3 startup: train on full NIMS+JARVIS corpus as a background task.
-  // Delayed 120s (was 30s) so SuperCon/COD/JARVIS/3DSC ingestion + DFT/ML/XGB
-  // poll loops can claim their initial DB connections and settle. Hitting Neon's
-  // pgBouncer with a 5-loader cascade at the same instant as ingestion's batch
-  // inserts is what triggered the "Exceeded concurrency limit" cap and made
-  // every loader silently return [] → empty training data → tiny model.
-  //
-  // Wrapped in a retry loop so a transient DB cap during the first attempt
-  // doesn't permanently disable startup training for the worker's lifetime.
-  // Each failed attempt waits 5 minutes before retrying so the connection
-  // pressure has time to subside.
+  // ── Initial startup training ──────────────────────────────────────────────
+  // On first boot (or after restart), run one training pass so we have a fresh
+  // model. Delayed 120s to let ingestion settle and avoid DB connection storms.
+  // After this, all subsequent training happens at midnight UTC.
   void (async () => {
     try {
       await new Promise(r => setTimeout(r, 120_000));
@@ -1472,9 +1508,13 @@ export async function startGNNLoop(): Promise<void> {
       for (let attempt = 1; attempt <= STARTUP_MAX_ATTEMPTS; attempt++) {
         try {
           await runStartupFullCorpusTraining();
-          if (_startupCorpusRan) return; // success — flag is set at end of function
+          if (_startupCorpusRan) {
+            console.log('[GNN-GCP] Initial startup training complete — scheduling nightly runs');
+            fetchNextMPBatch().catch(() => {});
+            break;
+          }
           console.warn(
-            `[GNN-GCP] Startup attempt ${attempt}/${STARTUP_MAX_ATTEMPTS} returned without setting ran flag — likely deferred. Retrying.`
+            `[GNN-GCP] Startup attempt ${attempt}/${STARTUP_MAX_ATTEMPTS} returned without setting ran flag — retrying`
           );
         } catch (err: any) {
           console.error(
@@ -1487,43 +1527,37 @@ export async function startGNNLoop(): Promise<void> {
           await new Promise(r => setTimeout(r, waitMs));
         }
       }
-      console.error(
-        `[GNN-GCP] Startup corpus training gave up after ${STARTUP_MAX_ATTEMPTS} attempts. ` +
-        `Worker will continue polling for dispatched jobs but will not have a fresh full-corpus baseline.`
-      );
     } finally {
-      // Cycle 1375 fix: clear the active flag whether startup succeeded, failed,
-      // or exhausted retries. Once cleared, the dispatched-job poll loop is free
-      // to claim the GNN slot. Without this finally, a successful startup never
-      // clears the flag and dispatched jobs would be locked out forever after
-      // startup completes — _startupCorpusActive would stay true.
       _startupCorpusActive = false;
-      console.log('[GNN-GCP] Startup corpus phase complete — dispatched-job poll loop unblocked');
+      // Schedule nightly training regardless of whether startup succeeded.
+      // If startup failed, the nightly run will be the first real training.
+      scheduleNightlyTraining();
+      console.log('[GNN-GCP] Python service serving predictions — next training at midnight UTC');
     }
   })();
 
-  // Delay job polling by 125s so the startup corpus training acquires the slot first.
-  // Was 35s — increased to match the new 120s startup delay so the poll loop
-  // doesn't claim jobs before startup training has had a chance to run.
-  await new Promise(r => setTimeout(r, 125_000));
-  console.log("[GNN-GCP] Job polling starting — startup training should hold the slot");
-
+  // Keep the process alive. The Python service handles /predict and /predict-xgb
+  // requests. Training fires via the midnight timer. No more polling for
+  // dispatched jobs — training is strictly scheduled, not on-demand.
   while (running) {
-    try {
-      const processed = await processNextGnnJob();
-      await new Promise(r => setTimeout(r, processed ? 1000 : POLL_INTERVAL_MS));
-    } catch (err: any) {
-      const msg = err instanceof Error
-        ? (err.stack || err.message || err.constructor?.name || "(empty Error)")
-        : (err != null ? String(err) : "unknown");
-      console.error(`[GNN-GCP] Loop error (${err?.constructor?.name ?? typeof err}): ${msg || "(no message)"}`);
-      await new Promise(r => setTimeout(r, isConnectionError(err) ? 5000 : POLL_INTERVAL_MS));
+    await new Promise(r => setTimeout(r, 60_000));
+    // Periodic Python health check — respawn if it crashed
+    if (!_pythonTrainingInProgress) {
+      try {
+        await spawnPythonGNNService();
+      } catch (err: any) {
+        console.error(`[GNN-GCP] Python service health check failed: ${err.message?.slice(0, 100)}`);
+      }
     }
   }
 }
 
 export function stopGNNLoop() {
   running = false;
+  if (_midnightTimer) {
+    clearTimeout(_midnightTimer);
+    _midnightTimer = null;
+  }
   if (_pythonProcess && !_pythonProcess.killed) {
     console.log("[GNN-GCP] Stopping Python GNN service…");
     _pythonProcess.kill("SIGTERM");

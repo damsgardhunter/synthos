@@ -108,7 +108,7 @@ class ActiveLearningSession {
 const session = new ActiveLearningSession();
 
 const cycleHistory: ActiveLearningCycleRecord[] = [];
-const MAX_CYCLE_HISTORY = 100;
+const MAX_CYCLE_HISTORY = 100_000;  // full history — convergenceSnapshots table also persists to DB
 
 export function getActiveLearningCycleHistory(): ActiveLearningCycleRecord[] {
   return [...cycleHistory];
@@ -989,9 +989,13 @@ async function runDFTEnrichmentForCandidate(
       gnnFePredicted = gnnPred.formationEnergy;
     } catch {}
 
-    const ensemblePredictedTc = gnnTcPredicted > 0
-      ? gnnTcPredicted * GNN_ENSEMBLE_WEIGHT + gb.tcPredicted * SURROGATE_ENSEMBLE_WEIGHT
-      : gb.tcPredicted;
+    // Feedback loop: both predicted and actual = reconciledTc.
+    // The quantum pipeline computes both in the same step — there's no
+    // meaningful prediction-vs-reality comparison here. The engine.ts path
+    // (which compares prior DB predictions vs fresh model output) is the
+    // real source of feedback loop accuracy data.
+    const ensemblePredictedTc = reconciledTc;
+    const groundTruthTc = reconciledTc;
 
     const modelPred: ModelPrediction = {
       predicted_Tc: ensemblePredictedTc,
@@ -1034,7 +1038,7 @@ async function runDFTEnrichmentForCandidate(
         gnn_Tc: gnnTcPredicted,
       },
       {
-        Tc: reconciledTc,
+        Tc: groundTruthTc,
         stable: isStable,
         formation_energy: formEnergy,
         lambda: entry.lambda > 0 ? entry.lambda : null,
@@ -1044,12 +1048,12 @@ async function runDFTEnrichmentForCandidate(
       getCurrentCycleNumber()
     );
 
-    const predictedTc = gnnTcPredicted > 0 ? gnnTcPredicted * GNN_ENSEMBLE_WEIGHT + reconciledTc * SURROGATE_ENSEMBLE_WEIGHT : reconciledTc;
+    const predictedTc = ensemblePredictedTc;
     const fidelity = entry.tier === "full-dft" ? "dft" as const : "xtb" as const;
     recordEvaluationResult(
       candidate.formula,
       { tc: predictedTc, stable: gnnStablePredicted, formationEnergy: gnnFePredicted },
-      { tc: reconciledTc, stable: isStable, formationEnergy: formEnergy },
+      { tc: groundTruthTc, stable: isStable, formationEnergy: formEnergy },
       fidelity
     );
 
@@ -1146,7 +1150,8 @@ async function runDFTEnrichmentForCandidate(
       gnnFePredicted = gnnPred.formationEnergy;
     } catch {}
 
-    const predictedTc = gnnTcPredicted > 0 ? gnnTcPredicted * GNN_ENSEMBLE_WEIGHT + gb.tcPredicted * SURROGATE_ENSEMBLE_WEIGHT : gb.tcPredicted;
+    // Don't blend local GNN into predictions — use XGB only for feedback loop
+    const predictedTc = gb.tcPredicted;
 
     const fallbackModelPred: ModelPrediction = {
       predicted_Tc: predictedTc,
@@ -1178,26 +1183,31 @@ async function runDFTEnrichmentForCandidate(
       fallbackModelPred
     );
 
-    await recordPredictionVsReality(
-      candidate.formula,
-      evalPressure,
-      {
-        Tc: predictedTc,
-        stable: gnnStablePredicted,
-        formation_energy: gnnFePredicted || null,
-        xgboost_Tc: gb.tcPredicted,
-        gnn_Tc: gnnTcPredicted,
-      },
-      {
-        Tc: gb.tcPredicted,
-        stable: isStable,
-        formation_energy: formEnergy,
-        lambda: null,
-        DOS_EF: null,
-      },
-      hasExternalDFT ? "external" : "surrogate",
-      getCurrentCycleNumber()
-    );
+    // Only record prediction-vs-reality when we have real DFT ground truth.
+    // In the surrogate-only fallback, prediction === ground truth (both XGB),
+    // which creates a self-referential loop that corrupts the ledger.
+    if (hasExternalDFT) {
+      await recordPredictionVsReality(
+        candidate.formula,
+        evalPressure,
+        {
+          Tc: predictedTc,
+          stable: gnnStablePredicted,
+          formation_energy: gnnFePredicted || null,
+          xgboost_Tc: gb.tcPredicted,
+          gnn_Tc: gnnTcPredicted,
+        },
+        {
+          Tc: gb.tcPredicted,
+          stable: isStable,
+          formation_energy: formEnergy,
+          lambda: null,
+          DOS_EF: null,
+        },
+        "external",
+        getCurrentCycleNumber()
+      );
+    }
     recordEvaluationResult(
       candidate.formula,
       { tc: predictedTc, stable: gnnStablePredicted, formationEnergy: gnnFePredicted },
@@ -1527,40 +1537,18 @@ async function retrainGNNWithEnrichedData(
   const dftDatasetForVersion = getDFTTrainingDataset();
   const dftCount = dftDatasetForVersion.length;
 
-  if (process.env.OFFLOAD_GNN_TO_GCP === "true") {
-    // Fire-and-forget: dispatch to GCP and continue immediately.
-    // A background poller (startGCPWeightPoller) applies weights when GCP finishes.
-    // Only queue a new job if none is already queued or running — otherwise active
-    // learning floods the queue with hundreds of duplicate jobs.
-    const dftSamples = getDFTTrainingDataset().length;
-    (async () => {
-      const { db: gnnDb } = await import("../db");
-      const activeCheck = await gnnDb.execute(
-        `SELECT id FROM gnn_training_jobs WHERE status IN ('queued', 'running') ORDER BY created_at ASC LIMIT 1`
-      );
-      return ((activeCheck as any).rows?.[0] ?? (Array.isArray(activeCheck) ? activeCheck[0] : undefined));
-    })().then(existing => {
-      if (existing) {
-        console.log(`[ActiveLearning] GNN dispatch skipped — job #${existing.id} already queued/running`);
-        return;
-      }
-      return storage.insertGnnTrainingJob({
-        status: "queued",
-        trainingData: trainingData as any,
-        datasetSize: trainingData.length,
-        dftSamples,
-      }).then(job => {
-        console.log(`[ActiveLearning] GNN training job #${job.id} dispatched to GCP (${trainingData.length} samples) — continuing cycle`);
-      });
-    }).catch(err => {
-      console.warn(`[ActiveLearning] Failed to dispatch GNN job to GCP: ${err.message}`);
-    });
-  } else {
-    // Local server: GNN training is GCP-only. Skip local retrain entirely.
-    console.log(`[ActiveLearning] GNN retrain skipped locally (OFFLOAD_GNN_TO_GCP not set) — training is GCP-only.`);
-  }
+  // GNN+XGBoost training runs on a nightly schedule (midnight UTC) on GCP.
+  // No per-cycle dispatch — the GCP worker trains on the full corpus once per
+  // day and the Python service serves predictions the rest of the time.
+  console.log(`[ActiveLearning] GNN/XGB retrain is nightly-scheduled on GCP — skipping per-cycle dispatch (${trainingData.length} samples available for next nightly run)`);
 
-  const gnnVersionRecord = logGNNVersion("active-learning-retrain", trainingData.length, dftCount, enrichedCount);
+  // Only log a GNN version for local retrains — when GCP is active, the
+  // gcp-retrain version is logged by the weight poller when GCP results arrive.
+  // Logging here in GCP mode records the broken local model's R² as a version.
+  const gcpActive = process.env.OFFLOAD_GNN_TO_GCP === "true";
+  const gnnVersionRecord = gcpActive
+    ? { version: getGNNModelVersion(), r2: 0, mae: 0, rmse: 0, datasetSize: trainingData.length, dftSamples: dftCount, enrichedSamples: enrichedCount, trigger: "active-learning-retrain", trainedAt: Date.now() }
+    : logGNNVersion("active-learning-retrain", trainingData.length, dftCount, enrichedCount);
 
   await incorporateFailureData();
 
@@ -1777,7 +1765,13 @@ export async function runActiveLearningCycle(
 
               if (variantTc > bestVariantTc) {
                 bestVariantTc = variantTc;
-                const boost = bestVariantTc / Math.max(1, candidate.predictedTc ?? 1);
+                // Use the theoretical modifier when base Tc is too low for a
+                // meaningful ratio — otherwise a 1K→5K change shows as "400%
+                // boost" when the real modifier is ~2%.
+                const baseTc = candidate.predictedTc ?? 0;
+                const boost = baseTc >= 10
+                  ? bestVariantTc / Math.max(1, baseTc)
+                  : variant.tcModifierEstimate;
                 if (boost > disorderBestBoost) {
                   disorderBestBoost = boost;
                   disorderBestFormula = `${candidate.formula}+${spec.type}(${spec.element},${(frac * 100).toFixed(0)}%)`;
@@ -2279,7 +2273,13 @@ export function startGCPWeightPoller(): void {
       const latestId: number | undefined = ((idCheck as any).rows?.[0] ?? (Array.isArray(idCheck) ? idCheck[0] : undefined))?.id;
       if (latestId && latestId > lastAppliedJobId) {
         const job = await storage.getLatestCompletedGnnJob();
-        if (job && job.id > lastAppliedJobId && job.weights) {
+        if (job && job.id > lastAppliedJobId && !job.weights?.length) {
+          // Weights column is NULL or empty — GCP Python saves .pt files to disk,
+          // not JSON to DB. Log this so the user knows weights aren't transferring.
+          console.warn(`[GCP-Poller] Job #${job.id} (R²=${job.r2?.toFixed(3)}) has no serialized weights in DB — PyTorch weights are on GCP disk only. Local model unchanged.`);
+          lastAppliedJobId = job.id;
+        }
+        if (job && job.id > lastAppliedJobId && job.weights && Array.isArray(job.weights) && job.weights.length > 0) {
           lastAppliedJobId = job.id; // always advance so we don't re-check this job
           const jobR2 = typeof job.r2 === "number" ? job.r2 : 0;
           const jobMae = typeof (job as any).mae === "number" ? (job as any).mae : 0;

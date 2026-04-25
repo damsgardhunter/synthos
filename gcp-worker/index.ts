@@ -69,8 +69,8 @@ const ENABLE_ML  = process.env.ENABLE_ML_WORKER  !== "false";
 
 console.log("=".repeat(60));
 console.log("  Quantum Alchemy Engine — GCP Worker");
+console.log(`  GNN/XGB  : ${ENABLE_GNN ? "ENABLED (nightly training @ midnight UTC, predictions always)" : "disabled"}`);
 console.log(`  DFT loop : ${ENABLE_DFT ? "ENABLED" : "disabled"}`);
-console.log(`  GNN loop : ${ENABLE_GNN ? "ENABLED" : "disabled"}`);
 console.log(`  XGB loop : ${ENABLE_XGB ? "ENABLED" : "disabled"}`);
 console.log(`  ML  loop : ${ENABLE_ML  ? "ENABLED" : "disabled"}`);
 console.log(`  OMP_NUM_THREADS = ${process.env.OMP_NUM_THREADS}`);

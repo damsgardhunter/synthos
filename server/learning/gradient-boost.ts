@@ -5,7 +5,7 @@ import { getExtendedTrainingData } from "./extended-dataset";
 import { extractFeatures, type MLFeatureVector } from "./ml-predictor";
 import { computeMiedemaFormationEnergy } from "./phase-diagram-engine";
 import { computeCompositionFeatures, compositionFeatureVector, COMPOSITION_FEATURE_NAMES } from "./composition-features";
-import { classifyFamily } from "./utils";
+import { classifyFamily, normalizeFormula } from "./utils";
 import { storage } from "../storage";
 import { systemMetrics } from "../../shared/schema";
 import { db } from "../db";
@@ -1423,7 +1423,8 @@ export async function getTrainedModel(): Promise<GBModel> {
   if (process.env.OFFLOAD_XGB_TO_GCP === "true") {
     console.log(`[GradientBoost] OFFLOAD_XGB_TO_GCP=true — dispatching getTrainedModel to GCP (${X.length} samples)`);
     dispatchXGBJobToGCP(X, y, formulas).catch(err => console.warn("[GradientBoost] GCP getTrainedModel dispatch failed:", err.message));
-    return FALLBACK_MODEL;
+    cachedModel = FALLBACK_MODEL;
+    return cachedModel;
   }
 
   cachedModel = await trainGradientBoosting(X, y, 80, 0.08, 5);
@@ -1496,6 +1497,28 @@ function applicationAwareScore(tc: number, application?: string | null): number 
 
 export async function gbPredict(features: MLFeatureVector, formula?: string): Promise<{ tcPredicted: number; score: number; reasoning: string[] }> {
   const t0 = Date.now();
+
+  // Check colab XGB cache first — it has 15k+ trained predictions that are
+  // far more accurate than the local model (which often returns constants).
+  // Try both the raw formula and the normalized _sourceFormula since the cache
+  // may store keys in either format (e.g. "Sc2H5" vs alphabetized "H5Sc2").
+  if (_xgbCache.size > 0) {
+    const candidates = [formula, features._sourceFormula].filter(Boolean) as string[];
+    for (const f of candidates) {
+      const cached = _xgbCache.get(f);
+      if (cached && Date.now() - cached.fetchedAt < XGB_CACHE_TTL_MS) {
+        const tc = cached.result.tcMean;
+        const elapsed = Date.now() - t0;
+        try { const { recordInferenceTime } = require("./model-diagnostics"); recordInferenceTime("xgboost", elapsed); } catch {}
+        return {
+          tcPredicted: Math.min(350, Math.max(0, Math.round(tc * 10) / 10)),
+          score: applicationAwareScore(tc),
+          reasoning: [`Colab-XGB cache: Tc=${tc.toFixed(1)}K`],
+        };
+      }
+    }
+  }
+
   const model = await getTrainedModel();
   const x = featureVectorToArray(features, formula);
   const tcPredicted = predictWithModel(model, x);
@@ -1571,12 +1594,27 @@ function _loadXGBCacheFromDisk(): void {
     const raw = fs.readFileSync(_XGB_DISK_CACHE_PATH, "utf8");
     const parsed = JSON.parse(raw) as Record<string, { result: XGBUncertaintyResult; fetchedAt: number }>;
     let count = 0;
+    const now = Date.now();
+    let staleCount = 0;
     for (const [formula, entry] of Object.entries(parsed)) {
-      // Load with current timestamp so TTL check doesn't immediately expire them.
-      // Fresh network fetches will overwrite these as materials get re-scored.
-      _xgbCache.set(formula, { result: entry.result, fetchedAt: Date.now() });
+      // Preserve the original fetchedAt timestamp from disk so stale entries
+      // actually expire instead of getting a fresh timestamp on every restart.
+      // Entries older than the cache TTL will be treated as stale but still
+      // served as fallback if GCP is unreachable.
+      const ts = typeof entry.fetchedAt === "number" && entry.fetchedAt > 0 ? entry.fetchedAt : now;
+      if (now - ts > XGB_CACHE_TTL_MS) staleCount++;
+      _xgbCache.set(formula, { result: entry.result, fetchedAt: ts });
+      // Also store under normalized key so lookups via _sourceFormula
+      // (which alphabetizes elements, e.g. "Sc2H5" -> "H5Sc2") still hit.
+      try {
+        const norm = normalizeFormula(formula);
+        if (norm && norm !== formula) {
+          _xgbCache.set(norm, { result: entry.result, fetchedAt: ts });
+        }
+      } catch {}
       count++;
     }
+    if (staleCount > 0) console.log(`[Colab-XGB] ${staleCount}/${count} cached entries are stale (>${Math.round(XGB_CACHE_TTL_MS / 3600000)}h old) — will refresh from GCP`);
     if (count > 0) console.log(`[Colab-XGB] Loaded ${count} cached predictions from disk (${_XGB_DISK_CACHE_PATH})`);
   } catch { /* non-fatal — fresh predictions will fill the cache */ }
 }
@@ -1594,20 +1632,87 @@ function _saveXGBCacheToDisk(): void {
 // Load persisted cache immediately on module load.
 _loadXGBCacheFromDisk();
 
+// Circuit breaker for XGBoost GCP calls — skip after 3 consecutive failures
+let _xgbConsecutiveFailures = 0;
+let _xgbCircuitOpenUntil = 0;
+let _xgbWasConnected = false;
+const _XGB_CIRCUIT_COOLDOWN_MS = 5 * 60 * 1000;
+
+// Background health probe for XGB — checks /health every 60s while circuit is open
+let _xgbHealthProbeTimer: ReturnType<typeof setInterval> | null = null;
+
+function _startXgbHealthProbe(): void {
+  if (_xgbHealthProbeTimer || !_xgbServiceURL) return;
+  _xgbHealthProbeTimer = setInterval(async () => {
+    try {
+      const res = await fetch(`${_xgbServiceURL}/health`, { signal: AbortSignal.timeout(5_000) });
+      if (res.ok) {
+        _xgbConsecutiveFailures = 0;
+        _xgbCircuitOpenUntil = 0;
+        console.log(`[XGB] ✓ GCP health probe succeeded — connection restored, circuit closed`);
+        _stopXgbHealthProbe();
+        _xgbWasConnected = true;
+      }
+    } catch { /* still down */ }
+  }, 60_000);
+}
+
+function _stopXgbHealthProbe(): void {
+  if (_xgbHealthProbeTimer) {
+    clearInterval(_xgbHealthProbeTimer);
+    _xgbHealthProbeTimer = null;
+  }
+}
+
+async function _xgbFetchWithRetry(url: string, body: string, maxRetries = 1): Promise<Response> {
+  let lastErr: any;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+        signal: AbortSignal.timeout(10_000),
+      });
+    } catch (err) {
+      lastErr = err;
+      if (attempt < maxRetries) {
+        await new Promise(r => setTimeout(r, 500 + Math.random() * 500));
+      }
+    }
+  }
+  throw lastErr;
+}
+
 async function fetchColabXGBPrediction(formula: string, pressureGpa = 0): Promise<XGBUncertaintyResult | null> {
   if (!_xgbServiceURL) return null;
   if (!formula || formula === "null" || formula === "undefined") return null;
+  // Circuit breaker: skip GCP if it's been failing
+  if (_xgbConsecutiveFailures >= 3 && Date.now() < _xgbCircuitOpenUntil) return null;
+  if (_xgbConsecutiveFailures >= 3 && Date.now() >= _xgbCircuitOpenUntil) {
+    console.log(`[XGB] Circuit cooldown expired — retrying GCP connection...`);
+    _xgbConsecutiveFailures = 0;
+  }
   try {
-    // 10s timeout: with 2 uvicorn workers on GCP, at least one should be free
-    // to serve predictions even during training. The old 4s timeout was too
-    // tight and caused every request to fail during single-worker training.
-    const res = await fetch(`${_xgbServiceURL}/predict-xgb`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ formula, pressure_gpa: pressureGpa }),
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (!res.ok) return null;
+    const res = await _xgbFetchWithRetry(
+      `${_xgbServiceURL}/predict-xgb`,
+      JSON.stringify({ formula, pressure_gpa: pressureGpa }),
+    );
+    if (!res.ok) {
+      _xgbConsecutiveFailures++;
+      if (_xgbConsecutiveFailures >= 3) {
+        _xgbCircuitOpenUntil = Date.now() + _XGB_CIRCUIT_COOLDOWN_MS;
+        console.warn(`[XGB] Circuit OPEN after ${_xgbConsecutiveFailures} failures — skipping GCP for 5 min (status ${res.status})`);
+        _startXgbHealthProbe();
+      }
+      return null;
+    }
+    if (_xgbConsecutiveFailures > 0 || !_xgbWasConnected) {
+      console.log(`[XGB] ✓ GCP connection ${_xgbWasConnected ? "restored" : "established"} — XGBoost predictions active`);
+    }
+    _xgbConsecutiveFailures = 0;
+    _xgbWasConnected = true;
+    _stopXgbHealthProbe();
     const d = await res.json() as { tc: number; r2: number };
     const tc = Math.max(0, Number(d.tc ?? 0));
     const r2 = Number(d.r2 ?? 0.88);
@@ -1636,7 +1741,15 @@ async function fetchColabXGBPrediction(formula: string, pressureGpa = 0): Promis
         `95% CI: [${Math.max(0, tc - 1.96 * totalStd).toFixed(1)}K, ${(tc + 1.96 * totalStd).toFixed(1)}K]`,
       ],
     };
-  } catch {
+  } catch (err: any) {
+    _xgbConsecutiveFailures++;
+    if (_xgbConsecutiveFailures >= 3) {
+      _xgbCircuitOpenUntil = Date.now() + _XGB_CIRCUIT_COOLDOWN_MS;
+      console.warn(`[XGB] Circuit OPEN after ${_xgbConsecutiveFailures} failures — skipping GCP for 5 min (${err?.message?.slice(0, 80) ?? "unknown"})`);
+      _startXgbHealthProbe();
+    } else {
+      console.warn(`[XGB] Fetch failed (${_xgbConsecutiveFailures}/3): ${err?.message?.slice(0, 100) ?? "unknown"}`);
+    }
     return null;
   }
 }
@@ -1824,13 +1937,13 @@ function buildFeatureImportanceCache(): void {
   }
 
   const sorted = [...featureImp.entries()].sort((a, b) => b[1] - a[1]);
-  const maxImp = sorted.length > 0 ? sorted[0][1] : 1;
+  const totalImp = sorted.reduce((s, [, v]) => s + v, 0) || 1;
 
   cachedGlobalFeatureImportance = sorted.map(([idx, count]) => ({
     name: FEATURE_NAMES[idx] || `feature_${idx}`,
     index: idx,
     importance: count,
-    normalizedImportance: Math.round((count / maxImp) * 1000) / 1000,
+    normalizedImportance: Math.round((count / totalImp) * 1000) / 1000,
   }));
 }
 
@@ -2623,47 +2736,8 @@ async function dispatchXGBJobToGCP(X: number[][], y: number[], formulas?: string
   });
   console.log(`[XGBoost] Dispatched training job #${job.id} to GCP (${X.length} samples)`);
 
-  // Co-dispatch a GNN training job with the same formula+Tc pairs so both models
-  // train on the same data and stay in sync. Skip if a GNN job is already queued
-  // to avoid piling up duplicate jobs when XGB retrains on the same dataset.
-  if (formulas && formulas.length > 0 && process.env.OFFLOAD_GNN_TO_GCP === "true") {
-    (async () => {
-      const { db: gnnDb } = await import("../db");
-      const activeCheck = await gnnDb.execute(
-        `SELECT id, status FROM gnn_training_jobs WHERE status IN ('queued', 'running') ORDER BY created_at ASC LIMIT 1`
-      );
-      return (activeCheck as any).rows?.[0] ?? (Array.isArray(activeCheck) ? activeCheck[0] : undefined);
-    })().then(existing => {
-      if (existing) {
-        console.log(`[XGBoost] GNN co-dispatch skipped — job #${existing.id} already ${existing.status}`);
-        return;
-      }
-      const feIdx = PHYSICS_FEATURE_NAMES.indexOf("formationEnergy");
-      const lambdaIdx = PHYSICS_FEATURE_NAMES.indexOf("lambda");
-      const gnnTrainingData = formulas.map((formula, i) => ({
-        formula,
-        tc: y[i] ?? 0,
-        formationEnergy: (feIdx >= 0 && X[i]?.[feIdx] != null && Number.isFinite(X[i][feIdx]) && X[i][feIdx] !== 0)
-          ? X[i][feIdx] : undefined as number | undefined,
-        lambda: (lambdaIdx >= 0 && X[i]?.[lambdaIdx] != null && Number.isFinite(X[i][lambdaIdx]) && X[i][lambdaIdx] > 0)
-          ? X[i][lambdaIdx] : undefined as number | undefined,
-        structure: undefined as any,
-        prototype: undefined as string | undefined,
-      }));
-      return storage.insertGnnTrainingJob({
-        status: "queued",
-        trainingData: gnnTrainingData as any,
-        datasetSize: gnnTrainingData.length,
-        dftSamples: 0,
-      }).then(gnnJob => {
-        const withFe = gnnTrainingData.filter(s => s.formationEnergy != null).length;
-        const withLambda = gnnTrainingData.filter(s => s.lambda != null).length;
-        console.log(`[XGBoost] Co-dispatched GNN job #${gnnJob.id} (${gnnTrainingData.length} samples, ${withFe} with FE, ${withLambda} with λ)`);
-      });
-    }).catch(err => {
-      console.warn(`[XGBoost] GNN co-dispatch failed: ${err.message}`);
-    });
-  }
+  // GNN+XGBoost training is nightly-scheduled on GCP (midnight UTC).
+  // No per-cycle co-dispatch needed — both models train on the full corpus.
 }
 
 /**
