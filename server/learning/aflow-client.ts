@@ -698,12 +698,23 @@ export async function fetchAflowByTernaryElements(
   // AFLUX: comma-separated species, paging(page,perPage), field names without $
   const query = `species(${sorted.join(",")}),nspecies(3),paging(1,5),volume_atom,lattice_system_relax,enthalpy_formation_atom,Egap`;
 
-  console.log(`[AFLOW-Vegard] Fetching ternary endpoints for ${cacheKey}...`);
-  const rawEntries = await vegardAflowFetch(query);
-  if (!rawEntries || rawEntries.length === 0) {
-    console.log(`[AFLOW-Vegard] No ternary entries for ${cacheKey}`);
-    return [];
+  // Ternary queries are fire-and-forget enrichment (non-critical) — they often
+  // 504 from AFLOW because ternary searches are expensive server-side.
+  // Suppress verbose logging to avoid log spam.
+  let rawEntries: any[] | null;
+  try {
+    const url = `${AFLOW_API_BASE}/?${query},format(json)`;
+    const response = await fetch(url, {
+      headers: { "Accept": "application/json" },
+      signal: AbortSignal.timeout(20000), // Shorter timeout for non-critical ternary
+    });
+    if (!response.ok) return []; // Silently skip 504s
+    const text = await response.text();
+    rawEntries = parseAflowResponse(text);
+  } catch {
+    return []; // Silently skip timeouts
   }
+  if (!rawEntries || rawEntries.length === 0) return [];
   console.log(`[AFLOW-Vegard] Got ${rawEntries.length} ternary entries for ${cacheKey}`);
 
   const endpoints: AflowStructureEndpoint[] = [];

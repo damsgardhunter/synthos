@@ -94,14 +94,65 @@ const KSPACING_VCRELAX = 0.30;
 const KSPACING_SCF = 0.25;
 const KSPACING_SCF_METAL = 0.20;
 
-// Stage time caps (ms)
-const STAGE1_TIMEOUT_MS = 900_000;      // 15 min (was 10 — too tight for 5+ concurrent jobs)
-const STAGE2_TIMEOUT_MS = 1_800_000;    // 30 min
-const STAGE4_TIMEOUT_MS = 1_800_000;    // 30 min
+// Stage time caps (ms) — base values, scaled by element complexity
+const STAGE1_BASE_TIMEOUT_MS = 900_000;   // 15 min base
+const STAGE2_TIMEOUT_MS = 1_800_000;      // 30 min
+const STAGE4_TIMEOUT_MS = 1_800_000;      // 30 min
 
 // Force thresholds (Ry/bohr)
 const STAGE1_FORCE_THR = 1e-3;
 const STAGE2_FORCE_THR = 5e-4;
+
+// Heavy elements (Z >= 55) have expensive SCF iterations due to large
+// basis sets, many valence electrons, and relativistic effects.
+const HEAVY_ELEMENTS = new Set([
+  "La", "Ce", "Pr", "Nd", "Pm", "Sm", "Eu", "Gd", "Tb", "Dy", "Ho", "Er", "Tm", "Yb", "Lu",
+  "Hf", "Ta", "W", "Re", "Os", "Ir", "Pt", "Au", "Hg",
+  "Tl", "Pb", "Bi", "Po",
+  "Ba", "Cs",
+  "Th", "U", "Pa",
+]);
+
+// Magnetic elements need nspin=2 which doubles the SCF cost
+const MAGNETIC_ELS = new Set(["Fe", "Co", "Ni", "Mn", "Cr", "V", "Gd", "Eu", "Nd"]);
+
+/**
+ * Compute Stage 1 timeout and ecutwfc based on element complexity.
+ * Heavy elements get more time and coarser cutoffs for screening.
+ */
+function computeStage1Params(elements: string[], totalAtoms: number): {
+  timeoutMs: number;
+  ecutwfcScale: number;  // multiplier on base ecutwfc (< 1.0 = coarser)
+  kspacingOverride: number;
+  maxSeconds: number;
+} {
+  const heavyCount = elements.filter(e => HEAVY_ELEMENTS.has(e)).length;
+  const hasMagnetic = elements.some(e => MAGNETIC_ELS.has(e));
+
+  // Time scaling: heavy elements and magnetic systems need more budget
+  let timeMult = 1.0;
+  if (heavyCount >= 2) timeMult *= 2.0;      // 2+ heavy → 2x time
+  else if (heavyCount === 1) timeMult *= 1.5; // 1 heavy → 1.5x time
+  if (hasMagnetic) timeMult *= 1.5;           // magnetic → 1.5x (nspin=2)
+  if (totalAtoms >= 8) timeMult *= 1.3;       // large cell → 1.3x
+  if (totalAtoms >= 12) timeMult *= 1.5;      // very large → 1.5x more
+
+  const timeoutMs = Math.min(STAGE1_BASE_TIMEOUT_MS * timeMult, 3_600_000); // cap at 60 min
+
+  // Ecutwfc scaling: for screening, heavy systems can use ~80% of production cutoff
+  let ecutwfcScale = 1.0;
+  if (heavyCount >= 2 || totalAtoms >= 8) ecutwfcScale = 0.85;
+  if (heavyCount >= 3 || totalAtoms >= 12) ecutwfcScale = 0.75;
+
+  // K-spacing: coarser for heavy/large systems during screening
+  let kspacing = KSPACING_RELAX; // 0.40 base
+  if (heavyCount >= 2 || totalAtoms >= 8) kspacing = 0.50;
+  if (totalAtoms >= 12) kspacing = 0.60;
+
+  const maxSeconds = Math.floor(timeoutMs / 1000) - 60;
+
+  return { timeoutMs, ecutwfcScale, kspacingOverride: kspacing, maxSeconds };
+}
 
 // ---------------------------------------------------------------------------
 // Main pipeline entry
@@ -246,9 +297,13 @@ async function runStage1AtomicRelax(
   const totalAtoms = positions.length;
   const nTypes = elements.length;
 
-  const ecutwfc = cb.resolveEcutwfc(elements);
+  // Scale timeout, ecutwfc, and k-grid based on element complexity
+  const s1Params = computeStage1Params(elements, totalAtoms);
+
+  const baseEcutwfc = cb.resolveEcutwfc(elements);
+  const ecutwfc = Math.round(baseEcutwfc * s1Params.ecutwfcScale);
   const ecutrho = cb.resolveEcutrho(elements, ecutwfc);
-  const kpoints = cb.autoKPoints(latticeA, cOverA, KSPACING_RELAX);
+  const kpoints = cb.autoKPoints(latticeA, cOverA, s1Params.kspacingOverride);
 
   const hasMag = cb.hasMagneticElements(elements);
   const nspin = hasMag ? 2 : 1;
@@ -279,7 +334,7 @@ async function runStage1AtomicRelax(
   forc_conv_thr = ${STAGE1_FORCE_THR.toExponential(1).replace("e+0", "d+").replace("e-", "d-").replace("e+", "d+")},
   etot_conv_thr = 1.0d-4,
   nstep = 100,
-  max_seconds = ${Math.floor(STAGE1_TIMEOUT_MS / 1000) - 60},
+  max_seconds = ${s1Params.maxSeconds},
 /
 &SYSTEM
   ibrav = 0,
@@ -319,7 +374,8 @@ ${cellBlock}
   const inputFile = path.join(stageDir, "relax.in");
   fs.writeFileSync(inputFile, input);
 
-  const result = await cb.runPwx(inputFile, stageDir, STAGE1_TIMEOUT_MS);
+  console.log(`[Staged-Relax] ${formula} S1 params: timeout=${Math.round(s1Params.timeoutMs/1000)}s, ecutwfc=${ecutwfc}Ry, kspacing=${s1Params.kspacingOverride}`);
+  const result = await cb.runPwx(inputFile, stageDir, s1Params.timeoutMs);
   fs.writeFileSync(path.join(stageDir, "relax.out"), result.stdout);
 
   const wallTime = (Date.now() - t0) / 1000;
