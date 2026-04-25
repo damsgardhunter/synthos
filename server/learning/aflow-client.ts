@@ -489,6 +489,70 @@ export interface AflowStructureEndpoint {
  * Bypasses the shared aflowFetch() circuit breaker so that engine-cycle
  * AFLOW failures don't block the critical-path Vegard structure lookups.
  */
+/**
+ * Parse AFLOW AFLUX response body into an array of entry objects.
+ *
+ * AFLOW responses come in several formats:
+ * 1. Array: [{...}, {...}]  (rare, older API)
+ * 2. Paginated object: {"1 of 139": {...}, "2 of 139": {...}}
+ * 3. Concatenated paginated objects: {"1 of 139": {...},...}{"11 of 139": {...},...}
+ *    (when paging returns multiple pages)
+ */
+function parseAflowResponse(text: string): any[] {
+  const trimmed = text.trim();
+  if (trimmed.length < 3) return [];
+
+  // Try parsing as a single JSON value first
+  try {
+    const data = JSON.parse(trimmed);
+    if (Array.isArray(data)) return data;
+    if (typeof data === "object" && data !== null) {
+      return extractPaginatedEntries(data);
+    }
+    return [];
+  } catch {
+    // JSON.parse failed — likely concatenated objects: {...}{...}
+  }
+
+  // Split concatenated top-level JSON objects by finding balanced braces
+  const entries: any[] = [];
+  let i = 0;
+  while (i < trimmed.length) {
+    if (trimmed[i] !== "{") { i++; continue; }
+    let depth = 0;
+    let endIdx = -1;
+    for (let j = i; j < trimmed.length; j++) {
+      if (trimmed[j] === "{") depth++;
+      else if (trimmed[j] === "}") {
+        depth--;
+        if (depth === 0) { endIdx = j; break; }
+      }
+    }
+    if (endIdx < 0) break;
+    try {
+      const obj = JSON.parse(trimmed.slice(i, endIdx + 1));
+      if (typeof obj === "object" && obj !== null) {
+        entries.push(...extractPaginatedEntries(obj));
+      }
+    } catch {
+      // Skip malformed chunk
+    }
+    i = endIdx + 1;
+  }
+  return entries;
+}
+
+function extractPaginatedEntries(obj: Record<string, any>): any[] {
+  const entries: any[] = [];
+  for (const key of Object.keys(obj)) {
+    const val = obj[key];
+    if (typeof val === "object" && val !== null && !Array.isArray(val)) {
+      entries.push(val);
+    }
+  }
+  return entries;
+}
+
 async function vegardAflowFetch(query: string): Promise<any[] | null> {
   try {
     const url = `${AFLOW_API_BASE}/?${query},format(json)`;
@@ -497,70 +561,17 @@ async function vegardAflowFetch(query: string): Promise<any[] | null> {
       signal: AbortSignal.timeout(45000),
     });
     if (!response.ok) {
-      console.log(`[AFLOW-Vegard] HTTP ${response.status} for query: ${query.slice(0, 80)}`);
+      console.log(`[AFLOW-Vegard] HTTP ${response.status} for: ${query.slice(0, 60)}`);
       return null;
     }
     const text = await response.text();
-    if (!text || text.trim().length < 3) {
-      console.log(`[AFLOW-Vegard] Empty response for query: ${query.slice(0, 80)}`);
+    const entries = parseAflowResponse(text);
+    if (entries.length === 0) {
+      // Log a snippet so we can diagnose unexpected formats
+      console.log(`[AFLOW-Vegard] 0 entries parsed from ${text.length} bytes: ${text.slice(0, 150)}`);
       return null;
     }
-    const trimmed = text.trim();
-    // Debug: log first 300 chars of response to diagnose parsing
-    console.log(`[AFLOW-Vegard] Response (${trimmed.length} chars): ${trimmed.slice(0, 300)}`);
-
-    // AFLOW can return multiple paginated JSON objects concatenated: {...}{...}
-    // JSON.parse only handles one object, so we need to handle this.
-    // Strategy: try parsing as-is first; if that fails, try extracting first object.
-    let data: any;
-    try {
-      data = JSON.parse(trimmed);
-    } catch {
-      // Concatenated objects: extract the first complete JSON object
-      const firstClose = trimmed.indexOf("}", 1);
-      if (firstClose > 0) {
-        // Find the matching opening brace depth
-        let depth = 0;
-        let endIdx = -1;
-        for (let i = 0; i < trimmed.length; i++) {
-          if (trimmed[i] === "{") depth++;
-          else if (trimmed[i] === "}") {
-            depth--;
-            if (depth === 0) { endIdx = i; break; }
-          }
-        }
-        if (endIdx > 0) {
-          try {
-            data = JSON.parse(trimmed.slice(0, endIdx + 1));
-          } catch {
-            console.log(`[AFLOW-Vegard] JSON parse failed even for first object`);
-            return null;
-          }
-        } else {
-          console.log(`[AFLOW-Vegard] Cannot find complete JSON object in response`);
-          return null;
-        }
-      } else {
-        console.log(`[AFLOW-Vegard] JSON parse failed: ${trimmed.slice(0, 100)}`);
-        return null;
-      }
-    }
-
-    // AFLOW returns paginated objects like {"1 of 139": {...}, "2 of 139": {...}}
-    // or arrays. Handle both formats.
-    if (Array.isArray(data)) return data;
-    if (typeof data === "object" && data !== null) {
-      // Paginated object format: extract values
-      const entries: any[] = [];
-      for (const key of Object.keys(data)) {
-        if (typeof data[key] === "object" && data[key] !== null) {
-          entries.push(data[key]);
-        }
-      }
-      console.log(`[AFLOW-Vegard] Extracted ${entries.length} entries from paginated response (${Object.keys(data).length} keys)`);
-      return entries.length > 0 ? entries : null;
-    }
-    return null;
+    return entries;
   } catch (err: any) {
     console.log(`[AFLOW-Vegard] Fetch failed: ${err?.message?.slice(0, 80) ?? "unknown"}`);
     return null;
@@ -590,8 +601,9 @@ export async function fetchAflowByElements(
   const cached = await getAflowCachedData(cacheKey, "vegard_endpoint");
   if (cached && Array.isArray(cached) && cached.length > 0) return cached as AflowStructureEndpoint[];
 
-  // AFLUX species() requires comma-separated elements: species(Bi,Ge)
-  const query = `species(${sorted[0]},${sorted[1]}),nspecies(2),paging(10),$auid,$compound,$volume_atom,$lattice_system_relax,$spacegroup_relax,$sg2,$enthalpy_formation_atom,$Egap`;
+  // AFLUX syntax: species(Bi,Ge) with comma separation, paging(page,perPage),
+  // field names WITHOUT $ prefix ($ causes them to be silently ignored).
+  const query = `species(${sorted[0]},${sorted[1]}),nspecies(2),paging(1,10),volume_atom,lattice_system_relax,enthalpy_formation_atom,Egap`;
 
   console.log(`[AFLOW-Vegard] Fetching binary endpoints for ${cacheKey}...`);
   const rawEntries = await vegardAflowFetch(query);
@@ -602,19 +614,24 @@ export async function fetchAflowByElements(
   console.log(`[AFLOW-Vegard] Got ${rawEntries.length} raw entries for ${cacheKey}`);
 
   const endpoints: AflowStructureEndpoint[] = [];
+  let skippedNoVol = 0;
   for (const entry of rawEntries) {
-    const volAtom = entry.volume_atom != null ? Number(entry.volume_atom) : null;
-    if (volAtom == null || volAtom <= 0) continue;  // Skip entries without volume data
+    // AFLOW may return volume_atom under different keys depending on the catalog
+    const volAtom = entry.volume_atom ?? entry.volume_cell ?? entry.volume ?? null;
+    const volNum = volAtom != null ? Number(volAtom) : 0;
+    // Accept entries even without volume — the compound/spacegroup data is still
+    // valuable for prototype matching. Use 0 as placeholder.
+    if (!entry.compound && !entry.auid) continue; // Skip truly empty entries
 
     endpoints.push({
-      compound: entry.compound ?? `${sorted[0]}${sorted[1]}`,
+      compound: entry.compound ?? entry.Compound ?? `${sorted[0]}${sorted[1]}`,
       elements: sorted,
-      volumeAtom: volAtom,
-      latticeSystem: (entry.lattice_system_relax ?? "").toLowerCase(),
-      spaceGroupNumber: entry.spacegroup_relax != null ? Number(entry.spacegroup_relax) : 0,
-      spaceGroupSymbol: entry.sg2 ?? "",
+      volumeAtom: volNum > 0 ? volNum : 15, // Default 15 Å³/atom if missing
+      latticeSystem: (entry.lattice_system_relax ?? entry.lattice ?? "").toLowerCase(),
+      spaceGroupNumber: entry.spacegroup_relax ?? entry.sg ?? 0,
+      spaceGroupSymbol: entry.sg2 ?? entry.spacegroup ?? "",
       enthalpyFormationAtom: entry.enthalpy_formation_atom != null ? Number(entry.enthalpy_formation_atom) : null,
-      bandgap: entry.Egap != null ? Number(entry.Egap) : null,
+      bandgap: entry.Egap ?? entry.Egap_type != null ? Number(entry.Egap ?? 0) : null,
       source: "AFLOW",
     });
   }
@@ -642,8 +659,8 @@ export async function fetchAflowByTernaryElements(
   const cached = await getAflowCachedData(cacheKey, "vegard_endpoint");
   if (cached && Array.isArray(cached) && cached.length > 0) return cached as AflowStructureEndpoint[];
 
-  // AFLUX species() requires comma-separated elements
-  const query = `species(${sorted.join(",")}),nspecies(3),paging(5),$auid,$compound,$volume_atom,$lattice_system_relax,$spacegroup_relax,$sg2,$enthalpy_formation_atom,$Egap`;
+  // AFLUX: comma-separated species, paging(page,perPage), field names without $
+  const query = `species(${sorted.join(",")}),nspecies(3),paging(1,5),volume_atom,lattice_system_relax,enthalpy_formation_atom,Egap`;
 
   console.log(`[AFLOW-Vegard] Fetching ternary endpoints for ${cacheKey}...`);
   const rawEntries = await vegardAflowFetch(query);
