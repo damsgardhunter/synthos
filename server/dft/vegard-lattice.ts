@@ -139,7 +139,7 @@ async function fetchBinaryEndpoints(el1: string, el2: string): Promise<BinaryEnd
         spaceGroup: entry.spaceGroupSymbol,
         isMetallic: entry.bandgap != null ? entry.bandgap < 0.01 : null,
         source: "AFLOW",
-        positions: null,  // AFLOW doesn't return positions in our query
+        positions: entry.positions ?? null,  // DFT-relaxed positions from AFLOW
       });
     }
   }
@@ -407,7 +407,7 @@ function interpolatePositionsFromEndpoints(
   const result: Array<{ element: string; x: number; y: number; z: number }> = [];
 
   // Map template elements to target elements
-  const templateEls = [...templateElements];
+  const templateEls = Array.from(templateElements);
   const targetEls = [...elements];
   const mapping: Record<string, string> = {};
 

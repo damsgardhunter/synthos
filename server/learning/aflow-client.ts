@@ -482,6 +482,10 @@ export interface AflowStructureEndpoint {
   enthalpyFormationAtom: number | null;  // eV/atom
   bandgap: number | null;    // eV — 0 means metallic
   source: "AFLOW";
+  /** DFT-relaxed lattice parameters [a, b, c, alpha, beta, gamma] from AFLOW geometry field. */
+  geometry: [number, number, number, number, number, number] | null;
+  /** DFT-relaxed fractional atomic positions from AFLOW. */
+  positions: Array<{ element: string; x: number; y: number; z: number }> | null;
 }
 
 /**
@@ -603,7 +607,9 @@ export async function fetchAflowByElements(
 
   // AFLUX syntax: species(Bi,Ge) with comma separation, paging(page,perPage),
   // field names WITHOUT $ prefix ($ causes them to be silently ignored).
-  const query = `species(${sorted[0]},${sorted[1]}),nspecies(2),paging(1,10),volume_atom,lattice_system_relax,enthalpy_formation_atom,Egap`;
+  // Include geometry + positions_fractional + composition + species_pp for
+  // DFT-relaxed atomic positions — these feed VCA position interpolation.
+  const query = `species(${sorted[0]},${sorted[1]}),nspecies(2),paging(1,10),volume_atom,lattice_system_relax,enthalpy_formation_atom,Egap,geometry,positions_fractional,composition,species_pp`;
 
   console.log(`[AFLOW-Vegard] Fetching binary endpoints for ${cacheKey}...`);
   const rawEntries = await vegardAflowFetch(query);
@@ -623,16 +629,46 @@ export async function fetchAflowByElements(
     // valuable for prototype matching. Use 0 as placeholder.
     if (!entry.compound && !entry.auid) continue; // Skip truly empty entries
 
+    // Parse DFT-relaxed atomic positions from AFLOW's positions_fractional + species_pp + composition
+    let aflowPositions: Array<{ element: string; x: number; y: number; z: number }> | null = null;
+    if (entry.positions_fractional && Array.isArray(entry.positions_fractional) &&
+        entry.species_pp && Array.isArray(entry.species_pp) &&
+        entry.composition && Array.isArray(entry.composition)) {
+      aflowPositions = [];
+      const species = (entry.species_pp as string[]).map((s: string) => s.replace(/_.*/, "")); // Nb_sv -> Nb
+      const comp = entry.composition as number[];
+      let atomIdx = 0;
+      for (let s = 0; s < species.length && s < comp.length; s++) {
+        for (let i = 0; i < comp[s]; i++) {
+          if (atomIdx < entry.positions_fractional.length) {
+            const pos = entry.positions_fractional[atomIdx] as number[];
+            if (pos && pos.length >= 3) {
+              aflowPositions.push({ element: species[s], x: pos[0], y: pos[1], z: pos[2] });
+            }
+          }
+          atomIdx++;
+        }
+      }
+      if (aflowPositions.length === 0) aflowPositions = null;
+    }
+
+    // Parse geometry [a, b, c, alpha, beta, gamma]
+    const geom = entry.geometry && Array.isArray(entry.geometry) && entry.geometry.length >= 6
+      ? entry.geometry as [number, number, number, number, number, number]
+      : null;
+
     endpoints.push({
       compound: entry.compound ?? entry.Compound ?? `${sorted[0]}${sorted[1]}`,
       elements: sorted,
-      volumeAtom: volNum > 0 ? volNum : 15, // Default 15 Å³/atom if missing
+      volumeAtom: volNum > 0 ? volNum : 15,
       latticeSystem: (entry.lattice_system_relax ?? entry.lattice ?? "").toLowerCase(),
       spaceGroupNumber: entry.spacegroup_relax ?? entry.sg ?? 0,
       spaceGroupSymbol: entry.sg2 ?? entry.spacegroup ?? "",
       enthalpyFormationAtom: entry.enthalpy_formation_atom != null ? Number(entry.enthalpy_formation_atom) : null,
-      bandgap: entry.Egap ?? entry.Egap_type != null ? Number(entry.Egap ?? 0) : null,
+      bandgap: entry.Egap != null ? Number(entry.Egap) : null,
       source: "AFLOW",
+      geometry: geom,
+      positions: aflowPositions,
     });
   }
 
@@ -685,6 +721,8 @@ export async function fetchAflowByTernaryElements(
       enthalpyFormationAtom: entry.enthalpy_formation_atom != null ? Number(entry.enthalpy_formation_atom) : null,
       bandgap: entry.Egap != null ? Number(entry.Egap) : null,
       source: "AFLOW",
+      geometry: null,
+      positions: null,
     });
   }
 
