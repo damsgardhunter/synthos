@@ -65,7 +65,10 @@ function aflowRecordFailure(reason: string): void {
       console.log(`[AFLOW API] ${reason}, backing off`);
     }
     aflowConsecutiveFailures++;
-    aflowBackoffUntil = Date.now() + Math.min(300000, 30000 * aflowConsecutiveFailures);
+    // Gentler backoff: 10s for first failure (was 30s), scaling up to 5 min max.
+    // Single timeouts shouldn't block Vegard lookups for the next 30s worth
+    // of materials — different element pairs may respond faster.
+    aflowBackoffUntil = Date.now() + Math.min(300000, 10000 * aflowConsecutiveFailures);
   }
 }
 
@@ -77,9 +80,12 @@ async function aflowFetch(query: string): Promise<any[] | null> {
   aflowInFlight++;
   try {
     const url = `${AFLOW_API_BASE}/?${query},format(json)`;
+    // 45s timeout: AFLOW can be slow for large binary endpoint queries (139+
+    // entries for Bi-Ge). The prior 20s was borderline and triggered the
+    // backoff circuit breaker, blocking all subsequent Vegard lookups.
     const response = await fetch(url, {
       headers: { "Accept": "application/json" },
-      signal: AbortSignal.timeout(20000),
+      signal: AbortSignal.timeout(45000),
     });
 
     if (!response.ok) {
