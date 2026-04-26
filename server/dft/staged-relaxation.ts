@@ -116,56 +116,117 @@ const HEAVY_ELEMENTS = new Set([
 // Magnetic elements need nspin=2 which doubles the SCF cost
 const MAGNETIC_ELS = new Set(["Fe", "Co", "Ni", "Mn", "Cr", "V", "Gd", "Eu", "Nd"]);
 
+// Valence electron counts per element (from QE pseudopotential zValence).
+// Used to estimate SCF cost: more valence electrons = larger basis set = more expensive.
+const Z_VALENCE: Record<string, number> = {
+  H: 1, He: 2, Li: 3, Be: 4, B: 3, C: 4, N: 5, O: 6, F: 7,
+  Na: 9, Mg: 10, Al: 3, Si: 4, P: 5, S: 6, Cl: 7,
+  K: 9, Ca: 10, Sc: 11, Ti: 12, V: 13, Cr: 14, Mn: 15,
+  Fe: 16, Co: 17, Ni: 18, Cu: 19, Zn: 20, Ga: 13, Ge: 14,
+  As: 15, Se: 16, Br: 7, Rb: 9, Sr: 10, Y: 11, Zr: 12,
+  Nb: 13, Mo: 14, Ru: 14, Rh: 15, Pd: 16, Ag: 19, Cd: 20,
+  In: 13, Sn: 14, Sb: 15, Te: 16, I: 7, Cs: 9, Ba: 10,
+  La: 11, Ce: 12, Pr: 13, Nd: 14, Sm: 16, Eu: 17, Gd: 18,
+  Hf: 12, Ta: 13, W: 14, Re: 15, Os: 14, Ir: 15, Pt: 16,
+  Au: 19, Hg: 20, Tl: 13, Pb: 14, Bi: 15,
+  Th: 12, U: 14,
+};
+
 /**
- * Compute Stage 1 timeout and ecutwfc based on element complexity.
- * Heavy elements get more time and coarser cutoffs for screening.
+ * Physics-based SCF cost estimator for Stage 1 timeout.
+ *
+ * Instead of arbitrary multipliers, this calculates the expected wall time
+ * from the actual computational cost of one SCF iteration:
+ *
+ *   cost_per_iter ∝ N_atoms² × N_electrons × N_kpoints
+ *   total_cost = cost_per_iter × N_iterations × nspin_factor
+ *   timeout = total_cost / calibration_constant + 10 min safety margin
+ *
+ * Calibrated from observed Stage 1 results:
+ *   MoSiTl2 (4 atoms, 60 electrons, ~4 kpts): 844s
+ *   LaH12   (13 atoms, 23 electrons, ~2 kpts): 3319s
+ *   Bi2GeSb (4 atoms, 58 electrons, ~4 kpts):  1293s
  */
-function computeStage1Params(elements: string[], totalAtoms: number): {
+function computeStage1Params(elements: string[], totalAtoms: number, counts?: Record<string, number>): {
   timeoutMs: number;
-  ecutwfcScale: number;  // multiplier on base ecutwfc (< 1.0 = coarser)
+  ecutwfcScale: number;
   kspacingOverride: number;
   maxSeconds: number;
 } {
   const heavyCount = elements.filter(e => HEAVY_ELEMENTS.has(e)).length;
   const hasMagnetic = elements.some(e => MAGNETIC_ELS.has(e));
-  // "Semi-heavy" elements (Z >= 37, 4d/5p block): not as expensive as 6p/lanthanides
-  // but still significantly more costly than light elements
-  const SEMI_HEAVY = new Set(["Rb", "Sr", "Y", "Zr", "Nb", "Mo", "Tc", "Ru", "Rh", "Pd", "Ag", "Cd", "In", "Sn", "Sb", "Te", "I"]);
-  const semiHeavyCount = elements.filter(e => SEMI_HEAVY.has(e)).length;
 
-  // Time scaling: compound cost based on element weight, atom count, and magnetism.
-  // Each SCF iteration cost scales roughly as N_atoms^2 * N_electrons.
-  // Heavy 6p elements (Bi, Pb, Tl) have 3-5x more electrons than light elements.
-  let timeMult = 1.0;
-
-  // Element weight scaling
-  if (heavyCount >= 3) timeMult *= 3.0;       // 3+ heavy (e.g., Bi3SbSn) → 3x
-  else if (heavyCount >= 2) timeMult *= 2.5;  // 2 heavy → 2.5x
-  else if (heavyCount === 1) timeMult *= 1.8; // 1 heavy → 1.8x
-  if (semiHeavyCount >= 2) timeMult *= 1.3;   // 2+ semi-heavy on top of heavy
-  if (hasMagnetic) timeMult *= 1.8;           // magnetic → 1.8x (nspin=2 doubles cost + spin convergence slower)
-
-  // Heavy + magnetic combo is especially expensive (Ba+Co, La+Fe, etc.)
-  if (heavyCount >= 1 && hasMagnetic) timeMult *= 1.3; // extra 30% for the combo
-
-  // Atom count scaling — continuous, not just thresholds
-  // More atoms = more bands = more SCF cost per iteration
-  if (totalAtoms >= 4) timeMult *= 1.0 + (totalAtoms - 3) * 0.2; // +20% per atom above 3
-
-  const timeoutMs = Math.min(STAGE1_BASE_TIMEOUT_MS * timeMult, 3_600_000); // cap at 60 min
-
-  // Ecutwfc scaling: for screening, heavy systems can use ~80% of production cutoff
+  // --- Ecutwfc and kspacing first (needed for cost estimate) ---
   let ecutwfcScale = 1.0;
   if (heavyCount >= 2 || totalAtoms >= 6) ecutwfcScale = 0.85;
   if (heavyCount >= 3 || totalAtoms >= 10) ecutwfcScale = 0.75;
 
-  // K-spacing: coarser for heavy/large systems during screening
   let kspacing = KSPACING_RELAX; // 0.40 base
   if (heavyCount >= 1 || totalAtoms >= 5) kspacing = 0.50;
   if (heavyCount >= 2 || totalAtoms >= 8) kspacing = 0.55;
   if (totalAtoms >= 12) kspacing = 0.65;
 
-  const maxSeconds = Math.floor(timeoutMs / 1000) - 60;
+  // --- Physics-based cost model ---
+  // Step 1: Count total valence electrons in the unit cell
+  let cellElectrons = 0;
+  if (counts) {
+    for (const el of elements) {
+      cellElectrons += (counts[el] ?? 1) * (Z_VALENCE[el] ?? 8);
+    }
+  } else {
+    // Fallback: assume uniform stoichiometry
+    for (const el of elements) {
+      cellElectrons += (Z_VALENCE[el] ?? 8);
+    }
+    cellElectrons = (cellElectrons / elements.length) * totalAtoms;
+  }
+
+  // Step 2: Estimate k-points from kspacing and a typical lattice ~5 A
+  // k_i = ceil(2π / (kspacing * a)), assume a ≈ 5 A for estimation
+  const typicalLattice = 5.0;
+  const kPerDir = Math.max(2, Math.ceil((2 * Math.PI) / (kspacing * typicalLattice)));
+  const nKpoints = kPerDir * kPerDir * kPerDir;
+
+  // Step 3: nspin factor — spin-polarized doubles the work
+  const nspinFactor = hasMagnetic ? 2.0 : 1.0;
+
+  // Step 4: Number of SCF iterations for relax (typically 50-150 per ionic step,
+  // ~5-20 ionic steps for Stage 1's nstep=100)
+  const scfItersPerIonic = 80;
+  const ionicSteps = 10; // Average for a reasonable starting structure
+
+  // Step 5: Cost model — calibrated from observed wall times:
+  //   MoSiTl2: 4 atoms, ~60 e-, 4³ kpts, nspin=1 → 844s
+  //   LaH12:  13 atoms, ~23 e-, 2³ kpts, nspin=1 → 3319s
+  //   Bi2GeSb: 4 atoms, ~58 e-, 4³ kpts, nspin=1 → 1293s
+  //
+  // Model: time_s = C * N_atoms² * N_electrons * N_kpoints * nspin * iters
+  // Fitting C from MoSiTl2: 844 = C * 16 * 60 * 64 * 1 * (80*10)
+  //   C = 844 / (16 * 60 * 64 * 800) = 844 / 49,152,000 ≈ 1.72e-5
+  //
+  // But SCF cost doesn't scale linearly with all factors — it's more like
+  // N_atoms^1.5 * sqrt(N_electrons) * N_kpoints^0.7 in practice.
+  // Use a simpler empirical formula calibrated to the three data points:
+  const costFactor = Math.pow(totalAtoms, 1.8) * Math.sqrt(cellElectrons) * Math.pow(nKpoints, 0.6) * nspinFactor;
+
+  // Calibration constant: fit to observed data
+  // MoSiTl2: costFactor = 4^1.8 * sqrt(60) * 64^0.6 * 1 = 12.1 * 7.75 * 14.9 = 1397 → 844s → rate = 0.60 s/unit
+  // LaH12:   costFactor = 13^1.8 * sqrt(23) * 8^0.6 * 1 = 113 * 4.80 * 3.48 = 1888 → 3319s → rate = 1.76 s/unit
+  // Bi2GeSb: costFactor = 4^1.8 * sqrt(58) * 64^0.6 * 1 = 12.1 * 7.62 * 14.9 = 1373 → 1293s → rate = 0.94 s/unit
+  // Average rate ≈ 1.1 s/unit. Use 1.5 to be conservative (accounts for VM contention).
+  const SECONDS_PER_COST_UNIT = 1.5;
+  const estimatedSeconds = costFactor * SECONDS_PER_COST_UNIT;
+
+  // Add 10 minute safety margin
+  const SAFETY_MARGIN_S = 600;
+  const timeoutSeconds = estimatedSeconds + SAFETY_MARGIN_S;
+
+  // Floor at 15 min (simple systems), cap at 90 min (avoid hogging the worker)
+  const clampedTimeoutS = Math.max(900, Math.min(timeoutSeconds, 5400));
+  const timeoutMs = clampedTimeoutS * 1000;
+  const maxSeconds = Math.floor(clampedTimeoutS) - 60; // QE max_seconds slightly under timeout
+
+  console.log(`[Staged-Relax] Cost model: ${totalAtoms} atoms, ${cellElectrons.toFixed(0)} e-, ${nKpoints} kpts, nspin=${nspinFactor} → cost=${costFactor.toFixed(0)}, est=${estimatedSeconds.toFixed(0)}s, timeout=${clampedTimeoutS.toFixed(0)}s`);
 
   return { timeoutMs, ecutwfcScale, kspacingOverride: kspacing, maxSeconds };
 }
@@ -181,7 +242,7 @@ export async function runStagedRelaxation(opts: StagedRelaxationOpts): Promise<S
   // Limit candidates for expensive systems — no point testing 3 candidates
   // if each takes 50+ min on shared VM. Heavy+magnetic systems test only 1.
   const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
-  const s1Params = computeStage1Params(elements, totalAtoms);
+  const s1Params = computeStage1Params(elements, totalAtoms, counts);
   const defaultMax = s1Params.timeoutMs > 2_400_000 ? 1 : s1Params.timeoutMs > 1_500_000 ? 2 : 3;
   const maxS1 = opts.maxStage1Candidates ?? defaultMax;
 
@@ -319,7 +380,7 @@ async function runStage1AtomicRelax(
   const nTypes = elements.length;
 
   // Scale timeout, ecutwfc, and k-grid based on element complexity
-  const s1Params = computeStage1Params(elements, totalAtoms);
+  const s1Params = computeStage1Params(elements, totalAtoms, counts);
 
   const baseEcutwfc = cb.resolveEcutwfc(elements);
   const ecutwfc = Math.round(baseEcutwfc * s1Params.ecutwfcScale);
