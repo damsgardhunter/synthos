@@ -3830,7 +3830,24 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     };
     const isKnownCompound = !!VERIFIED_LATTICE_A[normFormula];
 
-    if (!isKnownCompound && structureCandidates.length > 0) {
+    // For known compounds with no Vegard candidates, create one using
+    // the literature lattice + generateAtomicPositions
+    if (isKnownCompound && structureCandidates.length === 0) {
+      const litA = VERIFIED_LATTICE_A[normFormula];
+      const litPositions = generateAtomicPositions(elements, counts, formula, litA);
+      structureCandidates.push({
+        latticeA: litA,
+        positions: litPositions,
+        prototype: "literature",
+        crystalSystem: "cubic",
+        spaceGroup: "",
+        source: `Literature lattice (a=${litA} A)`,
+        confidence: 0.95,
+        isMetallic: null,
+      });
+    }
+
+    if (structureCandidates.length > 0) {
       // Run staged relaxation (Stage 1 + Stage 2) on structure candidates
       const qeCallbacks = buildQERunnerCallbacks();
       const skipVcRelax = (
