@@ -4501,7 +4501,16 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     // early — e.g., BiGeSb had 4/9 imaginary modes that would have been caught
     // here in ~10 min instead of wasting 14.5h on the full pipeline.
     let gammaPhononPassed = true;
-    if (scfUsable && !isPartialWalltime && result.scf) {
+    // Skip Gamma phonon check for high-pressure hydrides (P >= 100 GPa).
+    // DFPT is numerically unstable at extreme compression — ph.x crashes with
+    // IEEE_UNDERFLOW_FLAG on LaH12/LaH10/YH9Na2 because the Fermi surface is
+    // too complex for Gamma-point DFPT perturbation convergence.
+    // The full phonon pipeline (Stage 5) has retry logic that handles these cases.
+    const skipGammaPhonon = (workerPressure >= 100 && elements.includes("H"));
+    if (skipGammaPhonon) {
+      console.log(`[QE-Worker] Skipping Gamma phonon check for ${formula} — high-P hydride (${workerPressure} GPa), DFPT unstable at extreme compression`);
+    }
+    if (scfUsable && !isPartialWalltime && result.scf && !skipGammaPhonon) {
       try {
         const qeCallbacks = buildQERunnerCallbacks();
         const hasH = elements.includes("H");
