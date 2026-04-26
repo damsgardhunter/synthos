@@ -140,14 +140,17 @@ function computeStage1Params(elements: string[], totalAtoms: number): {
 
   // Element weight scaling
   if (heavyCount >= 3) timeMult *= 3.0;       // 3+ heavy (e.g., Bi3SbSn) → 3x
-  else if (heavyCount >= 2) timeMult *= 2.0;  // 2 heavy → 2x
-  else if (heavyCount === 1) timeMult *= 1.5; // 1 heavy → 1.5x
-  if (semiHeavyCount >= 2 && heavyCount === 0) timeMult *= 1.5; // semi-heavy without full heavy
-  if (hasMagnetic) timeMult *= 1.5;           // magnetic → 1.5x (nspin=2)
+  else if (heavyCount >= 2) timeMult *= 2.5;  // 2 heavy → 2.5x
+  else if (heavyCount === 1) timeMult *= 1.8; // 1 heavy → 1.8x
+  if (semiHeavyCount >= 2) timeMult *= 1.3;   // 2+ semi-heavy on top of heavy
+  if (hasMagnetic) timeMult *= 1.8;           // magnetic → 1.8x (nspin=2 doubles cost + spin convergence slower)
+
+  // Heavy + magnetic combo is especially expensive (Ba+Co, La+Fe, etc.)
+  if (heavyCount >= 1 && hasMagnetic) timeMult *= 1.3; // extra 30% for the combo
 
   // Atom count scaling — continuous, not just thresholds
   // More atoms = more bands = more SCF cost per iteration
-  if (totalAtoms >= 4) timeMult *= 1.0 + (totalAtoms - 3) * 0.15; // +15% per atom above 3
+  if (totalAtoms >= 4) timeMult *= 1.0 + (totalAtoms - 3) * 0.2; // +20% per atom above 3
 
   const timeoutMs = Math.min(STAGE1_BASE_TIMEOUT_MS * timeMult, 3_600_000); // cap at 60 min
 
@@ -175,7 +178,12 @@ export async function runStagedRelaxation(opts: StagedRelaxationOpts): Promise<S
   const { formula, elements, counts, candidates, pressureGPa, jobDir, callbacks } = opts;
   const stages: StageResult[] = [];
   const startTime = Date.now();
-  const maxS1 = opts.maxStage1Candidates ?? 3;
+  // Limit candidates for expensive systems — no point testing 3 candidates
+  // if each takes 50+ min on shared VM. Heavy+magnetic systems test only 1.
+  const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
+  const s1Params = computeStage1Params(elements, totalAtoms);
+  const defaultMax = s1Params.timeoutMs > 2_400_000 ? 1 : s1Params.timeoutMs > 1_500_000 ? 2 : 3;
+  const maxS1 = opts.maxStage1Candidates ?? defaultMax;
 
   let bestPositions = candidates[0]?.positions ?? [];
   let bestLatticeA = candidates[0]?.latticeA ?? 5.0;
