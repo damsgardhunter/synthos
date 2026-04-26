@@ -651,7 +651,7 @@ ${cellBlock}
 export interface Stage4Opts {
   formula: string;
   elements: string[];
-  counts: Record<string, number>;
+  counts: Record<string, number>;  // stoichiometry for electron count
   positions: Array<{ element: string; x: number; y: number; z: number }>;
   latticeA: number;
   cellVectors?: number[][];
@@ -675,11 +675,50 @@ export async function runStage4GammaPhonon(opts: Stage4Opts): Promise<StageResul
   // The SCF writes to jobDir/tmp/prefix.save, so ph.x must use outdir='./tmp'
   // and run with cwd=jobDir.
 
-  // Scale timeout: each representation (3*N_atoms total) takes ~2-3 min wall time.
-  // LaH12 (13 atoms, 39 modes, 13 reps): needs ~40 min, not 30.
-  const nReps = totalAtoms; // 1 representation per atom (3 modes each)
-  const minPerRep = 3;      // ~3 min per representation (conservative)
-  const phTimeoutS = Math.max(1200, nReps * minPerRep * 60 + 600); // +10 min safety
+  // Physics-based cost model for Gamma phonon (same approach as Stage 1).
+  //
+  // DFPT cost per representation ∝ N_atoms × N_electrons × N_kpoints × nspin
+  // Total representations = N_atoms (each atom has 3 displacement directions,
+  // but symmetry reduces unique reps to roughly N_atoms).
+  // Each rep does ~10-15 DFPT iterations (like mini-SCF).
+  //
+  // Calibrated from LaH12 observation:
+  //   13 atoms, 23 e-, 5³=125 kpts, nspin=1
+  //   Completed 2 reps in ~15 min → ~7.5 min/rep
+  //   13 reps × 7.5 min = ~98 min total needed
+  //
+  // Model: time_per_rep = C × N_atoms × sqrt(N_electrons) × N_kpoints^0.5 × nspin
+  //   LaH12: C × 13 × 4.8 × 11.2 × 1 = C × 699 → 7.5 min = 450s → C ≈ 0.64
+  const heavyCount = elements.filter(e => HEAVY_ELEMENTS.has(e)).length;
+  const hasMagnetic = elements.some(e => MAGNETIC_ELS.has(e));
+
+  let phElectrons = 0;
+  for (const el of elements) {
+    phElectrons += (Z_VALENCE[el] ?? 8);
+  }
+  // Scale by stoichiometry if counts available
+  if (opts.counts) {
+    phElectrons = 0;
+    for (const el of elements) {
+      phElectrons += (opts.counts[el] ?? 1) * (Z_VALENCE[el] ?? 8);
+    }
+  }
+
+  // Estimate k-points from the SCF k-grid (already computed for this material)
+  const phKspacing = heavyCount >= 1 ? 0.55 : 0.50;
+  const phTypicalLattice = opts.latticeA || 5.0;
+  const phKperDir = Math.max(2, Math.ceil((2 * Math.PI) / (phKspacing * phTypicalLattice)));
+  const phNkpts = phKperDir * phKperDir * phKperDir;
+  const phNspin = hasMagnetic ? 2.0 : 1.0;
+
+  const nReps = totalAtoms;
+  const SECONDS_PER_COST_UNIT_PH = 0.65;
+  const costPerRep = totalAtoms * Math.sqrt(phElectrons) * Math.pow(phNkpts, 0.5) * phNspin;
+  const totalPhCost = nReps * costPerRep;
+  const estimatedPhSeconds = totalPhCost * SECONDS_PER_COST_UNIT_PH;
+
+  // Add 10 min safety margin, floor at 20 min, cap at 3 hours
+  const phTimeoutS = Math.max(1200, Math.min(estimatedPhSeconds + 600, 10800));
   const phTimeoutMs = phTimeoutS * 1000;
 
   const phInput = `Gamma phonon check for ${formula}
@@ -694,7 +733,7 @@ export async function runStage4GammaPhonon(opts: Stage4Opts): Promise<StageResul
 0.0 0.0 0.0
 `;
 
-  console.log(`[Staged-Relax] ${formula} Stage 4: ${nReps} reps, timeout=${phTimeoutS}s (${(phTimeoutS/60).toFixed(0)} min)`);
+  console.log(`[Staged-Relax] ${formula} Stage 4 cost model: ${nReps} reps, ${phElectrons} e-, ${phNkpts} kpts, nspin=${phNspin} → cost/rep=${costPerRep.toFixed(0)}, est=${estimatedPhSeconds.toFixed(0)}s, timeout=${phTimeoutS.toFixed(0)}s (${(phTimeoutS/60).toFixed(0)} min)`);
 
   const inputFile = path.join(jobDir, "ph_gamma.in");
   fs.writeFileSync(inputFile, phInput);
