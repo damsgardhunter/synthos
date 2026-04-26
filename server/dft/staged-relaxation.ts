@@ -675,22 +675,31 @@ export async function runStage4GammaPhonon(opts: Stage4Opts): Promise<StageResul
   // The SCF writes to jobDir/tmp/prefix.save, so ph.x must use outdir='./tmp'
   // and run with cwd=jobDir.
 
+  // Scale timeout: each representation (3*N_atoms total) takes ~2-3 min wall time.
+  // LaH12 (13 atoms, 39 modes, 13 reps): needs ~40 min, not 30.
+  const nReps = totalAtoms; // 1 representation per atom (3 modes each)
+  const minPerRep = 3;      // ~3 min per representation (conservative)
+  const phTimeoutS = Math.max(1200, nReps * minPerRep * 60 + 600); // +10 min safety
+  const phTimeoutMs = phTimeoutS * 1000;
+
   const phInput = `Gamma phonon check for ${formula}
 &INPUTPH
   outdir = './tmp',
   prefix = '${prefix}',
-  tr2_ph = 1.0d-10,
-  alpha_mix(1) = 0.3,
+  tr2_ph = 1.0d-8,
+  alpha_mix(1) = 0.2,
   ldisp = .false.,
-  max_seconds = ${Math.floor(STAGE4_TIMEOUT_MS / 1000) - 60},
+  max_seconds = ${phTimeoutS - 60},
 /
 0.0 0.0 0.0
 `;
 
+  console.log(`[Staged-Relax] ${formula} Stage 4: ${nReps} reps, timeout=${phTimeoutS}s (${(phTimeoutS/60).toFixed(0)} min)`);
+
   const inputFile = path.join(jobDir, "ph_gamma.in");
   fs.writeFileSync(inputFile, phInput);
 
-  const result = await cb.runPhx(inputFile, jobDir, STAGE4_TIMEOUT_MS);
+  const result = await cb.runPhx(inputFile, jobDir, phTimeoutMs);
   fs.writeFileSync(path.join(jobDir, "ph_gamma.out"), result.stdout);
 
   const wallTime = (Date.now() - t0) / 1000;
