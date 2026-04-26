@@ -695,6 +695,14 @@ export async function runStage4GammaPhonon(opts: Stage4Opts): Promise<StageResul
 
   const wallTime = (Date.now() - t0) / 1000;
 
+  // Log ph.x exit and output for debugging
+  console.log(`[Staged-Relax] ${formula} Stage 4 ph.x: exit=${result.exitCode}, stdout=${result.stdout.length} bytes, stderr=${result.stderr.slice(0, 200)}`);
+  if (result.stdout.length < 500) {
+    console.log(`[Staged-Relax] ${formula} Stage 4 ph.x full stdout: ${result.stdout}`);
+  } else {
+    console.log(`[Staged-Relax] ${formula} Stage 4 ph.x stdout tail: ${result.stdout.slice(-300)}`);
+  }
+
   // Parse phonon frequencies from output
   const frequencies = parseGammaPhononFrequencies(result.stdout);
 
