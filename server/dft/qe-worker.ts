@@ -3856,8 +3856,8 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
           pressureGPa: workerPressure,
           jobDir,
           callbacks: qeCallbacks,
-          skipVcRelax,
-          skipRelaxation: isKnownCompound,
+          skipVcRelax: skipVcRelax || isKnownCompound,  // Known compounds: skip vc-relax (lattice is correct) but still run Stage 1 (positions need fixing)
+          skipRelaxation: false,
           maxStage1Candidates: 3,
           isMetallic: vegardResult?.isMetallic ?? undefined,
         });
