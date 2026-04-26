@@ -721,12 +721,22 @@ export async function runStage4GammaPhonon(opts: Stage4Opts): Promise<StageResul
   const phTimeoutS = Math.max(1200, Math.min(estimatedPhSeconds + 600, 10800));
   const phTimeoutMs = phTimeoutS * 1000;
 
+  // Metallic hydrides at high pressure need gentler DFPT parameters to avoid
+  // IEEE_UNDERFLOW_FLAG crash. Use the same conservative settings that the
+  // production phonon retry uses (tr2_ph=1e-10, alpha_mix=0.1) from the start.
+  const isHighPressureMetallic = elements.includes("H") && heavyCount >= 1;
+  const tr2Ph = isHighPressureMetallic ? "1.0d-10" : "1.0d-8";
+  const alphaMix = isHighPressureMetallic ? 0.10 : 0.15;
+  const niterPh = isHighPressureMetallic ? 150 : 100;
+
   const phInput = `Gamma phonon check for ${formula}
 &INPUTPH
   outdir = './tmp',
   prefix = '${prefix}',
-  tr2_ph = 1.0d-8,
-  alpha_mix(1) = 0.2,
+  tr2_ph = ${tr2Ph},
+  alpha_mix(1) = ${alphaMix},
+  niter_ph = ${niterPh},
+  epsil = .false.,
   ldisp = .false.,
   max_seconds = ${phTimeoutS - 60},
 /
