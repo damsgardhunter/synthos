@@ -601,10 +601,11 @@ export async function runStage4GammaPhonon(opts: Stage4Opts): Promise<StageResul
   const totalAtoms = opts.positions.length;
   const prefix = formula.replace(/[^a-zA-Z0-9]/g, "");
 
-  const stageDir = path.join(jobDir, "stage4_gamma");
-  fs.mkdirSync(stageDir, { recursive: true });
+  // ph.x MUST run in the same directory as the SCF (jobDir), not a subdirectory.
+  // It needs outdir/prefix.save which contains the SCF wavefunctions.
+  // The SCF writes to jobDir/tmp/prefix.save, so ph.x must use outdir='./tmp'
+  // and run with cwd=jobDir.
 
-  // ph.x input for Gamma-only phonon
   const phInput = `Gamma phonon check for ${formula}
 &INPUTPH
   outdir = './tmp',
@@ -617,13 +618,11 @@ export async function runStage4GammaPhonon(opts: Stage4Opts): Promise<StageResul
 0.0 0.0 0.0
 `;
 
-  // We need the SCF .save directory from Stage 3 to be available.
-  // The ph.x input references outdir/prefix.save which should exist from the SCF run.
-  const inputFile = path.join(stageDir, "ph_gamma.in");
+  const inputFile = path.join(jobDir, "ph_gamma.in");
   fs.writeFileSync(inputFile, phInput);
 
-  const result = await cb.runPhx(inputFile, stageDir, STAGE4_TIMEOUT_MS);
-  fs.writeFileSync(path.join(stageDir, "ph_gamma.out"), result.stdout);
+  const result = await cb.runPhx(inputFile, jobDir, STAGE4_TIMEOUT_MS);
+  fs.writeFileSync(path.join(jobDir, "ph_gamma.out"), result.stdout);
 
   const wallTime = (Date.now() - t0) / 1000;
 
