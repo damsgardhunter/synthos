@@ -762,6 +762,7 @@ export async function runStage4GammaPhonon(opts: Stage4Opts): Promise<StageResul
   //   Attempt 1: tr2_ph=1e-12, alpha_mix=0.3 (production defaults)
   //   Attempt 2 (on crash): tr2_ph=1e-10, alpha_mix=0.1 (loosened, matches production retry)
   // On timeout: attempt 2 with recover=.true. (resume from checkpoint)
+  const expectedModes = 3 * totalAtoms;
   let frequencies: number[] = [];
   let lastResult: { stdout: string; stderr: string; exitCode: number } | null = null;
 
@@ -794,38 +795,64 @@ ${recoverLine}/
     const retryInfo = isRetry
       ? (prevCrashed ? " (retry: loosened tr2_ph=1e-10, alpha_mix=0.1)" : " (retry: recover=.true.)")
       : "";
-    console.log(`[Staged-Relax] ${formula} Stage 4 attempt ${attempt + 1}/2${retryInfo}`);
+    console.log(`[Staged-Relax] ${formula} Stage 4 attempt ${attempt + 1}/2${retryInfo}, params: tr2_ph=${retryTr2}, alpha_mix=${retryAlpha}, max_seconds=${phTimeoutS - 60}, recover=${prevTimedOut}`);
+
+    // Log the .save directory status so we can verify SCF wavefunctions exist
+    const saveDir = path.join(jobDir, "tmp", `${prefix}.save`);
+    const saveDirExists = fs.existsSync(saveDir);
+    const saveContents = saveDirExists ? (fs.readdirSync(saveDir).slice(0, 10).join(", ") || "empty") : "MISSING";
+    console.log(`[Staged-Relax] ${formula} Stage 4 .save dir: ${saveDir} → exists=${saveDirExists}, contents=[${saveContents}]`);
 
     const inputFile = path.join(jobDir, "ph_gamma.in");
     fs.writeFileSync(inputFile, attemptInput);
 
+    const attemptT0 = Date.now();
     const result = await cb.runPhx(inputFile, jobDir, phTimeoutMs);
+    const attemptWall = (Date.now() - attemptT0) / 1000;
     fs.writeFileSync(path.join(jobDir, "ph_gamma.out"), result.stdout);
     lastResult = result;
 
-    // Log ph.x exit and output
-    console.log(`[Staged-Relax] ${formula} Stage 4 ph.x: exit=${result.exitCode}, stdout=${result.stdout.length} bytes, stderr=${result.stderr.slice(0, 200)}`);
-    if (result.stdout.length < 500) {
-      console.log(`[Staged-Relax] ${formula} Stage 4 ph.x full stdout: ${result.stdout}`);
-    } else {
-      console.log(`[Staged-Relax] ${formula} Stage 4 ph.x stdout tail: ${result.stdout.slice(-300)}`);
+    // Diagnose the ph.x run: exit code, wall time, output size, error classification
+    const hitMaxSeconds = result.stdout.includes("Maximum CPU time exceeded");
+    const hasUnderflow = result.stderr.includes("IEEE_UNDERFLOW") || result.stdout.includes("IEEE_UNDERFLOW");
+    const hasStopError = result.stderr.includes("STOP 1") || result.stdout.includes("STOP 1");
+    const hasWrongInput = result.stdout.includes("Wrong ") || result.stdout.includes("Error in routine");
+    const completedReps = (result.stdout.match(/Convergence has been achieved/g) || []).length;
+    const startedReps = (result.stdout.match(/Representation #/g) || []).length;
+
+    console.log(`[Staged-Relax] ${formula} Stage 4 ph.x result: exit=${result.exitCode}, wall=${attemptWall.toFixed(0)}s, stdout=${result.stdout.length}B, reps=${completedReps}/${startedReps} completed`);
+    console.log(`[Staged-Relax] ${formula} Stage 4 diagnosis: maxSecHit=${hitMaxSeconds}, underflow=${hasUnderflow}, stop1=${hasStopError}, wrongInput=${hasWrongInput}`);
+
+    if (result.stderr.length > 0 && result.stderr.length < 500) {
+      console.log(`[Staged-Relax] ${formula} Stage 4 stderr: ${result.stderr.trim()}`);
+    } else if (result.stderr.length >= 500) {
+      console.log(`[Staged-Relax] ${formula} Stage 4 stderr (first 300): ${result.stderr.slice(0, 300)}`);
     }
+
+    // Log the last few meaningful lines of stdout (skip boilerplate)
+    const stdoutLines = result.stdout.split("\n");
+    const meaningfulTail = stdoutLines.slice(-15).filter(l => l.trim().length > 0 && !l.includes("----")).join("\n");
+    console.log(`[Staged-Relax] ${formula} Stage 4 stdout tail:\n${meaningfulTail}`);
 
     // Parse phonon frequencies from output
     frequencies = parseGammaPhononFrequencies(result.stdout);
 
     if (frequencies.length > 0) {
-      console.log(`[Staged-Relax] ${formula} Stage 4 attempt ${attempt + 1}: parsed ${frequencies.length} frequencies`);
+      console.log(`[Staged-Relax] ${formula} Stage 4 attempt ${attempt + 1}: SUCCESS — parsed ${frequencies.length} frequencies, range [${Math.min(...frequencies).toFixed(1)}, ${Math.max(...frequencies).toFixed(1)}] cm-1`);
       break; // Success — stop retrying
     }
 
-    if (attempt === 0) {
-      console.log(`[Staged-Relax] ${formula} Stage 4 attempt 1 failed (${prevCrashed ? "crash" : prevTimedOut ? "timeout" : "0 modes"}), retrying...`);
+    // Detailed failure classification for retry decision
+    const failClass = hasWrongInput ? "input-error" : hasUnderflow ? "underflow-crash" : hitMaxSeconds ? "timeout" : hasStopError ? "stop-error" : "unknown";
+    console.log(`[Staged-Relax] ${formula} Stage 4 attempt ${attempt + 1}: FAILED — class=${failClass}, 0/${expectedModes} modes, ${completedReps}/${nReps} reps done in ${attemptWall.toFixed(0)}s`);
+
+    if (attempt === 0 && failClass === "input-error") {
+      console.log(`[Staged-Relax] ${formula} Stage 4: input error detected, skipping retry (same input would fail again)`);
+      break; // Don't retry on input errors
     }
   }
 
   const failReasons: string[] = [];
-  const expectedModes = 3 * totalAtoms;
 
   if (frequencies.length < expectedModes) {
     failReasons.push(`only ${frequencies.length}/${expectedModes} modes parsed`);
@@ -847,9 +874,11 @@ ${recoverLine}/
 
   const passed = failReasons.length === 0;
   if (passed) {
-    console.log(`[Staged-Relax] ${formula} Stage 4 (Gamma phonon): PASSED — ${frequencies.length} modes, lowest=${Math.min(...frequencies).toFixed(1)} cm-1, wall=${totalWallTime.toFixed(0)}s`);
+    console.log(`[Staged-Relax] ${formula} Stage 4 (Gamma phonon): PASSED — ${frequencies.length}/${expectedModes} modes, lowest=${Math.min(...frequencies).toFixed(1)} cm-1, highest=${Math.max(...frequencies).toFixed(1)} cm-1, wall=${totalWallTime.toFixed(0)}s (${(totalWallTime/60).toFixed(1)} min)`);
   } else {
+    // Log full context on failure so we can diagnose without re-running
     console.log(`[Staged-Relax] ${formula} Stage 4 (Gamma phonon): FAILED — ${failReasons.join("; ")}`);
+    console.log(`[Staged-Relax] ${formula} Stage 4 context: ${totalAtoms} atoms, ${phElectrons} e-, lattice=${opts.latticeA?.toFixed(3)} A, ${phNkpts} kpts, attempts=2, total_wall=${totalWallTime.toFixed(0)}s (${(totalWallTime/60).toFixed(1)} min), timeout_budget=${phTimeoutS.toFixed(0)}s`);
   }
 
   return {
