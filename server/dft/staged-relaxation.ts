@@ -758,6 +758,23 @@ export async function runStage4GammaPhonon(opts: Stage4Opts): Promise<StageResul
 
   console.log(`[Staged-Relax] ${formula} Stage 4 cost model: ${nReps} reps, ${phElectrons} e-, ${phNkpts} kpts, nspin=${phNspin} → cost/rep=${costPerRep.toFixed(0)}, est=${estimatedPhSeconds.toFixed(0)}s, timeout=${phTimeoutS.toFixed(0)}s (${(phTimeoutS/60).toFixed(0)} min)`);
 
+  // If estimated cost exceeds the 4h cap, Stage 4 is too expensive as a screening
+  // gate for this material. Skip directly to Stage 5 (full phonon) which has its
+  // own retry logic and up to 48h budget.
+  if (estimatedPhSeconds > 14400) {
+    console.log(`[Staged-Relax] ${formula} Stage 4: SKIPPED — estimated ${(estimatedPhSeconds/3600).toFixed(1)}h exceeds 4h screening budget, deferring to full phonon pipeline (Stage 5)`);
+    return {
+      stage: 4,
+      passed: true,  // Pass through so Stage 5 runs
+      positions: opts.positions,
+      latticeA: opts.latticeA,
+      cellVectors: opts.cellVectors,
+      totalEnergy: 0,
+      wallTimeSeconds: 0,
+      frequencies: [],
+    };
+  }
+
   // 2-attempt retry matching production phonon pipeline (qe-worker.ts lines 4580-4644):
   //   Attempt 1: tr2_ph=1e-12, alpha_mix=0.3 (production defaults)
   //   Attempt 2 (on crash): tr2_ph=1e-10, alpha_mix=0.1 (loosened, matches production retry)
@@ -768,16 +785,24 @@ export async function runStage4GammaPhonon(opts: Stage4Opts): Promise<StageResul
 
   for (let attempt = 0; attempt < 2; attempt++) {
     const isRetry = attempt > 0;
-    const prevCrashed = lastResult != null && lastResult.exitCode !== 0 &&
-      !lastResult.stdout.includes("Maximum CPU time exceeded");
+    // Classify previous failure. Crash (underflow/stop1) takes priority over
+    // timeout — when both occur (QE hit max_seconds AND underflow on the last
+    // rep), the underflow is the root cause and needs loosened params, not recover.
+    const prevHasUnderflow = lastResult != null &&
+      (lastResult.stderr.includes("IEEE_UNDERFLOW") || lastResult.stdout.includes("IEEE_UNDERFLOW") ||
+       lastResult.stderr.includes("STOP 1") || lastResult.stdout.includes("STOP 1"));
     const prevTimedOut = lastResult != null &&
       lastResult.stdout.includes("Maximum CPU time exceeded");
+    // Also detect external kill (wall time exceeded but QE didn't write the message)
+    const prevExternalKill = lastResult != null && lastResult.exitCode !== 0 &&
+      !prevHasUnderflow && !prevTimedOut;
+    const prevCrashed = prevHasUnderflow; // Crash = underflow/stop1
 
-    // On crash retry: loosen convergence (production behavior)
-    // On timeout retry: use recover=.true. to resume from checkpoint
+    // On crash: loosen convergence (production retry behavior)
+    // On timeout (no crash): use recover=.true. to resume from checkpoint
     const retryTr2 = prevCrashed ? "1.0d-10" : "1.0d-12";
     const retryAlpha = prevCrashed ? 0.1 : 0.3;
-    const recoverLine = prevTimedOut ? "  recover = .true.,\n" : "";
+    const recoverLine = (prevTimedOut || prevExternalKill) && !prevCrashed ? "  recover = .true.,\n" : "";
 
     const attemptInput = `Gamma-only phonon calculation
 &INPUTPH
@@ -843,7 +868,8 @@ ${recoverLine}/
     }
 
     // Detailed failure classification for retry decision
-    const failClass = hasWrongInput ? "input-error" : hasUnderflow ? "underflow-crash" : hitMaxSeconds ? "timeout" : hasStopError ? "stop-error" : "unknown";
+    const externalKill = result.exitCode !== 0 && !hasUnderflow && !hitMaxSeconds && !hasWrongInput && !hasStopError && attemptWall > (phTimeoutS - 120);
+    const failClass = hasWrongInput ? "input-error" : hasUnderflow ? "underflow-crash" : hitMaxSeconds ? "timeout" : hasStopError ? "stop-error" : externalKill ? "external-timeout" : "unknown";
     console.log(`[Staged-Relax] ${formula} Stage 4 attempt ${attempt + 1}: FAILED — class=${failClass}, 0/${expectedModes} modes, ${completedReps}/${nReps} reps done in ${attemptWall.toFixed(0)}s`);
 
     if (attempt === 0 && failClass === "input-error") {

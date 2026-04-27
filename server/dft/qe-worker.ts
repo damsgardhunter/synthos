@@ -4561,7 +4561,7 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       if (nAtoms >= 8) phMultiplier = 8;
       if (nAtoms >= 12) phMultiplier = 10;
       if (heavyCount >= 2) phMultiplier = Math.max(phMultiplier, 10);
-      const MAX_PHONON_TIMEOUT_MS = 24 * 3600 * 1000; // 24 hours absolute cap
+      const MAX_PHONON_TIMEOUT_MS = 48 * 3600 * 1000; // 48 hours absolute cap
       const phKillTimeoutMs = Math.min(effectiveKillTimeoutMs * phMultiplier, MAX_PHONON_TIMEOUT_MS);
       // max_seconds for ph.x: 120s before the kill timeout so QE can checkpoint
       // cleanly and write recover data for the next attempt.
