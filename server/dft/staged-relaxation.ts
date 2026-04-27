@@ -711,14 +711,25 @@ export async function runStage4GammaPhonon(opts: Stage4Opts): Promise<StageResul
   const phNkpts = phKperDir * phKperDir * phKperDir;
   const phNspin = hasMagnetic ? 2.0 : 1.0;
 
+  // DFPT cost model. Each representation requires a full linear-response SCF
+  // which is much more expensive than a ground-state SCF step.
+  //
+  // Calibrated from LaH10 observation:
+  //   11 atoms, 21 e-, 27 kpts, nspin=1
+  //   costPerRep = 11 × sqrt(21) × sqrt(27) × 1 = 262
+  //   totalCost = 11 × 262 = 2,880
+  //   Actual: 1 rep completed in ~20 min, 11 reps total ≈ 220 min = 13,200s
+  //   Calibration: 13,200 / 2,880 = 4.58 s/unit
+  //
+  // Using 5.0 to be conservative (accounts for VM contention with 5 jobs).
   const nReps = totalAtoms;
-  const SECONDS_PER_COST_UNIT_PH = 0.65;
+  const SECONDS_PER_COST_UNIT_PH = 5.0;
   const costPerRep = totalAtoms * Math.sqrt(phElectrons) * Math.pow(phNkpts, 0.5) * phNspin;
   const totalPhCost = nReps * costPerRep;
   const estimatedPhSeconds = totalPhCost * SECONDS_PER_COST_UNIT_PH;
 
-  // Add 10 min safety margin, floor at 20 min, cap at 3 hours
-  const phTimeoutS = Math.max(1200, Math.min(estimatedPhSeconds + 600, 10800));
+  // Add 10 min safety margin, floor at 30 min, cap at 4 hours
+  const phTimeoutS = Math.max(1800, Math.min(estimatedPhSeconds + 600, 14400));
   const phTimeoutMs = phTimeoutS * 1000;
 
   // Use EXACTLY the same ph.x input as the production Gamma-only phonon
@@ -747,24 +758,71 @@ export async function runStage4GammaPhonon(opts: Stage4Opts): Promise<StageResul
 
   console.log(`[Staged-Relax] ${formula} Stage 4 cost model: ${nReps} reps, ${phElectrons} e-, ${phNkpts} kpts, nspin=${phNspin} → cost/rep=${costPerRep.toFixed(0)}, est=${estimatedPhSeconds.toFixed(0)}s, timeout=${phTimeoutS.toFixed(0)}s (${(phTimeoutS/60).toFixed(0)} min)`);
 
-  const inputFile = path.join(jobDir, "ph_gamma.in");
-  fs.writeFileSync(inputFile, phInput);
+  // 2-attempt retry matching production phonon pipeline (qe-worker.ts lines 4580-4644):
+  //   Attempt 1: tr2_ph=1e-12, alpha_mix=0.3 (production defaults)
+  //   Attempt 2 (on crash): tr2_ph=1e-10, alpha_mix=0.1 (loosened, matches production retry)
+  // On timeout: attempt 2 with recover=.true. (resume from checkpoint)
+  let frequencies: number[] = [];
+  let lastResult: { stdout: string; stderr: string; exitCode: number } | null = null;
 
-  const result = await cb.runPhx(inputFile, jobDir, phTimeoutMs);
-  fs.writeFileSync(path.join(jobDir, "ph_gamma.out"), result.stdout);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const isRetry = attempt > 0;
+    const prevCrashed = lastResult != null && lastResult.exitCode !== 0 &&
+      !lastResult.stdout.includes("Maximum CPU time exceeded");
+    const prevTimedOut = lastResult != null &&
+      lastResult.stdout.includes("Maximum CPU time exceeded");
 
-  const wallTime = (Date.now() - t0) / 1000;
+    // On crash retry: loosen convergence (production behavior)
+    // On timeout retry: use recover=.true. to resume from checkpoint
+    const retryTr2 = prevCrashed ? "1.0d-10" : "1.0d-12";
+    const retryAlpha = prevCrashed ? 0.1 : 0.3;
+    const recoverLine = prevTimedOut ? "  recover = .true.,\n" : "";
 
-  // Log ph.x exit and output for debugging
-  console.log(`[Staged-Relax] ${formula} Stage 4 ph.x: exit=${result.exitCode}, stdout=${result.stdout.length} bytes, stderr=${result.stderr.slice(0, 200)}`);
-  if (result.stdout.length < 500) {
-    console.log(`[Staged-Relax] ${formula} Stage 4 ph.x full stdout: ${result.stdout}`);
-  } else {
-    console.log(`[Staged-Relax] ${formula} Stage 4 ph.x stdout tail: ${result.stdout.slice(-300)}`);
+    const attemptInput = `Gamma-only phonon calculation
+&INPUTPH
+  prefix = '${prefix}',
+  outdir = './tmp',
+  fildyn = '${prefix}.dyn',
+  tr2_ph = ${retryTr2},
+  alpha_mix(1) = ${retryAlpha},
+  ldisp = .false.,
+  max_seconds = ${phTimeoutS - 60},
+${recoverLine}/
+0.0 0.0 0.0
+`;
+
+    const retryInfo = isRetry
+      ? (prevCrashed ? " (retry: loosened tr2_ph=1e-10, alpha_mix=0.1)" : " (retry: recover=.true.)")
+      : "";
+    console.log(`[Staged-Relax] ${formula} Stage 4 attempt ${attempt + 1}/2${retryInfo}`);
+
+    const inputFile = path.join(jobDir, "ph_gamma.in");
+    fs.writeFileSync(inputFile, attemptInput);
+
+    const result = await cb.runPhx(inputFile, jobDir, phTimeoutMs);
+    fs.writeFileSync(path.join(jobDir, "ph_gamma.out"), result.stdout);
+    lastResult = result;
+
+    // Log ph.x exit and output
+    console.log(`[Staged-Relax] ${formula} Stage 4 ph.x: exit=${result.exitCode}, stdout=${result.stdout.length} bytes, stderr=${result.stderr.slice(0, 200)}`);
+    if (result.stdout.length < 500) {
+      console.log(`[Staged-Relax] ${formula} Stage 4 ph.x full stdout: ${result.stdout}`);
+    } else {
+      console.log(`[Staged-Relax] ${formula} Stage 4 ph.x stdout tail: ${result.stdout.slice(-300)}`);
+    }
+
+    // Parse phonon frequencies from output
+    frequencies = parseGammaPhononFrequencies(result.stdout);
+
+    if (frequencies.length > 0) {
+      console.log(`[Staged-Relax] ${formula} Stage 4 attempt ${attempt + 1}: parsed ${frequencies.length} frequencies`);
+      break; // Success — stop retrying
+    }
+
+    if (attempt === 0) {
+      console.log(`[Staged-Relax] ${formula} Stage 4 attempt 1 failed (${prevCrashed ? "crash" : prevTimedOut ? "timeout" : "0 modes"}), retrying...`);
+    }
   }
-
-  // Parse phonon frequencies from output
-  const frequencies = parseGammaPhononFrequencies(result.stdout);
 
   const failReasons: string[] = [];
   const expectedModes = 3 * totalAtoms;
@@ -785,9 +843,11 @@ export async function runStage4GammaPhonon(opts: Stage4Opts): Promise<StageResul
     failReasons.push(`${smallNegative.length} negative modes below -10 cm-1 (expected <= 3 acoustic)`);
   }
 
+  const totalWallTime = (Date.now() - t0) / 1000;
+
   const passed = failReasons.length === 0;
   if (passed) {
-    console.log(`[Staged-Relax] ${formula} Stage 4 (Gamma phonon): PASSED — ${frequencies.length} modes, lowest=${Math.min(...frequencies).toFixed(1)} cm-1, wall=${wallTime.toFixed(0)}s`);
+    console.log(`[Staged-Relax] ${formula} Stage 4 (Gamma phonon): PASSED — ${frequencies.length} modes, lowest=${Math.min(...frequencies).toFixed(1)} cm-1, wall=${totalWallTime.toFixed(0)}s`);
   } else {
     console.log(`[Staged-Relax] ${formula} Stage 4 (Gamma phonon): FAILED — ${failReasons.join("; ")}`);
   }
@@ -800,7 +860,7 @@ export async function runStage4GammaPhonon(opts: Stage4Opts): Promise<StageResul
     latticeA: opts.latticeA,
     cellVectors: opts.cellVectors,
     totalEnergy: 0,
-    wallTimeSeconds: wallTime,
+    wallTimeSeconds: totalWallTime,
     frequencies,
   };
 }
