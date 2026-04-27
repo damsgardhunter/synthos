@@ -727,7 +727,6 @@ export async function runStage4GammaPhonon(opts: Stage4Opts): Promise<StageResul
   const isHighPressureMetallic = elements.includes("H") && heavyCount >= 1;
   const tr2Ph = isHighPressureMetallic ? "1.0d-10" : "1.0d-8";
   const alphaMix = isHighPressureMetallic ? 0.10 : 0.15;
-  const niterPh = isHighPressureMetallic ? 150 : 100;
 
   const phInput = `Gamma phonon check for ${formula}
 &INPUTPH
@@ -735,7 +734,6 @@ export async function runStage4GammaPhonon(opts: Stage4Opts): Promise<StageResul
   prefix = '${prefix}',
   tr2_ph = ${tr2Ph},
   alpha_mix(1) = ${alphaMix},
-  niter_ph = ${niterPh},
   epsil = .false.,
   ldisp = .false.,
   max_seconds = ${phTimeoutS - 60},
