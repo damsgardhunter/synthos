@@ -721,20 +721,24 @@ export async function runStage4GammaPhonon(opts: Stage4Opts): Promise<StageResul
   const phTimeoutS = Math.max(1200, Math.min(estimatedPhSeconds + 600, 10800));
   const phTimeoutMs = phTimeoutS * 1000;
 
-  // Metallic hydrides at high pressure need gentler DFPT parameters to avoid
-  // IEEE_UNDERFLOW_FLAG crash. Use the same conservative settings that the
-  // production phonon retry uses (tr2_ph=1e-10, alpha_mix=0.1) from the start.
-  const isHighPressureMetallic = elements.includes("H") && heavyCount >= 1;
-  const tr2Ph = isHighPressureMetallic ? "1.0d-10" : "1.0d-8";
-  const alphaMix = isHighPressureMetallic ? 0.10 : 0.15;
-
-  const phInput = `Gamma phonon check for ${formula}
+  // Use EXACTLY the same ph.x input as the production Gamma-only phonon
+  // (generatePhononInput in qe-worker.ts, isGammaOnly=true branch).
+  // The only difference is max_seconds which is scaled by the cost model.
+  //
+  // Previous Stage 4 failures were caused by deviating from production:
+  // - Missing fildyn parameter → undefined .dyn output
+  // - Added epsil=.false. → removed dielectric screening that prevents underflow
+  // - Used tr2_ph=1e-10 instead of production's 1e-12 → noise amplification
+  // - Added invalid niter_ph parameter → immediate crash
+  //
+  // Lesson: don't invent custom ph.x parameters — use what works in production.
+  const phInput = `Gamma-only phonon calculation
 &INPUTPH
-  outdir = './tmp',
   prefix = '${prefix}',
-  tr2_ph = ${tr2Ph},
-  alpha_mix(1) = ${alphaMix},
-  epsil = .false.,
+  outdir = './tmp',
+  fildyn = '${prefix}.dyn',
+  tr2_ph = 1.0d-12,
+  alpha_mix(1) = 0.3,
   ldisp = .false.,
   max_seconds = ${phTimeoutS - 60},
 /
