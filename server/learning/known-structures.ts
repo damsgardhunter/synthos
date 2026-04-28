@@ -735,6 +735,32 @@ const KNOWN_STRUCTURES: Record<string, KnownStructure> = {
     { element: "O",  x: 0.0, y: 0.0, z: 0.893, wyckoff: "4e" },
   ]},
 
+  // Corundum — Al2O3 (R-3c)
+  "Al2O3": { formula: "Al2O3", spaceGroup: "R-3c", spaceGroupNumber: 167, latticeType: "hexagonal", latticeA: 4.76, latticeC: 12.99, pressureGPa: 0, atoms: [
+    { element: "Al", x: 0.0, y: 0.0, z: 0.352, wyckoff: "12c" },
+    { element: "Al", x: 0.0, y: 0.0, z: 0.648, wyckoff: "12c" },
+    { element: "Al", x: 0.0, y: 0.0, z: 0.852, wyckoff: "12c" },
+    { element: "Al", x: 0.0, y: 0.0, z: 0.148, wyckoff: "12c" },
+    { element: "O",  x: 0.306, y: 0.0, z: 0.25, wyckoff: "18e" },
+    { element: "O",  x: 0.0, y: 0.306, z: 0.25, wyckoff: "18e" },
+    { element: "O",  x: 0.694, y: 0.694, z: 0.25, wyckoff: "18e" },
+    { element: "O",  x: 0.694, y: 0.0, z: 0.75, wyckoff: "18e" },
+    { element: "O",  x: 0.0, y: 0.694, z: 0.75, wyckoff: "18e" },
+    { element: "O",  x: 0.306, y: 0.306, z: 0.75, wyckoff: "18e" },
+  ]},
+  "Fe2O3": { formula: "Fe2O3", spaceGroup: "R-3c", spaceGroupNumber: 167, latticeType: "hexagonal", latticeA: 5.04, latticeC: 13.75, pressureGPa: 0, atoms: [
+    { element: "Fe", x: 0.0, y: 0.0, z: 0.355, wyckoff: "12c" },
+    { element: "Fe", x: 0.0, y: 0.0, z: 0.645, wyckoff: "12c" },
+    { element: "Fe", x: 0.0, y: 0.0, z: 0.855, wyckoff: "12c" },
+    { element: "Fe", x: 0.0, y: 0.0, z: 0.145, wyckoff: "12c" },
+    { element: "O",  x: 0.306, y: 0.0, z: 0.25, wyckoff: "18e" },
+    { element: "O",  x: 0.0, y: 0.306, z: 0.25, wyckoff: "18e" },
+    { element: "O",  x: 0.694, y: 0.694, z: 0.25, wyckoff: "18e" },
+    { element: "O",  x: 0.694, y: 0.0, z: 0.75, wyckoff: "18e" },
+    { element: "O",  x: 0.0, y: 0.694, z: 0.75, wyckoff: "18e" },
+    { element: "O",  x: 0.306, y: 0.306, z: 0.75, wyckoff: "18e" },
+  ]},
+
   // Inverse Heusler — Mn2CoAl (F-43m)
   "Mn2CoAl": { formula: "Mn2CoAl", spaceGroup: "F-43m", spaceGroupNumber: 216, latticeType: "cubic", latticeA: 5.80, pressureGPa: 0, atoms: [
     { element: "Al", x: 0.0, y: 0.0, z: 0.0, wyckoff: "4a" },

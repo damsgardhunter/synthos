@@ -105,6 +105,8 @@ const PACKING_FACTORS: Record<string, number> = {
   "MAX413-M4AX3": 0.68,
   "Brownmillerite-A2B2O5": 0.62,
   "RP-n3-A4B3O10": 0.55,
+  "Corundum-A2O3": 0.65,
+  "ThMn12-RFe12": 0.68,
 };
 
 const DEFAULT_PACKING_FACTOR = 0.68;
@@ -989,6 +991,79 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
       const hasAE = elements.some(e => ["Sr", "Ca", "Ba", "La", "Nd", "Pr", "Y"].includes(e));
       const hasTM = elements.some(e => ["Ru", "Mn", "Ni", "Co", "Fe", "Ti", "Ir", "V"].includes(e));
       return hasO && hasAE && hasTM;
+    },
+  },
+
+  // Corundum: R-3c (167), A2O3 — hexagonal setting
+  // For: Al2O3, Fe2O3, Cr2O3, V2O3, Ti2O3 — extremely common binary oxide
+  // Rhombohedral primitive cell: 2 A + 3 O = 5 atoms (from hex cell 12A + 18O → rhombo 1/6)
+  // Actually for R-3c hex cell: 12 M + 18 O = 30 atoms, rhombo primitive = 10 atoms (4M + 6O)
+  // Using rhombohedral primitive: 4 metal + 6 oxygen = 10 atoms, ratio [2,3]
+  {
+    name: "Corundum-A2O3",
+    spaceGroup: "R-3c",
+    latticeType: "hexagonal",
+    cOverA: 2.73,
+    sites: [
+      // M at 12c Wyckoff (4 in rhomb primitive): (0,0,z) with z≈0.352
+      { label: "A", x: 0.0, y: 0.0, z: 0.352, role: "cation" },
+      { label: "A", x: 0.0, y: 0.0, z: 0.648, role: "cation" },
+      { label: "A", x: 0.0, y: 0.0, z: 0.852, role: "cation" },
+      { label: "A", x: 0.0, y: 0.0, z: 0.148, role: "cation" },
+      // O at 18e Wyckoff (6 in rhomb primitive): (x,0,1/4) with x≈0.306
+      { label: "B", x: 0.306, y: 0.0, z: 0.25, role: "anion" },
+      { label: "B", x: 0.0, y: 0.306, z: 0.25, role: "anion" },
+      { label: "B", x: 0.694, y: 0.694, z: 0.25, role: "anion" },
+      { label: "B", x: 0.694, y: 0.0, z: 0.75, role: "anion" },
+      { label: "B", x: 0.0, y: 0.694, z: 0.75, role: "anion" },
+      { label: "B", x: 0.306, y: 0.306, z: 0.75, role: "anion" },
+    ],
+    stoichiometryRatio: [2, 3],
+    coordination: [6, 4],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      const hasO = elements.includes("O");
+      const hasMetal = elements.some(e => ["Al", "Fe", "Cr", "V", "Ti", "Mn", "Ga", "In", "Rh"].includes(e));
+      return hasO && hasMetal;
+    },
+  },
+  // ThMn12-type: I4/mmm (139), RFe12 — rare-earth permanent magnet structure
+  // For: NdFe12, SmFe12, YFe12, CeFe12 and nitrides NdFe12N
+  // Body-centered tetragonal. Primitive cell (half conventional):
+  // 1 R + 12 Fe = 13 atoms (conventional: 2R + 24Fe = 26)
+  // Wyckoff: R at 2a, Fe at 8f + 8i + 8j
+  // Primitive: R(1) + Fe-8f(4) + Fe-8i(4) + Fe-8j(4) = 13
+  {
+    name: "ThMn12-RFe12",
+    spaceGroup: "I4/mmm",
+    latticeType: "tetragonal",
+    cOverA: 0.57,
+    sites: [
+      // R at 2a: (0, 0, 0)
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "rare-earth" },
+      // Fe at 8f: (1/4, 1/4, 1/4) — 4 in primitive
+      { label: "B", x: 0.25, y: 0.25, z: 0.25, role: "Fe-8f" },
+      { label: "B", x: 0.75, y: 0.25, z: 0.25, role: "Fe-8f" },
+      { label: "B", x: 0.25, y: 0.75, z: 0.25, role: "Fe-8f" },
+      { label: "B", x: 0.75, y: 0.75, z: 0.25, role: "Fe-8f" },
+      // Fe at 8i: (x, 0, 0) with x≈0.36 — 4 in primitive
+      { label: "B", x: 0.36, y: 0.0, z: 0.0, role: "Fe-8i" },
+      { label: "B", x: 0.64, y: 0.0, z: 0.0, role: "Fe-8i" },
+      { label: "B", x: 0.0, y: 0.36, z: 0.0, role: "Fe-8i" },
+      { label: "B", x: 0.0, y: 0.64, z: 0.0, role: "Fe-8i" },
+      // Fe at 8j: (x, 1/2, 0) with x≈0.28 — 4 in primitive
+      { label: "B", x: 0.28, y: 0.5, z: 0.0, role: "Fe-8j" },
+      { label: "B", x: 0.72, y: 0.5, z: 0.0, role: "Fe-8j" },
+      { label: "B", x: 0.5, y: 0.28, z: 0.0, role: "Fe-8j" },
+      { label: "B", x: 0.5, y: 0.72, z: 0.0, role: "Fe-8j" },
+    ],
+    stoichiometryRatio: [1, 12],
+    coordination: [20, 12],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      const hasRE = elements.some(e => isRareEarth(e) || ["Y", "Sc", "Th", "Zr"].includes(e));
+      const hasTM = elements.some(e => ["Fe", "Co", "Ni", "Mn", "V", "Cr"].includes(e));
+      return hasRE && hasTM;
     },
   },
 
