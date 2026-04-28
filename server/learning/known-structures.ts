@@ -1290,6 +1290,46 @@ const KNOWN_STRUCTURES: Record<string, KnownStructure> = {
     { element: "O",  x: 0.442, y: 0.758, z: 0.479, wyckoff: "4e" },
   ]},
 
+  // Wolframite — FeWO4 (P2/c, photocatalyst)
+  "FeWO4": { formula: "FeWO4", spaceGroup: "P2/c", spaceGroupNumber: 13, latticeType: "monoclinic", latticeA: 4.73, latticeB: 5.70, latticeC: 4.96, beta: 90.0, pressureGPa: 0, atoms: [
+    { element: "Fe", x: 0.5, y: 0.672, z: 0.25, wyckoff: "2f" },
+    { element: "W",  x: 0.0, y: 0.182, z: 0.25, wyckoff: "2e" },
+    { element: "O",  x: 0.214, y: 0.103, z: 0.071, wyckoff: "4g" },
+    { element: "O",  x: 0.256, y: 0.373, z: 0.398, wyckoff: "4g" },
+  ]},
+
+  // Baddeleyite — HfO2 (P21/c, gate dielectric)
+  "HfO2": { formula: "HfO2", spaceGroup: "P21/c", spaceGroupNumber: 14, latticeType: "monoclinic", latticeA: 5.12, latticeB: 5.17, latticeC: 5.30, beta: 99.2, pressureGPa: 0, atoms: [
+    { element: "Hf", x: 0.276, y: 0.040, z: 0.208, wyckoff: "4e" },
+    { element: "O",  x: 0.070, y: 0.342, z: 0.341, wyckoff: "4e" },
+    { element: "O",  x: 0.442, y: 0.758, z: 0.479, wyckoff: "4e" },
+  ]},
+
+  // VO2 monoclinic M1 — (P21/c, Mott insulator, Tc=68°C)
+  "VO2": { formula: "VO2", spaceGroup: "P21/c", spaceGroupNumber: 14, latticeType: "monoclinic", latticeA: 5.75, latticeB: 4.54, latticeC: 5.38, beta: 122.6, pressureGPa: 0, atoms: [
+    { element: "V", x: 0.242, y: 0.975, z: 0.025, wyckoff: "4e" },
+    { element: "O", x: 0.100, y: 0.210, z: 0.200, wyckoff: "4e" },
+    { element: "O", x: 0.390, y: 0.690, z: 0.290, wyckoff: "4e" },
+  ]},
+
+  // Monazite — LaPO4 (P21/n, nuclear waste host)
+  "LaPO4": { formula: "LaPO4", spaceGroup: "P21/n", spaceGroupNumber: 14, latticeType: "monoclinic", latticeA: 6.83, latticeB: 7.07, latticeC: 6.50, beta: 103.2, pressureGPa: 0, atoms: [
+    { element: "La", x: 0.282, y: 0.158, z: 0.100, wyckoff: "4e" },
+    { element: "P",  x: 0.305, y: 0.163, z: 0.612, wyckoff: "4e" },
+    { element: "O",  x: 0.250, y: 0.007, z: 0.447, wyckoff: "4e" },
+    { element: "O",  x: 0.381, y: 0.338, z: 0.497, wyckoff: "4e" },
+    { element: "O",  x: 0.474, y: 0.105, z: 0.811, wyckoff: "4e" },
+    { element: "O",  x: 0.127, y: 0.211, z: 0.710, wyckoff: "4e" },
+  ]},
+  "CePO4": { formula: "CePO4", spaceGroup: "P21/n", spaceGroupNumber: 14, latticeType: "monoclinic", latticeA: 6.79, latticeB: 7.02, latticeC: 6.47, beta: 103.5, pressureGPa: 0, atoms: [
+    { element: "Ce", x: 0.282, y: 0.158, z: 0.100, wyckoff: "4e" },
+    { element: "P",  x: 0.305, y: 0.163, z: 0.612, wyckoff: "4e" },
+    { element: "O",  x: 0.250, y: 0.007, z: 0.447, wyckoff: "4e" },
+    { element: "O",  x: 0.381, y: 0.338, z: 0.497, wyckoff: "4e" },
+    { element: "O",  x: 0.474, y: 0.105, z: 0.811, wyckoff: "4e" },
+    { element: "O",  x: 0.127, y: 0.211, z: 0.710, wyckoff: "4e" },
+  ]},
+
   // Inverse Heusler — Mn2CoAl (F-43m)
   "Mn2CoAl": { formula: "Mn2CoAl", spaceGroup: "F-43m", spaceGroupNumber: 216, latticeType: "cubic", latticeA: 5.80, pressureGPa: 0, atoms: [
     { element: "Al", x: 0.0, y: 0.0, z: 0.0, wyckoff: "4a" },

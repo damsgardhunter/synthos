@@ -162,6 +162,11 @@ const PACKING_FACTORS: Record<string, number> = {
   "Tl1223-AB2C2D3O9": 0.55,
   "Tetradymite-A2B2C": 0.52,
   "Aurivillius-n2-AB2C2O9": 0.55,
+  // ── Monoclinic prototypes ──
+  "Wolframite-ABO4": 0.62,
+  "Baddeleyite-AO2": 0.62,
+  "VO2-monoclinic": 0.65,
+  "Monazite-ABO4": 0.60,
 };
 
 const DEFAULT_PACKING_FACTOR = 0.68;
@@ -2660,6 +2665,170 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
       const hasAE = elements.some(e => ["Sr", "Ba", "Ca", "Pb"].includes(e));
       const hasB = elements.some(e => ["Ta", "Nb", "Ti", "W", "Mo", "V"].includes(e));
       return hasO && hasBi && hasAE && hasB;
+    },
+  },
+
+  // ══════════════════════════════════════════════════════════════════════
+  // ── Monoclinic prototype templates (Phase 2) ─────────────────────────
+  // ══════════════════════════════════════════════════════════════════════
+
+  // Wolframite: P2/c (13), ABO4 — monoclinic tungstate/molybdate
+  // For: MnWO4, FeWO4, NiWO4, CoWO4, MnMoO4 — multiferroics, photocatalysts
+  // Distinct from Scheelite (I41/a, tetragonal): wolframite forms when
+  // A-site cation is smaller (Mn, Fe, Co, Ni vs Ca, Sr, Ba in scheelite).
+  // Primitive cell: 2 formula units → 2A + 2B + 8O = 12 atoms, ratio [1,1,4]
+  // beta ≈ 91° (nearly orthorhombic but genuinely monoclinic)
+  {
+    name: "Wolframite-ABO4",
+    spaceGroup: "P2/c",
+    latticeType: "monoclinic",
+    cOverA: 1.033,
+    bOverA: 1.192,
+    beta: 91.1,
+    sites: [
+      // A (Mn/Fe/Co/Ni) at 2f: (1/2, y, 1/4)
+      { label: "A", x: 0.5, y: 0.685, z: 0.25, role: "A-site" },
+      { label: "A", x: 0.5, y: 0.315, z: 0.75, role: "A-site" },
+      // B (W/Mo) at 2e: (0, y, 1/4)
+      { label: "B", x: 0.0, y: 0.180, z: 0.25, role: "B-site" },
+      { label: "B", x: 0.0, y: 0.820, z: 0.75, role: "B-site" },
+      // O at 4g: general position (x, y, z) — 4 per f.u., 8 total
+      { label: "C", x: 0.222, y: 0.106, z: 0.075, role: "O-1" },
+      { label: "C", x: 0.778, y: 0.894, z: 0.925, role: "O-1" },
+      { label: "C", x: 0.778, y: 0.106, z: 0.425, role: "O-1" },
+      { label: "C", x: 0.222, y: 0.894, z: 0.575, role: "O-1" },
+      { label: "C", x: 0.259, y: 0.379, z: 0.395, role: "O-2" },
+      { label: "C", x: 0.741, y: 0.621, z: 0.605, role: "O-2" },
+      { label: "C", x: 0.741, y: 0.379, z: 0.105, role: "O-2" },
+      { label: "C", x: 0.259, y: 0.621, z: 0.895, role: "O-2" },
+    ],
+    stoichiometryRatio: [1, 1, 4],
+    coordination: [6, 6, 3],
+    chemistryRules: (elements) => {
+      if (elements.length !== 3) return false;
+      const hasO = elements.includes("O");
+      // A-site: smaller divalent TM (not in Scheelite's A-site list)
+      const hasA = elements.some(e => ["Mn", "Fe", "Co", "Ni", "Cu", "Zn", "Mg"].includes(e));
+      // B-site: W or Mo (same as Scheelite)
+      const hasB = elements.some(e => ["W", "Mo"].includes(e));
+      return hasO && hasA && hasB;
+    },
+  },
+
+  // Baddeleyite: P21/c (14), AO2 — monoclinic dioxide
+  // For: ZrO2, HfO2, CeO2(mono), PuO2 — structural ceramics, gate dielectrics
+  // Distinct from Rutile (tetragonal) and Fluorite (cubic): 7-fold A coordination.
+  // Primitive cell: 4 formula units → 4A + 8O = 12 atoms, ratio [1,2]
+  // beta ≈ 99.2°
+  {
+    name: "Baddeleyite-AO2",
+    spaceGroup: "P21/c",
+    latticeType: "monoclinic",
+    cOverA: 1.031,
+    bOverA: 1.012,
+    beta: 99.2,
+    sites: [
+      // A (Zr/Hf) at 4e: (x, y, z) — 4 in primitive
+      { label: "A", x: 0.276, y: 0.040, z: 0.208, role: "cation" },
+      { label: "A", x: 0.724, y: 0.960, z: 0.792, role: "cation" },
+      { label: "A", x: 0.724, y: 0.540, z: 0.292, role: "cation" },
+      { label: "A", x: 0.276, y: 0.460, z: 0.708, role: "cation" },
+      // O1 at 4e — 4 atoms
+      { label: "B", x: 0.070, y: 0.342, z: 0.341, role: "O-type1" },
+      { label: "B", x: 0.930, y: 0.658, z: 0.659, role: "O-type1" },
+      { label: "B", x: 0.930, y: 0.842, z: 0.159, role: "O-type1" },
+      { label: "B", x: 0.070, y: 0.158, z: 0.841, role: "O-type1" },
+      // O2 at 4e — 4 atoms
+      { label: "B", x: 0.442, y: 0.758, z: 0.479, role: "O-type2" },
+      { label: "B", x: 0.558, y: 0.242, z: 0.521, role: "O-type2" },
+      { label: "B", x: 0.558, y: 0.258, z: 0.021, role: "O-type2" },
+      { label: "B", x: 0.442, y: 0.742, z: 0.979, role: "O-type2" },
+    ],
+    stoichiometryRatio: [1, 2],
+    coordination: [7, 3],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      const hasO = elements.includes("O");
+      // Baddeleyite: Zr, Hf, Ce, Pu, U + O (monoclinic at ambient pressure)
+      const hasA = elements.some(e => ["Zr", "Hf", "Ce", "Pu", "U", "Th"].includes(e));
+      return hasO && hasA;
+    },
+  },
+
+  // VO2 monoclinic: P21/c (14), M1 phase — Mott insulator
+  // For: VO2 — metal-insulator transition at 68°C, smart windows, neuromorphic
+  // Distinct from Rutile (high-T metallic phase): V-V dimerization + tilting.
+  // Primitive cell: 4 V + 8 O = 12 atoms, ratio [1,2]
+  // beta ≈ 122.6° (strongly monoclinic)
+  {
+    name: "VO2-monoclinic",
+    spaceGroup: "P21/c",
+    latticeType: "monoclinic",
+    cOverA: 1.006,
+    bOverA: 0.793,
+    beta: 122.6,
+    sites: [
+      // V at 4e: dimerized pairs along a-axis
+      { label: "A", x: 0.242, y: 0.975, z: 0.025, role: "V-dimer" },
+      { label: "A", x: 0.758, y: 0.025, z: 0.975, role: "V-dimer" },
+      { label: "A", x: 0.758, y: 0.525, z: 0.475, role: "V-dimer" },
+      { label: "A", x: 0.242, y: 0.475, z: 0.525, role: "V-dimer" },
+      // O1 at 4e
+      { label: "B", x: 0.100, y: 0.210, z: 0.200, role: "O-1" },
+      { label: "B", x: 0.900, y: 0.790, z: 0.800, role: "O-1" },
+      { label: "B", x: 0.900, y: 0.710, z: 0.300, role: "O-1" },
+      { label: "B", x: 0.100, y: 0.290, z: 0.700, role: "O-1" },
+      // O2 at 4e
+      { label: "B", x: 0.390, y: 0.690, z: 0.290, role: "O-2" },
+      { label: "B", x: 0.610, y: 0.310, z: 0.710, role: "O-2" },
+      { label: "B", x: 0.610, y: 0.810, z: 0.210, role: "O-2" },
+      { label: "B", x: 0.390, y: 0.190, z: 0.790, role: "O-2" },
+    ],
+    stoichiometryRatio: [1, 2],
+    coordination: [6, 3],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      const hasO = elements.includes("O");
+      // VO2 specifically: V + O (other TM dioxides use rutile or fluorite)
+      const hasV = elements.includes("V");
+      return hasO && hasV;
+    },
+  },
+
+  // Monazite: P21/n (14), ABO4 — rare-earth phosphate/arsenate
+  // For: LaPO4, CePO4, NdPO4, LaAsO4 — nuclear waste storage, phosphors, catalysts
+  // Distinct from Scheelite (needs Ca/Sr/Ba) and Wolframite (needs W/Mo).
+  // Monazite forms with larger RE + P/As.
+  // Primitive cell: 4 formula units → 4A + 4B + 16O = 24 atoms, ratio [1,1,4]
+  // beta ≈ 103.2°. Simplified to 1 f.u.: 1A + 1B + 4O = 6 atoms.
+  {
+    name: "Monazite-ABO4",
+    spaceGroup: "P21/n",
+    latticeType: "monoclinic",
+    cOverA: 0.941,
+    bOverA: 1.024,
+    beta: 103.2,
+    sites: [
+      // A (La/Ce/Nd) at 4e — 1 per f.u.
+      { label: "A", x: 0.282, y: 0.158, z: 0.100, role: "RE-site" },
+      // B (P/As) at 4e — 1 per f.u.
+      { label: "B", x: 0.305, y: 0.163, z: 0.612, role: "P-site" },
+      // O at 4e — 4 per f.u.
+      { label: "C", x: 0.250, y: 0.007, z: 0.447, role: "O-1" },
+      { label: "C", x: 0.381, y: 0.338, z: 0.497, role: "O-2" },
+      { label: "C", x: 0.474, y: 0.105, z: 0.811, role: "O-3" },
+      { label: "C", x: 0.127, y: 0.211, z: 0.710, role: "O-4" },
+    ],
+    stoichiometryRatio: [1, 1, 4],
+    coordination: [9, 4, 3],
+    chemistryRules: (elements) => {
+      if (elements.length !== 3) return false;
+      const hasO = elements.includes("O");
+      // A-site: rare-earth (La, Ce, Nd, Pr, Sm, Gd, Y, Bi)
+      const hasRE = elements.some(e => isRareEarth(e) || ["Y", "Bi", "Th", "U"].includes(e));
+      // B-site: P or As (phosphate/arsenate, not W/Mo like wolframite)
+      const hasP = elements.some(e => ["P", "As"].includes(e));
+      return hasO && hasRE && hasP;
     },
   },
 
