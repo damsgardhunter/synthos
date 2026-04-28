@@ -102,6 +102,8 @@ const PACKING_FACTORS: Record<string, number> = {
   "Bi2212-A2B2CB2O8": 0.55,
   "InverseHeusler-XA2B": 0.68,
   "MAX312-M3AX2": 0.68,
+  "MAX413-M4AX3": 0.68,
+  "Brownmillerite-A2B2O5": 0.62,
 };
 
 const DEFAULT_PACKING_FACTOR = 0.68;
@@ -863,6 +865,76 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
       const hasA = elements.some(e => ["Al", "Ga", "In", "Si", "Ge", "Sn", "Pb", "P", "As", "S"].includes(e));
       const hasX = elements.some(e => ["C", "N"].includes(e));
       return hasTM && hasA && hasX;
+    },
+  },
+
+  // MAX phase M4AX3 (413): P63/mmc (194), hexagonal
+  // For: Ti4AlN3, Ta4AlC3, Nb4AlC3, Ti4SiC3 — 413 MAX phases
+  // 4 M layers around each A layer, 3 X in octahedral interstices
+  // Wyckoff: M at 4f(z≈0.05) + 4e(z≈0.155), A at 2c, X at 2a + 4f(z≈0.103)
+  // Primitive cell: 8 atoms per formula unit
+  {
+    name: "MAX413-M4AX3",
+    spaceGroup: "P6_3/mmc",
+    latticeType: "hexagonal",
+    cOverA: 7.4,
+    sites: [
+      // M at 4f: inner TM layer (z ≈ 0.054)
+      { label: "M", x: 0.3333, y: 0.6667, z: 0.054, role: "TM-inner" },
+      { label: "M", x: 0.3333, y: 0.6667, z: 0.946, role: "TM-inner" },
+      // M at 4e: outer TM layer (z ≈ 0.155)
+      { label: "M", x: 0.0, y: 0.0, z: 0.155, role: "TM-outer" },
+      { label: "M", x: 0.0, y: 0.0, z: 0.845, role: "TM-outer" },
+      // A at 2c: A-element layer
+      { label: "A", x: 0.3333, y: 0.6667, z: 0.25, role: "A-layer" },
+      // X at 2a: center interstitial
+      { label: "X", x: 0.0, y: 0.0, z: 0.0, role: "X-center" },
+      // X at 4f: outer interstitial (z ≈ 0.103)
+      { label: "X", x: 0.3333, y: 0.6667, z: 0.103, role: "X-outer" },
+      { label: "X", x: 0.3333, y: 0.6667, z: 0.897, role: "X-outer" },
+    ],
+    stoichiometryRatio: [4, 1, 3],
+    coordination: [6, 12, 6],
+    chemistryRules: (elements) => {
+      if (elements.length !== 3) return false;
+      const hasTM = elements.some(e => ["Ti", "Zr", "Hf", "V", "Nb", "Ta", "Cr", "Mo", "W"].includes(e));
+      const hasA = elements.some(e => ["Al", "Ga", "In", "Si", "Ge", "Sn", "Pb", "P", "As", "S"].includes(e));
+      const hasX = elements.some(e => ["C", "N"].includes(e));
+      return hasTM && hasA && hasX;
+    },
+  },
+  // Brownmillerite: Ibm2 (46) / Pnma — A2B2O5 (oxygen-deficient perovskite)
+  // For: Ca2Fe2O5, Sr2Fe2O5, Ca2Al2O5, Sr2MnFeO5 — solid oxide fuel cells
+  // Structure: alternating octahedral BO6 and tetrahedral BO4 layers
+  // Simplified orthorhombic → tetragonal mapping, primitive cell: 9 atoms
+  // Wyckoff: A at 8d, B at 4a + 4b, O at 8d + 4c + 8d
+  {
+    name: "Brownmillerite-A2B2O5",
+    spaceGroup: "Pnma",
+    latticeType: "tetragonal",
+    cOverA: 0.27,
+    sites: [
+      // A-sites (Ca/Sr/Ba): 2 in reduced formula
+      { label: "A", x: 0.027, y: 0.25, z: 0.509, role: "A-site-1" },
+      { label: "A", x: 0.522, y: 0.25, z: 0.039, role: "A-site-2" },
+      // B-sites (Fe/Al/Mn): octahedral + tetrahedral
+      { label: "B", x: 0.0, y: 0.0, z: 0.0, role: "B-octahedral" },
+      { label: "B", x: 0.928, y: 0.25, z: 0.929, role: "B-tetrahedral" },
+      // O-sites: 5 per formula unit
+      { label: "C", x: 0.250, y: 0.007, z: 0.231, role: "O-equatorial" },
+      { label: "C", x: 0.028, y: 0.25, z: 0.744, role: "O-apical-1" },
+      { label: "C", x: 0.595, y: 0.25, z: 0.875, role: "O-apical-2" },
+      { label: "C", x: 0.860, y: 0.25, z: 0.070, role: "O-bridging-1" },
+      { label: "C", x: 0.371, y: 0.25, z: 0.419, role: "O-bridging-2" },
+    ],
+    stoichiometryRatio: [2, 2, 5],
+    coordination: [8, 5, 2],
+    chemistryRules: (elements) => {
+      if (elements.length !== 3) return false;
+      const hasO = elements.includes("O");
+      const hasAE = elements.some(e => ["Ca", "Sr", "Ba", "La", "Y"].includes(e));
+      const hasTM = elements.some(e => ["Fe", "Al", "Mn", "Co", "Cr", "Ga", "In"].includes(e));
+      return hasO && hasAE && hasTM;
     },
   },
 

@@ -679,6 +679,41 @@ const KNOWN_STRUCTURES: Record<string, KnownStructure> = {
     { element: "C",  x: 0.3333, y: 0.6667, z: 0.935, wyckoff: "4f" },
   ]},
 
+  // MAX 413 phase — Ti4AlN3 (P63/mmc)
+  "Ti4AlN3": { formula: "Ti4AlN3", spaceGroup: "P63/mmc", spaceGroupNumber: 194, latticeType: "hexagonal", latticeA: 2.99, latticeC: 23.37, pressureGPa: 0, atoms: [
+    { element: "Ti", x: 0.3333, y: 0.6667, z: 0.054, wyckoff: "4f" },
+    { element: "Ti", x: 0.3333, y: 0.6667, z: 0.946, wyckoff: "4f" },
+    { element: "Ti", x: 0.0, y: 0.0, z: 0.155, wyckoff: "4e" },
+    { element: "Ti", x: 0.0, y: 0.0, z: 0.845, wyckoff: "4e" },
+    { element: "Al", x: 0.3333, y: 0.6667, z: 0.25, wyckoff: "2c" },
+    { element: "N",  x: 0.0, y: 0.0, z: 0.0, wyckoff: "2a" },
+    { element: "N",  x: 0.3333, y: 0.6667, z: 0.103, wyckoff: "4f" },
+    { element: "N",  x: 0.3333, y: 0.6667, z: 0.897, wyckoff: "4f" },
+  ]},
+  "Ta4AlC3": { formula: "Ta4AlC3", spaceGroup: "P63/mmc", spaceGroupNumber: 194, latticeType: "hexagonal", latticeA: 3.09, latticeC: 24.12, pressureGPa: 0, atoms: [
+    { element: "Ta", x: 0.3333, y: 0.6667, z: 0.054, wyckoff: "4f" },
+    { element: "Ta", x: 0.3333, y: 0.6667, z: 0.946, wyckoff: "4f" },
+    { element: "Ta", x: 0.0, y: 0.0, z: 0.155, wyckoff: "4e" },
+    { element: "Ta", x: 0.0, y: 0.0, z: 0.845, wyckoff: "4e" },
+    { element: "Al", x: 0.3333, y: 0.6667, z: 0.25, wyckoff: "2c" },
+    { element: "C",  x: 0.0, y: 0.0, z: 0.0, wyckoff: "2a" },
+    { element: "C",  x: 0.3333, y: 0.6667, z: 0.103, wyckoff: "4f" },
+    { element: "C",  x: 0.3333, y: 0.6667, z: 0.897, wyckoff: "4f" },
+  ]},
+
+  // Brownmillerite — Ca2Fe2O5 (Pnma)
+  "Ca2Fe2O5": { formula: "Ca2Fe2O5", spaceGroup: "Pnma", spaceGroupNumber: 62, latticeType: "tetragonal", latticeA: 5.43, latticeC: 14.77, pressureGPa: 0, atoms: [
+    { element: "Ca", x: 0.027, y: 0.25, z: 0.509, wyckoff: "8d" },
+    { element: "Ca", x: 0.522, y: 0.25, z: 0.039, wyckoff: "8d" },
+    { element: "Fe", x: 0.0, y: 0.0, z: 0.0, wyckoff: "4a" },
+    { element: "Fe", x: 0.928, y: 0.25, z: 0.929, wyckoff: "4b" },
+    { element: "O",  x: 0.250, y: 0.007, z: 0.231, wyckoff: "8d" },
+    { element: "O",  x: 0.028, y: 0.25, z: 0.744, wyckoff: "4c" },
+    { element: "O",  x: 0.595, y: 0.25, z: 0.875, wyckoff: "4c" },
+    { element: "O",  x: 0.860, y: 0.25, z: 0.070, wyckoff: "8d" },
+    { element: "O",  x: 0.371, y: 0.25, z: 0.419, wyckoff: "8d" },
+  ]},
+
   // Inverse Heusler — Mn2CoAl (F-43m)
   "Mn2CoAl": { formula: "Mn2CoAl", spaceGroup: "F-43m", spaceGroupNumber: 216, latticeType: "cubic", latticeA: 5.80, pressureGPa: 0, atoms: [
     { element: "Al", x: 0.0, y: 0.0, z: 0.0, wyckoff: "4a" },
