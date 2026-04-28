@@ -111,6 +111,8 @@ const PACKING_FACTORS: Record<string, number> = {
   "Marcasite-AB2": 0.60,
   "Tl2201-A2B2CO6": 0.55,
   "PostPerovskite-ABO3": 0.65,
+  "Aurivillius-Bi2BO6": 0.55,
+  "Stannite-A2BCS4": 0.52,
 };
 
 const DEFAULT_PACKING_FACTOR = 0.68;
@@ -1218,6 +1220,77 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
       // B-site: small high-valence cation (Ir, Ru, Pt, Si, Ge, Sn)
       const hasB = elements.some(e => ["Ir", "Ru", "Pt", "Rh", "Os", "Si", "Ge", "Sn"].includes(e));
       return hasO && hasA && hasB;
+    },
+  },
+
+  // Aurivillius n=1: I4/mmm-like, Bi2BO6 — layered bismuth oxide
+  // Bi2O2 fluorite-like layers alternating with perovskite-like BO4 blocks.
+  // For: Bi2WO6, Bi2MoO6, Bi2CrO6 — photocatalysis, ferroelectrics
+  // Primitive cell: 2 Bi + 1 B + 6 O = 9 atoms, ratio [2,1,6]
+  // Wyckoff in pseudo-I4/mmm: Bi at 4e, B at 2a, O at multiple sites
+  {
+    name: "Aurivillius-Bi2BO6",
+    spaceGroup: "I4/mmm",
+    latticeType: "tetragonal",
+    cOverA: 2.7,
+    sites: [
+      // Bi at 4e: Bi2O2 layer
+      { label: "A", x: 0.0, y: 0.0, z: 0.330, role: "Bi2O2-layer" },
+      { label: "A", x: 0.0, y: 0.0, z: 0.670, role: "Bi2O2-layer" },
+      // B at 2a: perovskite B-site
+      { label: "B", x: 0.0, y: 0.0, z: 0.0, role: "perovskite-B" },
+      // O-sites: 6 in primitive
+      { label: "C", x: 0.5, y: 0.0, z: 0.0, role: "O-equatorial" },
+      { label: "C", x: 0.0, y: 0.5, z: 0.0, role: "O-equatorial" },
+      { label: "C", x: 0.0, y: 0.0, z: 0.145, role: "O-apical" },
+      { label: "C", x: 0.0, y: 0.0, z: 0.855, role: "O-apical" },
+      { label: "C", x: 0.0, y: 0.0, z: 0.415, role: "O-BiO-layer" },
+      { label: "C", x: 0.0, y: 0.0, z: 0.585, role: "O-BiO-layer" },
+    ],
+    stoichiometryRatio: [2, 1, 6],
+    coordination: [8, 6, 3],
+    chemistryRules: (elements) => {
+      if (elements.length !== 3) return false;
+      const hasBi = elements.includes("Bi");
+      const hasO = elements.includes("O");
+      // B-site: W, Mo, Cr, Ti, V, Nb, Ta (high-valence TM for charge balance with Bi3+)
+      const hasB = elements.some(e => ["W", "Mo", "Cr", "Ti", "V", "Nb", "Ta"].includes(e));
+      return hasBi && hasO && hasB;
+    },
+  },
+  // Stannite: I-42m (121), A2BCS4 — quaternary chalcogenide photovoltaic
+  // For: Cu2ZnSnS4 (CZTS), Cu2ZnSnSe4, Cu2ZnGeSe4, Cu2CdSnS4
+  // Primitive cell (body-centered tetragonal → half conventional):
+  // 2 A + 1 B + 1 C + 4 S = 8 atoms, ratio [2,1,1,4]
+  // Wyckoff: A at 4d, B at 2a, C at 2b, S at 8i
+  {
+    name: "Stannite-A2BCS4",
+    spaceGroup: "I-42m",
+    latticeType: "tetragonal",
+    cOverA: 1.97,
+    sites: [
+      // A (Cu) at 4d: (0, 1/2, 1/4) → 2 in primitive
+      { label: "A", x: 0.0, y: 0.5, z: 0.25, role: "Cu-site" },
+      { label: "A", x: 0.5, y: 0.0, z: 0.25, role: "Cu-site" },
+      // B (Zn) at 2a: (0, 0, 0) → 1 in primitive
+      { label: "B", x: 0.0, y: 0.0, z: 0.0, role: "Zn-site" },
+      // C (Sn) at 2b: (0, 0, 1/2) → 1 in primitive
+      { label: "C", x: 0.0, y: 0.0, z: 0.5, role: "Sn-site" },
+      // S at 8i: (x, x, z) with x≈0.245, z≈0.128 → 4 in primitive
+      { label: "D", x: 0.245, y: 0.245, z: 0.128, role: "S-1" },
+      { label: "D", x: 0.755, y: 0.755, z: 0.128, role: "S-2" },
+      { label: "D", x: 0.755, y: 0.245, z: 0.872, role: "S-3" },
+      { label: "D", x: 0.245, y: 0.755, z: 0.872, role: "S-4" },
+    ],
+    stoichiometryRatio: [2, 1, 1, 4],
+    coordination: [4, 4, 4, 4],
+    chemistryRules: (elements) => {
+      if (elements.length !== 4) return false;
+      const hasCu = elements.some(e => ["Cu", "Ag"].includes(e));
+      const hasZn = elements.some(e => ["Zn", "Cd", "Fe", "Mn", "Co", "Ni"].includes(e));
+      const hasSn = elements.some(e => ["Sn", "Ge", "Si"].includes(e));
+      const hasCh = elements.some(e => ["S", "Se", "Te"].includes(e));
+      return hasCu && hasZn && hasSn && hasCh;
     },
   },
 

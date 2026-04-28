@@ -814,6 +814,31 @@ const KNOWN_STRUCTURES: Record<string, KnownStructure> = {
     { element: "O",  x: 0.0, y: 0.87, z: 0.43, wyckoff: "8f" },
   ]},
 
+  // Aurivillius n=1 — Bi2WO6 (I4/mmm-like)
+  "Bi2WO6": { formula: "Bi2WO6", spaceGroup: "Pca21", spaceGroupNumber: 29, latticeType: "tetragonal", latticeA: 5.46, latticeC: 16.43, pressureGPa: 0, atoms: [
+    { element: "Bi", x: 0.0, y: 0.0, z: 0.330, wyckoff: "4e" },
+    { element: "Bi", x: 0.0, y: 0.0, z: 0.670, wyckoff: "4e" },
+    { element: "W",  x: 0.0, y: 0.0, z: 0.0, wyckoff: "2a" },
+    { element: "O",  x: 0.5, y: 0.0, z: 0.0, wyckoff: "4c" },
+    { element: "O",  x: 0.0, y: 0.5, z: 0.0, wyckoff: "4c" },
+    { element: "O",  x: 0.0, y: 0.0, z: 0.145, wyckoff: "4e" },
+    { element: "O",  x: 0.0, y: 0.0, z: 0.855, wyckoff: "4e" },
+    { element: "O",  x: 0.0, y: 0.0, z: 0.415, wyckoff: "4e" },
+    { element: "O",  x: 0.0, y: 0.0, z: 0.585, wyckoff: "4e" },
+  ]},
+
+  // Stannite — Cu2ZnSnS4 (CZTS, I-42m)
+  "Cu2ZnSnS4": { formula: "Cu2ZnSnS4", spaceGroup: "I-42m", spaceGroupNumber: 121, latticeType: "tetragonal", latticeA: 5.43, latticeC: 10.85, pressureGPa: 0, atoms: [
+    { element: "Cu", x: 0.0, y: 0.5, z: 0.25, wyckoff: "4d" },
+    { element: "Cu", x: 0.5, y: 0.0, z: 0.25, wyckoff: "4d" },
+    { element: "Zn", x: 0.0, y: 0.0, z: 0.0, wyckoff: "2a" },
+    { element: "Sn", x: 0.0, y: 0.0, z: 0.5, wyckoff: "2b" },
+    { element: "S",  x: 0.245, y: 0.245, z: 0.128, wyckoff: "8i" },
+    { element: "S",  x: 0.755, y: 0.755, z: 0.128, wyckoff: "8i" },
+    { element: "S",  x: 0.755, y: 0.245, z: 0.872, wyckoff: "8i" },
+    { element: "S",  x: 0.245, y: 0.755, z: 0.872, wyckoff: "8i" },
+  ]},
+
   // Inverse Heusler — Mn2CoAl (F-43m)
   "Mn2CoAl": { formula: "Mn2CoAl", spaceGroup: "F-43m", spaceGroupNumber: 216, latticeType: "cubic", latticeA: 5.80, pressureGPa: 0, atoms: [
     { element: "Al", x: 0.0, y: 0.0, z: 0.0, wyckoff: "4a" },
