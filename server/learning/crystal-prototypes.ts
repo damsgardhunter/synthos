@@ -129,6 +129,8 @@ const PACKING_FACTORS: Record<string, number> = {
   "Hg1201-AB2CO4": 0.58,
   "C11b-Disilicide-AB2": 0.68,
   "Tetraboride-AB4": 0.60,
+  "B20-FeSi": 0.68,
+  "Matlockite-ABX": 0.58,
 };
 
 const DEFAULT_PACKING_FACTOR = 0.68;
@@ -1838,6 +1840,73 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
         isRareEarth(e) || ["Y", "Sc", "Th", "U", "Zr", "Hf", "Ca", "Sr"].includes(e)
       );
       return hasB && hasMetal;
+    },
+  },
+
+  // B20 FeSi-type: P213 (198), AB — chiral cubic topological semimetal
+  // For: FeSi, CoSi, MnSi, RhSi, CrSi, CoGe — skyrmion hosts, Weyl semimetals
+  // P213 is the only chiral cubic SG in our library — unique for topology.
+  // Primitive cell (simple cubic): 4A + 4B = 8 atoms, ratio [1,1]
+  // A at 4a: (x, x, x) with x ≈ 0.137; B at 4a: (x, x, x) with x ≈ 0.845
+  {
+    name: "B20-FeSi",
+    spaceGroup: "P213",
+    latticeType: "cubic",
+    cOverA: 1.0,
+    sites: [
+      // Fe at 4a: (x, x, x) and symmetry-equivalents, x ≈ 0.137
+      { label: "A", x: 0.137, y: 0.137, z: 0.137, role: "TM-1" },
+      { label: "A", x: 0.637, y: 0.363, z: 0.863, role: "TM-2" },
+      { label: "A", x: 0.363, y: 0.863, z: 0.637, role: "TM-3" },
+      { label: "A", x: 0.863, y: 0.637, z: 0.363, role: "TM-4" },
+      // Si at 4a: (x, x, x) and symmetry-equivalents, x ≈ 0.845
+      { label: "B", x: 0.845, y: 0.845, z: 0.845, role: "Si-1" },
+      { label: "B", x: 0.345, y: 0.655, z: 0.155, role: "Si-2" },
+      { label: "B", x: 0.655, y: 0.155, z: 0.345, role: "Si-3" },
+      { label: "B", x: 0.155, y: 0.345, z: 0.655, role: "Si-4" },
+    ],
+    stoichiometryRatio: [1, 1],
+    coordination: [7, 7],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      // B20: TM + group-14 semimetal (Si, Ge, Sn)
+      const hasTM = elements.some(e => ["Fe", "Co", "Mn", "Cr", "Rh", "Ir", "Ru", "Os", "Ni", "Pt", "Pd"].includes(e));
+      const hasSemimetal = elements.some(e => ["Si", "Ge", "Sn"].includes(e));
+      return hasTM && hasSemimetal;
+    },
+  },
+  // Matlockite PbFCl-type: P4/nmm (129), ABX — layered oxyhalide/chalcohalide
+  // For: LaOF, CeOF, BiSCl, BiSeBr, NdOBr, PrOF — scintillators, optical
+  // Layered structure: RE-O and halide layers alternate.
+  // Primitive cell: 2A + 2B + 2X = 6 atoms, ratio [1,1,1]
+  // A at 2c (1/4, 1/4, z≈0.18), B at 2a (3/4, 1/4, 0), X at 2c (1/4, 1/4, z≈0.62)
+  {
+    name: "Matlockite-ABX",
+    spaceGroup: "P4/nmm",
+    latticeType: "tetragonal",
+    cOverA: 1.82,
+    sites: [
+      // A (La/Ce/Bi/Pb) at 2c
+      { label: "A", x: 0.25, y: 0.25, z: 0.18, role: "cation-layer" },
+      { label: "A", x: 0.75, y: 0.75, z: 0.82, role: "cation-layer" },
+      // B (O/S/Se) at 2a — smaller anion in cation layer
+      { label: "B", x: 0.75, y: 0.25, z: 0.0, role: "inner-anion" },
+      { label: "B", x: 0.25, y: 0.75, z: 0.0, role: "inner-anion" },
+      // X (F/Cl/Br/I) at 2c — halide in interlayer
+      { label: "C", x: 0.25, y: 0.25, z: 0.62, role: "halide-layer" },
+      { label: "C", x: 0.75, y: 0.75, z: 0.38, role: "halide-layer" },
+    ],
+    stoichiometryRatio: [1, 1, 1],
+    coordination: [8, 4, 4],
+    chemistryRules: (elements) => {
+      if (elements.length !== 3) return false;
+      // A-site: rare earth, Bi, Pb, or alkaline earth
+      const hasCation = elements.some(e => isRareEarth(e) || ["Bi", "Pb", "Y", "Sb"].includes(e));
+      // B-site: O or S/Se/Te (chalcogen in the cation plane)
+      const hasSmallAnion = elements.some(e => ["O", "S", "Se", "Te"].includes(e));
+      // X-site: halide (F, Cl, Br, I)
+      const hasHalide = elements.some(e => ["F", "Cl", "Br", "I"].includes(e));
+      return hasCation && hasSmallAnion && hasHalide;
     },
   },
 

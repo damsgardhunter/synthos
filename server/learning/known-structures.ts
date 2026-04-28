@@ -1031,6 +1031,38 @@ const KNOWN_STRUCTURES: Record<string, KnownStructure> = {
     { element: "B", x: 0.46, y: 0.04, z: 0.5, wyckoff: "4h" },
   ]},
 
+  // B20 FeSi — topological semimetal (P213)
+  "FeSi": { formula: "FeSi", spaceGroup: "P213", spaceGroupNumber: 198, latticeType: "cubic", latticeA: 4.49, pressureGPa: 0, atoms: [
+    { element: "Fe", x: 0.137, y: 0.137, z: 0.137, wyckoff: "4a" },
+    { element: "Fe", x: 0.637, y: 0.363, z: 0.863, wyckoff: "4a" },
+    { element: "Fe", x: 0.363, y: 0.863, z: 0.637, wyckoff: "4a" },
+    { element: "Fe", x: 0.863, y: 0.637, z: 0.363, wyckoff: "4a" },
+    { element: "Si", x: 0.845, y: 0.845, z: 0.845, wyckoff: "4a" },
+    { element: "Si", x: 0.345, y: 0.655, z: 0.155, wyckoff: "4a" },
+    { element: "Si", x: 0.655, y: 0.155, z: 0.345, wyckoff: "4a" },
+    { element: "Si", x: 0.155, y: 0.345, z: 0.655, wyckoff: "4a" },
+  ]},
+  "CoSi": { formula: "CoSi", spaceGroup: "P213", spaceGroupNumber: 198, latticeType: "cubic", latticeA: 4.44, pressureGPa: 0, atoms: [
+    { element: "Co", x: 0.144, y: 0.144, z: 0.144, wyckoff: "4a" },
+    { element: "Co", x: 0.644, y: 0.356, z: 0.856, wyckoff: "4a" },
+    { element: "Co", x: 0.356, y: 0.856, z: 0.644, wyckoff: "4a" },
+    { element: "Co", x: 0.856, y: 0.644, z: 0.356, wyckoff: "4a" },
+    { element: "Si", x: 0.843, y: 0.843, z: 0.843, wyckoff: "4a" },
+    { element: "Si", x: 0.343, y: 0.657, z: 0.157, wyckoff: "4a" },
+    { element: "Si", x: 0.657, y: 0.157, z: 0.343, wyckoff: "4a" },
+    { element: "Si", x: 0.157, y: 0.343, z: 0.657, wyckoff: "4a" },
+  ]},
+
+  // Matlockite — LaOF (P4/nmm, scintillator)
+  "LaOF": { formula: "LaOF", spaceGroup: "P4/nmm", spaceGroupNumber: 129, latticeType: "tetragonal", latticeA: 4.07, latticeC: 7.41, pressureGPa: 0, atoms: [
+    { element: "La", x: 0.25, y: 0.25, z: 0.18, wyckoff: "2c" },
+    { element: "La", x: 0.75, y: 0.75, z: 0.82, wyckoff: "2c" },
+    { element: "O",  x: 0.75, y: 0.25, z: 0.0, wyckoff: "2a" },
+    { element: "O",  x: 0.25, y: 0.75, z: 0.0, wyckoff: "2a" },
+    { element: "F",  x: 0.25, y: 0.25, z: 0.62, wyckoff: "2c" },
+    { element: "F",  x: 0.75, y: 0.75, z: 0.38, wyckoff: "2c" },
+  ]},
+
   // Inverse Heusler — Mn2CoAl (F-43m)
   "Mn2CoAl": { formula: "Mn2CoAl", spaceGroup: "F-43m", spaceGroupNumber: 216, latticeType: "cubic", latticeA: 5.80, pressureGPa: 0, atoms: [
     { element: "Al", x: 0.0, y: 0.0, z: 0.0, wyckoff: "4a" },
