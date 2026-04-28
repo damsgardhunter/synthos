@@ -2850,6 +2850,73 @@ function validateFormulaForDFT(formula: string, counts: Record<string, number>):
   return { valid: true, reason: "OK" };
 }
 
+function parseXTBOptXyz(
+  optPath: string,
+  effectiveLattice: number,
+  nExpected: number,
+): Array<{ element: string; x: number; y: number; z: number }> | null {
+  if (!fs.existsSync(optPath)) return null;
+  const optContent = fs.readFileSync(optPath, "utf-8");
+  const lines = optContent.trim().split("\n");
+  if (lines.length < 3) return null;
+
+  const relaxed: Array<{ element: string; x: number; y: number; z: number }> = [];
+  for (let i = 2; i < lines.length; i++) {
+    const parts = lines[i].trim().split(/\s+/);
+    if (parts.length >= 4) {
+      let fx = parseFloat(parts[1]) / effectiveLattice;
+      let fy = parseFloat(parts[2]) / effectiveLattice;
+      let fz = parseFloat(parts[3]) / effectiveLattice;
+      fx = fx - Math.floor(fx);
+      fy = fy - Math.floor(fy);
+      fz = fz - Math.floor(fz);
+      relaxed.push({ element: parts[0], x: fx, y: fy, z: fz });
+    }
+  }
+  return relaxed.length === nExpected ? relaxed : null;
+}
+
+function validateXTBRelaxation(
+  relaxed: Array<{ element: string; x: number; y: number; z: number }>,
+  positions: Array<{ element: string; x: number; y: number; z: number }>,
+  effectiveLattice: number,
+  maxFracDisp: number = 0.35,
+  absMinDist: number = 0.5,
+): { valid: boolean; maxDisp: number; maxDispAtom: number; minDist: number; minPair: string } {
+  let maxDisp = 0;
+  let maxDispAtom = -1;
+  for (let i = 0; i < relaxed.length; i++) {
+    let dx = relaxed[i].x - positions[i].x;
+    let dy = relaxed[i].y - positions[i].y;
+    let dz = relaxed[i].z - positions[i].z;
+    dx -= Math.round(dx);
+    dy -= Math.round(dy);
+    dz -= Math.round(dz);
+    const disp = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (disp > maxDisp) { maxDisp = disp; maxDispAtom = i; }
+  }
+
+  let minDist = Infinity;
+  let minPair = "";
+  for (let i = 0; i < relaxed.length; i++) {
+    for (let j = i + 1; j < relaxed.length; j++) {
+      let fdx = relaxed[i].x - relaxed[j].x;
+      let fdy = relaxed[i].y - relaxed[j].y;
+      let fdz = relaxed[i].z - relaxed[j].z;
+      fdx -= Math.round(fdx);
+      fdy -= Math.round(fdy);
+      fdz -= Math.round(fdz);
+      const dist = Math.sqrt((fdx * effectiveLattice) ** 2 + (fdy * effectiveLattice) ** 2 + (fdz * effectiveLattice) ** 2);
+      if (dist < minDist) { minDist = dist; minPair = `${relaxed[i].element}-${relaxed[j].element}`; }
+    }
+  }
+
+  return {
+    valid: maxDisp <= maxFracDisp && minDist >= absMinDist,
+    maxDisp, maxDispAtom, minDist, minPair,
+  };
+}
+
 function tryXTBPreRelaxation(
   positions: Array<{ element: string; x: number; y: number; z: number }>,
   latticeA: number,
@@ -2863,16 +2930,15 @@ function tryXTBPreRelaxation(
     }
 
     const preRelaxElements = Array.from(new Set(positions.map(p => p.element)));
+    const isHighPressureHydride = pressureGpa >= 50 && preRelaxElements.includes("H");
     const scale = pressureGpa > 0 ? computePressureScale(pressureGpa, preRelaxElements) : 1.0;
     const effectiveLattice = latticeA * scale;
-    const xyzPath = path.join(workDir, "pre_relax.xyz");
     const nAtoms = positions.length;
+
+    const xyzPath = path.join(workDir, "pre_relax.xyz");
     let xyzContent = `${nAtoms}\npre-relaxation${pressureGpa > 0 ? ` @ ${pressureGpa} GPa` : ""}\n`;
     for (const pos of positions) {
-      const cx = pos.x * effectiveLattice;
-      const cy = pos.y * effectiveLattice;
-      const cz = pos.z * effectiveLattice;
-      xyzContent += `${pos.element}  ${cx.toFixed(6)}  ${cy.toFixed(6)}  ${cz.toFixed(6)}\n`;
+      xyzContent += `${pos.element}  ${(pos.x * effectiveLattice).toFixed(6)}  ${(pos.y * effectiveLattice).toFixed(6)}  ${(pos.z * effectiveLattice).toFixed(6)}\n`;
     }
     fs.writeFileSync(xyzPath, xyzContent);
 
@@ -2884,95 +2950,106 @@ function tryXTBPreRelaxation(
       OMP_STACKSIZE: "512M",
     };
 
-    // Try GFN-FF first (pure force field — much faster and more robust on
-    // "explosive" initial geometries). Falls back to GFN2-xTB tight-binding.
-    let gfnffOk = false;
-    try {
-      execSync(
-        `${XTB_BIN} pre_relax.xyz --gfnff --opt crude 2>&1`,
-        { cwd: workDir, timeout: 20000, env, maxBuffer: 5 * 1024 * 1024 }
-      );
-      gfnffOk = fs.existsSync(path.join(workDir, "xtbopt.xyz"));
-    } catch { /* fall through to GFN2 */ }
-
-    if (!gfnffOk) {
-      execSync(
-        `${XTB_BIN} pre_relax.xyz --gfn 2 --opt crude 2>&1`,
-        { cwd: workDir, timeout: 30000, env, maxBuffer: 5 * 1024 * 1024 }
-      );
-    }
-
     const optPath = path.join(workDir, "xtbopt.xyz");
-    if (!fs.existsSync(optPath)) return null;
-
-    const optContent = fs.readFileSync(optPath, "utf-8");
-    const lines = optContent.trim().split("\n");
-    if (lines.length < 3) return null;
-
-    const relaxed: Array<{ element: string; x: number; y: number; z: number }> = [];
-    for (let i = 2; i < lines.length; i++) {
-      const parts = lines[i].trim().split(/\s+/);
-      if (parts.length >= 4) {
-        let fx = parseFloat(parts[1]) / effectiveLattice;
-        let fy = parseFloat(parts[2]) / effectiveLattice;
-        let fz = parseFloat(parts[3]) / effectiveLattice;
-        fx = fx - Math.floor(fx);
-        fy = fy - Math.floor(fy);
-        fz = fz - Math.floor(fz);
-        relaxed.push({ element: parts[0], x: fx, y: fy, z: fz });
-      }
-    }
-
-    if (relaxed.length !== positions.length) {
-      console.log(`[QE-Worker] xTB pre-relaxation atom count mismatch: got ${relaxed.length}, expected ${positions.length}`);
-      return null;
-    }
-
     const MAX_FRAC_DISPLACEMENT = 0.35;
-    let maxDisp = 0;
-    let maxDispAtom = -1;
-    for (let i = 0; i < relaxed.length; i++) {
-      let dx = relaxed[i].x - positions[i].x;
-      let dy = relaxed[i].y - positions[i].y;
-      let dz = relaxed[i].z - positions[i].z;
-      dx -= Math.round(dx);
-      dy -= Math.round(dy);
-      dz -= Math.round(dz);
-      const disp = Math.sqrt(dx * dx + dy * dy + dz * dz);
-      if (disp > maxDisp) {
-        maxDisp = disp;
-        maxDispAtom = i;
-      }
-    }
-    if (maxDisp > MAX_FRAC_DISPLACEMENT) {
-      console.log(`[QE-Worker] xTB pre-relax rejected: atom ${maxDispAtom} (${relaxed[maxDispAtom]?.element}) displaced ${maxDisp.toFixed(3)} frac units (max ${MAX_FRAC_DISPLACEMENT}) — molecular optimizer likely collapsed structure`);
-      return null;
-    }
-
-    let minDist = Infinity;
-    let minPair = "";
-    for (let i = 0; i < relaxed.length; i++) {
-      for (let j = i + 1; j < relaxed.length; j++) {
-        let fdx = relaxed[i].x - relaxed[j].x;
-        let fdy = relaxed[i].y - relaxed[j].y;
-        let fdz = relaxed[i].z - relaxed[j].z;
-        fdx -= Math.round(fdx);
-        fdy -= Math.round(fdy);
-        fdz -= Math.round(fdz);
-        const dist = Math.sqrt((fdx * effectiveLattice) ** 2 + (fdy * effectiveLattice) ** 2 + (fdz * effectiveLattice) ** 2);
-        if (dist < minDist) {
-          minDist = dist;
-          minPair = `${relaxed[i].element}-${relaxed[j].element}`;
-        }
-      }
-    }
     const ABS_MIN_DIST = 0.5;
-    if (minDist < ABS_MIN_DIST) {
-      console.log(`[QE-Worker] xTB pre-relax rejected: ${minPair} distance ${minDist.toFixed(3)} A < ${ABS_MIN_DIST} A absolute minimum — molecular optimizer collapsed atoms`);
+    let relaxed: Array<{ element: string; x: number; y: number; z: number }> | null = null;
+
+    // ---- Strategy 1: Constrained GFN-FF (pressure-aware) ----
+    // For high-P hydrides, xTB molecular mode collapses H cages because it
+    // doesn't know about pressure. Use a reference-structure constraint with
+    // a spring constant that keeps atoms near their Wyckoff positions while
+    // allowing local relaxation. The spring constant scales with pressure —
+    // higher pressure = stiffer constraint (cage is more rigid).
+    if (isHighPressureHydride) {
+      // Spring constant in Hartree/Bohr^2: higher pressure → stiffer springs
+      // At 200 GPa, k≈0.10; at 50 GPa, k≈0.03. This prevents cage collapse
+      // while allowing ~0.05-0.10 frac displacement for position refinement.
+      const kForce = Math.min(0.15, 0.02 + pressureGpa * 0.0004);
+      const xcontrolPath = path.join(workDir, "xcontrol_pressure.in");
+      fs.writeFileSync(xcontrolPath,
+        `$constrain\n  force constant=${kForce.toFixed(4)}\n  reference=pre_relax.xyz\n  atoms: 1-${nAtoms}\n$end\n`
+      );
+      console.log(`[QE-Worker] xTB high-P hydride mode: constrained GFN-FF (k=${kForce.toFixed(4)}, P=${pressureGpa} GPa, a_eff=${effectiveLattice.toFixed(3)} A)`);
+
+      try {
+        // Clean stale output from prior runs
+        for (const f of ["xtbopt.xyz", "gfnff_topo"]) {
+          const fp = path.join(workDir, f);
+          if (fs.existsSync(fp)) fs.unlinkSync(fp);
+        }
+        execSync(
+          `${XTB_BIN} pre_relax.xyz --gfnff --opt crude --input xcontrol_pressure.in 2>&1`,
+          { cwd: workDir, timeout: 30000, env, maxBuffer: 5 * 1024 * 1024 }
+        );
+        relaxed = parseXTBOptXyz(optPath, effectiveLattice, nAtoms);
+      } catch { /* fall through */ }
+
+      // If constrained GFN-FF didn't produce valid output, try GFN2 constrained
+      if (!relaxed) {
+        try {
+          for (const f of ["xtbopt.xyz"]) {
+            const fp = path.join(workDir, f);
+            if (fs.existsSync(fp)) fs.unlinkSync(fp);
+          }
+          execSync(
+            `${XTB_BIN} pre_relax.xyz --gfn 2 --opt crude --input xcontrol_pressure.in 2>&1`,
+            { cwd: workDir, timeout: 30000, env, maxBuffer: 5 * 1024 * 1024 }
+          );
+          relaxed = parseXTBOptXyz(optPath, effectiveLattice, nAtoms);
+        } catch { /* fall through */ }
+      }
+    }
+
+    // ---- Strategy 2: Unconstrained molecular GFN-FF / GFN2 ----
+    // For ambient-pressure or non-hydride materials, use the original
+    // molecular optimization (no constraints needed — structure is stable at 0 GPa).
+    if (!relaxed) {
+      let gfnffOk = false;
+      try {
+        for (const f of ["xtbopt.xyz", "gfnff_topo"]) {
+          const fp = path.join(workDir, f);
+          if (fs.existsSync(fp)) fs.unlinkSync(fp);
+        }
+        execSync(
+          `${XTB_BIN} pre_relax.xyz --gfnff --opt crude 2>&1`,
+          { cwd: workDir, timeout: 20000, env, maxBuffer: 5 * 1024 * 1024 }
+        );
+        gfnffOk = fs.existsSync(optPath);
+      } catch { /* fall through to GFN2 */ }
+
+      if (!gfnffOk) {
+        try {
+          const fp = path.join(workDir, "xtbopt.xyz");
+          if (fs.existsSync(fp)) fs.unlinkSync(fp);
+          execSync(
+            `${XTB_BIN} pre_relax.xyz --gfn 2 --opt crude 2>&1`,
+            { cwd: workDir, timeout: 30000, env, maxBuffer: 5 * 1024 * 1024 }
+          );
+        } catch { /* fall through */ }
+      }
+
+      relaxed = parseXTBOptXyz(optPath, effectiveLattice, nAtoms);
+    }
+
+    if (!relaxed) {
+      console.log(`[QE-Worker] xTB pre-relaxation atom count mismatch or no output for ${nAtoms} atoms`);
       return null;
     }
 
-    console.log(`[QE-Worker] xTB pre-relaxation succeeded for ${nAtoms} atoms (scale=${scale.toFixed(3)}, effLattice=${effectiveLattice.toFixed(3)} A, maxDisp=${maxDisp.toFixed(3)} frac, minDist=${minDist.toFixed(3)} A [${minPair}])`);
+    // ---- Validate result ----
+    const v = validateXTBRelaxation(relaxed, positions, effectiveLattice, MAX_FRAC_DISPLACEMENT, ABS_MIN_DIST);
+    if (v.maxDisp > MAX_FRAC_DISPLACEMENT) {
+      console.log(`[QE-Worker] xTB pre-relax rejected: atom ${v.maxDispAtom} (${relaxed[v.maxDispAtom]?.element}) displaced ${v.maxDisp.toFixed(3)} frac units (max ${MAX_FRAC_DISPLACEMENT}) — molecular optimizer likely collapsed structure`);
+      return null;
+    }
+    if (v.minDist < ABS_MIN_DIST) {
+      console.log(`[QE-Worker] xTB pre-relax rejected: ${v.minPair} distance ${v.minDist.toFixed(3)} A < ${ABS_MIN_DIST} A absolute minimum — molecular optimizer collapsed atoms`);
+      return null;
+    }
+
+    const mode = isHighPressureHydride ? "constrained" : "unconstrained";
+    console.log(`[QE-Worker] xTB pre-relaxation succeeded for ${nAtoms} atoms (${mode}, scale=${scale.toFixed(3)}, effLattice=${effectiveLattice.toFixed(3)} A, maxDisp=${v.maxDisp.toFixed(3)} frac, minDist=${v.minDist.toFixed(3)} A [${v.minPair}])`);
     return relaxed;
   } catch (err: any) {
     console.log(`[QE-Worker] xTB pre-relaxation failed for ${positions.length} atoms: ${err.message?.slice(0, 150)}`);
