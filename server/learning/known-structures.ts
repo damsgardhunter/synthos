@@ -1063,6 +1063,32 @@ const KNOWN_STRUCTURES: Record<string, KnownStructure> = {
     { element: "F",  x: 0.75, y: 0.75, z: 0.38, wyckoff: "2c" },
   ]},
 
+  // CaCu5 — SmCo5 (P6/mmm, permanent magnet)
+  "SmCo5": { formula: "SmCo5", spaceGroup: "P6/mmm", spaceGroupNumber: 191, latticeType: "hexagonal", latticeA: 4.99, latticeC: 3.98, pressureGPa: 0, atoms: [
+    { element: "Sm", x: 0.0, y: 0.0, z: 0.0, wyckoff: "1a" },
+    { element: "Co", x: 0.3333, y: 0.6667, z: 0.0, wyckoff: "2c" },
+    { element: "Co", x: 0.6667, y: 0.3333, z: 0.0, wyckoff: "2c" },
+    { element: "Co", x: 0.5, y: 0.0, z: 0.5, wyckoff: "3g" },
+    { element: "Co", x: 0.0, y: 0.5, z: 0.5, wyckoff: "3g" },
+    { element: "Co", x: 0.5, y: 0.5, z: 0.5, wyckoff: "3g" },
+  ]},
+  "LaNi5": { formula: "LaNi5", spaceGroup: "P6/mmm", spaceGroupNumber: 191, latticeType: "hexagonal", latticeA: 5.02, latticeC: 3.98, pressureGPa: 0, atoms: [
+    { element: "La", x: 0.0, y: 0.0, z: 0.0, wyckoff: "1a" },
+    { element: "Ni", x: 0.3333, y: 0.6667, z: 0.0, wyckoff: "2c" },
+    { element: "Ni", x: 0.6667, y: 0.3333, z: 0.0, wyckoff: "2c" },
+    { element: "Ni", x: 0.5, y: 0.0, z: 0.5, wyckoff: "3g" },
+    { element: "Ni", x: 0.0, y: 0.5, z: 0.5, wyckoff: "3g" },
+    { element: "Ni", x: 0.5, y: 0.5, z: 0.5, wyckoff: "3g" },
+  ]},
+
+  // DO3 — Na3Bi (Fm-3m, topological Dirac semimetal)
+  "Na3Bi": { formula: "Na3Bi", spaceGroup: "Fm-3m", spaceGroupNumber: 225, latticeType: "cubic", latticeA: 7.32, pressureGPa: 0, atoms: [
+    { element: "Na", x: 0.25, y: 0.25, z: 0.25, wyckoff: "8c" },
+    { element: "Na", x: 0.75, y: 0.75, z: 0.75, wyckoff: "8c" },
+    { element: "Na", x: 0.5, y: 0.5, z: 0.5, wyckoff: "4b" },
+    { element: "Bi", x: 0.0, y: 0.0, z: 0.0, wyckoff: "4a" },
+  ]},
+
   // Inverse Heusler — Mn2CoAl (F-43m)
   "Mn2CoAl": { formula: "Mn2CoAl", spaceGroup: "F-43m", spaceGroupNumber: 216, latticeType: "cubic", latticeA: 5.80, pressureGPa: 0, atoms: [
     { element: "Al", x: 0.0, y: 0.0, z: 0.0, wyckoff: "4a" },

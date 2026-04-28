@@ -131,6 +131,8 @@ const PACKING_FACTORS: Record<string, number> = {
   "Tetraboride-AB4": 0.60,
   "B20-FeSi": 0.68,
   "Matlockite-ABX": 0.58,
+  "CaCu5-AB5": 0.74,
+  "DO3-A3B": 0.68,
 };
 
 const DEFAULT_PACKING_FACTOR = 0.68;
@@ -1907,6 +1909,66 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
       // X-site: halide (F, Cl, Br, I)
       const hasHalide = elements.some(e => ["F", "Cl", "Br", "I"].includes(e));
       return hasCation && hasSmallAnion && hasHalide;
+    },
+  },
+
+  // CaCu5-type: P6/mmm (191), AB5 — permanent magnet / H-storage
+  // For: SmCo5, LaNi5, CeCo5, NdCo5, YCo5, PrCo5 — rare-earth magnets
+  // Also: LaNi5 (hydrogen storage alloy), CaCu5 (prototype)
+  // Primitive cell (P-type = conventional per f.u.): 1A + 5B = 6 atoms, ratio [1,5]
+  // A at 1a (0,0,0), B at 2c (1/3,2/3,0) + 3g (1/2,0,1/2)
+  {
+    name: "CaCu5-AB5",
+    spaceGroup: "P6/mmm",
+    latticeType: "hexagonal",
+    cOverA: 0.81,
+    sites: [
+      // A (Ca/Sm/La/Nd/Ce/Y) at 1a
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "RE-site" },
+      // B at 2c: (1/3, 2/3, 0)
+      { label: "B", x: 0.3333, y: 0.6667, z: 0.0, role: "TM-2c-1" },
+      { label: "B", x: 0.6667, y: 0.3333, z: 0.0, role: "TM-2c-2" },
+      // B at 3g: (1/2, 0, 1/2) and equivalents
+      { label: "B", x: 0.5, y: 0.0, z: 0.5, role: "TM-3g-1" },
+      { label: "B", x: 0.0, y: 0.5, z: 0.5, role: "TM-3g-2" },
+      { label: "B", x: 0.5, y: 0.5, z: 0.5, role: "TM-3g-3" },
+    ],
+    stoichiometryRatio: [1, 5],
+    coordination: [18, 12],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      const hasRE = elements.some(e => isRareEarth(e) || ["Y", "Sc", "Ca", "Sr", "Ba", "Th", "Zr", "Hf", "Mg"].includes(e));
+      const hasTM = elements.some(e => ["Co", "Ni", "Fe", "Cu", "Mn", "Pt", "Pd", "Ir", "Rh"].includes(e));
+      return hasRE && hasTM;
+    },
+  },
+  // DO3 / BiF3-type: Fm-3m (225), A3B — alkali/sp-metal topological
+  // For: Na3Bi (Dirac semimetal), Li3Bi, K3Bi, Na3Sb, Li3Sb
+  // Distinct from D019 (hexagonal, TM+partner) and Cementite (TM+light)
+  // Primitive cell (FCC → 1/4 conventional): 3A + 1B = 4 atoms, ratio [3,1]
+  // A at 8c (1/4,1/4,1/4) + 4b (1/2,1/2,1/2), B at 4a (0,0,0)
+  {
+    name: "DO3-A3B",
+    spaceGroup: "Fm-3m",
+    latticeType: "cubic",
+    cOverA: 1.0,
+    sites: [
+      // A (Li/Na/K) at 8c → 2 in primitive
+      { label: "A", x: 0.25, y: 0.25, z: 0.25, role: "alkali-8c" },
+      { label: "A", x: 0.75, y: 0.75, z: 0.75, role: "alkali-8c" },
+      // A at 4b → 1 in primitive
+      { label: "A", x: 0.5, y: 0.5, z: 0.5, role: "alkali-4b" },
+      // B (Bi/Sb/As/Sn/Pb) at 4a → 1 in primitive
+      { label: "B", x: 0.0, y: 0.0, z: 0.0, role: "heavy-pnictogen" },
+    ],
+    stoichiometryRatio: [3, 1],
+    coordination: [8, 12],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      // DO3: alkali/alkaline-earth + heavy p-block (topological materials)
+      const hasLight = elements.some(e => ["Li", "Na", "K", "Rb", "Cs", "Mg", "Ca"].includes(e));
+      const hasHeavy = elements.some(e => ["Bi", "Sb", "Sn", "Pb", "As", "Te", "In"].includes(e));
+      return hasLight && hasHeavy;
     },
   },
 
