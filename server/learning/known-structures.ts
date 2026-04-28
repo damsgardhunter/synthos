@@ -785,6 +785,35 @@ const KNOWN_STRUCTURES: Record<string, KnownStructure> = {
     { element: "Sb", x: 0.700, y: 0.122, z: 0.5, wyckoff: "4g" },
   ]},
 
+  // Tl-2201 single-layer cuprate — Tl2Ba2CuO6 (I4/mmm)
+  "Tl2Ba2CuO6": { formula: "Tl2Ba2CuO6", spaceGroup: "I4/mmm", spaceGroupNumber: 139, latticeType: "tetragonal", latticeA: 3.87, latticeC: 23.14, pressureGPa: 0, atoms: [
+    { element: "Tl", x: 0.0, y: 0.0, z: 0.210, wyckoff: "4e" },
+    { element: "Tl", x: 0.0, y: 0.0, z: 0.790, wyckoff: "4e" },
+    { element: "Ba", x: 0.0, y: 0.0, z: 0.116, wyckoff: "4e" },
+    { element: "Ba", x: 0.0, y: 0.0, z: 0.884, wyckoff: "4e" },
+    { element: "Cu", x: 0.0, y: 0.0, z: 0.0, wyckoff: "2a" },
+    { element: "O",  x: 0.5, y: 0.0, z: 0.0, wyckoff: "4c" },
+    { element: "O",  x: 0.0, y: 0.5, z: 0.0, wyckoff: "4c" },
+    { element: "O",  x: 0.0, y: 0.0, z: 0.163, wyckoff: "4e" },
+    { element: "O",  x: 0.0, y: 0.0, z: 0.837, wyckoff: "4e" },
+    { element: "O",  x: 0.0, y: 0.0, z: 0.279, wyckoff: "4e" },
+    { element: "O",  x: 0.0, y: 0.0, z: 0.721, wyckoff: "4e" },
+  ]},
+
+  // Post-perovskite — CaIrO3 (Cmcm)
+  "CaIrO3": { formula: "CaIrO3", spaceGroup: "Cmcm", spaceGroupNumber: 63, latticeType: "tetragonal", latticeA: 3.15, latticeC: 7.30, pressureGPa: 0, atoms: [
+    { element: "Ca", x: 0.0, y: 0.25, z: 0.25, wyckoff: "4c" },
+    { element: "Ca", x: 0.0, y: 0.75, z: 0.75, wyckoff: "4c" },
+    { element: "Ir", x: 0.0, y: 0.0, z: 0.0, wyckoff: "4a" },
+    { element: "Ir", x: 0.0, y: 0.5, z: 0.5, wyckoff: "4a" },
+    { element: "O",  x: 0.0, y: 0.93, z: 0.25, wyckoff: "4c" },
+    { element: "O",  x: 0.0, y: 0.07, z: 0.75, wyckoff: "4c" },
+    { element: "O",  x: 0.0, y: 0.63, z: 0.07, wyckoff: "8f" },
+    { element: "O",  x: 0.0, y: 0.37, z: 0.93, wyckoff: "8f" },
+    { element: "O",  x: 0.0, y: 0.13, z: 0.57, wyckoff: "8f" },
+    { element: "O",  x: 0.0, y: 0.87, z: 0.43, wyckoff: "8f" },
+  ]},
+
   // Inverse Heusler — Mn2CoAl (F-43m)
   "Mn2CoAl": { formula: "Mn2CoAl", spaceGroup: "F-43m", spaceGroupNumber: 216, latticeType: "cubic", latticeA: 5.80, pressureGPa: 0, atoms: [
     { element: "Al", x: 0.0, y: 0.0, z: 0.0, wyckoff: "4a" },
