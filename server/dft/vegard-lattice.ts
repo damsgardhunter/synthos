@@ -11,6 +11,7 @@
 import {
   fetchAflowByElements,
   fetchAflowByTernaryElements,
+  fetchAflowBySpaceGroup,
   type AflowStructureEndpoint,
 } from "../learning/aflow-client";
 import {
@@ -533,6 +534,160 @@ function interpolatePositionsFromEndpoints(
 }
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Template-aware VCA: fetch AFLOW references sharing the same prototype,
+// then composition-weight their relaxed Wyckoff positions.
+// ---------------------------------------------------------------------------
+
+const SG_NUMBER: Record<string, number> = {
+  "Pm-3m": 221, "Fm-3m": 225, "Im-3m": 229, "Fd-3m": 227,
+  "P6/mmm": 191, "P63/mmc": 194, "P63/mcm": 193, "P-3m1": 164,
+  "R-3m": 166, "R-3c": 167, "R-3": 148, "R3c": 161,
+  "I4/mmm": 139, "P4/mmm": 123, "P4/nmm": 129, "I41/amd": 141,
+  "I41/a": 88, "I-42d": 122, "I-42m": 121, "P42/mnm": 136,
+  "P4/mbm": 127, "Pmmm": 47, "Pnma": 62, "Cmcm": 63, "Pnnm": 58,
+  "P213": 198, "Pa-3": 205, "Im-3": 204, "Pm-3n": 223, "Pn-3m": 224,
+  "P2/c": 13, "P21/c": 14, "P21/n": 14, "C2/m": 12, "C2/c": 15,
+  "F-43m": 216, "P-6m2": 187, "P63mc": 186, "Pca21": 29,
+};
+
+/**
+ * Template-aware VCA position interpolation.
+ *
+ * Given a matched prototype template + target composition:
+ * 1. Query AFLOW for compounds with the same space group + nspecies
+ * 2. Score references by element overlap + ionic radius similarity
+ * 3. Map reference atoms to template sites by fractional-coord proximity
+ * 4. Composition-weight positions across top references
+ * 5. Return interpolated positions with averaged geometry
+ */
+export async function interpolateFromTemplateReferences(
+  template: PrototypeTemplate,
+  elements: string[],
+  counts: Record<string, number>,
+): Promise<{
+  positions: Array<{ element: string; x: number; y: number; z: number }>;
+  geometry: { a: number; b: number; c: number; alpha: number; beta: number; gamma: number } | null;
+  referencesUsed: string[];
+  confidence: number;
+} | null> {
+  const sgNumber = SG_NUMBER[template.spaceGroup] ?? 0;
+  if (sgNumber === 0) return null;
+
+  const nSpecies = elements.length;
+  const totalAtoms = Object.values(counts).reduce((s, n) => s + Math.round(n), 0);
+
+  let refs: AflowStructureEndpoint[];
+  try {
+    refs = await fetchAflowBySpaceGroup(sgNumber, nSpecies, 12);
+  } catch {
+    return null;
+  }
+
+  // Filter to entries with positions and similar atom count
+  const withPositions = refs.filter(r =>
+    r.positions && r.positions.length > 0 &&
+    Math.abs(r.positions.length - totalAtoms) <= 2
+  );
+  if (withPositions.length === 0) return null;
+
+  // Score by chemical similarity to target
+  const scored = withPositions.map(ref => {
+    let score = 0;
+    const refElements = new Set(ref.positions!.map(p => p.element));
+    for (const el of elements) {
+      if (refElements.has(el)) { score += 5; continue; }
+      const targetRadius = getElementData(el)?.atomicRadius ?? 130;
+      let bestDiff = Infinity;
+      Array.from(refElements).forEach(rel => {
+        bestDiff = Math.min(bestDiff, Math.abs(targetRadius - (getElementData(rel)?.atomicRadius ?? 130)));
+      });
+      score -= bestDiff * 0.02;
+    }
+    if (ref.positions!.length === totalAtoms) score += 3;
+    return { ref, score };
+  });
+  scored.sort((a, b) => b.score - a.score);
+
+  const topRefs = scored.slice(0, 5).filter(s => s.score > 0);
+  if (topRefs.length === 0) return null;
+
+  // VCA position averaging: map reference atoms to template sites
+  const accumulatedPositions: Array<{ x: number; y: number; z: number; weight: number }[]> =
+    template.sites.map(() => []);
+  const referencesUsed: string[] = [];
+
+  for (const { ref, score } of topRefs) {
+    const refPos = ref.positions!;
+    if (refPos.length !== template.sites.length) continue;
+
+    const weight = Math.max(0.1, score);
+    referencesUsed.push(ref.compound);
+
+    // Map by fractional-coordinate proximity (with PBC wrapping)
+    const used = new Set<number>();
+    for (let si = 0; si < template.sites.length; si++) {
+      const ts = template.sites[si];
+      let bestIdx = -1, bestDist = Infinity;
+      for (let ri = 0; ri < refPos.length; ri++) {
+        if (used.has(ri)) continue;
+        const dx = Math.min(Math.abs(refPos[ri].x - ts.x), 1 - Math.abs(refPos[ri].x - ts.x));
+        const dy = Math.min(Math.abs(refPos[ri].y - ts.y), 1 - Math.abs(refPos[ri].y - ts.y));
+        const dz = Math.min(Math.abs(refPos[ri].z - ts.z), 1 - Math.abs(refPos[ri].z - ts.z));
+        const dist = dx * dx + dy * dy + dz * dz;
+        if (dist < bestDist) { bestDist = dist; bestIdx = ri; }
+      }
+      if (bestIdx >= 0 && bestDist < 0.15) {
+        used.add(bestIdx);
+        accumulatedPositions[si].push({ x: refPos[bestIdx].x, y: refPos[bestIdx].y, z: refPos[bestIdx].z, weight });
+      }
+    }
+  }
+
+  if (referencesUsed.length === 0) return null;
+
+  // Build element mapping via selectPrototype
+  const formulaStr = elements.map(e => `${e}${Math.round(counts[e])}`).join("");
+  const protoResult = selectPrototype(formulaStr);
+  if (!protoResult) return null;
+  const { siteMap } = protoResult;
+
+  // Weighted average positions
+  const positions: Array<{ element: string; x: number; y: number; z: number }> = [];
+  for (let si = 0; si < template.sites.length; si++) {
+    const site = template.sites[si];
+    const element = siteMap[site.label];
+    if (!element) continue;
+    const acc = accumulatedPositions[si];
+    if (acc.length > 0) {
+      let wx = 0, wy = 0, wz = 0, wt = 0;
+      for (const a of acc) { wx += a.x * a.weight; wy += a.y * a.weight; wz += a.z * a.weight; wt += a.weight; }
+      positions.push({ element, x: wx / wt, y: wy / wt, z: wz / wt });
+    } else {
+      positions.push({ element, x: site.x, y: site.y, z: site.z });
+    }
+  }
+
+  // Average geometry from references
+  let geometry: { a: number; b: number; c: number; alpha: number; beta: number; gamma: number } | null = null;
+  const geomRefs = topRefs.filter(r => r.ref.geometry);
+  if (geomRefs.length > 0) {
+    let ga = 0, gb = 0, gc = 0, galpha = 0, gbeta = 0, ggamma = 0, gw = 0;
+    for (const { ref, score } of geomRefs) {
+      const g = ref.geometry!;
+      const w = Math.max(0.1, score);
+      ga += g[0] * w; gb += g[1] * w; gc += g[2] * w;
+      galpha += g[3] * w; gbeta += g[4] * w; ggamma += g[5] * w;
+      gw += w;
+    }
+    geometry = { a: ga / gw, b: gb / gw, c: gc / gw, alpha: galpha / gw, beta: gbeta / gw, gamma: ggamma / gw };
+  }
+
+  const confidence = Math.min(1.0, 0.5 + referencesUsed.length * 0.1);
+  console.log(`[VCA-Template] Interpolated ${positions.length} positions from ${referencesUsed.length} AFLOW refs (${template.name}, SG=${sgNumber}): ${referencesUsed.join(", ")}`);
+  return { positions, geometry, referencesUsed, confidence };
+}
+
 // Multi-candidate structure generation
 // ---------------------------------------------------------------------------
 
@@ -615,6 +770,32 @@ export async function generateStructureCandidates(
           confidence: vegard.confidence * 0.85,
           isMetallic: vegard.isMetallic,
         });
+      }
+
+      // --- Source 2b: Template-aware VCA from AFLOW references ---
+      try {
+        const templateVCA = await interpolateFromTemplateReferences(proto.template, elements, counts);
+        if (templateVCA && templateVCA.positions.length > 0) {
+          const vcaLatticeA = templateVCA.geometry?.a
+            ? vegard.latticeA * 0.5 + templateVCA.geometry.a * 0.5
+            : vegard.latticeA;
+          const vcaCOverA = templateVCA.geometry
+            ? templateVCA.geometry.c / templateVCA.geometry.a
+            : (protoLattice?.c && protoLattice?.a ? protoLattice.c / protoLattice.a : 1.0);
+          candidates.push({
+            latticeA: vcaLatticeA,
+            cOverA: vcaCOverA,
+            positions: templateVCA.positions,
+            prototype: `TemplateVCA-${proto.template.name}`,
+            crystalSystem: proto.template.latticeType ?? "cubic",
+            spaceGroup: proto.template.spaceGroup ?? "",
+            source: `Template VCA from ${templateVCA.referencesUsed.length} AFLOW refs: ${templateVCA.referencesUsed.slice(0, 3).join(", ")}`,
+            confidence: vegard.confidence * templateVCA.confidence * 0.90,
+            isMetallic: vegard.isMetallic,
+          });
+        }
+      } catch (err: any) {
+        console.log(`[VCA-Template] Failed for ${formula}: ${err?.message?.slice(0, 80) ?? "unknown"}`);
       }
     }
 

@@ -744,3 +744,79 @@ export async function fetchAflowByTernaryElements(
 
   return endpoints;
 }
+
+/**
+ * Fetch AFLOW compounds by space group number + number of species.
+ * Used for template-aware VCA: query AFLOW for all compounds with the
+ * same space group to use as reference structures for position interpolation.
+ * Cached 7 days under dataType="template_ref".
+ */
+export async function fetchAflowBySpaceGroup(
+  spaceGroupNumber: number,
+  nSpecies: number,
+  limit: number = 8,
+): Promise<AflowStructureEndpoint[]> {
+  const cacheKey = `sg${spaceGroupNumber}_n${nSpecies}`;
+  const cached = await getAflowCachedData(cacheKey, "template_ref");
+  if (cached && Array.isArray(cached) && cached.length > 0) return cached as AflowStructureEndpoint[];
+
+  const query = `spacegroup_relax(${spaceGroupNumber}),nspecies(${nSpecies}),paging(1,${limit}),volume_atom,lattice_system_relax,enthalpy_formation_atom,Egap,geometry,positions_fractional,composition,species_pp,compound`;
+
+  console.log(`[AFLOW-TemplateRef] Fetching SG=${spaceGroupNumber} nspecies=${nSpecies} (limit ${limit})...`);
+  const rawEntries = await vegardAflowFetch(query);
+  if (!rawEntries || rawEntries.length === 0) {
+    await setAflowCachedData(cacheKey, "template_ref", []);
+    return [];
+  }
+
+  const endpoints: AflowStructureEndpoint[] = [];
+  for (const entry of rawEntries) {
+    const volNum = entry.volume_atom != null ? Number(entry.volume_atom) : 15;
+    if (!entry.compound && !entry.auid) continue;
+
+    let aflowPositions: Array<{ element: string; x: number; y: number; z: number }> | null = null;
+    if (entry.positions_fractional && Array.isArray(entry.positions_fractional) &&
+        entry.species_pp && Array.isArray(entry.species_pp) &&
+        entry.composition && Array.isArray(entry.composition)) {
+      aflowPositions = [];
+      const species = (entry.species_pp as string[]).map((s: string) => s.replace(/_.*/, ""));
+      const comp = entry.composition as number[];
+      let atomIdx = 0;
+      for (let s = 0; s < species.length && s < comp.length; s++) {
+        for (let i = 0; i < comp[s]; i++) {
+          if (atomIdx < entry.positions_fractional.length) {
+            const pos = entry.positions_fractional[atomIdx] as number[];
+            if (pos && pos.length >= 3) {
+              aflowPositions.push({ element: species[s], x: pos[0], y: pos[1], z: pos[2] });
+            }
+          }
+          atomIdx++;
+        }
+      }
+      if (aflowPositions.length === 0) aflowPositions = null;
+    }
+
+    const geom = entry.geometry && Array.isArray(entry.geometry) && entry.geometry.length >= 6
+      ? entry.geometry as [number, number, number, number, number, number] : null;
+    const elems = entry.species_pp && Array.isArray(entry.species_pp)
+      ? (entry.species_pp as string[]).map((s: string) => s.replace(/_.*/, "")).sort() : [];
+
+    endpoints.push({
+      compound: entry.compound ?? "",
+      elements: elems,
+      volumeAtom: volNum,
+      latticeSystem: (entry.lattice_system_relax ?? "").toLowerCase(),
+      spaceGroupNumber,
+      spaceGroupSymbol: entry.sg2 ?? entry.spacegroup ?? "",
+      enthalpyFormationAtom: entry.enthalpy_formation_atom != null ? Number(entry.enthalpy_formation_atom) : null,
+      bandgap: entry.Egap != null ? Number(entry.Egap) : null,
+      source: "AFLOW",
+      geometry: geom,
+      positions: aflowPositions,
+    });
+  }
+
+  await setAflowCachedData(cacheKey, "template_ref", endpoints);
+  console.log(`[AFLOW-TemplateRef] Cached ${endpoints.length} entries for SG=${spaceGroupNumber} (${endpoints.filter(e => e.positions).length} with positions)`);
+  return endpoints;
+}
