@@ -141,6 +141,7 @@ const PACKING_FACTORS: Record<string, number> = {
   "A5-betaSn": 0.53,
   "OxynitridePerovskite-ABOX": 0.74,
   "Stibnite-A2B3": 0.55,
+  "HalidePerovskite-ABX3": 0.74,
 };
 
 const DEFAULT_PACKING_FACTOR = 0.68;
@@ -2223,6 +2224,41 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
     },
   },
 
+  // Halide Perovskite: Pm-3m (221), ABX3 — solar cell materials
+  // For: CsPbI3, CsPbBr3, CsPbCl3, CsSnI3, CsSnBr3, CsGeBr3
+  // CRITICAL: Oxide Perovskite template excludes Pb/Sn/Ge at B-site
+  // (not in CATIONS_SMALL_TM) and halides at X-site.
+  // Same cubic positions as oxide perovskite but distinct chemistry.
+  // Primitive: 1A + 1B + 3X = 5 atoms, ratio [1,1,3]
+  {
+    name: "HalidePerovskite-ABX3",
+    spaceGroup: "Pm-3m",
+    latticeType: "cubic",
+    cOverA: 1.0,
+    sites: [
+      // A (Cs/Rb/K) at 1a
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "A-site" },
+      // B (Pb/Sn/Ge) at 1b
+      { label: "B", x: 0.5, y: 0.5, z: 0.5, role: "B-site" },
+      // X (I/Br/Cl/F) at 3c
+      { label: "C", x: 0.5, y: 0.5, z: 0.0, role: "halide" },
+      { label: "C", x: 0.5, y: 0.0, z: 0.5, role: "halide" },
+      { label: "C", x: 0.0, y: 0.5, z: 0.5, role: "halide" },
+    ],
+    stoichiometryRatio: [1, 1, 3],
+    coordination: [12, 6, 2],
+    chemistryRules: (elements) => {
+      if (elements.length !== 3) return false;
+      // A-site: large monovalent cation
+      const hasA = elements.some(e => ["Cs", "Rb", "K", "Na", "Tl"].includes(e));
+      // B-site: Pb, Sn, Ge, Bi (heavy p-block metals)
+      const hasB = elements.some(e => ["Pb", "Sn", "Ge", "Bi", "Sb", "In"].includes(e));
+      // X-site: halide
+      const hasX = elements.some(e => ["I", "Br", "Cl", "F"].includes(e));
+      return hasA && hasB && hasX;
+    },
+  },
+
   // ── End of additional families ─────────────────────────────────────────
   {
     name: "Heusler-L21",
@@ -2593,9 +2629,9 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
     coordination: [4, 4, 4],
     chemistryRules: (elements: string[]) => {
       if (elements.length !== 3) return false;
-      const hasRE = elements.some(e => ["Y", "La", "Lu", "Sc", "Gd", "Nd", "Ce"].includes(e));
-      const hasTM = elements.some(e => ["Pt", "Pd", "Ni", "Au", "Ir", "Rh"].includes(e));
-      const hasSp = elements.some(e => ["Bi", "Sb", "Sn", "Pb", "In", "Te"].includes(e));
+      const hasRE = elements.some(e => ["Y", "La", "Lu", "Sc", "Gd", "Nd", "Ce", "Ti", "Zr", "Hf", "Nb", "Ta", "V"].includes(e));
+      const hasTM = elements.some(e => ["Pt", "Pd", "Ni", "Au", "Ir", "Rh", "Co", "Fe", "Mn", "Cu"].includes(e));
+      const hasSp = elements.some(e => ["Bi", "Sb", "Sn", "Pb", "In", "Te", "Ge", "Si", "Ga", "As", "Se"].includes(e));
       return hasRE && hasTM && hasSp;
     },
   },

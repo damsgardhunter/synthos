@@ -1192,6 +1192,29 @@ const KNOWN_STRUCTURES: Record<string, KnownStructure> = {
     { element: "S",  x: 0.453, y: 0.25, z: 0.373, wyckoff: "4c" },
   ]},
 
+  // Halide perovskite — CsPbI3 (Pm-3m, solar cell)
+  "CsPbI3": { formula: "CsPbI3", spaceGroup: "Pm-3m", spaceGroupNumber: 221, latticeType: "cubic", latticeA: 6.29, pressureGPa: 0, atoms: [
+    { element: "Cs", x: 0.0, y: 0.0, z: 0.0, wyckoff: "1a" },
+    { element: "Pb", x: 0.5, y: 0.5, z: 0.5, wyckoff: "1b" },
+    { element: "I",  x: 0.5, y: 0.5, z: 0.0, wyckoff: "3c" },
+    { element: "I",  x: 0.5, y: 0.0, z: 0.5, wyckoff: "3c" },
+    { element: "I",  x: 0.0, y: 0.5, z: 0.5, wyckoff: "3c" },
+  ]},
+  "CsPbBr3": { formula: "CsPbBr3", spaceGroup: "Pm-3m", spaceGroupNumber: 221, latticeType: "cubic", latticeA: 5.87, pressureGPa: 0, atoms: [
+    { element: "Cs", x: 0.0, y: 0.0, z: 0.0, wyckoff: "1a" },
+    { element: "Pb", x: 0.5, y: 0.5, z: 0.5, wyckoff: "1b" },
+    { element: "Br", x: 0.5, y: 0.5, z: 0.0, wyckoff: "3c" },
+    { element: "Br", x: 0.5, y: 0.0, z: 0.5, wyckoff: "3c" },
+    { element: "Br", x: 0.0, y: 0.5, z: 0.5, wyckoff: "3c" },
+  ]},
+  "CsSnI3": { formula: "CsSnI3", spaceGroup: "Pm-3m", spaceGroupNumber: 221, latticeType: "cubic", latticeA: 6.22, pressureGPa: 0, atoms: [
+    { element: "Cs", x: 0.0, y: 0.0, z: 0.0, wyckoff: "1a" },
+    { element: "Sn", x: 0.5, y: 0.5, z: 0.5, wyckoff: "1b" },
+    { element: "I",  x: 0.5, y: 0.5, z: 0.0, wyckoff: "3c" },
+    { element: "I",  x: 0.5, y: 0.0, z: 0.5, wyckoff: "3c" },
+    { element: "I",  x: 0.0, y: 0.5, z: 0.5, wyckoff: "3c" },
+  ]},
+
   // Inverse Heusler — Mn2CoAl (F-43m)
   "Mn2CoAl": { formula: "Mn2CoAl", spaceGroup: "F-43m", spaceGroupNumber: 216, latticeType: "cubic", latticeA: 5.80, pressureGPa: 0, atoms: [
     { element: "Al", x: 0.0, y: 0.0, z: 0.0, wyckoff: "4a" },
