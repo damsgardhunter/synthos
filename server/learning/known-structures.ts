@@ -196,13 +196,250 @@ const KNOWN_STRUCTURES: Record<string, KnownStructure> = {
   "ScH3":  { formula: "ScH3", spaceGroup: "Fm-3m", spaceGroupNumber: 225, latticeType: "cubic", latticeA: 4.48, pressureGPa: 0, atoms: ScH3_ATOMS },
   "YH3":   { formula: "YH3", spaceGroup: "Fm-3m", spaceGroupNumber: 225, latticeType: "cubic", latticeA: 5.14, pressureGPa: 0, atoms: ScH3_ATOMS.map(a => ({ ...a, element: a.element === "Sc" ? "Y" : a.element })) },
 
-  // Non-hydride superconductors
+  // Non-hydride superconductors — A15 family
   "MgB2":  { formula: "MgB2", spaceGroup: "P6/mmm", spaceGroupNumber: 191, latticeType: "hexagonal", latticeA: 3.09, latticeC: 3.53, pressureGPa: 0, atoms: MgB2_ATOMS },
   "Nb3Sn": { formula: "Nb3Sn", spaceGroup: "Pm-3n", spaceGroupNumber: 223, latticeType: "cubic", latticeA: 5.29, pressureGPa: 0, atoms: Nb3Sn_ATOMS },
   "Nb3Ge": { formula: "Nb3Ge", spaceGroup: "Pm-3n", spaceGroupNumber: 223, latticeType: "cubic", latticeA: 5.14, pressureGPa: 0, atoms: Nb3Ge_ATOMS },
   "V3Si":  { formula: "V3Si", spaceGroup: "Pm-3n", spaceGroupNumber: 223, latticeType: "cubic", latticeA: 4.72, pressureGPa: 0, atoms: V3Si_ATOMS },
+  "Nb3Al": { formula: "Nb3Al", spaceGroup: "Pm-3n", spaceGroupNumber: 223, latticeType: "cubic", latticeA: 5.19, pressureGPa: 0, atoms: Nb3Sn_ATOMS.map(a => ({ ...a, element: a.element === "Sn" ? "Al" : a.element })) },
+  "Nb3Ga": { formula: "Nb3Ga", spaceGroup: "Pm-3n", spaceGroupNumber: 223, latticeType: "cubic", latticeA: 5.18, pressureGPa: 0, atoms: Nb3Sn_ATOMS.map(a => ({ ...a, element: a.element === "Sn" ? "Ga" : a.element })) },
+  "V3Ga":  { formula: "V3Ga", spaceGroup: "Pm-3n", spaceGroupNumber: 223, latticeType: "cubic", latticeA: 4.82, pressureGPa: 0, atoms: V3Si_ATOMS.map(a => ({ ...a, element: a.element === "Si" ? "Ga" : a.element })) },
+
+  // Rocksalt nitrides/carbides
   "NbN":   { formula: "NbN", spaceGroup: "Fm-3m", spaceGroupNumber: 225, latticeType: "cubic", latticeA: 4.39, pressureGPa: 0, atoms: NbN_ATOMS },
   "NbC":   { formula: "NbC", spaceGroup: "Fm-3m", spaceGroupNumber: 225, latticeType: "cubic", latticeA: 4.47, pressureGPa: 0, atoms: NbC_ATOMS },
+  "TaN":   { formula: "TaN", spaceGroup: "Fm-3m", spaceGroupNumber: 225, latticeType: "cubic", latticeA: 4.34, pressureGPa: 0, atoms: NbN_ATOMS.map(a => ({ ...a, element: a.element === "Nb" ? "Ta" : a.element })) },
+  "TaC":   { formula: "TaC", spaceGroup: "Fm-3m", spaceGroupNumber: 225, latticeType: "cubic", latticeA: 4.46, pressureGPa: 0, atoms: NbC_ATOMS.map(a => ({ ...a, element: a.element === "Nb" ? "Ta" : a.element })) },
+  "TiN":   { formula: "TiN", spaceGroup: "Fm-3m", spaceGroupNumber: 225, latticeType: "cubic", latticeA: 4.24, pressureGPa: 0, atoms: NbN_ATOMS.map(a => ({ ...a, element: a.element === "Nb" ? "Ti" : a.element })) },
+  "ZrN":   { formula: "ZrN", spaceGroup: "Fm-3m", spaceGroupNumber: 225, latticeType: "cubic", latticeA: 4.58, pressureGPa: 0, atoms: NbN_ATOMS.map(a => ({ ...a, element: a.element === "Nb" ? "Zr" : a.element })) },
+  "VN":    { formula: "VN", spaceGroup: "Fm-3m", spaceGroupNumber: 225, latticeType: "cubic", latticeA: 4.14, pressureGPa: 0, atoms: NbN_ATOMS.map(a => ({ ...a, element: a.element === "Nb" ? "V" : a.element })) },
+  "MoN":   { formula: "MoN", spaceGroup: "Fm-3m", spaceGroupNumber: 225, latticeType: "cubic", latticeA: 4.21, pressureGPa: 0, atoms: NbN_ATOMS.map(a => ({ ...a, element: a.element === "Nb" ? "Mo" : a.element })) },
+
+  // Cuprates — YBCO-123 (P4/mmm simplified orthorhombic → tetragonal)
+  "YBa2Cu3O7": { formula: "YBa2Cu3O7", spaceGroup: "Pmmm", spaceGroupNumber: 47, latticeType: "tetragonal", latticeA: 3.82, latticeC: 11.68, pressureGPa: 0, atoms: [
+    { element: "Y",  x: 0.5, y: 0.5, z: 0.5, wyckoff: "1h" },
+    { element: "Ba", x: 0.5, y: 0.5, z: 0.185, wyckoff: "2t" },
+    { element: "Ba", x: 0.5, y: 0.5, z: 0.815, wyckoff: "2t" },
+    { element: "Cu", x: 0.0, y: 0.0, z: 0.0, wyckoff: "1a" },
+    { element: "Cu", x: 0.0, y: 0.0, z: 0.356, wyckoff: "2q" },
+    { element: "Cu", x: 0.0, y: 0.0, z: 0.644, wyckoff: "2q" },
+    { element: "O",  x: 0.0, y: 0.5, z: 0.0, wyckoff: "1e" },
+    { element: "O",  x: 0.5, y: 0.0, z: 0.378, wyckoff: "2s" },
+    { element: "O",  x: 0.5, y: 0.0, z: 0.622, wyckoff: "2s" },
+    { element: "O",  x: 0.0, y: 0.5, z: 0.378, wyckoff: "2r" },
+    { element: "O",  x: 0.0, y: 0.5, z: 0.622, wyckoff: "2r" },
+    { element: "O",  x: 0.0, y: 0.0, z: 0.159, wyckoff: "2q" },
+    { element: "O",  x: 0.0, y: 0.0, z: 0.841, wyckoff: "2q" },
+  ]},
+
+  // Iron pnictides — BaFe2As2 (122-type, ThCr2Si2, I4/mmm)
+  "BaFe2As2": { formula: "BaFe2As2", spaceGroup: "I4/mmm", spaceGroupNumber: 139, latticeType: "tetragonal", latticeA: 3.96, latticeC: 13.02, pressureGPa: 0, atoms: [
+    { element: "Ba", x: 0.0, y: 0.0, z: 0.0, wyckoff: "2a" },
+    { element: "Fe", x: 0.5, y: 0.0, z: 0.25, wyckoff: "4d" },
+    { element: "Fe", x: 0.0, y: 0.5, z: 0.25, wyckoff: "4d" },
+    { element: "As", x: 0.0, y: 0.0, z: 0.354, wyckoff: "4e" },
+    { element: "As", x: 0.0, y: 0.0, z: 0.646, wyckoff: "4e" },
+  ]},
+
+  // Iron pnictides — LaFeAsO (1111-type, P4/nmm)
+  "LaFeAsO": { formula: "LaFeAsO", spaceGroup: "P4/nmm", spaceGroupNumber: 129, latticeType: "tetragonal", latticeA: 4.03, latticeC: 8.74, pressureGPa: 0, atoms: [
+    { element: "La", x: 0.25, y: 0.25, z: 0.142, wyckoff: "2c" },
+    { element: "Fe", x: 0.75, y: 0.25, z: 0.5, wyckoff: "2b" },
+    { element: "As", x: 0.25, y: 0.25, z: 0.651, wyckoff: "2c" },
+    { element: "O",  x: 0.75, y: 0.25, z: 0.0, wyckoff: "2a" },
+  ]},
+
+  // Iron chalcogenide — FeSe (11-type, P4/nmm)
+  "FeSe": { formula: "FeSe", spaceGroup: "P4/nmm", spaceGroupNumber: 129, latticeType: "tetragonal", latticeA: 3.77, latticeC: 5.52, pressureGPa: 0, atoms: [
+    { element: "Fe", x: 0.75, y: 0.25, z: 0.0, wyckoff: "2a" },
+    { element: "Se", x: 0.25, y: 0.25, z: 0.268, wyckoff: "2c" },
+  ]},
+
+  // Iron pnictide — LiFeAs (111-type, P4/nmm)
+  "LiFeAs": { formula: "LiFeAs", spaceGroup: "P4/nmm", spaceGroupNumber: 129, latticeType: "tetragonal", latticeA: 3.77, latticeC: 6.36, pressureGPa: 0, atoms: [
+    { element: "Li", x: 0.25, y: 0.25, z: 0.345, wyckoff: "2c" },
+    { element: "Fe", x: 0.75, y: 0.25, z: 0.0, wyckoff: "2b" },
+    { element: "As", x: 0.25, y: 0.25, z: 0.737, wyckoff: "2c" },
+  ]},
+
+  // Hexaborides — CaB6 (Pm-3m, LaB6-type)
+  "CaB6": { formula: "CaB6", spaceGroup: "Pm-3m", spaceGroupNumber: 221, latticeType: "cubic", latticeA: 4.15, pressureGPa: 0, atoms: [
+    { element: "Ca", x: 0.0, y: 0.0, z: 0.0, wyckoff: "1a" },
+    { element: "B",  x: 0.203, y: 0.5, z: 0.5, wyckoff: "6f" },
+    { element: "B",  x: 0.797, y: 0.5, z: 0.5, wyckoff: "6f" },
+    { element: "B",  x: 0.5, y: 0.203, z: 0.5, wyckoff: "6f" },
+    { element: "B",  x: 0.5, y: 0.797, z: 0.5, wyckoff: "6f" },
+    { element: "B",  x: 0.5, y: 0.5, z: 0.203, wyckoff: "6f" },
+    { element: "B",  x: 0.5, y: 0.5, z: 0.797, wyckoff: "6f" },
+  ]},
+  "LaB6": { formula: "LaB6", spaceGroup: "Pm-3m", spaceGroupNumber: 221, latticeType: "cubic", latticeA: 4.16, pressureGPa: 0, atoms: [
+    { element: "La", x: 0.0, y: 0.0, z: 0.0, wyckoff: "1a" },
+    { element: "B",  x: 0.199, y: 0.5, z: 0.5, wyckoff: "6f" },
+    { element: "B",  x: 0.801, y: 0.5, z: 0.5, wyckoff: "6f" },
+    { element: "B",  x: 0.5, y: 0.199, z: 0.5, wyckoff: "6f" },
+    { element: "B",  x: 0.5, y: 0.801, z: 0.5, wyckoff: "6f" },
+    { element: "B",  x: 0.5, y: 0.5, z: 0.199, wyckoff: "6f" },
+    { element: "B",  x: 0.5, y: 0.5, z: 0.801, wyckoff: "6f" },
+  ]},
+
+  // Dichalcogenides — NbSe2 (P6_3/mmc, 2H polytype)
+  "NbSe2": { formula: "NbSe2", spaceGroup: "P63/mmc", spaceGroupNumber: 194, latticeType: "hexagonal", latticeA: 3.44, latticeC: 12.55, pressureGPa: 0, atoms: [
+    { element: "Nb", x: 0.0, y: 0.0, z: 0.25, wyckoff: "2b" },
+    { element: "Se", x: 0.3333, y: 0.6667, z: 0.121, wyckoff: "4f" },
+    { element: "Se", x: 0.3333, y: 0.6667, z: 0.379, wyckoff: "4f" },
+  ]},
+  "MoS2": { formula: "MoS2", spaceGroup: "P63/mmc", spaceGroupNumber: 194, latticeType: "hexagonal", latticeA: 3.16, latticeC: 12.30, pressureGPa: 0, atoms: [
+    { element: "Mo", x: 0.0, y: 0.0, z: 0.25, wyckoff: "2b" },
+    { element: "S",  x: 0.3333, y: 0.6667, z: 0.121, wyckoff: "4f" },
+    { element: "S",  x: 0.3333, y: 0.6667, z: 0.379, wyckoff: "4f" },
+  ]},
+  "TaS2": { formula: "TaS2", spaceGroup: "P63/mmc", spaceGroupNumber: 194, latticeType: "hexagonal", latticeA: 3.36, latticeC: 12.10, pressureGPa: 0, atoms: [
+    { element: "Ta", x: 0.0, y: 0.0, z: 0.25, wyckoff: "2b" },
+    { element: "S",  x: 0.3333, y: 0.6667, z: 0.121, wyckoff: "4f" },
+    { element: "S",  x: 0.3333, y: 0.6667, z: 0.379, wyckoff: "4f" },
+  ]},
+
+  // Topological insulators — Bi2Te3 (R-3m)
+  "Bi2Te3": { formula: "Bi2Te3", spaceGroup: "R-3m", spaceGroupNumber: 166, latticeType: "hexagonal", latticeA: 4.38, latticeC: 30.50, pressureGPa: 0, atoms: [
+    { element: "Bi", x: 0.0, y: 0.0, z: 0.400, wyckoff: "6c" },
+    { element: "Te", x: 0.0, y: 0.0, z: 0.0, wyckoff: "3a" },
+    { element: "Te", x: 0.0, y: 0.0, z: 0.212, wyckoff: "6c" },
+  ]},
+  "Bi2Se3": { formula: "Bi2Se3", spaceGroup: "R-3m", spaceGroupNumber: 166, latticeType: "hexagonal", latticeA: 4.14, latticeC: 28.64, pressureGPa: 0, atoms: [
+    { element: "Bi", x: 0.0, y: 0.0, z: 0.400, wyckoff: "6c" },
+    { element: "Se", x: 0.0, y: 0.0, z: 0.0, wyckoff: "3a" },
+    { element: "Se", x: 0.0, y: 0.0, z: 0.211, wyckoff: "6c" },
+  ]},
+
+  // Heavy fermion — CeCoIn5 (P4/mmm, HoCoGa5-type)
+  "CeCoIn5": { formula: "CeCoIn5", spaceGroup: "P4/mmm", spaceGroupNumber: 123, latticeType: "tetragonal", latticeA: 4.61, latticeC: 7.56, pressureGPa: 0, atoms: [
+    { element: "Ce", x: 0.0, y: 0.0, z: 0.0, wyckoff: "1a" },
+    { element: "Co", x: 0.0, y: 0.0, z: 0.5, wyckoff: "1b" },
+    { element: "In", x: 0.5, y: 0.5, z: 0.0, wyckoff: "1c" },
+    { element: "In", x: 0.5, y: 0.0, z: 0.3085, wyckoff: "4i" },
+    { element: "In", x: 0.0, y: 0.5, z: 0.3085, wyckoff: "4i" },
+    { element: "In", x: 0.5, y: 0.0, z: 0.6915, wyckoff: "4i" },
+    { element: "In", x: 0.0, y: 0.5, z: 0.6915, wyckoff: "4i" },
+  ]},
+
+  // Kagome — KV3Sb5 (P6/mmm)
+  "KV3Sb5": { formula: "KV3Sb5", spaceGroup: "P6/mmm", spaceGroupNumber: 191, latticeType: "hexagonal", latticeA: 5.50, latticeC: 9.33, pressureGPa: 0, atoms: [
+    { element: "K",  x: 0.0, y: 0.0, z: 0.5, wyckoff: "1b" },
+    { element: "V",  x: 0.5, y: 0.0, z: 0.0, wyckoff: "3g" },
+    { element: "V",  x: 0.0, y: 0.5, z: 0.0, wyckoff: "3g" },
+    { element: "V",  x: 0.5, y: 0.5, z: 0.0, wyckoff: "3g" },
+    { element: "Sb", x: 0.3333, y: 0.6667, z: 0.0, wyckoff: "2e" },
+    { element: "Sb", x: 0.6667, y: 0.3333, z: 0.0, wyckoff: "2e" },
+    { element: "Sb", x: 0.3333, y: 0.6667, z: 0.258, wyckoff: "4h" },
+    { element: "Sb", x: 0.6667, y: 0.3333, z: 0.258, wyckoff: "4h" },
+    { element: "Sb", x: 0.3333, y: 0.6667, z: 0.742, wyckoff: "4h" },
+  ]},
+  "CsV3Sb5": { formula: "CsV3Sb5", spaceGroup: "P6/mmm", spaceGroupNumber: 191, latticeType: "hexagonal", latticeA: 5.53, latticeC: 9.40, pressureGPa: 0, atoms: [
+    { element: "Cs", x: 0.0, y: 0.0, z: 0.5, wyckoff: "1b" },
+    { element: "V",  x: 0.5, y: 0.0, z: 0.0, wyckoff: "3g" },
+    { element: "V",  x: 0.0, y: 0.5, z: 0.0, wyckoff: "3g" },
+    { element: "V",  x: 0.5, y: 0.5, z: 0.0, wyckoff: "3g" },
+    { element: "Sb", x: 0.3333, y: 0.6667, z: 0.0, wyckoff: "2e" },
+    { element: "Sb", x: 0.6667, y: 0.3333, z: 0.0, wyckoff: "2e" },
+    { element: "Sb", x: 0.3333, y: 0.6667, z: 0.258, wyckoff: "4h" },
+    { element: "Sb", x: 0.6667, y: 0.3333, z: 0.258, wyckoff: "4h" },
+    { element: "Sb", x: 0.3333, y: 0.6667, z: 0.742, wyckoff: "4h" },
+  ]},
+
+  // Laves phase — MgCu2 (Fd-3m, C15)
+  "NbBe2": { formula: "NbBe2", spaceGroup: "Fd-3m", spaceGroupNumber: 227, latticeType: "cubic", latticeA: 6.41, pressureGPa: 0, atoms: [
+    { element: "Nb", x: 0.125, y: 0.125, z: 0.125, wyckoff: "8a" },
+    { element: "Nb", x: 0.875, y: 0.875, z: 0.875, wyckoff: "8a" },
+    { element: "Be", x: 0.5, y: 0.5, z: 0.5, wyckoff: "16d" },
+    { element: "Be", x: 0.5, y: 0.25, z: 0.25, wyckoff: "16d" },
+    { element: "Be", x: 0.25, y: 0.5, z: 0.25, wyckoff: "16d" },
+    { element: "Be", x: 0.25, y: 0.25, z: 0.5, wyckoff: "16d" },
+  ]},
+
+  // Borocarbide — YNi2B2C (I4/mmm)
+  "YNi2B2C": { formula: "YNi2B2C", spaceGroup: "I4/mmm", spaceGroupNumber: 139, latticeType: "tetragonal", latticeA: 3.52, latticeC: 10.56, pressureGPa: 0, atoms: [
+    { element: "Y",  x: 0.0, y: 0.0, z: 0.0, wyckoff: "2a" },
+    { element: "Ni", x: 0.0, y: 0.5, z: 0.25, wyckoff: "4d" },
+    { element: "Ni", x: 0.5, y: 0.0, z: 0.25, wyckoff: "4d" },
+    { element: "B",  x: 0.0, y: 0.0, z: 0.360, wyckoff: "4e" },
+    { element: "B",  x: 0.0, y: 0.0, z: 0.640, wyckoff: "4e" },
+    { element: "C",  x: 0.0, y: 0.0, z: 0.5, wyckoff: "2b" },
+  ]},
+
+  // Diborides — TiB2 (AlB2-type, P6/mmm)
+  "TiB2": { formula: "TiB2", spaceGroup: "P6/mmm", spaceGroupNumber: 191, latticeType: "hexagonal", latticeA: 3.03, latticeC: 3.23, pressureGPa: 0, atoms: [
+    { element: "Ti", x: 0.0, y: 0.0, z: 0.0, wyckoff: "1a" },
+    { element: "B",  x: 0.3333, y: 0.6667, z: 0.5, wyckoff: "2d" },
+    { element: "B",  x: 0.6667, y: 0.3333, z: 0.5, wyckoff: "2d" },
+  ]},
+  "ZrB2": { formula: "ZrB2", spaceGroup: "P6/mmm", spaceGroupNumber: 191, latticeType: "hexagonal", latticeA: 3.17, latticeC: 3.53, pressureGPa: 0, atoms: [
+    { element: "Zr", x: 0.0, y: 0.0, z: 0.0, wyckoff: "1a" },
+    { element: "B",  x: 0.3333, y: 0.6667, z: 0.5, wyckoff: "2d" },
+    { element: "B",  x: 0.6667, y: 0.3333, z: 0.5, wyckoff: "2d" },
+  ]},
+
+  // Elemental superconductors
+  "Nb": { formula: "Nb", spaceGroup: "Im-3m", spaceGroupNumber: 229, latticeType: "cubic", latticeA: 3.30, pressureGPa: 0, atoms: [{ element: "Nb", x: 0.0, y: 0.0, z: 0.0, wyckoff: "2a" }] },
+  "V":  { formula: "V", spaceGroup: "Im-3m", spaceGroupNumber: 229, latticeType: "cubic", latticeA: 3.02, pressureGPa: 0, atoms: [{ element: "V", x: 0.0, y: 0.0, z: 0.0, wyckoff: "2a" }] },
+  "Pb": { formula: "Pb", spaceGroup: "Fm-3m", spaceGroupNumber: 225, latticeType: "cubic", latticeA: 4.95, pressureGPa: 0, atoms: [{ element: "Pb", x: 0.0, y: 0.0, z: 0.0, wyckoff: "4a" }] },
+  "Al": { formula: "Al", spaceGroup: "Fm-3m", spaceGroupNumber: 225, latticeType: "cubic", latticeA: 4.05, pressureGPa: 0, atoms: [{ element: "Al", x: 0.0, y: 0.0, z: 0.0, wyckoff: "4a" }] },
+
+  // Cuprate — La2CuO4 (K2NiF4-type, I4/mmm)
+  "La2CuO4": { formula: "La2CuO4", spaceGroup: "I4/mmm", spaceGroupNumber: 139, latticeType: "tetragonal", latticeA: 3.78, latticeC: 13.23, pressureGPa: 0, atoms: [
+    { element: "La", x: 0.0, y: 0.0, z: 0.361, wyckoff: "4e" },
+    { element: "La", x: 0.0, y: 0.0, z: 0.639, wyckoff: "4e" },
+    { element: "Cu", x: 0.0, y: 0.0, z: 0.0, wyckoff: "2a" },
+    { element: "O",  x: 0.0, y: 0.5, z: 0.0, wyckoff: "4c" },
+    { element: "O",  x: 0.5, y: 0.0, z: 0.0, wyckoff: "4c" },
+    { element: "O",  x: 0.0, y: 0.0, z: 0.182, wyckoff: "4e" },
+    { element: "O",  x: 0.0, y: 0.0, z: 0.818, wyckoff: "4e" },
+  ]},
+
+  // Skutterudite — CoSb3 (Im-3)
+  "CoSb3": { formula: "CoSb3", spaceGroup: "Im-3", spaceGroupNumber: 204, latticeType: "cubic", latticeA: 9.04, pressureGPa: 0, atoms: [
+    { element: "Co", x: 0.25, y: 0.25, z: 0.25, wyckoff: "8c" },
+    { element: "Sb", x: 0.0, y: 0.335, z: 0.158, wyckoff: "24g" },
+    { element: "Sb", x: 0.0, y: 0.158, z: 0.335, wyckoff: "24g" },
+    { element: "Sb", x: 0.0, y: 0.665, z: 0.842, wyckoff: "24g" },
+  ]},
+
+  // MgCNi3 — antiperovskite superconductor (Pm-3m)
+  "MgCNi3": { formula: "MgCNi3", spaceGroup: "Pm-3m", spaceGroupNumber: 221, latticeType: "cubic", latticeA: 3.81, pressureGPa: 0, atoms: [
+    { element: "Mg", x: 0.0, y: 0.0, z: 0.0, wyckoff: "1a" },
+    { element: "C",  x: 0.5, y: 0.5, z: 0.5, wyckoff: "1b" },
+    { element: "Ni", x: 0.5, y: 0.5, z: 0.0, wyckoff: "3d" },
+    { element: "Ni", x: 0.5, y: 0.0, z: 0.5, wyckoff: "3d" },
+    { element: "Ni", x: 0.0, y: 0.5, z: 0.5, wyckoff: "3d" },
+  ]},
+
+  // Sr2RuO4 — p-wave superconductor (I4/mmm, K2NiF4-type)
+  "Sr2RuO4": { formula: "Sr2RuO4", spaceGroup: "I4/mmm", spaceGroupNumber: 139, latticeType: "tetragonal", latticeA: 3.87, latticeC: 12.74, pressureGPa: 0, atoms: [
+    { element: "Sr", x: 0.0, y: 0.0, z: 0.353, wyckoff: "4e" },
+    { element: "Sr", x: 0.0, y: 0.0, z: 0.647, wyckoff: "4e" },
+    { element: "Ru", x: 0.0, y: 0.0, z: 0.0, wyckoff: "2a" },
+    { element: "O",  x: 0.0, y: 0.5, z: 0.0, wyckoff: "4c" },
+    { element: "O",  x: 0.5, y: 0.0, z: 0.0, wyckoff: "4c" },
+    { element: "O",  x: 0.0, y: 0.0, z: 0.162, wyckoff: "4e" },
+    { element: "O",  x: 0.0, y: 0.0, z: 0.838, wyckoff: "4e" },
+  ]},
+
+  // Additional hydrides for completeness
+  "BaH2": { formula: "BaH2", spaceGroup: "Fm-3m", spaceGroupNumber: 225, latticeType: "cubic", latticeA: 4.16, pressureGPa: 0, atoms: [
+    { element: "Ba", x: 0.0, y: 0.0, z: 0.0, wyckoff: "4a" },
+    { element: "H",  x: 0.25, y: 0.25, z: 0.25, wyckoff: "8c" },
+    { element: "H",  x: 0.75, y: 0.75, z: 0.75, wyckoff: "8c" },
+  ]},
+  "CaH2": { formula: "CaH2", spaceGroup: "Fm-3m", spaceGroupNumber: 225, latticeType: "cubic", latticeA: 3.59, pressureGPa: 0, atoms: [
+    { element: "Ca", x: 0.0, y: 0.0, z: 0.0, wyckoff: "4a" },
+    { element: "H",  x: 0.25, y: 0.25, z: 0.25, wyckoff: "8c" },
+    { element: "H",  x: 0.75, y: 0.75, z: 0.75, wyckoff: "8c" },
+  ]},
+
+  // NbTi alloy — BCC
+  "NbTi": { formula: "NbTi", spaceGroup: "Im-3m", spaceGroupNumber: 229, latticeType: "cubic", latticeA: 3.30, pressureGPa: 0, atoms: [
+    { element: "Nb", x: 0.0, y: 0.0, z: 0.0, wyckoff: "2a" },
+    { element: "Ti", x: 0.5, y: 0.5, z: 0.5, wyckoff: "2a" },
+  ]},
 };
 
 // ---------------------------------------------------------------------------
