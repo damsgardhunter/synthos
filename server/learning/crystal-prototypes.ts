@@ -100,6 +100,8 @@ const PACKING_FACTORS: Record<string, number> = {
   "DoublePerovskite-A2BBO6": 0.74,
   "RP-n2-A3B2O7": 0.58,
   "Bi2212-A2B2CB2O8": 0.55,
+  "InverseHeusler-XA2B": 0.68,
+  "MAX312-M3AX2": 0.68,
 };
 
 const DEFAULT_PACKING_FACTOR = 0.68;
@@ -801,6 +803,66 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
       const hasAE = elements.some(e => ["Sr", "Ba"].includes(e));
       const hasSpacer = elements.includes("Ca") || elements.some(e => isRareEarth(e) || e === "Y");
       return hasO && hasCu && hasHeavyPost && hasAE && hasSpacer;
+    },
+  },
+
+  // Inverse Heusler: F-43m (216), XA2B ordering
+  // Differs from L21 in that the majority-element occupies TWO distinct
+  // Wyckoff sites (4c + 4d) instead of one (8c), lowering symmetry from Fm-3m to F-43m.
+  // Primitive cell (FCC → 1/4 conventional): 4 atoms.
+  // For: Mn2CoAl, Ti2CoSi, Mn2CuAl, Cr2CoGa, etc.
+  {
+    name: "InverseHeusler-XA2B",
+    spaceGroup: "F-43m",
+    latticeType: "cubic",
+    cOverA: 1.0,
+    sites: [
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "X-site-4a" },
+      { label: "B", x: 0.25, y: 0.25, z: 0.25, role: "A-site-4c" },
+      { label: "B", x: 0.75, y: 0.75, z: 0.75, role: "A-site-4d" },
+      { label: "C", x: 0.5, y: 0.5, z: 0.5, role: "B-site-4b" },
+    ],
+    stoichiometryRatio: [1, 2, 1],
+    coordination: [4, 4, 4],
+    chemistryRules: (elements) => {
+      if (elements.length !== 3) return false;
+      // Inverse Heusler: the majority element is typically Mn, Ti, Cr, or V
+      const hasMajorTM = elements.some(e => ["Mn", "Ti", "Cr", "V", "Sc", "Hf", "Zr"].includes(e));
+      const hasMinorTM = elements.some(e => ["Co", "Ni", "Fe", "Cu", "Pd", "Pt", "Rh", "Ir"].includes(e));
+      const hasSp = elements.some(e => ["Al", "Ga", "In", "Si", "Ge", "Sn", "Sb", "Bi"].includes(e));
+      return hasMajorTM && hasMinorTM && hasSp;
+    },
+  },
+  // MAX phase M3AX2 (312): P63/mmc (194), hexagonal
+  // For: Ti3SiC2, Ti3AlC2, Ti3GeC2, Zr3Al2C — 312 MAX phases
+  // 3 M layers around each A layer, 2 X in octahedral interstices
+  // Conventional cell: 2 formula units = 12 atoms; primitive same for hexagonal.
+  // Wyckoff: M at 2a + 4f, A at 2b, X at 4f
+  {
+    name: "MAX312-M3AX2",
+    spaceGroup: "P6_3/mmc",
+    latticeType: "hexagonal",
+    cOverA: 5.5,
+    sites: [
+      // M at 2a: (0, 0, 0) — 1 in primitive per formula unit
+      { label: "M", x: 0.0, y: 0.0, z: 0.0, role: "TM-inner" },
+      // M at 4f: (1/3, 2/3, z) with z ≈ 0.135 — 2 in primitive per f.u.
+      { label: "M", x: 0.3333, y: 0.6667, z: 0.135, role: "TM-outer" },
+      { label: "M", x: 0.3333, y: 0.6667, z: 0.865, role: "TM-outer" },
+      // A at 2b: (0, 0, 1/4) — 1 in primitive
+      { label: "A", x: 0.0, y: 0.0, z: 0.25, role: "A-layer" },
+      // X at 4f: (1/3, 2/3, z) with z ≈ 0.070 — 2 in primitive
+      { label: "X", x: 0.3333, y: 0.6667, z: 0.070, role: "X-interstitial" },
+      { label: "X", x: 0.3333, y: 0.6667, z: 0.930, role: "X-interstitial" },
+    ],
+    stoichiometryRatio: [3, 1, 2],
+    coordination: [6, 12, 6],
+    chemistryRules: (elements) => {
+      if (elements.length !== 3) return false;
+      const hasTM = elements.some(e => ["Ti", "Zr", "Hf", "V", "Nb", "Ta", "Cr", "Mo", "W"].includes(e));
+      const hasA = elements.some(e => ["Al", "Ga", "In", "Si", "Ge", "Sn", "Pb", "P", "As", "S"].includes(e));
+      const hasX = elements.some(e => ["C", "N"].includes(e));
+      return hasTM && hasA && hasX;
     },
   },
 

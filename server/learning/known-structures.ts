@@ -661,6 +661,32 @@ const KNOWN_STRUCTURES: Record<string, KnownStructure> = {
     { element: "C",  x: 0.0, y: 0.0, z: 0.0, wyckoff: "2a" },
   ]},
 
+  // MAX 312 phase — Ti3SiC2 (P63/mmc)
+  "Ti3SiC2": { formula: "Ti3SiC2", spaceGroup: "P63/mmc", spaceGroupNumber: 194, latticeType: "hexagonal", latticeA: 3.07, latticeC: 17.67, pressureGPa: 0, atoms: [
+    { element: "Ti", x: 0.0, y: 0.0, z: 0.0, wyckoff: "2a" },
+    { element: "Ti", x: 0.3333, y: 0.6667, z: 0.135, wyckoff: "4f" },
+    { element: "Ti", x: 0.3333, y: 0.6667, z: 0.865, wyckoff: "4f" },
+    { element: "Si", x: 0.0, y: 0.0, z: 0.25, wyckoff: "2b" },
+    { element: "C",  x: 0.3333, y: 0.6667, z: 0.070, wyckoff: "4f" },
+    { element: "C",  x: 0.3333, y: 0.6667, z: 0.930, wyckoff: "4f" },
+  ]},
+  "Ti3AlC2": { formula: "Ti3AlC2", spaceGroup: "P63/mmc", spaceGroupNumber: 194, latticeType: "hexagonal", latticeA: 3.08, latticeC: 18.58, pressureGPa: 0, atoms: [
+    { element: "Ti", x: 0.0, y: 0.0, z: 0.0, wyckoff: "2a" },
+    { element: "Ti", x: 0.3333, y: 0.6667, z: 0.128, wyckoff: "4f" },
+    { element: "Ti", x: 0.3333, y: 0.6667, z: 0.872, wyckoff: "4f" },
+    { element: "Al", x: 0.0, y: 0.0, z: 0.25, wyckoff: "2b" },
+    { element: "C",  x: 0.3333, y: 0.6667, z: 0.065, wyckoff: "4f" },
+    { element: "C",  x: 0.3333, y: 0.6667, z: 0.935, wyckoff: "4f" },
+  ]},
+
+  // Inverse Heusler — Mn2CoAl (F-43m)
+  "Mn2CoAl": { formula: "Mn2CoAl", spaceGroup: "F-43m", spaceGroupNumber: 216, latticeType: "cubic", latticeA: 5.80, pressureGPa: 0, atoms: [
+    { element: "Al", x: 0.0, y: 0.0, z: 0.0, wyckoff: "4a" },
+    { element: "Mn", x: 0.25, y: 0.25, z: 0.25, wyckoff: "4c" },
+    { element: "Mn", x: 0.75, y: 0.75, z: 0.75, wyckoff: "4d" },
+    { element: "Co", x: 0.5, y: 0.5, z: 0.5, wyckoff: "4b" },
+  ]},
+
   // GaAs — Zinc blende (F-43m)
   "GaAs": { formula: "GaAs", spaceGroup: "F-43m", spaceGroupNumber: 216, latticeType: "cubic", latticeA: 5.65, pressureGPa: 0, atoms: [
     { element: "Ga", x: 0.0, y: 0.0, z: 0.0, wyckoff: "4a" },
