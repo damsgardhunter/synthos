@@ -149,6 +149,7 @@ const PACKING_FACTORS: Record<string, number> = {
   "Tl1212-AB2CD2O7": 0.55,
   "MAB-phase": 0.68,
   "Tl1223-AB2C2D3O9": 0.55,
+  "Tetradymite-A2B2C": 0.52,
 };
 
 const DEFAULT_PACKING_FACTOR = 0.68;
@@ -2533,6 +2534,38 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
     },
   },
 
+  // Tetradymite: R-3m (166), A2B2C — ordered quintuple-layer topological insulator
+  // For: Bi2Te2Se, Bi2Te2S, Bi2Se2Te, Sb2Te2Se — topological insulators
+  // Same quintuple-layer as Bi2Te3 but with 3 elements (ordered chalcogen sites).
+  // CRITICAL: Bi2Te2Se (most-studied TI) had ZERO match — 3-element [2,2,1]
+  // doesn't fit 2-element Bi2Te3 template or any ternary [1,2,2] templates.
+  // Primitive: 2A + 2B + 1C = 5 atoms, ratio [2,2,1]
+  {
+    name: "Tetradymite-A2B2C",
+    spaceGroup: "R-3m",
+    latticeType: "hexagonal",
+    cOverA: 6.96,
+    sites: [
+      // A (Bi/Sb) at 6c: outer layer of quintuple
+      { label: "A", x: 0.0, y: 0.0, z: 0.400, role: "pnictogen-outer" },
+      { label: "A", x: 0.0, y: 0.0, z: 0.600, role: "pnictogen-outer" },
+      // B (Te) at 6c: inner chalcogen layer
+      { label: "B", x: 0.0, y: 0.0, z: 0.212, role: "chalcogen-inner" },
+      { label: "B", x: 0.0, y: 0.0, z: 0.788, role: "chalcogen-inner" },
+      // C (Se/S) at 3a: central layer of quintuple
+      { label: "C", x: 0.0, y: 0.0, z: 0.0, role: "chalcogen-center" },
+    ],
+    stoichiometryRatio: [2, 2, 1],
+    coordination: [6, 3, 6],
+    chemistryRules: (elements) => {
+      if (elements.length !== 3) return false;
+      // Tetradymite: heavy pnictogen + 2 different chalcogens
+      const hasPn = elements.some(e => ["Bi", "Sb"].includes(e));
+      const chalcogens = elements.filter(e => ["S", "Se", "Te"].includes(e));
+      return hasPn && chalcogens.length >= 2;
+    },
+  },
+
   // ── End of additional families ─────────────────────────────────────────
   {
     name: "Heusler-L21",
@@ -3005,7 +3038,8 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
     coordination: [8, 4],
     chemistryRules: (elements) => {
       if (elements.length !== 2) return false;
-      const hasLarge = elements.some(e => ["Zr", "Hf", "Ce", "Th", "U", "Pb", "Ca"].includes(e));
+      // Expanded: Ti/Ba/Sr/La for fluorite-type hydrides (TiH2, BaH2) and oxides
+      const hasLarge = elements.some(e => ["Zr", "Hf", "Ce", "Th", "U", "Pb", "Ca", "Ti", "Ba", "Sr", "La", "Pr", "Nd"].includes(e));
       const hasAnion = elements.some(e => ["O", "F", "Cl", "H"].includes(e));
       return hasLarge && hasAnion;
     },
