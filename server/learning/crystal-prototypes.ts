@@ -150,6 +150,7 @@ const PACKING_FACTORS: Record<string, number> = {
   "MAB-phase": 0.68,
   "Tl1223-AB2C2D3O9": 0.55,
   "Tetradymite-A2B2C": 0.52,
+  "Aurivillius-n2-AB2C2O9": 0.55,
 };
 
 const DEFAULT_PACKING_FACTOR = 0.68;
@@ -2563,6 +2564,47 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
       const hasPn = elements.some(e => ["Bi", "Sb"].includes(e));
       const chalcogens = elements.filter(e => ["S", "Se", "Te"].includes(e));
       return hasPn && chalcogens.length >= 2;
+    },
+  },
+
+  // Aurivillius n=2: I4/mmm-like, AB2C2O9 — FeRAM ferroelectric
+  // Bi2O2 layers + double perovskite block. SrBi2Ta2O9 (SBT) — THE FeRAM material.
+  // For: SrBi2Ta2O9, SrBi2Nb2O9, BaBi2Ta2O9, CaBi2Nb2O9
+  // Primitive: 1A + 2Bi + 2B + 9O = 14 atoms, ratio [1,2,2,9]
+  {
+    name: "Aurivillius-n2-AB2C2O9",
+    spaceGroup: "I4/mmm",
+    latticeType: "tetragonal",
+    cOverA: 4.55,
+    sites: [
+      // A (Sr/Ba/Ca) at 2a: center of perovskite block
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "A-perovskite" },
+      // Bi at 4e: Bi2O2 layer
+      { label: "B", x: 0.0, y: 0.0, z: 0.28, role: "Bi2O2-layer" },
+      { label: "B", x: 0.0, y: 0.0, z: 0.72, role: "Bi2O2-layer" },
+      // C (Ta/Nb) at 4e: B-site of double perovskite
+      { label: "C", x: 0.0, y: 0.0, z: 0.10, role: "B-perovskite" },
+      { label: "C", x: 0.0, y: 0.0, z: 0.90, role: "B-perovskite" },
+      // O: 9 per primitive
+      { label: "D", x: 0.5, y: 0.0, z: 0.10, role: "O-eq-1" },
+      { label: "D", x: 0.0, y: 0.5, z: 0.10, role: "O-eq-2" },
+      { label: "D", x: 0.5, y: 0.0, z: 0.90, role: "O-eq-3" },
+      { label: "D", x: 0.0, y: 0.5, z: 0.90, role: "O-eq-4" },
+      { label: "D", x: 0.0, y: 0.0, z: 0.19, role: "O-apical" },
+      { label: "D", x: 0.0, y: 0.0, z: 0.81, role: "O-apical" },
+      { label: "D", x: 0.0, y: 0.0, z: 0.5, role: "O-bridging" },
+      { label: "D", x: 0.0, y: 0.0, z: 0.36, role: "O-BiO" },
+      { label: "D", x: 0.0, y: 0.0, z: 0.64, role: "O-BiO" },
+    ],
+    stoichiometryRatio: [1, 2, 2, 9],
+    coordination: [12, 8, 6, 2],
+    chemistryRules: (elements) => {
+      if (elements.length !== 4) return false;
+      const hasO = elements.includes("O");
+      const hasBi = elements.includes("Bi");
+      const hasAE = elements.some(e => ["Sr", "Ba", "Ca", "Pb"].includes(e));
+      const hasB = elements.some(e => ["Ta", "Nb", "Ti", "W", "Mo", "V"].includes(e));
+      return hasO && hasBi && hasAE && hasB;
     },
   },
 
