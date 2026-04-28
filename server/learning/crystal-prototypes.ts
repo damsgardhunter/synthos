@@ -142,6 +142,8 @@ const PACKING_FACTORS: Record<string, number> = {
   "OxynitridePerovskite-ABOX": 0.74,
   "Stibnite-A2B3": 0.55,
   "HalidePerovskite-ABX3": 0.74,
+  "Hg1212-AB2CD2O6": 0.55,
+  "Hg1223-AB2C2D3O8": 0.55,
 };
 
 const DEFAULT_PACKING_FACTOR = 0.68;
@@ -2256,6 +2258,91 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
       // X-site: halide
       const hasX = elements.some(e => ["I", "Br", "Cl", "F"].includes(e));
       return hasA && hasB && hasX;
+    },
+  },
+
+  // Hg-1212 cuprate: P4/mmm (123), AB2CD2O6 — double-CuO2-layer
+  // HgBa2CaCu2O6+δ — Tc ≈ 127K, highest CONFIRMED ambient-pressure Tc.
+  // Simple tetragonal like Hg-1201 but with Ca spacer + double CuO2 planes.
+  // Primitive: 1Hg + 2Ba + 1Ca + 2Cu + 6O = 12 atoms, ratio [1,2,1,2,6]
+  {
+    name: "Hg1212-AB2CD2O6",
+    spaceGroup: "P4/mmm",
+    latticeType: "tetragonal",
+    cOverA: 3.16,
+    sites: [
+      // Hg at 1a (0,0,0)
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "Hg-layer" },
+      // Ba at 2h (1/2, 1/2, z≈0.22)
+      { label: "B", x: 0.5, y: 0.5, z: 0.22, role: "Ba-site" },
+      { label: "B", x: 0.5, y: 0.5, z: 0.78, role: "Ba-site" },
+      // Ca at 1b (0, 0, 1/2) — spacer between CuO2 planes
+      { label: "C", x: 0.0, y: 0.0, z: 0.5, role: "Ca-spacer" },
+      // Cu at 2g (0, 0, z≈0.38) — double CuO2 plane
+      { label: "D", x: 0.0, y: 0.0, z: 0.38, role: "CuO2-plane" },
+      { label: "D", x: 0.0, y: 0.0, z: 0.62, role: "CuO2-plane" },
+      // O: 6 total
+      { label: "E", x: 0.5, y: 0.0, z: 0.38, role: "O-planar" },
+      { label: "E", x: 0.0, y: 0.5, z: 0.38, role: "O-planar" },
+      { label: "E", x: 0.5, y: 0.0, z: 0.62, role: "O-planar" },
+      { label: "E", x: 0.0, y: 0.5, z: 0.62, role: "O-planar" },
+      { label: "E", x: 0.0, y: 0.0, z: 0.15, role: "O-apical" },
+      { label: "E", x: 0.0, y: 0.0, z: 0.85, role: "O-apical" },
+    ],
+    stoichiometryRatio: [1, 2, 1, 2, 6],
+    coordination: [2, 10, 8, 5, 2],
+    chemistryRules: (elements) => {
+      if (elements.length !== 5) return false;
+      const hasO = elements.includes("O");
+      const hasCu = elements.includes("Cu");
+      const hasHg = elements.includes("Hg");
+      const hasAE = elements.some(e => ["Ba", "Sr"].includes(e));
+      const hasSpacer = elements.includes("Ca") || elements.some(e => isRareEarth(e) || e === "Y");
+      return hasO && hasCu && hasHg && hasAE && hasSpacer;
+    },
+  },
+  // Hg-1223 cuprate: P4/mmm (123), AB2C2D3O8 — triple-CuO2-layer
+  // HgBa2Ca2Cu3O8+δ — Tc ≈ 134K, THE HIGHEST Tc at ambient pressure.
+  // World record holder. Triple CuO2 planes with Hg-O charge reservoir.
+  // Primitive: 1Hg + 2Ba + 2Ca + 3Cu + 8O = 16 atoms, ratio [1,2,2,3,8]
+  {
+    name: "Hg1223-AB2C2D3O8",
+    spaceGroup: "P4/mmm",
+    latticeType: "tetragonal",
+    cOverA: 3.95,
+    sites: [
+      // Hg at 1a
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "Hg-layer" },
+      // Ba at 2h
+      { label: "B", x: 0.5, y: 0.5, z: 0.175, role: "Ba-site" },
+      { label: "B", x: 0.5, y: 0.5, z: 0.825, role: "Ba-site" },
+      // Ca at 2g — double spacer
+      { label: "C", x: 0.0, y: 0.0, z: 0.39, role: "Ca-spacer" },
+      { label: "C", x: 0.0, y: 0.0, z: 0.61, role: "Ca-spacer" },
+      // Cu: 3 total (1 inner + 2 outer)
+      { label: "D", x: 0.0, y: 0.0, z: 0.5, role: "Cu-inner" },
+      { label: "D", x: 0.0, y: 0.0, z: 0.30, role: "Cu-outer" },
+      { label: "D", x: 0.0, y: 0.0, z: 0.70, role: "Cu-outer" },
+      // O: 8 total
+      { label: "E", x: 0.5, y: 0.0, z: 0.5, role: "O-inner-eq" },
+      { label: "E", x: 0.0, y: 0.5, z: 0.5, role: "O-inner-eq" },
+      { label: "E", x: 0.5, y: 0.0, z: 0.30, role: "O-outer-eq" },
+      { label: "E", x: 0.0, y: 0.5, z: 0.30, role: "O-outer-eq" },
+      { label: "E", x: 0.5, y: 0.0, z: 0.70, role: "O-outer-eq" },
+      { label: "E", x: 0.0, y: 0.5, z: 0.70, role: "O-outer-eq" },
+      { label: "E", x: 0.0, y: 0.0, z: 0.12, role: "O-apical" },
+      { label: "E", x: 0.0, y: 0.0, z: 0.88, role: "O-apical" },
+    ],
+    stoichiometryRatio: [1, 2, 2, 3, 8],
+    coordination: [2, 10, 8, 5, 2],
+    chemistryRules: (elements) => {
+      if (elements.length !== 5) return false;
+      const hasO = elements.includes("O");
+      const hasCu = elements.includes("Cu");
+      const hasHg = elements.includes("Hg");
+      const hasAE = elements.some(e => ["Ba", "Sr"].includes(e));
+      const hasSpacer = elements.includes("Ca") || elements.some(e => isRareEarth(e) || e === "Y");
+      return hasO && hasCu && hasHg && hasAE && hasSpacer;
     },
   },
 

@@ -1215,6 +1215,42 @@ const KNOWN_STRUCTURES: Record<string, KnownStructure> = {
     { element: "I",  x: 0.0, y: 0.5, z: 0.5, wyckoff: "3c" },
   ]},
 
+  // Hg-1212 — HgBa2CaCu2O6 (P4/mmm, Tc ≈ 127K — highest confirmed ambient Tc)
+  "HgBa2CaCu2O6": { formula: "HgBa2CaCu2O6", spaceGroup: "P4/mmm", spaceGroupNumber: 123, latticeType: "tetragonal", latticeA: 3.86, latticeC: 12.66, pressureGPa: 0, atoms: [
+    { element: "Hg", x: 0.0, y: 0.0, z: 0.0, wyckoff: "1a" },
+    { element: "Ba", x: 0.5, y: 0.5, z: 0.22, wyckoff: "2h" },
+    { element: "Ba", x: 0.5, y: 0.5, z: 0.78, wyckoff: "2h" },
+    { element: "Ca", x: 0.0, y: 0.0, z: 0.5, wyckoff: "1b" },
+    { element: "Cu", x: 0.0, y: 0.0, z: 0.38, wyckoff: "2g" },
+    { element: "Cu", x: 0.0, y: 0.0, z: 0.62, wyckoff: "2g" },
+    { element: "O",  x: 0.5, y: 0.0, z: 0.38, wyckoff: "4i" },
+    { element: "O",  x: 0.0, y: 0.5, z: 0.38, wyckoff: "4i" },
+    { element: "O",  x: 0.5, y: 0.0, z: 0.62, wyckoff: "4i" },
+    { element: "O",  x: 0.0, y: 0.5, z: 0.62, wyckoff: "4i" },
+    { element: "O",  x: 0.0, y: 0.0, z: 0.15, wyckoff: "2g" },
+    { element: "O",  x: 0.0, y: 0.0, z: 0.85, wyckoff: "2g" },
+  ]},
+
+  // Hg-1223 — HgBa2Ca2Cu3O8 (P4/mmm, Tc ≈ 134K — WORLD RECORD ambient Tc)
+  "HgBa2Ca2Cu3O8": { formula: "HgBa2Ca2Cu3O8", spaceGroup: "P4/mmm", spaceGroupNumber: 123, latticeType: "tetragonal", latticeA: 3.85, latticeC: 15.82, pressureGPa: 0, atoms: [
+    { element: "Hg", x: 0.0, y: 0.0, z: 0.0, wyckoff: "1a" },
+    { element: "Ba", x: 0.5, y: 0.5, z: 0.175, wyckoff: "2h" },
+    { element: "Ba", x: 0.5, y: 0.5, z: 0.825, wyckoff: "2h" },
+    { element: "Ca", x: 0.0, y: 0.0, z: 0.39, wyckoff: "2g" },
+    { element: "Ca", x: 0.0, y: 0.0, z: 0.61, wyckoff: "2g" },
+    { element: "Cu", x: 0.0, y: 0.0, z: 0.5, wyckoff: "1d" },
+    { element: "Cu", x: 0.0, y: 0.0, z: 0.30, wyckoff: "2g" },
+    { element: "Cu", x: 0.0, y: 0.0, z: 0.70, wyckoff: "2g" },
+    { element: "O",  x: 0.5, y: 0.0, z: 0.5, wyckoff: "2f" },
+    { element: "O",  x: 0.0, y: 0.5, z: 0.5, wyckoff: "2f" },
+    { element: "O",  x: 0.5, y: 0.0, z: 0.30, wyckoff: "4i" },
+    { element: "O",  x: 0.0, y: 0.5, z: 0.30, wyckoff: "4i" },
+    { element: "O",  x: 0.5, y: 0.0, z: 0.70, wyckoff: "4i" },
+    { element: "O",  x: 0.0, y: 0.5, z: 0.70, wyckoff: "4i" },
+    { element: "O",  x: 0.0, y: 0.0, z: 0.12, wyckoff: "2g" },
+    { element: "O",  x: 0.0, y: 0.0, z: 0.88, wyckoff: "2g" },
+  ]},
+
   // Inverse Heusler — Mn2CoAl (F-43m)
   "Mn2CoAl": { formula: "Mn2CoAl", spaceGroup: "F-43m", spaceGroupNumber: 216, latticeType: "cubic", latticeA: 5.80, pressureGPa: 0, atoms: [
     { element: "Al", x: 0.0, y: 0.0, z: 0.0, wyckoff: "4a" },
