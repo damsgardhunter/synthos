@@ -960,6 +960,27 @@ const KNOWN_STRUCTURES: Record<string, KnownStructure> = {
     { element: "S",  x: 0.0, y: 0.0, z: 0.74, wyckoff: "6c" },
   ]},
 
+  // D019 — Ni3Al (P63/mmc, structural superalloy)
+  "Ni3Al": { formula: "Ni3Al", spaceGroup: "P63/mmc", spaceGroupNumber: 194, latticeType: "hexagonal", latticeA: 5.07, latticeC: 4.07, pressureGPa: 0, atoms: [
+    { element: "Ni", x: 0.833, y: 0.666, z: 0.25, wyckoff: "6h" },
+    { element: "Ni", x: 0.334, y: 0.167, z: 0.25, wyckoff: "6h" },
+    { element: "Ni", x: 0.167, y: 0.833, z: 0.25, wyckoff: "6h" },
+    { element: "Ni", x: 0.167, y: 0.334, z: 0.75, wyckoff: "6h" },
+    { element: "Ni", x: 0.666, y: 0.833, z: 0.75, wyckoff: "6h" },
+    { element: "Ni", x: 0.833, y: 0.167, z: 0.75, wyckoff: "6h" },
+    { element: "Al", x: 0.3333, y: 0.6667, z: 0.25, wyckoff: "2c" },
+    { element: "Al", x: 0.6667, y: 0.3333, z: 0.75, wyckoff: "2c" },
+  ]},
+
+  // Sesquicarbide — Cr3C2 (Pnma, hard coating)
+  "Cr3C2": { formula: "Cr3C2", spaceGroup: "Pnma", spaceGroupNumber: 62, latticeType: "tetragonal", latticeA: 5.53, latticeC: 2.83, pressureGPa: 0, atoms: [
+    { element: "Cr", x: 0.100, y: 0.25, z: 0.770, wyckoff: "4c" },
+    { element: "Cr", x: 0.190, y: 0.25, z: 0.440, wyckoff: "4c" },
+    { element: "Cr", x: 0.392, y: 0.25, z: 0.100, wyckoff: "4c" },
+    { element: "C",  x: 0.050, y: 0.25, z: 0.100, wyckoff: "4c" },
+    { element: "C",  x: 0.280, y: 0.25, z: 0.885, wyckoff: "4c" },
+  ]},
+
   // Inverse Heusler — Mn2CoAl (F-43m)
   "Mn2CoAl": { formula: "Mn2CoAl", spaceGroup: "F-43m", spaceGroupNumber: 216, latticeType: "cubic", latticeA: 5.80, pressureGPa: 0, atoms: [
     { element: "Al", x: 0.0, y: 0.0, z: 0.0, wyckoff: "4a" },

@@ -123,6 +123,8 @@ const PACKING_FACTORS: Record<string, number> = {
   "HexLayered-AB": 0.34,
   "Anatase-AB2": 0.58,
   "LayeredChalc-AMX2": 0.55,
+  "D019-A3B": 0.74,
+  "Sesquicarbide-A3C2": 0.65,
 };
 
 const DEFAULT_PACKING_FACTOR = 0.68;
@@ -1633,6 +1635,70 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
       // X-site: chalcogenide (NOT oxide — that's delafossite/layered oxide)
       const hasCh = elements.some(e => ["S", "Se", "Te"].includes(e));
       return hasA && hasTM && hasCh;
+    },
+  },
+
+  // D019 ordered HCP: P63/mmc (194), A3B — Ni3Sn-type intermetallic
+  // For: Ni3Al, Ti3Al, Ni3Sn, Co3Ti, Fe3Al, Pt3Sn — structural alloys, catalysts
+  // Hexagonal DO19 superstructure of HCP.
+  // Primitive cell: 6A + 2B = 8 atoms, ratio [3,1]
+  // A at 6h: (x, 2x, 1/4) with x ≈ 0.833; B at 2c: (1/3, 2/3, 1/4)
+  {
+    name: "D019-A3B",
+    spaceGroup: "P63/mmc",
+    latticeType: "hexagonal",
+    cOverA: 0.8,
+    sites: [
+      // A at 6h → 6 atoms (x ≈ 5/6)
+      { label: "A", x: 0.833, y: 0.666, z: 0.25, role: "majority-1" },
+      { label: "A", x: 0.334, y: 0.167, z: 0.25, role: "majority-2" },
+      { label: "A", x: 0.167, y: 0.833, z: 0.25, role: "majority-3" },
+      { label: "A", x: 0.167, y: 0.334, z: 0.75, role: "majority-4" },
+      { label: "A", x: 0.666, y: 0.833, z: 0.75, role: "majority-5" },
+      { label: "A", x: 0.833, y: 0.167, z: 0.75, role: "majority-6" },
+      // B at 2c
+      { label: "B", x: 0.3333, y: 0.6667, z: 0.25, role: "minority-1" },
+      { label: "B", x: 0.6667, y: 0.3333, z: 0.75, role: "minority-2" },
+    ],
+    stoichiometryRatio: [3, 1],
+    coordination: [12, 12],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      // D019: two metals, majority is late-TM or Al, minority is p-block or early-TM
+      const hasTM = elements.some(e => ["Ni", "Co", "Fe", "Pt", "Pd", "Ir", "Rh"].includes(e));
+      const hasPartner = elements.some(e => ["Al", "Ti", "Sn", "V", "Ga", "In", "Si", "Ge", "Mn"].includes(e));
+      return hasTM && hasPartner;
+    },
+  },
+  // Sesquicarbide: Pnma (62), A3C2 — Cr3C2-type hard coating
+  // For: Cr3C2, Mn3C2, Fe3C2, V3C2 — wear-resistant coatings, cutting tools
+  // Distinct from cementite A3C (ratio [3,1]) — this is [3,2]
+  // Primitive cell = conventional: 1 formula unit = 3A + 2B = 5 atoms
+  // Simplified representative positions from Cr3C2 literature
+  {
+    name: "Sesquicarbide-A3C2",
+    spaceGroup: "Pnma",
+    latticeType: "tetragonal",
+    cOverA: 0.36,
+    sites: [
+      // Cr1 at 4c: (x, 1/4, z)
+      { label: "A", x: 0.100, y: 0.25, z: 0.770, role: "metal-4c-1" },
+      // Cr2 at 4c: (x, 1/4, z)
+      { label: "A", x: 0.190, y: 0.25, z: 0.440, role: "metal-4c-2" },
+      // Cr3 at 4c: (x, 1/4, z)
+      { label: "A", x: 0.392, y: 0.25, z: 0.100, role: "metal-4c-3" },
+      // C1 at 4c: (x, 1/4, z)
+      { label: "B", x: 0.050, y: 0.25, z: 0.100, role: "carbon-1" },
+      // C2 at 4c: (x, 1/4, z)
+      { label: "B", x: 0.280, y: 0.25, z: 0.885, role: "carbon-2" },
+    ],
+    stoichiometryRatio: [3, 2],
+    coordination: [6, 6],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      const hasTM = elements.some(e => ["Cr", "Mn", "Fe", "V", "W", "Mo", "Ta", "Nb"].includes(e));
+      const hasLight = elements.some(e => ["C", "N", "B"].includes(e));
+      return hasTM && hasLight;
     },
   },
 
