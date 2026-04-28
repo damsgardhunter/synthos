@@ -121,6 +121,8 @@ const PACKING_FACTORS: Record<string, number> = {
   "HexPerovskite-2H": 0.68,
   "Cuprate2223-A2B2C2D3O10": 0.55,
   "HexLayered-AB": 0.34,
+  "Anatase-AB2": 0.58,
+  "LayeredChalc-AMX2": 0.55,
 };
 
 const DEFAULT_PACKING_FACTOR = 0.68;
@@ -1568,6 +1570,69 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
       const hasN = elements.includes("N");
       // Also covers: AlN-2H, GaN-2H (wurtzite handled separately), SiC-2H
       return hasB && hasN;
+    },
+  },
+
+  // Anatase: I41/amd (141), AB2 — TiO2 photocatalyst polymorph
+  // Distinct from rutile (P42/mnm): edge-sharing vs corner-sharing octahedra
+  // For: TiO2-anatase, SnO2-anatase (metastable), VO2 (at high T)
+  // Primitive cell (BCC → half conventional): 2A + 4B = 6 atoms, ratio [1,2]
+  // Ti at 4a (0,0,0), O at 8e (0,0,z) with z ≈ 0.208
+  {
+    name: "Anatase-AB2",
+    spaceGroup: "I41/amd",
+    latticeType: "tetragonal",
+    cOverA: 2.51,
+    sites: [
+      // Ti at 4a → 2 in primitive
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "cation" },
+      { label: "A", x: 0.0, y: 0.5, z: 0.25, role: "cation" },
+      // O at 8e → 4 in primitive
+      { label: "B", x: 0.0, y: 0.0, z: 0.208, role: "anion" },
+      { label: "B", x: 0.0, y: 0.0, z: 0.792, role: "anion" },
+      { label: "B", x: 0.0, y: 0.5, z: 0.458, role: "anion" },
+      { label: "B", x: 0.0, y: 0.5, z: 0.042, role: "anion" },
+    ],
+    stoichiometryRatio: [1, 2],
+    coordination: [6, 3],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      // Anatase-specific: Ti/V/Sn + O (photocatalyst oxides)
+      // Narrow to avoid shadowing Rutile, Fluorite, etc.
+      const hasTi = elements.some(e => ["Ti", "V", "Sn"].includes(e));
+      const hasO = elements.includes("O");
+      return hasTi && hasO;
+    },
+  },
+  // Layered chalcogenide: R-3m (166), AMX2 — NaCrS2-type
+  // For: NaCrS2, LiTiS2, NaCoO2-analogs with S/Se/Te, KCrSe2, AgCrS2
+  // Distinct from delafossite (same SG but oxide-specific with noble metals)
+  // Primitive cell (rhombohedral): 1A + 1M + 2X = 4 atoms, ratio [1,1,2]
+  {
+    name: "LayeredChalc-AMX2",
+    spaceGroup: "R-3m",
+    latticeType: "hexagonal",
+    cOverA: 5.8,
+    sites: [
+      // A (alkali/Ag) at 3a: (0, 0, 0)
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "intercalant" },
+      // M (TM) at 3b: (0, 0, 1/2)
+      { label: "B", x: 0.0, y: 0.0, z: 0.5, role: "TM-oct" },
+      // X (S/Se/Te) at 6c: (0, 0, z) with z ≈ 0.26
+      { label: "C", x: 0.0, y: 0.0, z: 0.26, role: "chalcogen" },
+      { label: "C", x: 0.0, y: 0.0, z: 0.74, role: "chalcogen" },
+    ],
+    stoichiometryRatio: [1, 1, 2],
+    coordination: [6, 6, 6],
+    chemistryRules: (elements) => {
+      if (elements.length !== 3) return false;
+      // A-site: alkali or Ag/Cu
+      const hasA = elements.some(e => ["Li", "Na", "K", "Rb", "Cs", "Ag", "Cu", "Tl"].includes(e));
+      // M-site: transition metal
+      const hasTM = elements.some(e => ["Cr", "Ti", "V", "Mn", "Fe", "Co", "Ni", "Nb", "Mo", "W", "Ta"].includes(e));
+      // X-site: chalcogenide (NOT oxide — that's delafossite/layered oxide)
+      const hasCh = elements.some(e => ["S", "Se", "Te"].includes(e));
+      return hasA && hasTM && hasCh;
     },
   },
 

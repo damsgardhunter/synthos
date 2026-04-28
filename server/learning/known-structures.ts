@@ -936,6 +936,30 @@ const KNOWN_STRUCTURES: Record<string, KnownStructure> = {
     { element: "N", x: 0.6667, y: 0.3333, z: 0.75, wyckoff: "2c" },
   ]},
 
+  // Anatase — TiO2 (I41/amd, photocatalyst)
+  "TiO2": { formula: "TiO2", spaceGroup: "I41/amd", spaceGroupNumber: 141, latticeType: "tetragonal", latticeA: 3.78, latticeC: 9.51, pressureGPa: 0, atoms: [
+    { element: "Ti", x: 0.0, y: 0.0, z: 0.0, wyckoff: "4a" },
+    { element: "Ti", x: 0.0, y: 0.5, z: 0.25, wyckoff: "4a" },
+    { element: "O",  x: 0.0, y: 0.0, z: 0.208, wyckoff: "8e" },
+    { element: "O",  x: 0.0, y: 0.0, z: 0.792, wyckoff: "8e" },
+    { element: "O",  x: 0.0, y: 0.5, z: 0.458, wyckoff: "8e" },
+    { element: "O",  x: 0.0, y: 0.5, z: 0.042, wyckoff: "8e" },
+  ]},
+
+  // Layered chalcogenide — LiTiS2 (R-3m, battery intercalation)
+  "LiTiS2": { formula: "LiTiS2", spaceGroup: "R-3m", spaceGroupNumber: 166, latticeType: "hexagonal", latticeA: 3.45, latticeC: 18.22, pressureGPa: 0, atoms: [
+    { element: "Li", x: 0.0, y: 0.0, z: 0.0, wyckoff: "3a" },
+    { element: "Ti", x: 0.0, y: 0.0, z: 0.5, wyckoff: "3b" },
+    { element: "S",  x: 0.0, y: 0.0, z: 0.26, wyckoff: "6c" },
+    { element: "S",  x: 0.0, y: 0.0, z: 0.74, wyckoff: "6c" },
+  ]},
+  "NaCrS2": { formula: "NaCrS2", spaceGroup: "R-3m", spaceGroupNumber: 166, latticeType: "hexagonal", latticeA: 3.53, latticeC: 19.51, pressureGPa: 0, atoms: [
+    { element: "Na", x: 0.0, y: 0.0, z: 0.0, wyckoff: "3a" },
+    { element: "Cr", x: 0.0, y: 0.0, z: 0.5, wyckoff: "3b" },
+    { element: "S",  x: 0.0, y: 0.0, z: 0.26, wyckoff: "6c" },
+    { element: "S",  x: 0.0, y: 0.0, z: 0.74, wyckoff: "6c" },
+  ]},
+
   // Inverse Heusler — Mn2CoAl (F-43m)
   "Mn2CoAl": { formula: "Mn2CoAl", spaceGroup: "F-43m", spaceGroupNumber: 216, latticeType: "cubic", latticeA: 5.80, pressureGPa: 0, atoms: [
     { element: "Al", x: 0.0, y: 0.0, z: 0.0, wyckoff: "4a" },
