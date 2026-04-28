@@ -144,6 +144,8 @@ const PACKING_FACTORS: Record<string, number> = {
   "HalidePerovskite-ABX3": 0.74,
   "Hg1212-AB2CD2O6": 0.55,
   "Hg1223-AB2C2D3O8": 0.55,
+  "BaAl4-AB4": 0.68,
+  "QuaternaryHeusler-ABCD": 0.68,
 };
 
 const DEFAULT_PACKING_FACTOR = 0.68;
@@ -2343,6 +2345,63 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
       const hasAE = elements.some(e => ["Ba", "Sr"].includes(e));
       const hasSpacer = elements.includes("Ca") || elements.some(e => isRareEarth(e) || e === "Y");
       return hasO && hasCu && hasHg && hasAE && hasSpacer;
+    },
+  },
+
+  // BaAl4-type: I4/mmm (139), AB4 — heavy-fermion / topological intermetallic
+  // For: CeAl4, BaAl4, SrGa4, EuIn4, CeRh2Si2-related aluminides
+  // Distinct from Tetraboride (P4/mbm, B only) — this handles Al/Ga/In/Si.
+  // Primitive cell (BCC → half conv.): 1A + 4B = 5 atoms, ratio [1,4]
+  // A at 2a, B at 4d (0,1/2,1/4) + 4e (0,0,z≈0.38)
+  {
+    name: "BaAl4-AB4",
+    spaceGroup: "I4/mmm",
+    latticeType: "tetragonal",
+    cOverA: 2.77,
+    sites: [
+      // A (Ba/Sr/Ca/Ce/Eu) at 2a → 1 in primitive
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "A-site" },
+      // B at 4d → 2 in primitive
+      { label: "B", x: 0.0, y: 0.5, z: 0.25, role: "B-basal" },
+      { label: "B", x: 0.5, y: 0.0, z: 0.25, role: "B-basal" },
+      // B at 4e → 2 in primitive
+      { label: "B", x: 0.0, y: 0.0, z: 0.38, role: "B-apical" },
+      { label: "B", x: 0.0, y: 0.0, z: 0.62, role: "B-apical" },
+    ],
+    stoichiometryRatio: [1, 4],
+    coordination: [16, 9],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      const hasA = elements.some(e => isRareEarth(e) || ["Ba", "Sr", "Ca", "Y", "Sc", "Th", "Eu", "Yb"].includes(e));
+      const hasB = elements.some(e => ["Al", "Ga", "In", "Si", "Ge", "Sn", "Cu", "Ag", "Au", "Zn", "Cd"].includes(e));
+      return hasA && hasB;
+    },
+  },
+  // Quaternary Heusler: F-43m (216), ABCD — equiatomic spintronic
+  // For: CoFeMnSi, CoFeMnGe, NiFeMnGa, LiMgPdSn — spin-gapless, half-metals
+  // 4 distinct sublattices in FCC framework. Growing family for spintronics.
+  // Primitive cell (FCC → 1/4 conv.): 1A + 1B + 1C + 1D = 4 atoms, ratio [1,1,1,1]
+  // A at 4a, B at 4b, C at 4c, D at 4d
+  {
+    name: "QuaternaryHeusler-ABCD",
+    spaceGroup: "F-43m",
+    latticeType: "cubic",
+    cOverA: 1.0,
+    sites: [
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "site-4a" },
+      { label: "B", x: 0.5, y: 0.5, z: 0.5, role: "site-4b" },
+      { label: "C", x: 0.25, y: 0.25, z: 0.25, role: "site-4c" },
+      { label: "D", x: 0.75, y: 0.75, z: 0.75, role: "site-4d" },
+    ],
+    stoichiometryRatio: [1, 1, 1, 1],
+    coordination: [4, 4, 4, 4],
+    chemistryRules: (elements) => {
+      if (elements.length !== 4) return false;
+      // Quaternary Heusler: 4 different metals, typically 2-3 TMs + sp-element
+      const tmCount = elements.filter(e => isTransitionMetal(e)).length;
+      const hasSp = elements.some(e => ["Al", "Ga", "In", "Si", "Ge", "Sn", "Sb", "Bi"].includes(e));
+      // Need at least 2 TMs and at least 1 sp-block element
+      return tmCount >= 2 && hasSp;
     },
   },
 
