@@ -125,6 +125,8 @@ const PACKING_FACTORS: Record<string, number> = {
   "LayeredChalc-AMX2": 0.55,
   "D019-A3B": 0.74,
   "Sesquicarbide-A3C2": 0.65,
+  "Dodecaboride-AB12": 0.62,
+  "Hg1201-AB2CO4": 0.58,
 };
 
 const DEFAULT_PACKING_FACTOR = 0.68;
@@ -1699,6 +1701,82 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
       const hasTM = elements.some(e => ["Cr", "Mn", "Fe", "V", "W", "Mo", "Ta", "Nb"].includes(e));
       const hasLight = elements.some(e => ["C", "N", "B"].includes(e));
       return hasTM && hasLight;
+    },
+  },
+
+  // Dodecaboride: Fm-3m (225), AB12 — UB12/YB12-type boride cage
+  // B12 cubo-octahedral clusters enclosing metal atoms.
+  // For: YB12, ZrB12, ScB12, LuB12 — some superconducting (ZrB12 Tc≈6K)
+  // Primitive cell (FCC → 1/4 conventional): 1 M + 12 B = 13 atoms, ratio [1,12]
+  // M at 4a (0,0,0), B at 48i (1/2, x, x) with x ≈ 0.178
+  {
+    name: "Dodecaboride-AB12",
+    spaceGroup: "Fm-3m",
+    latticeType: "cubic",
+    cOverA: 1.0,
+    sites: [
+      // M at 4a → 1 in primitive
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "cage-center" },
+      // B at 48i → 12 in primitive (cubo-octahedral cage)
+      { label: "B", x: 0.5, y: 0.178, z: 0.178, role: "B-cage" },
+      { label: "B", x: 0.5, y: 0.822, z: 0.178, role: "B-cage" },
+      { label: "B", x: 0.5, y: 0.178, z: 0.822, role: "B-cage" },
+      { label: "B", x: 0.5, y: 0.822, z: 0.822, role: "B-cage" },
+      { label: "B", x: 0.178, y: 0.5, z: 0.178, role: "B-cage" },
+      { label: "B", x: 0.822, y: 0.5, z: 0.178, role: "B-cage" },
+      { label: "B", x: 0.178, y: 0.5, z: 0.822, role: "B-cage" },
+      { label: "B", x: 0.822, y: 0.5, z: 0.822, role: "B-cage" },
+      { label: "B", x: 0.178, y: 0.178, z: 0.5, role: "B-cage" },
+      { label: "B", x: 0.822, y: 0.178, z: 0.5, role: "B-cage" },
+      { label: "B", x: 0.178, y: 0.822, z: 0.5, role: "B-cage" },
+      { label: "B", x: 0.822, y: 0.822, z: 0.5, role: "B-cage" },
+    ],
+    stoichiometryRatio: [1, 12],
+    coordination: [24, 5],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      const hasB = elements.includes("B");
+      const hasMetal = elements.some(e =>
+        isRareEarth(e) || ["Y", "Sc", "Zr", "Hf", "Th", "U"].includes(e)
+      );
+      return hasB && hasMetal;
+    },
+  },
+  // Hg-1201 cuprate: P4/mmm (123), AB2CO4 — single-layer Hg cuprate
+  // HgBa2CuO4+δ — highest Tc for single-CuO2-layer cuprate (~97 K)
+  // Distinct from Tl-2201 (I4/mmm, ratio [2,2,1,6]) — Hg-1201 has no
+  // double Hg-layer and uses simple tetragonal P4/mmm.
+  // Primitive cell: 1A + 2B + 1C + 4O = 8 atoms, ratio [1,2,1,4]
+  {
+    name: "Hg1201-AB2CO4",
+    spaceGroup: "P4/mmm",
+    latticeType: "tetragonal",
+    cOverA: 2.48,
+    sites: [
+      // Hg at 1a: (0, 0, 0)
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "Hg-layer" },
+      // Ba at 2h: (1/2, 1/2, z) with z ≈ 0.29
+      { label: "B", x: 0.5, y: 0.5, z: 0.29, role: "Ba-site" },
+      { label: "B", x: 0.5, y: 0.5, z: 0.71, role: "Ba-site" },
+      // Cu at 1b: (0, 0, 1/2)
+      { label: "C", x: 0.0, y: 0.0, z: 0.5, role: "CuO2-plane" },
+      // O at 2g (0, 1/2, 1/2) — CuO2 in-plane
+      { label: "D", x: 0.0, y: 0.5, z: 0.5, role: "O-planar" },
+      { label: "D", x: 0.5, y: 0.0, z: 0.5, role: "O-planar" },
+      // O at 2e (1/2, 1/2, 0) or 1c+1d — apical O
+      { label: "D", x: 0.0, y: 0.0, z: 0.16, role: "O-apical" },
+      { label: "D", x: 0.0, y: 0.0, z: 0.84, role: "O-apical" },
+    ],
+    stoichiometryRatio: [1, 2, 1, 4],
+    coordination: [2, 10, 5, 2],
+    chemistryRules: (elements) => {
+      if (elements.length !== 4) return false;
+      const hasO = elements.includes("O");
+      const hasCu = elements.includes("Cu");
+      // A-site: Hg specifically (Tl-1201 uses different structure/ratio)
+      const hasHg = elements.includes("Hg");
+      const hasAE = elements.some(e => ["Ba", "Sr"].includes(e));
+      return hasO && hasCu && hasHg && hasAE;
     },
   },
 

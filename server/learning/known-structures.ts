@@ -981,6 +981,35 @@ const KNOWN_STRUCTURES: Record<string, KnownStructure> = {
     { element: "C",  x: 0.280, y: 0.25, z: 0.885, wyckoff: "4c" },
   ]},
 
+  // Dodecaboride — ZrB12 (Fm-3m, Tc ≈ 6 K)
+  "ZrB12": { formula: "ZrB12", spaceGroup: "Fm-3m", spaceGroupNumber: 225, latticeType: "cubic", latticeA: 7.41, pressureGPa: 0, atoms: [
+    { element: "Zr", x: 0.0, y: 0.0, z: 0.0, wyckoff: "4a" },
+    { element: "B",  x: 0.5, y: 0.178, z: 0.178, wyckoff: "48i" },
+    { element: "B",  x: 0.5, y: 0.822, z: 0.178, wyckoff: "48i" },
+    { element: "B",  x: 0.5, y: 0.178, z: 0.822, wyckoff: "48i" },
+    { element: "B",  x: 0.5, y: 0.822, z: 0.822, wyckoff: "48i" },
+    { element: "B",  x: 0.178, y: 0.5, z: 0.178, wyckoff: "48i" },
+    { element: "B",  x: 0.822, y: 0.5, z: 0.178, wyckoff: "48i" },
+    { element: "B",  x: 0.178, y: 0.5, z: 0.822, wyckoff: "48i" },
+    { element: "B",  x: 0.822, y: 0.5, z: 0.822, wyckoff: "48i" },
+    { element: "B",  x: 0.178, y: 0.178, z: 0.5, wyckoff: "48i" },
+    { element: "B",  x: 0.822, y: 0.178, z: 0.5, wyckoff: "48i" },
+    { element: "B",  x: 0.178, y: 0.822, z: 0.5, wyckoff: "48i" },
+    { element: "B",  x: 0.822, y: 0.822, z: 0.5, wyckoff: "48i" },
+  ]},
+
+  // Hg-1201 cuprate — HgBa2CuO4 (P4/mmm, Tc ≈ 97 K)
+  "HgBa2CuO4": { formula: "HgBa2CuO4", spaceGroup: "P4/mmm", spaceGroupNumber: 123, latticeType: "tetragonal", latticeA: 3.88, latticeC: 9.51, pressureGPa: 0, atoms: [
+    { element: "Hg", x: 0.0, y: 0.0, z: 0.0, wyckoff: "1a" },
+    { element: "Ba", x: 0.5, y: 0.5, z: 0.29, wyckoff: "2h" },
+    { element: "Ba", x: 0.5, y: 0.5, z: 0.71, wyckoff: "2h" },
+    { element: "Cu", x: 0.0, y: 0.0, z: 0.5, wyckoff: "1b" },
+    { element: "O",  x: 0.0, y: 0.5, z: 0.5, wyckoff: "2g" },
+    { element: "O",  x: 0.5, y: 0.0, z: 0.5, wyckoff: "2g" },
+    { element: "O",  x: 0.0, y: 0.0, z: 0.16, wyckoff: "2e" },
+    { element: "O",  x: 0.0, y: 0.0, z: 0.84, wyckoff: "2e" },
+  ]},
+
   // Inverse Heusler — Mn2CoAl (F-43m)
   "Mn2CoAl": { formula: "Mn2CoAl", spaceGroup: "F-43m", spaceGroupNumber: 216, latticeType: "cubic", latticeA: 5.80, pressureGPa: 0, atoms: [
     { element: "Al", x: 0.0, y: 0.0, z: 0.0, wyckoff: "4a" },
