@@ -117,6 +117,8 @@ const PACKING_FACTORS: Record<string, number> = {
   "Cementite-A3B": 0.68,
   "Zintl-AB2C2": 0.58,
   "Antifluorite-A2B": 0.68,
+  "Cuprite-A2B": 0.52,
+  "HexPerovskite-2H": 0.68,
 };
 
 const DEFAULT_PACKING_FACTOR = 0.68;
@@ -1420,10 +1422,74 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
     coordination: [4, 8],
     chemistryRules: (elements) => {
       if (elements.length !== 2) return false;
-      // Antifluorite: alkali + chalcogenide/oxide (A2X)
-      const hasAlkali = elements.some(e => ["Li", "Na", "K", "Rb", "Cs", "Cu", "Ag"].includes(e));
+      // Antifluorite: alkali + chalcogenide/oxide (A2X). Cu2O is cuprite, not antifluorite.
+      const hasAlkali = elements.some(e => ["Li", "Na", "K", "Rb", "Cs"].includes(e));
       const hasAnion = elements.some(e => ["O", "S", "Se", "Te", "F"].includes(e));
       return hasAlkali && hasAnion;
+    },
+  },
+
+  // Cuprite: Pn-3m (224), A2B — Cu2O-type
+  // Distinct from antifluorite: linear O-Cu-O coordination, not tetrahedral.
+  // For: Cu2O, Ag2O — photovoltaics, catalysis, p-type TCO
+  // Primitive cell: 2 Cu + 1 O = 3 atoms (from conventional 4Cu + 2O = 6, /2)
+  // Cu at 4b: (1/4, 1/4, 1/4), O at 2a: (0, 0, 0)
+  {
+    name: "Cuprite-A2B",
+    spaceGroup: "Pn-3m",
+    latticeType: "cubic",
+    cOverA: 1.0,
+    sites: [
+      // Cu at 4b → 2 in primitive
+      { label: "A", x: 0.25, y: 0.25, z: 0.25, role: "linear-coord" },
+      { label: "A", x: 0.75, y: 0.75, z: 0.75, role: "linear-coord" },
+      // O at 2a → 1 in primitive
+      { label: "B", x: 0.0, y: 0.0, z: 0.0, role: "tetrahedral" },
+    ],
+    stoichiometryRatio: [2, 1],
+    coordination: [2, 4],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      const hasCuAg = elements.some(e => ["Cu", "Ag"].includes(e));
+      const hasO = elements.includes("O");
+      return hasCuAg && hasO;
+    },
+  },
+  // Hexagonal perovskite 2H: P63/mmc (194), ABO3 — face-sharing octahedra
+  // Distinct from cubic perovskite (corner-sharing). For: BaNiO3, BaCoO3,
+  // BaMnO3-2H, CsNiF3, BaRuO3 — quantum magnets, catalysts
+  // Primitive cell: 2A + 2B + 6O = 10 atoms, ratio [1,1,3]
+  // Wyckoff: A at 2d, B at 2a, O at 6h
+  {
+    name: "HexPerovskite-2H",
+    spaceGroup: "P63/mmc",
+    latticeType: "hexagonal",
+    cOverA: 2.45,
+    sites: [
+      // A (Ba/Cs) at 2d: (1/3, 2/3, 3/4)
+      { label: "A", x: 0.3333, y: 0.6667, z: 0.75, role: "A-site" },
+      { label: "A", x: 0.6667, y: 0.3333, z: 0.25, role: "A-site" },
+      // B (Ni/Co/Mn/Ru) at 2a: (0, 0, 0)
+      { label: "B", x: 0.0, y: 0.0, z: 0.0, role: "B-face-share" },
+      { label: "B", x: 0.0, y: 0.0, z: 0.5, role: "B-face-share" },
+      // O at 6h: (x, 2x, 1/4) with x ≈ 0.515
+      { label: "C", x: 0.515, y: 0.030, z: 0.25, role: "O-1" },
+      { label: "C", x: 0.970, y: 0.485, z: 0.25, role: "O-2" },
+      { label: "C", x: 0.485, y: 0.515, z: 0.25, role: "O-3" },
+      { label: "C", x: 0.485, y: 0.970, z: 0.75, role: "O-4" },
+      { label: "C", x: 0.030, y: 0.515, z: 0.75, role: "O-5" },
+      { label: "C", x: 0.515, y: 0.485, z: 0.75, role: "O-6" },
+    ],
+    stoichiometryRatio: [1, 1, 3],
+    coordination: [12, 6, 2],
+    chemistryRules: (elements) => {
+      if (elements.length !== 3) return false;
+      const hasAnion = elements.includes("O") || elements.includes("F");
+      // A-site: Ba, Cs specifically (large cations that stabilize hexagonal stacking)
+      const hasLargeA = elements.some(e => ["Ba", "Cs"].includes(e));
+      // B-site: TM that prefers face-sharing (Ni, Co, Mn, Ru, Ti, V, Cr)
+      const hasTM = elements.some(e => ["Ni", "Co", "Mn", "Ru", "Ti", "V", "Cr", "Fe", "Ir"].includes(e));
+      return hasAnion && hasLargeA && hasTM;
     },
   },
 
@@ -2614,14 +2680,31 @@ function sortElementsBySite(elements: string[], counts: Record<string, number>, 
 export function selectPrototype(formula: string): { template: PrototypeTemplate; siteMap: Record<string, string> } | null {
   const counts = parseFormulaCounts(formula);
   const elements = Object.keys(counts);
+  const formulaAtomCount = Object.values(counts).reduce((s, n) => s + Math.round(n), 0);
 
+  // Collect all matching templates, then prefer the one whose atom count
+  // best matches the formula (exact > smallest-multiple > fewest-atoms)
+  const matches: { template: PrototypeTemplate; siteMap: Record<string, string>; nAtoms: number }[] = [];
   for (const template of PROTOTYPE_TEMPLATES) {
     if (!template.chemistryRules(elements)) continue;
     const siteMap = sortElementsBySite(elements, counts, template);
-    if (siteMap) return { template, siteMap };
+    if (siteMap) matches.push({ template, siteMap, nAtoms: template.sites.length });
   }
 
-  return null;
+  if (matches.length === 0) return null;
+
+  // Sort: exact atom count first, then clean multiples, then fewest atoms
+  matches.sort((a, b) => {
+    const aExact = a.nAtoms === formulaAtomCount ? 0 : 1;
+    const bExact = b.nAtoms === formulaAtomCount ? 0 : 1;
+    if (aExact !== bExact) return aExact - bExact;
+    const aMult = a.nAtoms % formulaAtomCount === 0 ? 0 : 1;
+    const bMult = b.nAtoms % formulaAtomCount === 0 ? 0 : 1;
+    if (aMult !== bMult) return aMult - bMult;
+    return a.nAtoms - b.nAtoms;
+  });
+
+  return { template: matches[0].template, siteMap: matches[0].siteMap };
 }
 
 function getAvgRadius(el: string): number {

@@ -884,6 +884,27 @@ const KNOWN_STRUCTURES: Record<string, KnownStructure> = {
     { element: "S",  x: 0.0, y: 0.0, z: 0.0, wyckoff: "4a" },
   ]},
 
+  // Cuprite — Cu2O (Pn-3m)
+  "Cu2O": { formula: "Cu2O", spaceGroup: "Pn-3m", spaceGroupNumber: 224, latticeType: "cubic", latticeA: 4.27, pressureGPa: 0, atoms: [
+    { element: "Cu", x: 0.25, y: 0.25, z: 0.25, wyckoff: "4b" },
+    { element: "Cu", x: 0.75, y: 0.75, z: 0.75, wyckoff: "4b" },
+    { element: "O",  x: 0.0, y: 0.0, z: 0.0, wyckoff: "2a" },
+  ]},
+
+  // Hexagonal perovskite 2H — BaNiO3 (P63/mmc)
+  "BaNiO3": { formula: "BaNiO3", spaceGroup: "P63/mmc", spaceGroupNumber: 194, latticeType: "hexagonal", latticeA: 5.63, latticeC: 4.83, pressureGPa: 0, atoms: [
+    { element: "Ba", x: 0.3333, y: 0.6667, z: 0.75, wyckoff: "2d" },
+    { element: "Ba", x: 0.6667, y: 0.3333, z: 0.25, wyckoff: "2d" },
+    { element: "Ni", x: 0.0, y: 0.0, z: 0.0, wyckoff: "2a" },
+    { element: "Ni", x: 0.0, y: 0.0, z: 0.5, wyckoff: "2a" },
+    { element: "O",  x: 0.515, y: 0.030, z: 0.25, wyckoff: "6h" },
+    { element: "O",  x: 0.970, y: 0.485, z: 0.25, wyckoff: "6h" },
+    { element: "O",  x: 0.485, y: 0.515, z: 0.25, wyckoff: "6h" },
+    { element: "O",  x: 0.485, y: 0.970, z: 0.75, wyckoff: "6h" },
+    { element: "O",  x: 0.030, y: 0.515, z: 0.75, wyckoff: "6h" },
+    { element: "O",  x: 0.515, y: 0.485, z: 0.75, wyckoff: "6h" },
+  ]},
+
   // Inverse Heusler — Mn2CoAl (F-43m)
   "Mn2CoAl": { formula: "Mn2CoAl", spaceGroup: "F-43m", spaceGroupNumber: 216, latticeType: "cubic", latticeA: 5.80, pressureGPa: 0, atoms: [
     { element: "Al", x: 0.0, y: 0.0, z: 0.0, wyckoff: "4a" },
