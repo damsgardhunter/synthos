@@ -81,6 +81,11 @@ const PACKING_FACTORS: Record<string, number> = {
   "1111-Type": 0.58,
   "Infinite-layer": 0.58,
   "T-prime": 0.52,
+  // High-pressure hydride prototypes
+  "Bcc-MH3": 0.68,
+  "Sodalite-MH6": 0.62,
+  "Hex-Clathrate-MH9": 0.58,
+  "Clathrate-Fm3m-MH10": 0.60,
 };
 
 const DEFAULT_PACKING_FACTOR = 0.68;
@@ -305,23 +310,115 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
       return hasAnion && hasMetal;
     },
   },
+  // ── High-pressure hydride prototypes ──────────────────────────────────
+  // These must appear BEFORE generic templates to match first for hydrides.
+  // Wyckoff positions are for the PRIMITIVE cell, computed from the
+  // conventional cell symmetry operations.
+
+  // H3S-type: Im-3m BCC, 1 M + 3 H (MH3 stoichiometry)
+  // S at 2a → 1 in primitive; H at 6b → 3 in primitive
+  // For: H3S, ScH3, YH3 (and any MH3 binary with H + chalcogen/metal)
   {
-    name: "Clathrate-H32",
+    name: "Bcc-MH3",
     spaceGroup: "Im-3m",
     latticeType: "cubic",
     cOverA: 1.0,
     sites: [
       { label: "M", x: 0.0, y: 0.0, z: 0.0, role: "metal-center" },
-      { label: "H", x: 0.18, y: 0.18, z: 0.18, role: "cage" },
-      { label: "H", x: 0.31, y: 0.31, z: 0.0, role: "cage" },
-      { label: "H", x: 0.0, y: 0.31, z: 0.31, role: "cage" },
-      { label: "H", x: 0.31, y: 0.0, z: 0.31, role: "cage" },
+      { label: "H", x: 0.0, y: 0.5, z: 0.5, role: "octahedral" },
+      { label: "H", x: 0.5, y: 0.0, z: 0.5, role: "octahedral" },
+      { label: "H", x: 0.5, y: 0.5, z: 0.0, role: "octahedral" },
+    ],
+    stoichiometryRatio: [1, 3],
+    coordination: [6, 2],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      // H3S (H is majority, S/Se/Te is minority) or ScH3/YH3 (metal + H)
+      return elements.includes("H") || elements.some(e => ["S", "Se", "Te"].includes(e));
+    },
+  },
+  // Sodalite-type: Im-3m, 1 M + 6 H (MH6 stoichiometry)
+  // M at 2a → 1 in primitive; H at 12d → 6 in primitive
+  // For: CaH6, YH6, SrH6, LaH6, ScH6, MgH6, BaH6
+  {
+    name: "Sodalite-MH6",
+    spaceGroup: "Im-3m",
+    latticeType: "cubic",
+    cOverA: 1.0,
+    sites: [
+      { label: "M", x: 0.0, y: 0.0, z: 0.0, role: "cage-center" },
+      { label: "H", x: 0.50, y: 0.75, z: 0.25, role: "sodalite-cage" },
+      { label: "H", x: 0.50, y: 0.25, z: 0.75, role: "sodalite-cage" },
+      { label: "H", x: 0.75, y: 0.50, z: 0.25, role: "sodalite-cage" },
+      { label: "H", x: 0.25, y: 0.50, z: 0.75, role: "sodalite-cage" },
+      { label: "H", x: 0.75, y: 0.25, z: 0.50, role: "sodalite-cage" },
+      { label: "H", x: 0.25, y: 0.75, z: 0.50, role: "sodalite-cage" },
+    ],
+    stoichiometryRatio: [1, 6],
+    coordination: [24, 4],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      return elements.includes("H") && elements.some(e =>
+        isRareEarth(e) || ["Ca", "Sr", "Ba", "Y", "Sc", "Mg", "Th"].includes(e)
+      );
+    },
+  },
+  // Hexagonal clathrate: P63/mmc, 1 M + 9 H (MH9 stoichiometry)
+  // For: YH9, CeH9, ScH9
+  {
+    name: "Hex-Clathrate-MH9",
+    spaceGroup: "P63/mmc",
+    latticeType: "hexagonal",
+    cOverA: 1.55,
+    sites: [
+      { label: "M", x: 0.3333, y: 0.6667, z: 0.25, role: "cage-center" },
+      { label: "H", x: 0.155, y: 0.310, z: 0.25, role: "hex-cage-6h" },
+      { label: "H", x: 0.690, y: 0.845, z: 0.25, role: "hex-cage-6h" },
+      { label: "H", x: 0.845, y: 0.155, z: 0.25, role: "hex-cage-6h" },
+      { label: "H", x: 0.0, y: 0.0, z: 0.25, role: "hex-cage-2b" },
+      { label: "H", x: 0.520, y: 0.040, z: 0.08, role: "hex-cage-12k" },
+      { label: "H", x: 0.960, y: 0.480, z: 0.08, role: "hex-cage-12k" },
+      { label: "H", x: 0.480, y: 0.520, z: 0.08, role: "hex-cage-12k" },
+      { label: "H", x: 0.040, y: 0.520, z: 0.42, role: "hex-cage-12k" },
+      { label: "H", x: 0.520, y: 0.480, z: 0.42, role: "hex-cage-12k" },
+    ],
+    stoichiometryRatio: [1, 9],
+    coordination: [29, 3],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      return elements.includes("H") && elements.some(e =>
+        isRareEarth(e) || ["Y", "Sc", "Ca", "Sr", "Ba", "Th"].includes(e)
+      );
+    },
+  },
+  // Clathrate Fm-3m: 1 M + 10 H (MH10 stoichiometry)
+  // La at 4a → 1 in primitive; H at 32f → 8 in primitive; H at 8c → 2 in primitive
+  // For: LaH10, ThH10, CeH10 and novel RE-H10 predictions
+  {
+    name: "Clathrate-Fm3m-MH10",
+    spaceGroup: "Fm-3m",
+    latticeType: "cubic",
+    cOverA: 1.0,
+    sites: [
+      { label: "M", x: 0.0, y: 0.0, z: 0.0, role: "cage-center" },
+      { label: "H", x: 0.375, y: 0.375, z: 0.375, role: "32f-cage" },
+      { label: "H", x: 0.375, y: 0.375, z: 0.875, role: "32f-cage" },
+      { label: "H", x: 0.375, y: 0.875, z: 0.375, role: "32f-cage" },
+      { label: "H", x: 0.875, y: 0.375, z: 0.375, role: "32f-cage" },
+      { label: "H", x: 0.625, y: 0.625, z: 0.625, role: "32f-cage" },
+      { label: "H", x: 0.625, y: 0.625, z: 0.125, role: "32f-cage" },
+      { label: "H", x: 0.625, y: 0.125, z: 0.625, role: "32f-cage" },
+      { label: "H", x: 0.125, y: 0.625, z: 0.625, role: "32f-cage" },
+      { label: "H", x: 0.25, y: 0.25, z: 0.25, role: "8c-interstitial" },
+      { label: "H", x: 0.75, y: 0.75, z: 0.75, role: "8c-interstitial" },
     ],
     stoichiometryRatio: [1, 10],
     coordination: [32, 3],
     chemistryRules: (elements) => {
       if (elements.length !== 2) return false;
-      return elements.includes("H") && elements.some(e => isRareEarth(e) || ["Ca", "Sr", "Ba", "Y", "Sc", "Th"].includes(e));
+      return elements.includes("H") && elements.some(e =>
+        isRareEarth(e) || ["Ca", "Sr", "Ba", "Y", "Sc", "Th"].includes(e)
+      );
     },
   },
   {
@@ -1008,12 +1105,15 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
     latticeType: "hexagonal",
     cOverA: 0.8,
     sites: [
-      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "pnictogen-1" },
-      { label: "B", x: 0.333, y: 0.667, z: 0.5, role: "pnictogen-2" },
-      { label: "C", x: 0.5, y: 0.0, z: 0.0, role: "kagome-metal" },
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "pnictogen-1a" },
+      { label: "A", x: 0.333, y: 0.667, z: 0.5, role: "pnictogen-2d" },
+      { label: "A", x: 0.667, y: 0.333, z: 0.5, role: "pnictogen-2d" },
+      { label: "B", x: 0.5, y: 0.0, z: 0.0, role: "kagome-metal-3f" },
+      { label: "B", x: 0.0, y: 0.5, z: 0.0, role: "kagome-metal-3f" },
+      { label: "B", x: 0.5, y: 0.5, z: 0.0, role: "kagome-metal-3f" },
     ],
-    stoichiometryRatio: [1, 2, 3],
-    coordination: [12, 12, 12],
+    stoichiometryRatio: [1, 1],
+    coordination: [12, 12],
     chemistryRules: (elements) => {
       if (elements.length !== 2) return false;
       return elements.some(e => ["Co", "Fe", "Ni", "Mn"].includes(e)) && elements.some(e => ["Sn", "Ge", "Sb"].includes(e));
@@ -1170,8 +1270,12 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
       { label: "A", x: 0.44, y: 0.75, z: 0.48, role: "A-site-large" },
       { label: "B", x: 0.0, y: 0.0, z: 0.5, role: "B-site-TM" },
       { label: "B", x: 0.5, y: 0.5, z: 0.0, role: "B-site-TM" },
-      { label: "O", x: 0.1, y: 0.46, z: 0.1, role: "apical-O" },
+      { label: "O", x: 0.1, y: 0.25, z: 0.1, role: "apical-O" },
+      { label: "O", x: 0.4, y: 0.75, z: 0.6, role: "apical-O" },
       { label: "O", x: 0.7, y: 0.04, z: 0.3, role: "equatorial-O" },
+      { label: "O", x: 0.8, y: 0.46, z: 0.2, role: "equatorial-O" },
+      { label: "O", x: 0.3, y: 0.96, z: 0.7, role: "equatorial-O" },
+      { label: "O", x: 0.2, y: 0.54, z: 0.8, role: "equatorial-O" },
     ],
     stoichiometryRatio: [1, 1, 3],
     coordination: [8, 6, 2],
@@ -1219,10 +1323,12 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
     sites: [
       { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "Te-vdW" },
       { label: "B", x: 0.0, y: 0.0, z: 0.40, role: "Bi-inner" },
-      { label: "C", x: 0.0, y: 0.0, z: 0.21, role: "Te-inner" },
+      { label: "B", x: 0.0, y: 0.0, z: 0.60, role: "Bi-inner" },
+      { label: "A", x: 0.0, y: 0.0, z: 0.21, role: "Te-inner" },
+      { label: "A", x: 0.0, y: 0.0, z: 0.79, role: "Te-inner" },
     ],
-    stoichiometryRatio: [1, 2, 2],
-    coordination: [6, 6, 6],
+    stoichiometryRatio: [3, 2],
+    coordination: [6, 6],
     chemistryRules: (elements) => {
       if (elements.length !== 2) return false;
       const hasPnictogen = elements.some(e => ["Bi", "Sb", "As"].includes(e));
@@ -1316,8 +1422,15 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
     cOverA: 1.0,
     sites: [
       { label: "A", x: 0.5, y: 0.5, z: 0.5, role: "A-16d" },
+      { label: "A", x: 0.25, y: 0.25, z: 0.75, role: "A-16d" },
       { label: "B", x: 0.0, y: 0.0, z: 0.0, role: "B-16c" },
+      { label: "B", x: 0.25, y: 0.25, z: 0.25, role: "B-16c" },
       { label: "O", x: 0.31, y: 0.125, z: 0.125, role: "O-48f" },
+      { label: "O", x: 0.125, y: 0.31, z: 0.125, role: "O-48f" },
+      { label: "O", x: 0.125, y: 0.125, z: 0.31, role: "O-48f" },
+      { label: "O", x: 0.69, y: 0.875, z: 0.875, role: "O-48f" },
+      { label: "O", x: 0.875, y: 0.69, z: 0.875, role: "O-48f" },
+      { label: "O", x: 0.875, y: 0.875, z: 0.69, role: "O-48f" },
       { label: "O", x: 0.375, y: 0.375, z: 0.375, role: "O-8b" },
     ],
     stoichiometryRatio: [2, 2, 7],
@@ -1421,12 +1534,8 @@ function sortElementsBySite(elements: string[], counts: Record<string, number>, 
 
   const siteOrder = siteLabels.map((l, i) => ({ label: l, ratio: siteRatios[i] }))
     .sort((a, b) => b.ratio - a.ratio);
-  const elemOrder = elements.map(e => ({ el: e, ratio: Math.round(counts[e]) }))
-    .sort((a, b) => {
-      const aR = getReducedRatio([a.ratio])[0];
-      const bR = getReducedRatio([b.ratio])[0];
-      return bR - aR || a.el.localeCompare(b.el);
-    });
+  const elemOrder = elements.map((e, i) => ({ el: e, ratio: elemRatios[i] }))
+    .sort((a, b) => b.ratio - a.ratio || a.el.localeCompare(b.el));
 
   const siteByRatio: Record<number, string[]> = {};
   for (const s of siteOrder) {
@@ -1434,9 +1543,9 @@ function sortElementsBySite(elements: string[], counts: Record<string, number>, 
     siteByRatio[s.ratio].push(s.label);
   }
   const elemByRatio: Record<number, string[]> = {};
-  const elemReduced = elements.map(e => ({
+  const elemReduced = elements.map((e, i) => ({
     el: e,
-    reduced: getReducedRatio([Math.round(counts[e])])[0]
+    reduced: elemRatios[i]
   }));
   for (const er of elemReduced) {
     if (!elemByRatio[er.reduced]) elemByRatio[er.reduced] = [];

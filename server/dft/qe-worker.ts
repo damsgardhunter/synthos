@@ -27,6 +27,7 @@ import {
   type ElectronPhononCoupling,
 } from "../learning/physics-engine";
 import { generateStructureCandidates, vegardEstimate, type StructureCandidate, type VegardEstimate } from "./vegard-lattice";
+import { lookupKnownStructure } from "../learning/known-structures";
 import {
   runStagedRelaxation,
   runStage4GammaPhonon,
@@ -1862,6 +1863,19 @@ function generateAtomicPositions(
   formula?: string,
   latticeA?: number,
 ): Array<{ element: string; x: number; y: number; z: number }> {
+  // Tier 0: Known structures database — exact literature Wyckoff positions.
+  // These produce stable phonon spectra for verified compounds (LaH10, CaH6, etc.)
+  if (formula) {
+    try {
+      const known = lookupKnownStructure(formula);
+      if (known) {
+        console.log(`[QE-Worker] Using known structure for ${formula} (${known.atoms.length} atoms, ${known.spaceGroup}, a=${known.latticeA} Å)`);
+        return perturbPositions(known.atoms.map(a => ({ element: a.element, x: a.x, y: a.y, z: a.z })), 0.002, latticeA ?? known.latticeA);
+      }
+    } catch {}
+  }
+
+  // Tier 1: Prototype matching
   if (formula) {
     try {
       const proto = selectPrototype(formula);
