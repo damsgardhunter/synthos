@@ -119,6 +119,8 @@ const PACKING_FACTORS: Record<string, number> = {
   "Antifluorite-A2B": 0.68,
   "Cuprite-A2B": 0.52,
   "HexPerovskite-2H": 0.68,
+  "Cuprate2223-A2B2C2D3O10": 0.55,
+  "HexLayered-AB": 0.34,
 };
 
 const DEFAULT_PACKING_FACTOR = 0.68;
@@ -1490,6 +1492,82 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
       // B-site: TM that prefers face-sharing (Ni, Co, Mn, Ru, Ti, V, Cr)
       const hasTM = elements.some(e => ["Ni", "Co", "Mn", "Ru", "Ti", "V", "Cr", "Fe", "Ir"].includes(e));
       return hasAnion && hasLargeA && hasTM;
+    },
+  },
+
+  // 2223 triple-layer cuprate: I4/mmm, A2B2C2D3O10
+  // Triple CuO2 layer — highest Tc in Tl/Bi cuprate families (~125 K)
+  // For: Tl2Ba2Ca2Cu3O10, Bi2Sr2Ca2Cu3O10 (Bi-2223)
+  // Primitive cell (BCC → half conventional): 2A + 2B + 2C + 3D + 10O = 19 atoms
+  {
+    name: "Cuprate2223-A2B2C2D3O10",
+    spaceGroup: "I4/mmm",
+    latticeType: "tetragonal",
+    cOverA: 9.5,
+    sites: [
+      // A (Tl/Bi) at 4e: double AO layer
+      { label: "A", x: 0.0, y: 0.0, z: 0.220, role: "AO-layer" },
+      { label: "A", x: 0.0, y: 0.0, z: 0.780, role: "AO-layer" },
+      // B (Ba/Sr) at 4e: BO layer
+      { label: "B", x: 0.0, y: 0.0, z: 0.140, role: "BO-layer" },
+      { label: "B", x: 0.0, y: 0.0, z: 0.860, role: "BO-layer" },
+      // C (Ca) at 4e: spacer between CuO2 planes
+      { label: "C", x: 0.0, y: 0.0, z: 0.045, role: "Ca-spacer" },
+      { label: "C", x: 0.0, y: 0.0, z: 0.955, role: "Ca-spacer" },
+      // D (Cu) at 2a + 4e: 3 CuO2 planes (1 inner + 2 outer)
+      { label: "D", x: 0.0, y: 0.0, z: 0.0, role: "Cu-inner-plane" },
+      { label: "D", x: 0.0, y: 0.0, z: 0.090, role: "Cu-outer-plane" },
+      { label: "D", x: 0.0, y: 0.0, z: 0.910, role: "Cu-outer-plane" },
+      // O: 10 sites in primitive (equatorial + apical + AO-layer)
+      { label: "E", x: 0.5, y: 0.0, z: 0.0, role: "O-inner-eq" },
+      { label: "E", x: 0.0, y: 0.5, z: 0.0, role: "O-inner-eq" },
+      { label: "E", x: 0.5, y: 0.0, z: 0.090, role: "O-outer-eq" },
+      { label: "E", x: 0.0, y: 0.5, z: 0.090, role: "O-outer-eq" },
+      { label: "E", x: 0.5, y: 0.0, z: 0.910, role: "O-outer-eq" },
+      { label: "E", x: 0.0, y: 0.5, z: 0.910, role: "O-outer-eq" },
+      { label: "E", x: 0.0, y: 0.0, z: 0.170, role: "O-apical" },
+      { label: "E", x: 0.0, y: 0.0, z: 0.830, role: "O-apical" },
+      { label: "E", x: 0.0, y: 0.0, z: 0.280, role: "O-AO-layer" },
+      { label: "E", x: 0.0, y: 0.0, z: 0.720, role: "O-AO-layer" },
+    ],
+    stoichiometryRatio: [2, 2, 2, 3, 10],
+    coordination: [6, 9, 8, 5, 2],
+    chemistryRules: (elements) => {
+      if (elements.length !== 5) return false;
+      const hasO = elements.includes("O");
+      const hasCu = elements.includes("Cu");
+      const hasHeavy = elements.some(e => ["Bi", "Tl", "Hg", "Pb"].includes(e));
+      const hasAE = elements.some(e => ["Ba", "Sr"].includes(e));
+      const hasSpacer = elements.includes("Ca") || elements.some(e => isRareEarth(e) || e === "Y");
+      return hasO && hasCu && hasHeavy && hasAE && hasSpacer;
+    },
+  },
+  // Hexagonal layered AB: P63/mmc (194), hBN-type
+  // For: hBN, AlN (wurtzite is different!), SiC-2H, graphite-like layered
+  // AB stacking with sp2 layers. Primitive cell: 2A + 2B = 4 atoms, ratio [1,1]
+  // A at 2b: (0, 0, 1/4), B at 2c: (1/3, 2/3, 1/4)
+  {
+    name: "HexLayered-AB",
+    spaceGroup: "P63/mmc",
+    latticeType: "hexagonal",
+    cOverA: 2.66,
+    sites: [
+      // A (B in hBN) at 2b
+      { label: "A", x: 0.0, y: 0.0, z: 0.25, role: "layer-A-1" },
+      { label: "A", x: 0.0, y: 0.0, z: 0.75, role: "layer-A-2" },
+      // B (N in hBN) at 2c
+      { label: "B", x: 0.3333, y: 0.6667, z: 0.25, role: "layer-B-1" },
+      { label: "B", x: 0.6667, y: 0.3333, z: 0.75, role: "layer-B-2" },
+    ],
+    stoichiometryRatio: [1, 1],
+    coordination: [3, 3],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      // hBN-type: light p-block + p-block or N combinations
+      const hasB = elements.includes("B");
+      const hasN = elements.includes("N");
+      // Also covers: AlN-2H, GaN-2H (wurtzite handled separately), SiC-2H
+      return hasB && hasN;
     },
   },
 

@@ -905,6 +905,37 @@ const KNOWN_STRUCTURES: Record<string, KnownStructure> = {
     { element: "O",  x: 0.515, y: 0.485, z: 0.75, wyckoff: "6h" },
   ]},
 
+  // 2223 triple-layer cuprate — Bi2Sr2Ca2Cu3O10 (I4/mmm, Tc ≈ 110 K)
+  "Bi2Sr2Ca2Cu3O10": { formula: "Bi2Sr2Ca2Cu3O10", spaceGroup: "I4/mmm", spaceGroupNumber: 139, latticeType: "tetragonal", latticeA: 3.83, latticeC: 37.08, pressureGPa: 0, atoms: [
+    { element: "Bi", x: 0.0, y: 0.0, z: 0.220, wyckoff: "4e" },
+    { element: "Bi", x: 0.0, y: 0.0, z: 0.780, wyckoff: "4e" },
+    { element: "Sr", x: 0.0, y: 0.0, z: 0.140, wyckoff: "4e" },
+    { element: "Sr", x: 0.0, y: 0.0, z: 0.860, wyckoff: "4e" },
+    { element: "Ca", x: 0.0, y: 0.0, z: 0.045, wyckoff: "4e" },
+    { element: "Ca", x: 0.0, y: 0.0, z: 0.955, wyckoff: "4e" },
+    { element: "Cu", x: 0.0, y: 0.0, z: 0.0, wyckoff: "2a" },
+    { element: "Cu", x: 0.0, y: 0.0, z: 0.090, wyckoff: "4e" },
+    { element: "Cu", x: 0.0, y: 0.0, z: 0.910, wyckoff: "4e" },
+    { element: "O",  x: 0.5, y: 0.0, z: 0.0, wyckoff: "4c" },
+    { element: "O",  x: 0.0, y: 0.5, z: 0.0, wyckoff: "4c" },
+    { element: "O",  x: 0.5, y: 0.0, z: 0.090, wyckoff: "8g" },
+    { element: "O",  x: 0.0, y: 0.5, z: 0.090, wyckoff: "8g" },
+    { element: "O",  x: 0.5, y: 0.0, z: 0.910, wyckoff: "8g" },
+    { element: "O",  x: 0.0, y: 0.5, z: 0.910, wyckoff: "8g" },
+    { element: "O",  x: 0.0, y: 0.0, z: 0.170, wyckoff: "4e" },
+    { element: "O",  x: 0.0, y: 0.0, z: 0.830, wyckoff: "4e" },
+    { element: "O",  x: 0.0, y: 0.0, z: 0.280, wyckoff: "4e" },
+    { element: "O",  x: 0.0, y: 0.0, z: 0.720, wyckoff: "4e" },
+  ]},
+
+  // Hexagonal BN (P63/mmc)
+  "BN": { formula: "BN", spaceGroup: "P63/mmc", spaceGroupNumber: 194, latticeType: "hexagonal", latticeA: 2.50, latticeC: 6.66, pressureGPa: 0, atoms: [
+    { element: "B", x: 0.0, y: 0.0, z: 0.25, wyckoff: "2b" },
+    { element: "B", x: 0.0, y: 0.0, z: 0.75, wyckoff: "2b" },
+    { element: "N", x: 0.3333, y: 0.6667, z: 0.25, wyckoff: "2c" },
+    { element: "N", x: 0.6667, y: 0.3333, z: 0.75, wyckoff: "2c" },
+  ]},
+
   // Inverse Heusler — Mn2CoAl (F-43m)
   "Mn2CoAl": { formula: "Mn2CoAl", spaceGroup: "F-43m", spaceGroupNumber: 216, latticeType: "cubic", latticeA: 5.80, pressureGPa: 0, atoms: [
     { element: "Al", x: 0.0, y: 0.0, z: 0.0, wyckoff: "4a" },
