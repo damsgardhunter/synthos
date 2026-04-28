@@ -761,6 +761,30 @@ const KNOWN_STRUCTURES: Record<string, KnownStructure> = {
     { element: "O",  x: 0.306, y: 0.306, z: 0.75, wyckoff: "18e" },
   ]},
 
+  // Ilmenite — FeTiO3 (R-3)
+  "FeTiO3": { formula: "FeTiO3", spaceGroup: "R-3", spaceGroupNumber: 148, latticeType: "hexagonal", latticeA: 5.09, latticeC: 14.09, pressureGPa: 0, atoms: [
+    { element: "Fe", x: 0.0, y: 0.0, z: 0.356, wyckoff: "4c" },
+    { element: "Fe", x: 0.0, y: 0.0, z: 0.644, wyckoff: "4c" },
+    { element: "Ti", x: 0.0, y: 0.0, z: 0.146, wyckoff: "4c" },
+    { element: "Ti", x: 0.0, y: 0.0, z: 0.854, wyckoff: "4c" },
+    { element: "O",  x: 0.317, y: 0.020, z: 0.245, wyckoff: "18f" },
+    { element: "O",  x: 0.980, y: 0.297, z: 0.245, wyckoff: "18f" },
+    { element: "O",  x: 0.703, y: 0.683, z: 0.245, wyckoff: "18f" },
+    { element: "O",  x: 0.683, y: 0.980, z: 0.755, wyckoff: "18f" },
+    { element: "O",  x: 0.020, y: 0.703, z: 0.755, wyckoff: "18f" },
+    { element: "O",  x: 0.297, y: 0.317, z: 0.755, wyckoff: "18f" },
+  ]},
+
+  // Marcasite — FeSb2 (Pnnm)
+  "FeSb2": { formula: "FeSb2", spaceGroup: "Pnnm", spaceGroupNumber: 58, latticeType: "tetragonal", latticeA: 5.83, latticeC: 3.20, pressureGPa: 0, atoms: [
+    { element: "Fe", x: 0.0, y: 0.0, z: 0.0, wyckoff: "2a" },
+    { element: "Fe", x: 0.5, y: 0.5, z: 0.5, wyckoff: "2a" },
+    { element: "Sb", x: 0.200, y: 0.378, z: 0.0, wyckoff: "4g" },
+    { element: "Sb", x: 0.800, y: 0.622, z: 0.0, wyckoff: "4g" },
+    { element: "Sb", x: 0.300, y: 0.878, z: 0.5, wyckoff: "4g" },
+    { element: "Sb", x: 0.700, y: 0.122, z: 0.5, wyckoff: "4g" },
+  ]},
+
   // Inverse Heusler — Mn2CoAl (F-43m)
   "Mn2CoAl": { formula: "Mn2CoAl", spaceGroup: "F-43m", spaceGroupNumber: 216, latticeType: "cubic", latticeA: 5.80, pressureGPa: 0, atoms: [
     { element: "Al", x: 0.0, y: 0.0, z: 0.0, wyckoff: "4a" },

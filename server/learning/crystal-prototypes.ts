@@ -107,6 +107,8 @@ const PACKING_FACTORS: Record<string, number> = {
   "RP-n3-A4B3O10": 0.55,
   "Corundum-A2O3": 0.65,
   "ThMn12-RFe12": 0.68,
+  "Ilmenite-ABO3": 0.62,
+  "Marcasite-AB2": 0.60,
 };
 
 const DEFAULT_PACKING_FACTOR = 0.68;
@@ -1064,6 +1066,76 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
       const hasRE = elements.some(e => isRareEarth(e) || ["Y", "Sc", "Th", "Zr"].includes(e));
       const hasTM = elements.some(e => ["Fe", "Co", "Ni", "Mn", "V", "Cr"].includes(e));
       return hasRE && hasTM;
+    },
+  },
+
+  // Ilmenite: R-3 (148), ABO3 — ordered corundum derivative
+  // Distinct from perovskite: rhombohedral with alternating A/B cation layers
+  // For: FeTiO3, MnTiO3, NiTiO3, CoTiO3, MgTiO3 — photocatalysts, geoscience
+  // Rhombohedral primitive cell: 2A + 2B + 6O = 10 atoms, ratio [1,1,3]
+  // A at 4c (0,0,zA≈0.356), B at 4c (0,0,zB≈0.146), O at 18f-derived
+  {
+    name: "Ilmenite-ABO3",
+    spaceGroup: "R-3",
+    latticeType: "hexagonal",
+    cOverA: 2.77,
+    sites: [
+      // A cations (Fe/Mn/Co/Ni): 2 in primitive from 4c
+      { label: "A", x: 0.0, y: 0.0, z: 0.356, role: "A-layer" },
+      { label: "A", x: 0.0, y: 0.0, z: 0.644, role: "A-layer" },
+      // B cations (Ti): 2 in primitive from 4c
+      { label: "B", x: 0.0, y: 0.0, z: 0.146, role: "B-layer" },
+      { label: "B", x: 0.0, y: 0.0, z: 0.854, role: "B-layer" },
+      // O anions: 6 in primitive from 18f-derived
+      { label: "C", x: 0.317, y: 0.020, z: 0.245, role: "O-1" },
+      { label: "C", x: 0.980, y: 0.297, z: 0.245, role: "O-2" },
+      { label: "C", x: 0.703, y: 0.683, z: 0.245, role: "O-3" },
+      { label: "C", x: 0.683, y: 0.980, z: 0.755, role: "O-4" },
+      { label: "C", x: 0.020, y: 0.703, z: 0.755, role: "O-5" },
+      { label: "C", x: 0.297, y: 0.317, z: 0.755, role: "O-6" },
+    ],
+    stoichiometryRatio: [1, 1, 3],
+    coordination: [6, 6, 4],
+    chemistryRules: (elements) => {
+      if (elements.length !== 3) return false;
+      const hasO = elements.includes("O");
+      // A-site: divalent TM (Fe2+, Mn2+, Co2+, Ni2+, Mg2+)
+      const hasA = elements.some(e => ["Fe", "Mn", "Co", "Ni", "Mg", "Zn", "Cd"].includes(e));
+      // B-site: tetravalent (Ti4+, Sn4+, Ge4+, Hf4+)
+      const hasB = elements.some(e => ["Ti", "Sn", "Ge", "Hf", "Zr", "Nb"].includes(e));
+      return hasO && hasA && hasB;
+    },
+  },
+  // Marcasite: Pnnm (58), AB2 — orthorhombic FeS2 polymorph
+  // Distinct from pyrite (Pa-3): edge-sharing octahedra instead of corner-sharing
+  // For: FeS2-marcasite, FeSb2, CrSb2, OsP2, NiAs2 — thermoelectric/catalytic
+  // Primitive cell: 2A + 4B = 6 atoms, ratio [1,2]
+  // A at 2a (0,0,0), B at 4g (x,y,0) with x≈0.20, y≈0.38
+  {
+    name: "Marcasite-AB2",
+    spaceGroup: "Pnnm",
+    latticeType: "tetragonal",
+    cOverA: 0.55,
+    sites: [
+      // M at 2a: (0,0,0) — 2 in primitive
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "metal" },
+      { label: "A", x: 0.5, y: 0.5, z: 0.5, role: "metal" },
+      // X at 4g: (x,y,0) with x≈0.200, y≈0.378 — 4 in primitive
+      { label: "B", x: 0.200, y: 0.378, z: 0.0, role: "anion-1" },
+      { label: "B", x: 0.800, y: 0.622, z: 0.0, role: "anion-2" },
+      { label: "B", x: 0.300, y: 0.878, z: 0.5, role: "anion-3" },
+      { label: "B", x: 0.700, y: 0.122, z: 0.5, role: "anion-4" },
+    ],
+    stoichiometryRatio: [1, 2],
+    coordination: [6, 3],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      // Marcasite-type specifically: TM + diantimonides/diarsenides/diphosphides
+      // These adopt marcasite (Pnnm) rather than pyrite (Pa-3).
+      // FeS2 → pyrite (handled by Pyrite template); FeSb2 → marcasite
+      const hasTM = elements.some(e => ["Fe", "Co", "Ni", "Cr", "Os", "Ru", "Mn", "Cu", "Ir", "Rh"].includes(e));
+      const hasHeavyPn = elements.some(e => ["Sb", "Bi"].includes(e));
+      return hasTM && hasHeavyPn;
     },
   },
 
