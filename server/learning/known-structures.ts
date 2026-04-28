@@ -19,11 +19,16 @@ export interface KnownStructure {
   formula: string;
   spaceGroup: string;
   spaceGroupNumber: number;
-  latticeType: "cubic" | "hexagonal" | "tetragonal";
+  latticeType: "cubic" | "hexagonal" | "tetragonal" | "orthorhombic" | "monoclinic" | "triclinic";
   /** Lattice constant a in Angstroms (at the material's target pressure). */
   latticeA: number;
   latticeB?: number;
   latticeC?: number;
+  /** Lattice angles in degrees. Defaults: alpha=90, beta=90, gamma=90.
+   *  Monoclinic: only beta ≠ 90. Triclinic: all three may differ. */
+  alpha?: number;
+  beta?: number;
+  gamma?: number;
   /** Pressure at which this structure is stable (GPa). */
   pressureGPa: number;
   /** Primitive cell atomic positions in fractional coordinates. */
@@ -1267,6 +1272,22 @@ const KNOWN_STRUCTURES: Record<string, KnownStructure> = {
     { element: "Sb", x: 0.0, y: 0.0, z: 0.399, wyckoff: "6c" },
     { element: "Te", x: 0.0, y: 0.0, z: 0.0, wyckoff: "3a" },
     { element: "Te", x: 0.0, y: 0.0, z: 0.212, wyckoff: "6c" },
+  ]},
+
+  // ── Monoclinic test entries ──────────────────────────────────────────
+  // Wolframite — MnWO4 (P2/c, monoclinic multiferroic)
+  "MnWO4": { formula: "MnWO4", spaceGroup: "P2/c", spaceGroupNumber: 13, latticeType: "monoclinic", latticeA: 4.83, latticeB: 5.76, latticeC: 4.99, beta: 91.1, pressureGPa: 0, atoms: [
+    { element: "Mn", x: 0.5, y: 0.685, z: 0.25, wyckoff: "2f" },
+    { element: "W",  x: 0.0, y: 0.180, z: 0.25, wyckoff: "2e" },
+    { element: "O",  x: 0.222, y: 0.106, z: 0.075, wyckoff: "4g" },
+    { element: "O",  x: 0.259, y: 0.379, z: 0.395, wyckoff: "4g" },
+  ]},
+
+  // Baddeleyite — ZrO2 (P21/c, monoclinic zirconia)
+  "ZrO2": { formula: "ZrO2", spaceGroup: "P21/c", spaceGroupNumber: 14, latticeType: "monoclinic", latticeA: 5.15, latticeB: 5.21, latticeC: 5.31, beta: 99.2, pressureGPa: 0, atoms: [
+    { element: "Zr", x: 0.276, y: 0.040, z: 0.208, wyckoff: "4e" },
+    { element: "O",  x: 0.070, y: 0.342, z: 0.341, wyckoff: "4e" },
+    { element: "O",  x: 0.442, y: 0.758, z: 0.479, wyckoff: "4e" },
   ]},
 
   // Inverse Heusler — Mn2CoAl (F-43m)

@@ -163,6 +163,15 @@ const CRYSTAL_SYSTEM_PATHS: Record<string, HighSymmetryPath> = {
     ],
     nPointsBetween: 12,
   },
+  triclinic: {
+    labels: ["G", "X", "Y", "Z", "R", "S", "T", "G"],
+    coords: [
+      [0, 0, 0], [0.5, 0, 0], [0, 0.5, 0],
+      [0, 0, 0.5], [0.5, 0.5, 0], [0, 0.5, 0.5],
+      [0.5, 0, 0.5], [0, 0, 0],
+    ],
+    nPointsBetween: 10,
+  },
 };
 
 function guessCrystalSystem(

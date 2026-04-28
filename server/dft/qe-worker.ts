@@ -1692,7 +1692,11 @@ function determineCrystalSystem(elements: string[], counts: Record<string, numbe
   return { ibrav: 0, cOverA };
 }
 
-function generateCellParameters(latticeA: number, cOverA: number, ibrav: number, bOverA: number = 1.0, elements?: string[], counts?: Record<string, number>): string {
+function generateCellParameters(
+  latticeA: number, cOverA: number, ibrav: number,
+  bOverA: number = 1.0, elements?: string[], counts?: Record<string, number>,
+  alpha: number = 90, beta: number = 90, gamma: number = 90,
+): string {
   const a = latticeA;
   const b = latticeA * bOverA;
   const c = latticeA * cOverA;
@@ -1705,6 +1709,35 @@ function generateCellParameters(latticeA: number, cOverA: number, ibrav: number,
   ${(-a / 2).toFixed(8)}  ${(a * Math.sqrt(3) / 2).toFixed(8)}  0.000000000
   0.000000000  0.000000000  ${c.toFixed(8)}`;
   }
+
+  // Monoclinic: beta ≠ 90° — v3 tilted in xz-plane
+  if (Math.abs(beta - 90) > 1 && Math.abs(alpha - 90) < 1 && Math.abs(gamma - 90) < 1) {
+    const betaR = beta * Math.PI / 180;
+    const v3x = c * Math.cos(betaR);
+    const v3z = c * Math.sin(betaR);
+    return `CELL_PARAMETERS {angstrom}
+  ${a.toFixed(8)}  0.000000000  0.000000000
+  0.000000000  ${b.toFixed(8)}  0.000000000
+  ${v3x.toFixed(8)}  0.000000000  ${v3z.toFixed(8)}`;
+  }
+
+  // Triclinic: general angles — full 3×3 matrix
+  if (Math.abs(alpha - 90) > 1 || Math.abs(gamma - 90) > 1) {
+    const alphaR = alpha * Math.PI / 180;
+    const betaR = beta * Math.PI / 180;
+    const gammaR = gamma * Math.PI / 180;
+    const cosA = Math.cos(alphaR), cosB = Math.cos(betaR), cosG = Math.cos(gammaR);
+    const sinG = Math.sin(gammaR);
+    const cx = c * cosB;
+    const cy = sinG > 1e-10 ? c * (cosA - cosB * cosG) / sinG : 0;
+    const cz = Math.sqrt(Math.max(0, c * c - cx * cx - cy * cy));
+    return `CELL_PARAMETERS {angstrom}
+  ${a.toFixed(8)}  0.000000000  0.000000000
+  ${(b * cosG).toFixed(8)}  ${(b * sinG).toFixed(8)}  0.000000000
+  ${cx.toFixed(8)}  ${cy.toFixed(8)}  ${cz.toFixed(8)}`;
+  }
+
+  // Orthorhombic/tetragonal/cubic: all angles 90°
   return `CELL_PARAMETERS {angstrom}
   ${a.toFixed(8)}  0.000000000  0.000000000
   0.000000000  ${b.toFixed(8)}  0.000000000
@@ -3969,6 +4002,123 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     if (!result.vcRelaxed && elements.length >= 3 && elements.every(el => TRANSITION_METALS.has(el))) {
       console.log(`[QE-Worker] Skipping vc-relax for ${formula} — all-TM intermetallic (${elements.length} TMs: ${elements.join(",")}); BFGS destabilises, proceeding with xTB geometry (saves ~90 min)`);
       result.vcRelaxed = true;
+    }
+
+    // When vc-relax is skipped and the lattice was rescaled significantly
+    // (e.g., from Vegard estimate to literature value), atomic positions are
+    // wrong for the new cell. Run a quick fixed-cell relax to bring forces
+    // down before SCF + phonon. Without this, ph.x crashes with
+    // IEEE_UNDERFLOW_FLAG because DFPT needs forces < 0.05 Ry/bohr.
+    const latticeShiftPct = Math.abs(latticeA - preVcLatticeA) / Math.max(1e-6, preVcLatticeA);
+    if (result.vcRelaxed && latticeShiftPct > 0.03 && positions.length > 0) {
+      console.log(`[QE-Worker] Lattice rescaled by ${(latticeShiftPct * 100).toFixed(1)}% (${preVcLatticeA.toFixed(3)} → ${latticeA.toFixed(3)} Å) — running quick fixed-cell relax to fix atomic positions`);
+      try {
+        const relaxPrefix = formula.replace(/[^a-zA-Z0-9]/g, "") + "_fixcell";
+        const hasHRelax = elements.includes("H");
+        const ecutwfcRelax = Math.max(computeEcutwfc(elements, 0, 80, 45), hasHRelax ? 80 : 50);
+        const ecutrhoRelax = ecutwfcRelax * ecutrhoMultiplier(elements);
+        const cOverARelax = estimateCOverA(elements, counts);
+        const bOverARelax = estimateBOverA(elements, counts);
+        const kptsRelax = autoKPoints(latticeA, cOverARelax, bOverARelax, undefined, 0.6, { stage: "relax", totalAtoms: positions.length }).trim();
+        const hasMagRelax = mayHaveMagneticMoment(elements);
+        const nspinRelax = hasMagRelax ? 2 : 1;
+        const magLinesRelax = hasMagRelax ? generateMagnetizationLines(elements, counts, isAFMCandidate(elements, counts), !elements.some(el => el in MAGNETIC_ELEMENTS)) : "";
+        let atomicSpeciesRelax = "";
+        for (const el of elements) {
+          atomicSpeciesRelax += `  ${el}  ${getAtomicMass(el).toFixed(3)}  ${resolvePPFilename(el)}\n`;
+        }
+        let atomicPosRelax = "";
+        for (const pos of positions) {
+          atomicPosRelax += `  ${pos.element}  ${pos.x.toFixed(6)}  ${pos.y.toFixed(6)}  ${pos.z.toFixed(6)}\n`;
+        }
+        const cellBlockRelax = generateCellParameters(latticeA, cOverARelax, 0, bOverARelax, elements, counts);
+        const FIXCELL_RELAX_MAX_SECONDS = 900; // 15 min cap
+        const relaxInput = `&CONTROL
+  calculation = 'relax',
+  restart_mode = 'from_scratch',
+  prefix = '${relaxPrefix}',
+  outdir = './tmp',
+  disk_io = 'low',
+  pseudo_dir = '${QE_PSEUDO_DIR_INPUT}',
+  tprnfor = .true.,
+  tstress = .true.,
+  forc_conv_thr = 1.0d-3,
+  etot_conv_thr = 1.0d-4,
+  nstep = 80,
+  max_seconds = ${FIXCELL_RELAX_MAX_SECONDS},
+/
+&SYSTEM
+  ibrav = 0,
+  nat = ${positions.length},
+  ntyp = ${elements.length},
+  ecutwfc = ${ecutwfcRelax},
+  ecutrho = ${ecutrhoRelax},
+  input_dft = 'PBE',
+  occupations = 'smearing',
+  smearing = 'mv',
+  degauss = 0.015,
+  nspin = ${nspinRelax},
+${magLinesRelax}/
+&ELECTRONS
+  electron_maxstep = 200,
+  conv_thr = 1.0d-4,
+  mixing_beta = 0.4,
+  mixing_mode = 'local-TF',
+  diagonalization = 'david',
+  scf_must_converge = .false.,
+/
+&IONS
+  ion_dynamics = 'bfgs',
+/
+ATOMIC_SPECIES
+${atomicSpeciesRelax}
+ATOMIC_POSITIONS {crystal}
+${atomicPosRelax}
+K_POINTS {automatic}
+${kptsRelax}
+
+${cellBlockRelax}
+`;
+        const relaxFile = path.join(jobDir, "fixcell_relax.in");
+        fs.writeFileSync(relaxFile, relaxInput);
+        const relaxKillMs = (FIXCELL_RELAX_MAX_SECONDS + 60) * 1000;
+        const relaxResult = await runQECommand(
+          path.posix.join(getQEBinDir(), "pw.x"),
+          relaxFile,
+          jobDir,
+          relaxKillMs,
+        );
+        fs.writeFileSync(path.join(jobDir, "fixcell_relax.out"), relaxResult.stdout);
+
+        // Parse relaxed positions
+        const posBlocks = relaxResult.stdout.match(/ATOMIC_POSITIONS\s*[{(]?\s*(?:crystal|angstrom|bohr|alat)?\s*[})]?\s*\n([\s\S]*?)(?=\n\s*(?:CELL_PARAMETERS|K_POINTS|End final|End of|ATOMIC_SPECIES|\n\s*\n)|$)/gi);
+        if (posBlocks && posBlocks.length > 0) {
+          const lastBlock = posBlocks[posBlocks.length - 1];
+          const parsedPositions: Array<{ element: string; x: number; y: number; z: number }> = [];
+          for (const line of lastBlock.split("\n").slice(1)) {
+            const m = line.trim().match(/^([A-Z][a-z]?)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)/);
+            if (m) parsedPositions.push({ element: m[1], x: parseFloat(m[2]), y: parseFloat(m[3]), z: parseFloat(m[4]) });
+          }
+          if (parsedPositions.length === positions.length) {
+            positions = parsedPositions;
+            const forceMatch = relaxResult.stdout.match(/Total force\s*=\s*([\d.]+)/g);
+            const lastForce = forceMatch ? forceMatch[forceMatch.length - 1].match(/([\d.]+)/) : null;
+            const resForce = lastForce ? parseFloat(lastForce[0]) : null;
+            // Parse wall time from QE output
+            const wallMatch = relaxResult.stdout.match(/PWSCF\s*:\s*(?:(\d+)h)?(?:(\d+)m)?\s*([\d.]+)s\s+CPU/);
+            const wallSec = wallMatch ? (parseInt(wallMatch[1] || "0") * 3600 + parseInt(wallMatch[2] || "0") * 60 + parseFloat(wallMatch[3] || "0")) : 0;
+            console.log(`[QE-Worker] Fixed-cell relax done for ${formula}: ${parsedPositions.length} atoms, residual force=${resForce?.toFixed(4) ?? "?"} Ry/bohr, wall=${Math.round(wallSec)}s`);
+          } else {
+            console.log(`[QE-Worker] Fixed-cell relax produced ${parsedPositions.length} atoms (expected ${positions.length}) — keeping original positions`);
+          }
+        } else {
+          console.log(`[QE-Worker] Fixed-cell relax produced no positions for ${formula} — keeping original`);
+        }
+        cleanQETmpDir(path.join(jobDir, "tmp"));
+      } catch (relaxErr: any) {
+        console.log(`[QE-Worker] Fixed-cell relax failed for ${formula}: ${(relaxErr.message || "").slice(0, 200)} — continuing with original positions`);
+        cleanQETmpDir(path.join(jobDir, "tmp"));
+      }
     }
 
     try {

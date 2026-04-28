@@ -1,11 +1,22 @@
 import { getElementData, isTransitionMetal, isRareEarth } from "./elemental-data";
 import { parseFormulaCounts as parseFormulaCountsCanonical } from "./utils";
 
+/** Supported crystal systems. Orthorhombic/monoclinic/triclinic added for
+ *  lower-symmetry structures (wolframite, baddeleyite, etc.). */
+export type LatticeType = "cubic" | "hexagonal" | "tetragonal" | "orthorhombic" | "monoclinic" | "triclinic";
+
 export interface PrototypeTemplate {
   name: string;
   spaceGroup: string;
-  latticeType: "cubic" | "hexagonal" | "tetragonal";
+  latticeType: LatticeType;
   cOverA: number;
+  /** b/a ratio — defaults to 1.0 for cubic/hex/tet. Required for ortho/mono/tri. */
+  bOverA?: number;
+  /** Monoclinic beta angle in degrees (default 90). */
+  beta?: number;
+  /** Triclinic angles in degrees (default 90 each). */
+  alpha?: number;
+  gamma?: number;
   sites: { label: string; x: number; y: number; z: number; role: string }[];
   stoichiometryRatio: number[];
   coordination: number[];
@@ -175,11 +186,22 @@ function getEffectiveRadius(el: string, useIonic: boolean): number {
   return getCovalentRadius(el);
 }
 
+/** Estimated lattice parameters. For cubic/hex/tet, b=a and all angles=90
+ *  (except hex gamma=120). For ortho/mono/tri, b and angles may differ. */
+export interface LatticeParams {
+  a: number;
+  b: number;
+  c: number;
+  alpha: number;   // degrees
+  beta: number;    // degrees
+  gamma: number;   // degrees
+}
+
 export function estimateLatticeConstant(
   elements: string[],
   counts: Record<string, number>,
   template: PrototypeTemplate
-): { a: number; c: number } {
+): LatticeParams {
   const useIonic = isIonicCompound(elements, template.name);
   let totalVolume = 0;
   for (const el of elements) {
@@ -199,22 +221,55 @@ export function estimateLatticeConstant(
     cellVolume = minCellVolume;
   }
 
+  const bOverA = template.bOverA ?? 1.0;
+  const alphaD = template.alpha ?? 90;
+  const betaD = template.beta ?? 90;
+  const gammaD = template.gamma ?? 90;
+
   let a: number;
+  let b: number;
   let c: number;
 
   if (template.latticeType === "cubic") {
     a = Math.pow(cellVolume, 1.0 / 3.0);
+    b = a;
     c = a;
   } else if (template.latticeType === "hexagonal") {
     const hexFactor = (Math.sqrt(3) / 2) * template.cOverA;
     a = Math.pow(cellVolume / hexFactor, 1.0 / 3.0);
+    b = a;
+    c = a * template.cOverA;
+  } else if (template.latticeType === "monoclinic" || template.latticeType === "triclinic") {
+    // V = a * b * c * sin(beta) for monoclinic; general formula for triclinic
+    const alphaR = alphaD * Math.PI / 180;
+    const betaR = betaD * Math.PI / 180;
+    const gammaR = gammaD * Math.PI / 180;
+    const cosA = Math.cos(alphaR), cosB = Math.cos(betaR), cosG = Math.cos(gammaR);
+    const angleFactor = Math.sqrt(1 - cosA * cosA - cosB * cosB - cosG * cosG + 2 * cosA * cosB * cosG);
+    // V = a * b * c * angleFactor = a * (bOverA*a) * (cOverA*a) * angleFactor
+    const volumeFactor = bOverA * template.cOverA * angleFactor;
+    a = Math.pow(cellVolume / volumeFactor, 1.0 / 3.0);
+    b = a * bOverA;
+    c = a * template.cOverA;
+  } else if (template.latticeType === "orthorhombic") {
+    // V = a * b * c = a * (bOverA*a) * (cOverA*a) = a^3 * bOverA * cOverA
+    const volumeFactor = bOverA * template.cOverA;
+    a = Math.pow(cellVolume / volumeFactor, 1.0 / 3.0);
+    b = a * bOverA;
     c = a * template.cOverA;
   } else {
+    // tetragonal: V = a^2 * c = a^3 * cOverA
     a = Math.pow(cellVolume / template.cOverA, 1.0 / 3.0);
+    b = a;
     c = a * template.cOverA;
   }
 
-  return { a, c };
+  return {
+    a, b, c,
+    alpha: alphaD,
+    beta: betaD,
+    gamma: template.latticeType === "hexagonal" ? 120 : gammaD,
+  };
 }
 
 const ANIONS = new Set(["O", "F", "Cl", "Br", "I", "S", "Se", "Te", "N", "P", "As"]);
@@ -3828,6 +3883,28 @@ function getAvgRadius(el: string): number {
   return (data?.atomicRadius ?? 150) / 100;
 }
 
+/** Build Cartesian lattice vectors from lattice parameters (a, b, c, alpha, beta, gamma). */
+function buildLatticeVectorsFromParams(p: LatticeParams): [number, number, number][] {
+  const { a, b, c, alpha, beta, gamma } = p;
+  const ar = alpha * Math.PI / 180;
+  const br = beta * Math.PI / 180;
+  const gr = gamma * Math.PI / 180;
+
+  const cosA = Math.cos(ar), cosB = Math.cos(br), cosG = Math.cos(gr);
+  const sinG = Math.sin(gr);
+
+  // Standard crystallographic convention:
+  // v1 along x, v2 in xy-plane, v3 general
+  const v1: [number, number, number] = [a, 0, 0];
+  const v2: [number, number, number] = [b * cosG, b * sinG, 0];
+  const cx = c * cosB;
+  const cy = sinG > 1e-10 ? c * (cosA - cosB * cosG) / sinG : 0;
+  const cz = Math.sqrt(Math.max(0, c * c - cx * cx - cy * cy));
+  const v3: [number, number, number] = [cx, cy, cz];
+
+  return [v1, v2, v3];
+}
+
 export function fillPrototype(formula: string): FilledPrototype | null {
   const result = selectPrototype(formula);
   if (!result) return null;
@@ -3836,25 +3913,18 @@ export function fillPrototype(formula: string): FilledPrototype | null {
   const counts = parseFormulaCounts(formula);
   const elements = Object.keys(counts);
 
-  const { a, c } = estimateLatticeConstant(elements, counts, template);
+  const params = estimateLatticeConstant(elements, counts, template);
+  const vecs = buildLatticeVectorsFromParams(params);
 
   const atoms: { element: string; x: number; y: number; z: number }[] = [];
-  const cos60 = 0.5;
-  const sin60 = Math.sqrt(3) / 2;
   for (const site of template.sites) {
     const element = siteMap[site.label];
     if (!element) continue;
 
-    let x: number, y: number, z: number;
-    if (template.latticeType === "hexagonal") {
-      x = a * (site.x + site.y * cos60);
-      y = a * site.y * sin60;
-      z = c * site.z;
-    } else {
-      x = a * site.x;
-      y = a * site.y;
-      z = (template.latticeType === "tetragonal" ? c : a) * site.z;
-    }
+    // General fractional → Cartesian via lattice vectors
+    const x = site.x * vecs[0][0] + site.y * vecs[1][0] + site.z * vecs[2][0];
+    const y = site.x * vecs[0][1] + site.y * vecs[1][1] + site.z * vecs[2][1];
+    const z = site.x * vecs[0][2] + site.y * vecs[1][2] + site.z * vecs[2][2];
     atoms.push({ element, x, y, z });
   }
 
@@ -3862,7 +3932,7 @@ export function fillPrototype(formula: string): FilledPrototype | null {
     templateName: template.name,
     siteMap,
     atoms,
-    latticeParam: a,
+    latticeParam: params.a,
   };
 }
 
@@ -4017,7 +4087,8 @@ export function enumeratePrototypesForFormula(formula: string): PrototypeEnumRes
     const siteMap = sortElementsBySite(elements, counts, template);
     if (!siteMap) continue;
 
-    const { a, c } = estimateLatticeConstant(elements, counts, template);
+    const latticeParams = estimateLatticeConstant(elements, counts, template);
+    const { a, c } = latticeParams;
     let compatScore = 0.5;
 
     const useIonic = isIonicCompound(elements, template.name);
