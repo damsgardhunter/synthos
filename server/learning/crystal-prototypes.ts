@@ -109,6 +109,8 @@ const PACKING_FACTORS: Record<string, number> = {
   "ThMn12-RFe12": 0.68,
   "Ilmenite-ABO3": 0.62,
   "Marcasite-AB2": 0.60,
+  "Tl2201-A2B2CO6": 0.55,
+  "PostPerovskite-ABO3": 0.65,
 };
 
 const DEFAULT_PACKING_FACTOR = 0.68;
@@ -1136,6 +1138,86 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
       const hasTM = elements.some(e => ["Fe", "Co", "Ni", "Cr", "Os", "Ru", "Mn", "Cu", "Ir", "Rh"].includes(e));
       const hasHeavyPn = elements.some(e => ["Sb", "Bi"].includes(e));
       return hasTM && hasHeavyPn;
+    },
+  },
+
+  // Tl-2201 single-layer cuprate: I4/mmm (139), A2B2CuO6
+  // Single CuO2 layer variant — Tl2Ba2CuO6+δ (Tc ≈ 90 K)
+  // Distinct from Bi-2212 (5 elements, 2 CuO2 layers) and YBCO-123 (4 elem, chains)
+  // For: Tl2Ba2CuO6, Bi2Sr2CuO6 (Bi-2201), Hg2Ba2CuO6
+  // Primitive cell (BCC → half conventional): 2A + 2B + 1Cu + 6O = 11 atoms
+  {
+    name: "Tl2201-A2B2CO6",
+    spaceGroup: "I4/mmm",
+    latticeType: "tetragonal",
+    cOverA: 5.95,
+    sites: [
+      // A-sites: Tl/Bi/Hg (2 in primitive, from 4e)
+      { label: "A", x: 0.0, y: 0.0, z: 0.210, role: "AO-layer" },
+      { label: "A", x: 0.0, y: 0.0, z: 0.790, role: "AO-layer" },
+      // B-sites: Ba/Sr (2 in primitive, from 4e)
+      { label: "B", x: 0.0, y: 0.0, z: 0.116, role: "BO-layer" },
+      { label: "B", x: 0.0, y: 0.0, z: 0.884, role: "BO-layer" },
+      // Cu at 2a: CuO2 plane
+      { label: "C", x: 0.0, y: 0.0, z: 0.0, role: "CuO2-plane" },
+      // O-sites: 6 in primitive
+      { label: "D", x: 0.5, y: 0.0, z: 0.0, role: "O-planar" },
+      { label: "D", x: 0.0, y: 0.5, z: 0.0, role: "O-planar" },
+      { label: "D", x: 0.0, y: 0.0, z: 0.163, role: "O-apical" },
+      { label: "D", x: 0.0, y: 0.0, z: 0.837, role: "O-apical" },
+      { label: "D", x: 0.0, y: 0.0, z: 0.279, role: "O-AO-layer" },
+      { label: "D", x: 0.0, y: 0.0, z: 0.721, role: "O-AO-layer" },
+    ],
+    stoichiometryRatio: [2, 2, 1, 6],
+    coordination: [6, 9, 5, 2],
+    chemistryRules: (elements) => {
+      if (elements.length !== 4) return false;
+      const hasO = elements.includes("O");
+      const hasCu = elements.includes("Cu");
+      const hasHeavy = elements.some(e => ["Tl", "Bi", "Hg", "Pb"].includes(e));
+      const hasAE = elements.some(e => ["Ba", "Sr"].includes(e));
+      return hasO && hasCu && hasHeavy && hasAE;
+    },
+  },
+  // Post-perovskite: Cmcm (63), ABO3 — high-pressure MgSiO3 phase
+  // CaIrO3-type structure. Important for deep Earth mineralogy and
+  // high-pressure superconductor candidates.
+  // For: MgSiO3 (>120 GPa), CaIrO3, CaRuO3, CaPtO3, NaMgF3
+  // Primitive cell: 4 atoms per formula unit → 4A + 4B + 12O = 20 atoms
+  // Actually Cmcm with Z=4: simplified to 1 f.u. in reduced description
+  // Wyckoff: A at 4c (0,y,1/4), B at 4a (0,0,0), O1 at 4c, O2 at 8f
+  // Primitive = half conventional for C-centering: 2A + 2B + 6O = 10 atoms
+  {
+    name: "PostPerovskite-ABO3",
+    spaceGroup: "Cmcm",
+    latticeType: "tetragonal",
+    cOverA: 2.42,
+    sites: [
+      // A at 4c: (0, y, 1/4) with y ≈ 0.25 — 2 in primitive
+      { label: "A", x: 0.0, y: 0.25, z: 0.25, role: "A-site" },
+      { label: "A", x: 0.0, y: 0.75, z: 0.75, role: "A-site" },
+      // B at 4a: (0, 0, 0) — 2 in primitive
+      { label: "B", x: 0.0, y: 0.0, z: 0.0, role: "B-site" },
+      { label: "B", x: 0.0, y: 0.5, z: 0.5, role: "B-site" },
+      // O1 at 4c: (0, y, 1/4) with y ≈ 0.93 — 2 in primitive
+      { label: "C", x: 0.0, y: 0.93, z: 0.25, role: "O-apical" },
+      { label: "C", x: 0.0, y: 0.07, z: 0.75, role: "O-apical" },
+      // O2 at 8f: (0, y, z) with y ≈ 0.63, z ≈ 0.07 — 4 in primitive
+      { label: "C", x: 0.0, y: 0.63, z: 0.07, role: "O-equatorial" },
+      { label: "C", x: 0.0, y: 0.37, z: 0.93, role: "O-equatorial" },
+      { label: "C", x: 0.0, y: 0.13, z: 0.57, role: "O-equatorial" },
+      { label: "C", x: 0.0, y: 0.87, z: 0.43, role: "O-equatorial" },
+    ],
+    stoichiometryRatio: [1, 1, 3],
+    coordination: [8, 6, 3],
+    chemistryRules: (elements) => {
+      if (elements.length !== 3) return false;
+      const hasO = elements.includes("O") || elements.includes("F");
+      // A-site: large cation (Mg, Ca, Na for fluoride analog)
+      const hasA = elements.some(e => ["Ca", "Mg", "Na", "Sr", "Ba"].includes(e));
+      // B-site: small high-valence cation (Ir, Ru, Pt, Si, Ge, Sn)
+      const hasB = elements.some(e => ["Ir", "Ru", "Pt", "Rh", "Os", "Si", "Ge", "Sn"].includes(e));
+      return hasO && hasA && hasB;
     },
   },
 
