@@ -863,6 +863,27 @@ const KNOWN_STRUCTURES: Record<string, KnownStructure> = {
     { element: "C",  x: 0.890, y: 0.25, z: 0.443, wyckoff: "4c" },
   ]},
 
+  // Zintl — CaMg2Bi2 (P-3m1, high-performance thermoelectric)
+  "CaMg2Bi2": { formula: "CaMg2Bi2", spaceGroup: "P-3m1", spaceGroupNumber: 164, latticeType: "hexagonal", latticeA: 4.73, latticeC: 7.60, pressureGPa: 0, atoms: [
+    { element: "Ca", x: 0.0, y: 0.0, z: 0.0, wyckoff: "1a" },
+    { element: "Mg", x: 0.3333, y: 0.6667, z: 0.63, wyckoff: "2d" },
+    { element: "Mg", x: 0.6667, y: 0.3333, z: 0.37, wyckoff: "2d" },
+    { element: "Bi", x: 0.3333, y: 0.6667, z: 0.24, wyckoff: "2d" },
+    { element: "Bi", x: 0.6667, y: 0.3333, z: 0.76, wyckoff: "2d" },
+  ]},
+
+  // Antifluorite — Li2O (Fm-3m)
+  "Li2O": { formula: "Li2O", spaceGroup: "Fm-3m", spaceGroupNumber: 225, latticeType: "cubic", latticeA: 4.61, pressureGPa: 0, atoms: [
+    { element: "Li", x: 0.25, y: 0.25, z: 0.25, wyckoff: "8c" },
+    { element: "Li", x: 0.75, y: 0.75, z: 0.75, wyckoff: "8c" },
+    { element: "O",  x: 0.0, y: 0.0, z: 0.0, wyckoff: "4a" },
+  ]},
+  "Na2S": { formula: "Na2S", spaceGroup: "Fm-3m", spaceGroupNumber: 225, latticeType: "cubic", latticeA: 6.54, pressureGPa: 0, atoms: [
+    { element: "Na", x: 0.25, y: 0.25, z: 0.25, wyckoff: "8c" },
+    { element: "Na", x: 0.75, y: 0.75, z: 0.75, wyckoff: "8c" },
+    { element: "S",  x: 0.0, y: 0.0, z: 0.0, wyckoff: "4a" },
+  ]},
+
   // Inverse Heusler — Mn2CoAl (F-43m)
   "Mn2CoAl": { formula: "Mn2CoAl", spaceGroup: "F-43m", spaceGroupNumber: 216, latticeType: "cubic", latticeA: 5.80, pressureGPa: 0, atoms: [
     { element: "Al", x: 0.0, y: 0.0, z: 0.0, wyckoff: "4a" },

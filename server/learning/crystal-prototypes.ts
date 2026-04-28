@@ -115,6 +115,8 @@ const PACKING_FACTORS: Record<string, number> = {
   "Stannite-A2BCS4": 0.52,
   "Scheelite-ABO4": 0.62,
   "Cementite-A3B": 0.68,
+  "Zintl-AB2C2": 0.58,
+  "Antifluorite-A2B": 0.68,
 };
 
 const DEFAULT_PACKING_FACTOR = 0.68;
@@ -1362,6 +1364,66 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
       const hasTM = elements.some(e => ["Fe", "Mn", "Cr", "Co", "Ni", "W", "Mo", "V"].includes(e));
       const hasLight = elements.some(e => ["C", "N", "B"].includes(e));
       return hasTM && hasLight;
+    },
+  },
+
+  // Zintl CaAl2Si2-type: P-3m1 (164), AB2C2 — thermoelectric/topological
+  // For: CaAl2Si2, Mg3Sb2 (as MgMg2Sb2), CaMg2Bi2, YbMg2Bi2, EuMg2Bi2
+  // Trigonal layered structure. A at 1a, B at 2d, C at 2d.
+  // Primitive cell: 1A + 2B + 2C = 5 atoms, ratio [1,2,2]
+  {
+    name: "Zintl-AB2C2",
+    spaceGroup: "P-3m1",
+    latticeType: "hexagonal",
+    cOverA: 1.6,
+    sites: [
+      // A at 1a: (0, 0, 0) — large cation (Ca, Yb, Eu, Mg)
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "cation" },
+      // B at 2d: (1/3, 2/3, z) with z ≈ 0.63 — tetrahedral B (Mg, Al, Zn)
+      { label: "B", x: 0.3333, y: 0.6667, z: 0.63, role: "tetra-B" },
+      { label: "B", x: 0.6667, y: 0.3333, z: 0.37, role: "tetra-B" },
+      // C at 2d: (1/3, 2/3, z) with z ≈ 0.24 — anion (Si, Sb, Bi, As, Sn)
+      { label: "C", x: 0.3333, y: 0.6667, z: 0.24, role: "anion" },
+      { label: "C", x: 0.6667, y: 0.3333, z: 0.76, role: "anion" },
+    ],
+    stoichiometryRatio: [1, 2, 2],
+    coordination: [6, 4, 5],
+    chemistryRules: (elements) => {
+      if (elements.length !== 3) return false;
+      // A-site: alkaline earth, Yb, Eu, or similar large cation
+      const hasA = elements.some(e => ["Ca", "Sr", "Ba", "Mg", "Yb", "Eu", "Sm", "La"].includes(e));
+      // B-site: small electropositive (Mg, Al, Zn, Cd, Mn)
+      const hasB = elements.some(e => ["Mg", "Al", "Zn", "Cd", "Mn", "Cu"].includes(e));
+      // C-site: pnictogen or group-14 (Si, Ge, Sn, Sb, Bi, As, P)
+      const hasC = elements.some(e => ["Si", "Ge", "Sn", "Sb", "Bi", "As", "P", "Te", "Se"].includes(e));
+      // Need at least 2 of 3 distinct (A and B can overlap, e.g., Mg3Sb2 = MgMg2Sb2)
+      return hasA && hasB && hasC;
+    },
+  },
+  // Antifluorite: Fm-3m (225), A2B — inverse of fluorite
+  // For: Li2O, Na2O, K2O, Li2S, Li2Se, Na2S, K2S — solid electrolytes, nuclear
+  // Primitive cell (FCC → 1/4 conventional): 2A + 1B = 3 atoms, ratio [2,1]
+  // Wyckoff: A at 8c (1/4,1/4,1/4), B at 4a (0,0,0)
+  {
+    name: "Antifluorite-A2B",
+    spaceGroup: "Fm-3m",
+    latticeType: "cubic",
+    cOverA: 1.0,
+    sites: [
+      // A (Li/Na/K) at 8c → 2 in primitive
+      { label: "A", x: 0.25, y: 0.25, z: 0.25, role: "cation" },
+      { label: "A", x: 0.75, y: 0.75, z: 0.75, role: "cation" },
+      // B (O/S/Se/Te) at 4a → 1 in primitive
+      { label: "B", x: 0.0, y: 0.0, z: 0.0, role: "anion" },
+    ],
+    stoichiometryRatio: [2, 1],
+    coordination: [4, 8],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      // Antifluorite: alkali + chalcogenide/oxide (A2X)
+      const hasAlkali = elements.some(e => ["Li", "Na", "K", "Rb", "Cs", "Cu", "Ag"].includes(e));
+      const hasAnion = elements.some(e => ["O", "S", "Se", "Te", "F"].includes(e));
+      return hasAlkali && hasAnion;
     },
   },
 
