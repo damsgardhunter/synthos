@@ -92,6 +92,93 @@ const H3S_ATOMS: KnownStructure["atoms"] = [
 ];
 
 // ---------------------------------------------------------------------------
+// Ternary Hydrides — Doped clathrate/sodalite cages
+// ---------------------------------------------------------------------------
+
+// Li2LaH12: Ternary clathrate, based on LaH10 Fm-3m cage with Li in interstitial
+// sites + extra H. Primitive cell: 1 La + 2 Li + 12 H = 15 atoms.
+// Li occupies the 8c-like interstitial sites (replacing 2 of the cage H),
+// and extra H fills remaining cage positions.
+const Li2LaH12_ATOMS: KnownStructure["atoms"] = [
+  { element: "La", x: 0.0000, y: 0.0000, z: 0.0000, wyckoff: "cage-center" },
+  // Li at interstitial sites (8c-derived)
+  { element: "Li", x: 0.2500, y: 0.2500, z: 0.2500, wyckoff: "interstitial" },
+  { element: "Li", x: 0.7500, y: 0.7500, z: 0.7500, wyckoff: "interstitial" },
+  // H cage (32f-derived positions, 8 atoms)
+  { element: "H",  x: 0.3750, y: 0.3750, z: 0.3750, wyckoff: "32f-cage" },
+  { element: "H",  x: 0.3750, y: 0.3750, z: 0.8750, wyckoff: "32f-cage" },
+  { element: "H",  x: 0.3750, y: 0.8750, z: 0.3750, wyckoff: "32f-cage" },
+  { element: "H",  x: 0.8750, y: 0.3750, z: 0.3750, wyckoff: "32f-cage" },
+  { element: "H",  x: 0.6250, y: 0.6250, z: 0.6250, wyckoff: "32f-cage" },
+  { element: "H",  x: 0.6250, y: 0.6250, z: 0.1250, wyckoff: "32f-cage" },
+  { element: "H",  x: 0.6250, y: 0.1250, z: 0.6250, wyckoff: "32f-cage" },
+  { element: "H",  x: 0.1250, y: 0.6250, z: 0.6250, wyckoff: "32f-cage" },
+  // Extra H at displaced interstitial sites (bridging Li-cage)
+  { element: "H",  x: 0.1250, y: 0.1250, z: 0.1250, wyckoff: "extra" },
+  { element: "H",  x: 0.8750, y: 0.8750, z: 0.8750, wyckoff: "extra" },
+  { element: "H",  x: 0.1250, y: 0.3750, z: 0.1250, wyckoff: "extra" },
+  { element: "H",  x: 0.3750, y: 0.1250, z: 0.1250, wyckoff: "extra" },
+];
+
+// LaH11Li2: Same structure family as Li2LaH12 but different H count.
+// 1 La + 2 Li + 11 H = 14 atoms. Li at interstitials, one fewer H.
+const LaH11Li2_ATOMS: KnownStructure["atoms"] = [
+  { element: "La", x: 0.0000, y: 0.0000, z: 0.0000, wyckoff: "cage-center" },
+  { element: "Li", x: 0.2500, y: 0.2500, z: 0.2500, wyckoff: "interstitial" },
+  { element: "Li", x: 0.7500, y: 0.7500, z: 0.7500, wyckoff: "interstitial" },
+  { element: "H",  x: 0.3750, y: 0.3750, z: 0.3750, wyckoff: "32f-cage" },
+  { element: "H",  x: 0.3750, y: 0.3750, z: 0.8750, wyckoff: "32f-cage" },
+  { element: "H",  x: 0.3750, y: 0.8750, z: 0.3750, wyckoff: "32f-cage" },
+  { element: "H",  x: 0.8750, y: 0.3750, z: 0.3750, wyckoff: "32f-cage" },
+  { element: "H",  x: 0.6250, y: 0.6250, z: 0.6250, wyckoff: "32f-cage" },
+  { element: "H",  x: 0.6250, y: 0.6250, z: 0.1250, wyckoff: "32f-cage" },
+  { element: "H",  x: 0.6250, y: 0.1250, z: 0.6250, wyckoff: "32f-cage" },
+  { element: "H",  x: 0.1250, y: 0.6250, z: 0.6250, wyckoff: "32f-cage" },
+  { element: "H",  x: 0.1250, y: 0.1250, z: 0.1250, wyckoff: "extra" },
+  { element: "H",  x: 0.8750, y: 0.8750, z: 0.8750, wyckoff: "extra" },
+  { element: "H",  x: 0.1250, y: 0.3750, z: 0.1250, wyckoff: "extra" },
+];
+
+// YH9Na2: Ternary hexagonal clathrate, Y-H cage with Na guest atoms.
+// Based on YH9 P63/mmc structure with Na at interstitial hexagonal sites.
+// 1 Y + 2 Na + 9 H = 12 atoms.
+const YH9Na2_ATOMS: KnownStructure["atoms"] = [
+  { element: "Y",  x: 0.3333, y: 0.6667, z: 0.2500, wyckoff: "2d" },
+  { element: "Na", x: 0.0000, y: 0.0000, z: 0.0000, wyckoff: "1a" },
+  { element: "Na", x: 0.0000, y: 0.0000, z: 0.5000, wyckoff: "1a" },
+  { element: "H",  x: 0.1550, y: 0.3100, z: 0.2500, wyckoff: "6h" },
+  { element: "H",  x: 0.6900, y: 0.8450, z: 0.2500, wyckoff: "6h" },
+  { element: "H",  x: 0.8450, y: 0.1550, z: 0.2500, wyckoff: "6h" },
+  { element: "H",  x: 0.0000, y: 0.0000, z: 0.2500, wyckoff: "2b" },
+  { element: "H",  x: 0.5200, y: 0.0400, z: 0.0800, wyckoff: "12k" },
+  { element: "H",  x: 0.9600, y: 0.4800, z: 0.0800, wyckoff: "12k" },
+  { element: "H",  x: 0.4800, y: 0.5200, z: 0.0800, wyckoff: "12k" },
+  { element: "H",  x: 0.0400, y: 0.5200, z: 0.4200, wyckoff: "12k" },
+  { element: "H",  x: 0.5200, y: 0.4800, z: 0.4200, wyckoff: "12k" },
+];
+
+// LaH12: Higher hydride clathrate. 1 La + 12 H = 13 atoms.
+// Based on Fm-3m cage with additional H at octahedral interstices.
+const LaH12_ATOMS: KnownStructure["atoms"] = [
+  { element: "La", x: 0.0000, y: 0.0000, z: 0.0000, wyckoff: "cage-center" },
+  // 32f cage H (8 in primitive)
+  { element: "H",  x: 0.3750, y: 0.3750, z: 0.3750, wyckoff: "32f-cage" },
+  { element: "H",  x: 0.3750, y: 0.3750, z: 0.8750, wyckoff: "32f-cage" },
+  { element: "H",  x: 0.3750, y: 0.8750, z: 0.3750, wyckoff: "32f-cage" },
+  { element: "H",  x: 0.8750, y: 0.3750, z: 0.3750, wyckoff: "32f-cage" },
+  { element: "H",  x: 0.6250, y: 0.6250, z: 0.6250, wyckoff: "32f-cage" },
+  { element: "H",  x: 0.6250, y: 0.6250, z: 0.1250, wyckoff: "32f-cage" },
+  { element: "H",  x: 0.6250, y: 0.1250, z: 0.6250, wyckoff: "32f-cage" },
+  { element: "H",  x: 0.1250, y: 0.6250, z: 0.6250, wyckoff: "32f-cage" },
+  // 8c interstitial H (2 in primitive)
+  { element: "H",  x: 0.2500, y: 0.2500, z: 0.2500, wyckoff: "8c" },
+  { element: "H",  x: 0.7500, y: 0.7500, z: 0.7500, wyckoff: "8c" },
+  // Extra H at octahedral interstice (between cage sites)
+  { element: "H",  x: 0.5000, y: 0.0000, z: 0.0000, wyckoff: "octahedral" },
+  { element: "H",  x: 0.0000, y: 0.5000, z: 0.0000, wyckoff: "octahedral" },
+];
+
+// ---------------------------------------------------------------------------
 // P63/mmc (194) Hexagonal Clathrate Hydrides
 // ---------------------------------------------------------------------------
 
@@ -191,6 +278,12 @@ const KNOWN_STRUCTURES: Record<string, KnownStructure> = {
   "YH9":   { formula: "YH9", spaceGroup: "P63/mmc", spaceGroupNumber: 194, latticeType: "hexagonal", latticeA: 4.20, latticeC: 6.51, pressureGPa: 200, atoms: YH9_ATOMS },
   "CeH9":  { formula: "CeH9", spaceGroup: "P63/mmc", spaceGroupNumber: 194, latticeType: "hexagonal", latticeA: 4.85, latticeC: 7.52, pressureGPa: 150, atoms: YH9_ATOMS.map(a => ({ ...a, element: a.element === "Y" ? "Ce" : a.element })) },
   "ScH9":  { formula: "ScH9", spaceGroup: "P63/mmc", spaceGroupNumber: 194, latticeType: "hexagonal", latticeA: 4.20, latticeC: 6.51, pressureGPa: 200, atoms: YH9_ATOMS.map(a => ({ ...a, element: a.element === "Y" ? "Sc" : a.element })) },
+
+  // Ternary hydrides
+  "Li2LaH12": { formula: "Li2LaH12", spaceGroup: "Fm-3m", spaceGroupNumber: 225, latticeType: "cubic", latticeA: 5.10, pressureGPa: 175, atoms: Li2LaH12_ATOMS },
+  "LaH11Li2": { formula: "LaH11Li2", spaceGroup: "Fm-3m", spaceGroupNumber: 225, latticeType: "cubic", latticeA: 5.10, pressureGPa: 175, atoms: LaH11Li2_ATOMS },
+  "YH9Na2":  { formula: "YH9Na2", spaceGroup: "P63/mmc", spaceGroupNumber: 194, latticeType: "hexagonal", latticeA: 4.20, latticeC: 6.51, pressureGPa: 200, atoms: YH9Na2_ATOMS },
+  "LaH12":   { formula: "LaH12", spaceGroup: "Fm-3m", spaceGroupNumber: 225, latticeType: "cubic", latticeA: 5.10, pressureGPa: 175, atoms: LaH12_ATOMS },
 
   // Simple hydrides
   "ScH3":  { formula: "ScH3", spaceGroup: "Fm-3m", spaceGroupNumber: 225, latticeType: "cubic", latticeA: 4.48, pressureGPa: 0, atoms: ScH3_ATOMS },
@@ -440,6 +533,177 @@ const KNOWN_STRUCTURES: Record<string, KnownStructure> = {
     { element: "Nb", x: 0.0, y: 0.0, z: 0.0, wyckoff: "2a" },
     { element: "Ti", x: 0.5, y: 0.5, z: 0.5, wyckoff: "2a" },
   ]},
+
+  // More cuprate variants
+  "Bi2Sr2CaCu2O8": { formula: "Bi2Sr2CaCu2O8", spaceGroup: "I4/mmm", spaceGroupNumber: 139, latticeType: "tetragonal", latticeA: 3.81, latticeC: 30.89, pressureGPa: 0, atoms: [
+    { element: "Bi", x: 0.0, y: 0.0, z: 0.199, wyckoff: "4e" },
+    { element: "Bi", x: 0.0, y: 0.0, z: 0.801, wyckoff: "4e" },
+    { element: "Sr", x: 0.0, y: 0.0, z: 0.110, wyckoff: "4e" },
+    { element: "Sr", x: 0.0, y: 0.0, z: 0.890, wyckoff: "4e" },
+    { element: "Ca", x: 0.0, y: 0.0, z: 0.0, wyckoff: "2a" },
+    { element: "Cu", x: 0.0, y: 0.0, z: 0.054, wyckoff: "4e" },
+    { element: "Cu", x: 0.0, y: 0.0, z: 0.946, wyckoff: "4e" },
+    { element: "O",  x: 0.5, y: 0.0, z: 0.054, wyckoff: "8g" },
+    { element: "O",  x: 0.0, y: 0.5, z: 0.054, wyckoff: "8g" },
+    { element: "O",  x: 0.0, y: 0.0, z: 0.149, wyckoff: "4e" },
+    { element: "O",  x: 0.0, y: 0.0, z: 0.851, wyckoff: "4e" },
+    { element: "O",  x: 0.5, y: 0.0, z: 0.946, wyckoff: "8g" },
+    { element: "O",  x: 0.0, y: 0.5, z: 0.946, wyckoff: "8g" },
+    { element: "O",  x: 0.0, y: 0.0, z: 0.250, wyckoff: "4e" },
+    { element: "O",  x: 0.0, y: 0.0, z: 0.750, wyckoff: "4e" },
+  ]},
+
+  // More iron pnictide variants
+  "SrFe2As2": { formula: "SrFe2As2", spaceGroup: "I4/mmm", spaceGroupNumber: 139, latticeType: "tetragonal", latticeA: 3.93, latticeC: 12.36, pressureGPa: 0, atoms: [
+    { element: "Sr", x: 0.0, y: 0.0, z: 0.0, wyckoff: "2a" },
+    { element: "Fe", x: 0.5, y: 0.0, z: 0.25, wyckoff: "4d" },
+    { element: "Fe", x: 0.0, y: 0.5, z: 0.25, wyckoff: "4d" },
+    { element: "As", x: 0.0, y: 0.0, z: 0.360, wyckoff: "4e" },
+    { element: "As", x: 0.0, y: 0.0, z: 0.640, wyckoff: "4e" },
+  ]},
+  "CaFe2As2": { formula: "CaFe2As2", spaceGroup: "I4/mmm", spaceGroupNumber: 139, latticeType: "tetragonal", latticeA: 3.88, latticeC: 11.74, pressureGPa: 0, atoms: [
+    { element: "Ca", x: 0.0, y: 0.0, z: 0.0, wyckoff: "2a" },
+    { element: "Fe", x: 0.5, y: 0.0, z: 0.25, wyckoff: "4d" },
+    { element: "Fe", x: 0.0, y: 0.5, z: 0.25, wyckoff: "4d" },
+    { element: "As", x: 0.0, y: 0.0, z: 0.366, wyckoff: "4e" },
+    { element: "As", x: 0.0, y: 0.0, z: 0.634, wyckoff: "4e" },
+  ]},
+
+  // Diamond cubic — Si, Ge, C
+  "Si": { formula: "Si", spaceGroup: "Fd-3m", spaceGroupNumber: 227, latticeType: "cubic", latticeA: 5.43, pressureGPa: 0, atoms: [
+    { element: "Si", x: 0.0, y: 0.0, z: 0.0, wyckoff: "8a" },
+    { element: "Si", x: 0.25, y: 0.25, z: 0.25, wyckoff: "8a" },
+  ]},
+  "Ge": { formula: "Ge", spaceGroup: "Fd-3m", spaceGroupNumber: 227, latticeType: "cubic", latticeA: 5.66, pressureGPa: 0, atoms: [
+    { element: "Ge", x: 0.0, y: 0.0, z: 0.0, wyckoff: "8a" },
+    { element: "Ge", x: 0.25, y: 0.25, z: 0.25, wyckoff: "8a" },
+  ]},
+  "C": { formula: "C", spaceGroup: "Fd-3m", spaceGroupNumber: 227, latticeType: "cubic", latticeA: 3.57, pressureGPa: 0, atoms: [
+    { element: "C", x: 0.0, y: 0.0, z: 0.0, wyckoff: "8a" },
+    { element: "C", x: 0.25, y: 0.25, z: 0.25, wyckoff: "8a" },
+  ]},
+
+  // More elemental superconductors
+  "Sn": { formula: "Sn", spaceGroup: "I41/amd", spaceGroupNumber: 141, latticeType: "tetragonal", latticeA: 5.83, latticeC: 3.18, pressureGPa: 0, atoms: [
+    { element: "Sn", x: 0.0, y: 0.0, z: 0.0, wyckoff: "4a" },
+  ]},
+  "In": { formula: "In", spaceGroup: "I4/mmm", spaceGroupNumber: 139, latticeType: "tetragonal", latticeA: 3.25, latticeC: 4.95, pressureGPa: 0, atoms: [
+    { element: "In", x: 0.0, y: 0.0, z: 0.0, wyckoff: "2a" },
+  ]},
+  "Ta": { formula: "Ta", spaceGroup: "Im-3m", spaceGroupNumber: 229, latticeType: "cubic", latticeA: 3.30, pressureGPa: 0, atoms: [
+    { element: "Ta", x: 0.0, y: 0.0, z: 0.0, wyckoff: "2a" },
+  ]},
+  "Re": { formula: "Re", spaceGroup: "P63/mmc", spaceGroupNumber: 194, latticeType: "hexagonal", latticeA: 2.76, latticeC: 4.46, pressureGPa: 0, atoms: [
+    { element: "Re", x: 0.3333, y: 0.6667, z: 0.25, wyckoff: "2c" },
+  ]},
+  "Mo": { formula: "Mo", spaceGroup: "Im-3m", spaceGroupNumber: 229, latticeType: "cubic", latticeA: 3.15, pressureGPa: 0, atoms: [
+    { element: "Mo", x: 0.0, y: 0.0, z: 0.0, wyckoff: "2a" },
+  ]},
+  "W": { formula: "W", spaceGroup: "Im-3m", spaceGroupNumber: 229, latticeType: "cubic", latticeA: 3.16, pressureGPa: 0, atoms: [
+    { element: "W", x: 0.0, y: 0.0, z: 0.0, wyckoff: "2a" },
+  ]},
+  "Ti": { formula: "Ti", spaceGroup: "P63/mmc", spaceGroupNumber: 194, latticeType: "hexagonal", latticeA: 2.95, latticeC: 4.69, pressureGPa: 0, atoms: [
+    { element: "Ti", x: 0.3333, y: 0.6667, z: 0.25, wyckoff: "2c" },
+  ]},
+  "Zr": { formula: "Zr", spaceGroup: "P63/mmc", spaceGroupNumber: 194, latticeType: "hexagonal", latticeA: 3.23, latticeC: 5.15, pressureGPa: 0, atoms: [
+    { element: "Zr", x: 0.3333, y: 0.6667, z: 0.25, wyckoff: "2c" },
+  ]},
+  "Hf": { formula: "Hf", spaceGroup: "P63/mmc", spaceGroupNumber: 194, latticeType: "hexagonal", latticeA: 3.19, latticeC: 5.05, pressureGPa: 0, atoms: [
+    { element: "Hf", x: 0.3333, y: 0.6667, z: 0.25, wyckoff: "2c" },
+  ]},
+
+  // Spinel — MgAl2O4 (Fd-3m)
+  "MgAl2O4": { formula: "MgAl2O4", spaceGroup: "Fd-3m", spaceGroupNumber: 227, latticeType: "cubic", latticeA: 8.08, pressureGPa: 0, atoms: [
+    { element: "Mg", x: 0.125, y: 0.125, z: 0.125, wyckoff: "8a" },
+    { element: "Al", x: 0.5, y: 0.5, z: 0.5, wyckoff: "16d" },
+    { element: "Al", x: 0.5, y: 0.25, z: 0.25, wyckoff: "16d" },
+    { element: "O",  x: 0.263, y: 0.263, z: 0.263, wyckoff: "32e" },
+    { element: "O",  x: 0.263, y: 0.237, z: 0.737, wyckoff: "32e" },
+    { element: "O",  x: 0.737, y: 0.263, z: 0.737, wyckoff: "32e" },
+    { element: "O",  x: 0.737, y: 0.737, z: 0.263, wyckoff: "32e" },
+  ]},
+
+  // Double perovskite — Sr2FeMoO6 (Fm-3m)
+  "Sr2FeMoO6": { formula: "Sr2FeMoO6", spaceGroup: "Fm-3m", spaceGroupNumber: 225, latticeType: "cubic", latticeA: 7.90, pressureGPa: 0, atoms: [
+    { element: "Sr", x: 0.25, y: 0.25, z: 0.25, wyckoff: "8c" },
+    { element: "Sr", x: 0.75, y: 0.75, z: 0.75, wyckoff: "8c" },
+    { element: "Fe", x: 0.0, y: 0.0, z: 0.0, wyckoff: "4a" },
+    { element: "Mo", x: 0.5, y: 0.5, z: 0.5, wyckoff: "4b" },
+    { element: "O",  x: 0.25, y: 0.0, z: 0.0, wyckoff: "24e" },
+    { element: "O",  x: 0.75, y: 0.0, z: 0.0, wyckoff: "24e" },
+    { element: "O",  x: 0.0, y: 0.25, z: 0.0, wyckoff: "24e" },
+    { element: "O",  x: 0.0, y: 0.75, z: 0.0, wyckoff: "24e" },
+    { element: "O",  x: 0.0, y: 0.0, z: 0.25, wyckoff: "24e" },
+    { element: "O",  x: 0.0, y: 0.0, z: 0.75, wyckoff: "24e" },
+  ]},
+
+  // Ruddlesden-Popper n=2 — Sr3Ru2O7 (I4/mmm)
+  "Sr3Ru2O7": { formula: "Sr3Ru2O7", spaceGroup: "I4/mmm", spaceGroupNumber: 139, latticeType: "tetragonal", latticeA: 3.89, latticeC: 20.73, pressureGPa: 0, atoms: [
+    { element: "Sr", x: 0.0, y: 0.0, z: 0.5, wyckoff: "2b" },
+    { element: "Sr", x: 0.0, y: 0.0, z: 0.318, wyckoff: "4e" },
+    { element: "Sr", x: 0.0, y: 0.0, z: 0.682, wyckoff: "4e" },
+    { element: "Ru", x: 0.0, y: 0.0, z: 0.098, wyckoff: "4e" },
+    { element: "Ru", x: 0.0, y: 0.0, z: 0.902, wyckoff: "4e" },
+    { element: "O",  x: 0.0, y: 0.5, z: 0.098, wyckoff: "8g" },
+    { element: "O",  x: 0.5, y: 0.0, z: 0.098, wyckoff: "8g" },
+    { element: "O",  x: 0.0, y: 0.0, z: 0.198, wyckoff: "4e" },
+    { element: "O",  x: 0.0, y: 0.0, z: 0.802, wyckoff: "4e" },
+    { element: "O",  x: 0.0, y: 0.0, z: 0.0, wyckoff: "2a" },
+    { element: "O",  x: 0.0, y: 0.5, z: 0.902, wyckoff: "8g" },
+    { element: "O",  x: 0.5, y: 0.0, z: 0.902, wyckoff: "8g" },
+  ]},
+
+  // MAX phase — Ti2AlC (P63/mmc)
+  "Ti2AlC": { formula: "Ti2AlC", spaceGroup: "P63/mmc", spaceGroupNumber: 194, latticeType: "hexagonal", latticeA: 3.06, latticeC: 13.60, pressureGPa: 0, atoms: [
+    { element: "Ti", x: 0.3333, y: 0.6667, z: 0.086, wyckoff: "4f" },
+    { element: "Ti", x: 0.3333, y: 0.6667, z: 0.914, wyckoff: "4f" },
+    { element: "Al", x: 0.0, y: 0.0, z: 0.25, wyckoff: "2d" },
+    { element: "C",  x: 0.0, y: 0.0, z: 0.0, wyckoff: "2a" },
+  ]},
+
+  // GaAs — Zinc blende (F-43m)
+  "GaAs": { formula: "GaAs", spaceGroup: "F-43m", spaceGroupNumber: 216, latticeType: "cubic", latticeA: 5.65, pressureGPa: 0, atoms: [
+    { element: "Ga", x: 0.0, y: 0.0, z: 0.0, wyckoff: "4a" },
+    { element: "As", x: 0.25, y: 0.25, z: 0.25, wyckoff: "4c" },
+  ]},
+
+  // GaN — Wurtzite (P63mc)
+  "GaN": { formula: "GaN", spaceGroup: "P63mc", spaceGroupNumber: 186, latticeType: "hexagonal", latticeA: 3.19, latticeC: 5.19, pressureGPa: 0, atoms: [
+    { element: "Ga", x: 0.3333, y: 0.6667, z: 0.0, wyckoff: "2b" },
+    { element: "N",  x: 0.3333, y: 0.6667, z: 0.375, wyckoff: "2b" },
+  ]},
+
+  // PbTe — Rocksalt thermoelectric
+  "PbTe": { formula: "PbTe", spaceGroup: "Fm-3m", spaceGroupNumber: 225, latticeType: "cubic", latticeA: 6.46, pressureGPa: 0, atoms: [
+    { element: "Pb", x: 0.0, y: 0.0, z: 0.0, wyckoff: "4a" },
+    { element: "Te", x: 0.5, y: 0.5, z: 0.5, wyckoff: "4b" },
+  ]},
+
+  // Heusler — Cu2MnAl (L21, Fm-3m)
+  "Cu2MnAl": { formula: "Cu2MnAl", spaceGroup: "Fm-3m", spaceGroupNumber: 225, latticeType: "cubic", latticeA: 5.95, pressureGPa: 0, atoms: [
+    { element: "Cu", x: 0.25, y: 0.25, z: 0.25, wyckoff: "8c" },
+    { element: "Cu", x: 0.75, y: 0.75, z: 0.75, wyckoff: "8c" },
+    { element: "Mn", x: 0.5, y: 0.5, z: 0.5, wyckoff: "4b" },
+    { element: "Al", x: 0.0, y: 0.0, z: 0.0, wyckoff: "4a" },
+  ]},
+
+  // Half-Heusler — NiMnSb (F-43m)
+  "NiMnSb": { formula: "NiMnSb", spaceGroup: "F-43m", spaceGroupNumber: 216, latticeType: "cubic", latticeA: 5.92, pressureGPa: 0, atoms: [
+    { element: "Ni", x: 0.25, y: 0.25, z: 0.25, wyckoff: "4c" },
+    { element: "Mn", x: 0.0, y: 0.0, z: 0.0, wyckoff: "4a" },
+    { element: "Sb", x: 0.5, y: 0.5, z: 0.5, wyckoff: "4b" },
+  ]},
+
+  // WC — simple hexagonal (P-6m2)
+  "WC": { formula: "WC", spaceGroup: "P-6m2", spaceGroupNumber: 187, latticeType: "hexagonal", latticeA: 2.91, latticeC: 2.84, pressureGPa: 0, atoms: [
+    { element: "W", x: 0.0, y: 0.0, z: 0.0, wyckoff: "1a" },
+    { element: "C", x: 0.3333, y: 0.6667, z: 0.5, wyckoff: "1d" },
+  ]},
+
+  // Additional sodalite hydride variants
+  "BaH6":  { formula: "BaH6", spaceGroup: "Im-3m", spaceGroupNumber: 229, latticeType: "cubic", latticeA: 4.20, pressureGPa: 150, atoms: SODALITE_H6_ATOMS("Ba") },
+  "MgH6":  { formula: "MgH6", spaceGroup: "Im-3m", spaceGroupNumber: 229, latticeType: "cubic", latticeA: 3.60, pressureGPa: 300, atoms: SODALITE_H6_ATOMS("Mg") },
+  "ThH9":  { formula: "ThH9", spaceGroup: "P63/mmc", spaceGroupNumber: 194, latticeType: "hexagonal", latticeA: 4.62, latticeC: 7.16, pressureGPa: 175, atoms: YH9_ATOMS.map(a => ({ ...a, element: a.element === "Y" ? "Th" : a.element })) },
 };
 
 // ---------------------------------------------------------------------------

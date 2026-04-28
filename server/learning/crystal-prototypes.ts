@@ -86,6 +86,8 @@ const PACKING_FACTORS: Record<string, number> = {
   "Sodalite-MH6": 0.62,
   "Hex-Clathrate-MH9": 0.58,
   "Clathrate-Fm3m-MH10": 0.60,
+  "Ternary-Clathrate-A2MHn": 0.58,
+  "Ternary-Hex-Clathrate-A2MH9": 0.56,
 };
 
 const DEFAULT_PACKING_FACTOR = 0.68;
@@ -421,6 +423,74 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
       );
     },
   },
+  // Ternary clathrate hydride: A2MHn (e.g., Li2LaH12, Li2LaH11)
+  // Based on Fm-3m cage with alkali metal (Li/Na/K) at interstitial 8c sites
+  // and rare earth at cage center. 3-element hydride template.
+  // Sites: 1 M(RE) + 2 A(alkali) + variable H
+  {
+    name: "Ternary-Clathrate-A2MHn",
+    spaceGroup: "Fm-3m",
+    latticeType: "cubic",
+    cOverA: 1.0,
+    sites: [
+      { label: "M", x: 0.0, y: 0.0, z: 0.0, role: "cage-center" },
+      { label: "A", x: 0.25, y: 0.25, z: 0.25, role: "interstitial" },
+      { label: "A", x: 0.75, y: 0.75, z: 0.75, role: "interstitial" },
+      { label: "H", x: 0.375, y: 0.375, z: 0.375, role: "32f-cage" },
+      { label: "H", x: 0.375, y: 0.375, z: 0.875, role: "32f-cage" },
+      { label: "H", x: 0.375, y: 0.875, z: 0.375, role: "32f-cage" },
+      { label: "H", x: 0.875, y: 0.375, z: 0.375, role: "32f-cage" },
+      { label: "H", x: 0.625, y: 0.625, z: 0.625, role: "32f-cage" },
+      { label: "H", x: 0.625, y: 0.625, z: 0.125, role: "32f-cage" },
+      { label: "H", x: 0.625, y: 0.125, z: 0.625, role: "32f-cage" },
+      { label: "H", x: 0.125, y: 0.625, z: 0.625, role: "32f-cage" },
+      { label: "H", x: 0.125, y: 0.125, z: 0.125, role: "extra" },
+      { label: "H", x: 0.875, y: 0.875, z: 0.875, role: "extra" },
+      { label: "H", x: 0.125, y: 0.375, z: 0.125, role: "extra" },
+      { label: "H", x: 0.375, y: 0.125, z: 0.125, role: "extra" },
+    ],
+    stoichiometryRatio: [1, 2, 12],
+    coordination: [32, 8, 3],
+    chemistryRules: (elements) => {
+      if (elements.length !== 3) return false;
+      const hasH = elements.includes("H");
+      const hasAlkali = elements.some(e => ["Li", "Na", "K", "Rb", "Cs"].includes(e));
+      const hasRE = elements.some(e => isRareEarth(e) || ["Y", "Sc", "Ca", "Sr", "Ba", "Th"].includes(e));
+      return hasH && hasAlkali && hasRE;
+    },
+  },
+  // Ternary hexagonal hydride: A2MH9 (e.g., YH9Na2)
+  // Based on P63/mmc cage with alkali at interstices.
+  {
+    name: "Ternary-Hex-Clathrate-A2MH9",
+    spaceGroup: "P63/mmc",
+    latticeType: "hexagonal",
+    cOverA: 1.55,
+    sites: [
+      { label: "M", x: 0.3333, y: 0.6667, z: 0.25, role: "cage-center" },
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "interstice" },
+      { label: "A", x: 0.0, y: 0.0, z: 0.5, role: "interstice" },
+      { label: "H", x: 0.155, y: 0.310, z: 0.25, role: "hex-cage" },
+      { label: "H", x: 0.690, y: 0.845, z: 0.25, role: "hex-cage" },
+      { label: "H", x: 0.845, y: 0.155, z: 0.25, role: "hex-cage" },
+      { label: "H", x: 0.0, y: 0.0, z: 0.25, role: "hex-cage" },
+      { label: "H", x: 0.520, y: 0.040, z: 0.08, role: "hex-cage" },
+      { label: "H", x: 0.960, y: 0.480, z: 0.08, role: "hex-cage" },
+      { label: "H", x: 0.480, y: 0.520, z: 0.08, role: "hex-cage" },
+      { label: "H", x: 0.040, y: 0.520, z: 0.42, role: "hex-cage" },
+      { label: "H", x: 0.520, y: 0.480, z: 0.42, role: "hex-cage" },
+    ],
+    stoichiometryRatio: [1, 2, 9],
+    coordination: [29, 8, 3],
+    chemistryRules: (elements) => {
+      if (elements.length !== 3) return false;
+      const hasH = elements.includes("H");
+      const hasAlkali = elements.some(e => ["Li", "Na", "K", "Rb", "Cs"].includes(e));
+      const hasRE = elements.some(e => isRareEarth(e) || ["Y", "Sc", "Ca", "Sr", "Ba", "Th"].includes(e));
+      return hasH && hasAlkali && hasRE;
+    },
+  },
+  // ── End of hydride prototypes ──────────────────────────────────────────
   {
     name: "Heusler-L21",
     spaceGroup: "Fm-3m",
