@@ -148,6 +148,7 @@ const PACKING_FACTORS: Record<string, number> = {
   "QuaternaryHeusler-ABCD": 0.68,
   "Tl1212-AB2CD2O7": 0.55,
   "MAB-phase": 0.68,
+  "Tl1223-AB2C2D3O9": 0.55,
 };
 
 const DEFAULT_PACKING_FACTOR = 0.68;
@@ -2482,6 +2483,53 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
       const hasTM = elements.some(e => ["Mo", "W", "Cr", "Fe", "Mn", "V", "Nb", "Ta", "Ti"].includes(e));
       const hasA = elements.some(e => ["Al", "Ga", "In", "Si", "Ge"].includes(e));
       return hasB && hasTM && hasA;
+    },
+  },
+
+  // Tl-1223 cuprate: P4/mmm (123), AB2C2D3O9 — single-Tl triple-CuO2
+  // TlBa2Ca2Cu3O9 — Tc ≈ 133K. Completes the Tl-family:
+  //   Tl-2201 (1 CuO2, 2 TlO), Tl-1212 (2 CuO2, 1 TlO),
+  //   Tl-1223 (3 CuO2, 1 TlO), Tl-2223 (3 CuO2, 2 TlO via generic 2223)
+  // Primitive: 1Tl + 2Ba + 2Ca + 3Cu + 9O = 17 atoms, ratio [1,2,2,3,9]
+  {
+    name: "Tl1223-AB2C2D3O9",
+    spaceGroup: "P4/mmm",
+    latticeType: "tetragonal",
+    cOverA: 4.43,
+    sites: [
+      // Tl at 1a
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "Tl-layer" },
+      // Ba at 2h
+      { label: "B", x: 0.5, y: 0.5, z: 0.14, role: "Ba-site" },
+      { label: "B", x: 0.5, y: 0.5, z: 0.86, role: "Ba-site" },
+      // Ca at 2g — double spacer
+      { label: "C", x: 0.0, y: 0.0, z: 0.33, role: "Ca-spacer" },
+      { label: "C", x: 0.0, y: 0.0, z: 0.67, role: "Ca-spacer" },
+      // Cu: 3 (1 inner + 2 outer)
+      { label: "D", x: 0.0, y: 0.0, z: 0.5, role: "Cu-inner" },
+      { label: "D", x: 0.0, y: 0.0, z: 0.24, role: "Cu-outer" },
+      { label: "D", x: 0.0, y: 0.0, z: 0.76, role: "Cu-outer" },
+      // O: 9 total
+      { label: "E", x: 0.5, y: 0.0, z: 0.5, role: "O-inner-eq" },
+      { label: "E", x: 0.0, y: 0.5, z: 0.5, role: "O-inner-eq" },
+      { label: "E", x: 0.5, y: 0.0, z: 0.24, role: "O-outer-eq" },
+      { label: "E", x: 0.0, y: 0.5, z: 0.24, role: "O-outer-eq" },
+      { label: "E", x: 0.5, y: 0.0, z: 0.76, role: "O-outer-eq" },
+      { label: "E", x: 0.0, y: 0.5, z: 0.76, role: "O-outer-eq" },
+      { label: "E", x: 0.0, y: 0.0, z: 0.18, role: "O-apical" },
+      { label: "E", x: 0.0, y: 0.0, z: 0.82, role: "O-apical" },
+      { label: "E", x: 0.5, y: 0.5, z: 0.0, role: "O-Tl-layer" },
+    ],
+    stoichiometryRatio: [1, 2, 2, 3, 9],
+    coordination: [6, 10, 8, 5, 2],
+    chemistryRules: (elements) => {
+      if (elements.length !== 5) return false;
+      const hasO = elements.includes("O");
+      const hasCu = elements.includes("Cu");
+      const hasTl = elements.includes("Tl");
+      const hasAE = elements.some(e => ["Ba", "Sr"].includes(e));
+      const hasSpacer = elements.includes("Ca") || elements.some(e => isRareEarth(e) || e === "Y");
+      return hasO && hasCu && hasTl && hasAE && hasSpacer;
     },
   },
 
