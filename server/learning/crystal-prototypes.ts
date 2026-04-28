@@ -139,6 +139,8 @@ const PACKING_FACTORS: Record<string, number> = {
   "A7-Rhombohedral": 0.34,
   "A-RE2O3": 0.62,
   "A5-betaSn": 0.53,
+  "OxynitridePerovskite-ABOX": 0.74,
+  "Stibnite-A2B3": 0.55,
 };
 
 const DEFAULT_PACKING_FACTOR = 0.68;
@@ -2155,6 +2157,69 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
       if (elements.length !== 1) return false;
       // β-Sn type: tetragonal elements (between diamond and metallic)
       return ["Sn", "In", "Ga", "Pa"].includes(elements[0]);
+    },
+  },
+
+  // Oxynitride/Oxyfluoride perovskite: Pm-3m-derived, ABO2X (4 elements)
+  // For: SrTaO2N, BaTaO2N, LaTiO2N, KNbO2F — visible-light photocatalysts
+  // CRITICAL: Cubic Perovskite template only accepts 3 elements.
+  // These 4-element ABO2X perovskites had ZERO match.
+  // Positions identical to cubic perovskite but with mixed anion site.
+  // Primitive: 1A + 1B + 2O + 1X = 5 atoms, ratio [1,1,2,1]
+  {
+    name: "OxynitridePerovskite-ABOX",
+    spaceGroup: "Pm-3m",
+    latticeType: "cubic",
+    cOverA: 1.0,
+    sites: [
+      // A (Sr/Ba/La/Ca) at 1a
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "A-site" },
+      // B (Ta/Nb/Ti/V/W) at 1b
+      { label: "B", x: 0.5, y: 0.5, z: 0.5, role: "B-site" },
+      // O at 3c (face centers) — 2 of 3 are O
+      { label: "C", x: 0.5, y: 0.5, z: 0.0, role: "O-equatorial" },
+      { label: "C", x: 0.5, y: 0.0, z: 0.5, role: "O-equatorial" },
+      // X (N/F) at 3c — 1 of 3 is N or F
+      { label: "D", x: 0.0, y: 0.5, z: 0.5, role: "X-anion" },
+    ],
+    stoichiometryRatio: [1, 1, 2, 1],
+    coordination: [12, 6, 2, 2],
+    chemistryRules: (elements) => {
+      if (elements.length !== 4) return false;
+      const hasO = elements.includes("O");
+      const hasX = elements.some(e => ["N", "F", "Cl"].includes(e));
+      const hasA = elements.some(e => CATIONS_LARGE.has(e));
+      const hasB = elements.some(e => ["Ta", "Nb", "Ti", "V", "W", "Mo", "Zr", "Hf", "Mn", "Fe"].includes(e));
+      return hasO && hasX && hasA && hasB;
+    },
+  },
+  // Stibnite: Pnma (62), A2B3 — orthorhombic pnictide/chalcogenide
+  // For: Bi2S3, Sb2S3, Bi2Se3-ortho, Sb2Se3 — solar absorbers, thermoelectrics
+  // Distinct from Bi2Te3-R3m (rhombohedral quintuple-layer topology).
+  // Bi2S3 adopts stibnite structure, NOT rhombohedral.
+  // Primitive: 2A + 3B = 5 atoms per f.u., ratio [2,3]
+  {
+    name: "Stibnite-A2B3",
+    spaceGroup: "Pnma",
+    latticeType: "tetragonal",
+    cOverA: 0.29,
+    sites: [
+      // A (Bi/Sb) at 4c-like: 2 per f.u.
+      { label: "A", x: 0.517, y: 0.25, z: 0.174, role: "cation-1" },
+      { label: "A", x: 0.660, y: 0.25, z: 0.532, role: "cation-2" },
+      // B (S/Se/Te) at 4c-like: 3 per f.u.
+      { label: "B", x: 0.375, y: 0.25, z: 0.056, role: "anion-1" },
+      { label: "B", x: 0.722, y: 0.25, z: 0.809, role: "anion-2" },
+      { label: "B", x: 0.459, y: 0.25, z: 0.379, role: "anion-3" },
+    ],
+    stoichiometryRatio: [2, 3],
+    coordination: [7, 3],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      // Stibnite: heavy pnictogen/post-TM + chalcogen
+      const hasCation = elements.some(e => ["Bi", "Sb", "As", "In", "Tl"].includes(e));
+      const hasChalcogen = elements.some(e => ["S", "Se", "Te"].includes(e));
+      return hasCation && hasChalcogen;
     },
   },
 

@@ -1167,6 +1167,31 @@ const KNOWN_STRUCTURES: Record<string, KnownStructure> = {
     { element: "O",  x: 0.6667, y: 0.3333, z: 0.355, wyckoff: "2d" },
   ]},
 
+  // Oxynitride perovskite — SrTaO2N (photocatalyst)
+  "SrTaO2N": { formula: "SrTaO2N", spaceGroup: "Pm-3m", spaceGroupNumber: 221, latticeType: "cubic", latticeA: 4.03, pressureGPa: 0, atoms: [
+    { element: "Sr", x: 0.0, y: 0.0, z: 0.0, wyckoff: "1a" },
+    { element: "Ta", x: 0.5, y: 0.5, z: 0.5, wyckoff: "1b" },
+    { element: "O",  x: 0.5, y: 0.5, z: 0.0, wyckoff: "3c" },
+    { element: "O",  x: 0.5, y: 0.0, z: 0.5, wyckoff: "3c" },
+    { element: "N",  x: 0.0, y: 0.5, z: 0.5, wyckoff: "3c" },
+  ]},
+
+  // Stibnite — Bi2S3 (Pnma, solar absorber)
+  "Bi2S3": { formula: "Bi2S3", spaceGroup: "Pnma", spaceGroupNumber: 62, latticeType: "tetragonal", latticeA: 11.15, latticeC: 3.98, pressureGPa: 0, atoms: [
+    { element: "Bi", x: 0.517, y: 0.25, z: 0.174, wyckoff: "4c" },
+    { element: "Bi", x: 0.660, y: 0.25, z: 0.532, wyckoff: "4c" },
+    { element: "S",  x: 0.375, y: 0.25, z: 0.056, wyckoff: "4c" },
+    { element: "S",  x: 0.722, y: 0.25, z: 0.809, wyckoff: "4c" },
+    { element: "S",  x: 0.459, y: 0.25, z: 0.379, wyckoff: "4c" },
+  ]},
+  "Sb2S3": { formula: "Sb2S3", spaceGroup: "Pnma", spaceGroupNumber: 62, latticeType: "tetragonal", latticeA: 11.31, latticeC: 3.84, pressureGPa: 0, atoms: [
+    { element: "Sb", x: 0.530, y: 0.25, z: 0.173, wyckoff: "4c" },
+    { element: "Sb", x: 0.644, y: 0.25, z: 0.536, wyckoff: "4c" },
+    { element: "S",  x: 0.374, y: 0.25, z: 0.053, wyckoff: "4c" },
+    { element: "S",  x: 0.717, y: 0.25, z: 0.811, wyckoff: "4c" },
+    { element: "S",  x: 0.453, y: 0.25, z: 0.373, wyckoff: "4c" },
+  ]},
+
   // Inverse Heusler — Mn2CoAl (F-43m)
   "Mn2CoAl": { formula: "Mn2CoAl", spaceGroup: "F-43m", spaceGroupNumber: 216, latticeType: "cubic", latticeA: 5.80, pressureGPa: 0, atoms: [
     { element: "Al", x: 0.0, y: 0.0, z: 0.0, wyckoff: "4a" },
