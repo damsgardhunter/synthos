@@ -1151,6 +1151,22 @@ const KNOWN_STRUCTURES: Record<string, KnownStructure> = {
     { element: "Sb", x: 0.0, y: 0.0, z: 0.767, wyckoff: "6c" },
   ]},
 
+  // A-type RE sesquioxide — La2O3 (P-3m1)
+  "La2O3": { formula: "La2O3", spaceGroup: "P-3m1", spaceGroupNumber: 164, latticeType: "hexagonal", latticeA: 3.94, latticeC: 6.13, pressureGPa: 0, atoms: [
+    { element: "La", x: 0.3333, y: 0.6667, z: 0.245, wyckoff: "2d" },
+    { element: "La", x: 0.6667, y: 0.3333, z: 0.755, wyckoff: "2d" },
+    { element: "O",  x: 0.0, y: 0.0, z: 0.0, wyckoff: "1a" },
+    { element: "O",  x: 0.3333, y: 0.6667, z: 0.645, wyckoff: "2d" },
+    { element: "O",  x: 0.6667, y: 0.3333, z: 0.355, wyckoff: "2d" },
+  ]},
+  "Nd2O3": { formula: "Nd2O3", spaceGroup: "P-3m1", spaceGroupNumber: 164, latticeType: "hexagonal", latticeA: 3.83, latticeC: 6.00, pressureGPa: 0, atoms: [
+    { element: "Nd", x: 0.3333, y: 0.6667, z: 0.245, wyckoff: "2d" },
+    { element: "Nd", x: 0.6667, y: 0.3333, z: 0.755, wyckoff: "2d" },
+    { element: "O",  x: 0.0, y: 0.0, z: 0.0, wyckoff: "1a" },
+    { element: "O",  x: 0.3333, y: 0.6667, z: 0.645, wyckoff: "2d" },
+    { element: "O",  x: 0.6667, y: 0.3333, z: 0.355, wyckoff: "2d" },
+  ]},
+
   // Inverse Heusler — Mn2CoAl (F-43m)
   "Mn2CoAl": { formula: "Mn2CoAl", spaceGroup: "F-43m", spaceGroupNumber: 216, latticeType: "cubic", latticeA: 5.80, pressureGPa: 0, atoms: [
     { element: "Al", x: 0.0, y: 0.0, z: 0.0, wyckoff: "4a" },

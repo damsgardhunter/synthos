@@ -137,6 +137,8 @@ const PACKING_FACTORS: Record<string, number> = {
   "D88-A5B3": 0.74,
   "GeS-Pnma": 0.58,
   "A7-Rhombohedral": 0.34,
+  "A-RE2O3": 0.62,
+  "A5-betaSn": 0.53,
 };
 
 const DEFAULT_PACKING_FACTOR = 0.68;
@@ -2099,6 +2101,60 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
     chemistryRules: (elements) => {
       if (elements.length !== 1) return false;
       return ["Bi", "Sb", "As", "P"].includes(elements[0]);
+    },
+  },
+
+  // A-type RE sesquioxide: P-3m1 (164), A2O3 — hexagonal La2O3-type
+  // For: La2O3, Ce2O3, Pr2O3, Nd2O3, Pm2O3, Sm2O3, Eu2O3
+  // Distinct from corundum (R-3c): hexagonal layered vs rhombohedral.
+  // CRITICAL: Corundum excludes RE elements — ALL RE sesquioxides had no match.
+  // Primitive cell: 2A + 3O = 5 atoms, ratio [2,3]
+  // A at 2d (1/3, 2/3, z≈0.245), O at 1a (0,0,0) + 2d (1/3, 2/3, z≈0.645)
+  {
+    name: "A-RE2O3",
+    spaceGroup: "P-3m1",
+    latticeType: "hexagonal",
+    cOverA: 1.56,
+    sites: [
+      // RE at 2d
+      { label: "A", x: 0.3333, y: 0.6667, z: 0.245, role: "RE-layer" },
+      { label: "A", x: 0.6667, y: 0.3333, z: 0.755, role: "RE-layer" },
+      // O at 1a
+      { label: "B", x: 0.0, y: 0.0, z: 0.0, role: "O-central" },
+      // O at 2d
+      { label: "B", x: 0.3333, y: 0.6667, z: 0.645, role: "O-layer" },
+      { label: "B", x: 0.6667, y: 0.3333, z: 0.355, role: "O-layer" },
+    ],
+    stoichiometryRatio: [2, 3],
+    coordination: [7, 4],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      const hasO = elements.includes("O");
+      // A-type sesquioxide: RE or actinide + O
+      const hasRE = elements.some(e => isRareEarth(e) || ["Y", "Sc", "Bi", "Pu", "Am"].includes(e));
+      return hasO && hasRE;
+    },
+  },
+  // A5 β-Sn (white tin): I41/amd (141), elemental tetragonal
+  // For: Sn (Tc=3.7K superconductor), In (Tc=3.4K), Pa — tetragonal elements
+  // 5th elemental structure type after BCC, FCC, HCP, Diamond, A7.
+  // Primitive cell (BCC → half conventional): 2 atoms, ratio [1]
+  // Sn at 4a (0, 0, 0) in conventional → (0, 0, 0) + (0, 1/2, 1/4) in primitive
+  {
+    name: "A5-betaSn",
+    spaceGroup: "I41/amd",
+    latticeType: "tetragonal",
+    cOverA: 0.546,
+    sites: [
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "tetragonal-1" },
+      { label: "A", x: 0.0, y: 0.5, z: 0.25, role: "tetragonal-2" },
+    ],
+    stoichiometryRatio: [1],
+    coordination: [4],
+    chemistryRules: (elements) => {
+      if (elements.length !== 1) return false;
+      // β-Sn type: tetragonal elements (between diamond and metallic)
+      return ["Sn", "In", "Ga", "Pa"].includes(elements[0]);
     },
   },
 
