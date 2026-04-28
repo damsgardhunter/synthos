@@ -99,6 +99,7 @@ const PACKING_FACTORS: Record<string, number> = {
   "Olivine-A2BO4": 0.60,
   "DoublePerovskite-A2BBO6": 0.74,
   "RP-n2-A3B2O7": 0.58,
+  "Bi2212-A2B2CB2O8": 0.55,
 };
 
 const DEFAULT_PACKING_FACTOR = 0.68;
@@ -755,6 +756,51 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
       const hasAE = elements.some(e => ["Sr", "Ca", "Ba", "La", "Nd", "Pr"].includes(e));
       const hasTM = elements.some(e => ["Ru", "Mn", "Ni", "Co", "Fe", "Ti", "Ir"].includes(e));
       return hasO && hasAE && hasTM;
+    },
+  },
+
+  // Bi-2212 cuprate: I4/mmm, A2B2CB'2O8 (Bi2Sr2CaCu2O8+δ type)
+  // 5-element layered cuprate. Body-centered tetragonal primitive cell (15 atoms).
+  // A = Bi/Tl (heavy post-TM), B = Sr/Ba (alkaline earth), C = Ca (spacer),
+  // D = Cu (TM in CuO2 planes), E = O (oxygen)
+  // Wyckoff positions from literature: Bi 4e, Sr 4e, Ca 2a, Cu 4e, O at 8g+4e sites
+  {
+    name: "Bi2212-A2B2CB2O8",
+    spaceGroup: "I4/mmm",
+    latticeType: "tetragonal",
+    cOverA: 8.1,
+    sites: [
+      // A-sites: Bi/Tl (2 in primitive cell, from 4e)
+      { label: "A", x: 0.0, y: 0.0, z: 0.199, role: "BiO-layer" },
+      { label: "A", x: 0.0, y: 0.0, z: 0.801, role: "BiO-layer" },
+      // B-sites: Sr/Ba (2 in primitive cell, from 4e)
+      { label: "B", x: 0.0, y: 0.0, z: 0.110, role: "SrO-layer" },
+      { label: "B", x: 0.0, y: 0.0, z: 0.890, role: "SrO-layer" },
+      // C-site: Ca (1 in primitive cell, from 2a)
+      { label: "C", x: 0.0, y: 0.0, z: 0.0, role: "Ca-spacer" },
+      // D-sites: Cu (2 in primitive cell, from 4e)
+      { label: "D", x: 0.0, y: 0.0, z: 0.054, role: "CuO2-plane" },
+      { label: "D", x: 0.0, y: 0.0, z: 0.946, role: "CuO2-plane" },
+      // E-sites: O (8 in primitive cell)
+      { label: "E", x: 0.5, y: 0.0, z: 0.054, role: "O-planar" },
+      { label: "E", x: 0.0, y: 0.5, z: 0.054, role: "O-planar" },
+      { label: "E", x: 0.0, y: 0.0, z: 0.149, role: "O-apical" },
+      { label: "E", x: 0.0, y: 0.0, z: 0.851, role: "O-apical" },
+      { label: "E", x: 0.5, y: 0.0, z: 0.946, role: "O-planar" },
+      { label: "E", x: 0.0, y: 0.5, z: 0.946, role: "O-planar" },
+      { label: "E", x: 0.0, y: 0.0, z: 0.250, role: "O-BiO" },
+      { label: "E", x: 0.0, y: 0.0, z: 0.750, role: "O-BiO" },
+    ],
+    stoichiometryRatio: [2, 2, 1, 2, 8],
+    coordination: [6, 9, 8, 5, 2],
+    chemistryRules: (elements) => {
+      if (elements.length !== 5) return false;
+      const hasO = elements.includes("O");
+      const hasCu = elements.includes("Cu");
+      const hasHeavyPost = elements.some(e => ["Bi", "Tl", "Hg", "Pb"].includes(e));
+      const hasAE = elements.some(e => ["Sr", "Ba"].includes(e));
+      const hasSpacer = elements.includes("Ca") || elements.some(e => isRareEarth(e) || e === "Y");
+      return hasO && hasCu && hasHeavyPost && hasAE && hasSpacer;
     },
   },
 
