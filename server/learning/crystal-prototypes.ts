@@ -146,6 +146,7 @@ const PACKING_FACTORS: Record<string, number> = {
   "Hg1223-AB2C2D3O8": 0.55,
   "BaAl4-AB4": 0.68,
   "QuaternaryHeusler-ABCD": 0.68,
+  "Tl1212-AB2CD2O7": 0.55,
 };
 
 const DEFAULT_PACKING_FACTOR = 0.68;
@@ -368,7 +369,8 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
     chemistryRules: (elements) => {
       if (elements.length !== 3) return false;
       const hasAnion = elements.some(e => ["C", "N", "B", "O"].includes(e));
-      const hasMetal = elements.some(e => isTransitionMetal(e) || CATIONS_LARGE.has(e));
+      // Expanded to include alkali metals: Li3OCl, Na3OBr are key solid electrolytes
+      const hasMetal = elements.some(e => isTransitionMetal(e) || CATIONS_LARGE.has(e) || ["Li", "Na", "K", "Mg"].includes(e));
       return hasAnion && hasMetal;
     },
   },
@@ -770,7 +772,8 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
     chemistryRules: (elements) => {
       if (elements.length !== 4) return false;
       const hasO = elements.includes("O");
-      const hasAE = elements.some(e => ["Sr", "Ba", "Ca", "La", "Nd", "Pr", "Y"].includes(e));
+      // Expanded: Pb/Bi for piezoelectric double perovskites (PZT, PMN, PFN)
+      const hasAE = elements.some(e => ["Sr", "Ba", "Ca", "La", "Nd", "Pr", "Y", "Pb", "Bi", "K", "Na"].includes(e));
       const tmCount = elements.filter(e => isTransitionMetal(e)).length;
       return hasO && hasAE && tmCount >= 2;
     },
@@ -2402,6 +2405,49 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
       const hasSp = elements.some(e => ["Al", "Ga", "In", "Si", "Ge", "Sn", "Sb", "Bi"].includes(e));
       // Need at least 2 TMs and at least 1 sp-block element
       return tmCount >= 2 && hasSp;
+    },
+  },
+
+  // Tl-1212 cuprate: I4/mmm (139), AB2CD2O7 — single-Tl double-CuO2
+  // TlBa2CaCu2O7 — Tc ≈ 108K. Single Tl-O layer + double CuO2 planes.
+  // Distinct from Tl-2201 (single CuO2) and 2223 (triple, double Tl-O).
+  // Body-centered → primitive half: 1Tl + 2Ba + 1Ca + 2Cu + 7O = 13
+  // Ratio [1,2,1,2,7]
+  {
+    name: "Tl1212-AB2CD2O7",
+    spaceGroup: "I4/mmm",
+    latticeType: "tetragonal",
+    cOverA: 3.32,
+    sites: [
+      // Tl at 2b (0,0,1/2) → 1 in primitive
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "Tl-layer" },
+      // Ba at 4e → 2 in primitive
+      { label: "B", x: 0.0, y: 0.0, z: 0.15, role: "Ba-site" },
+      { label: "B", x: 0.0, y: 0.0, z: 0.85, role: "Ba-site" },
+      // Ca at 2a → 1 in primitive
+      { label: "C", x: 0.0, y: 0.0, z: 0.5, role: "Ca-spacer" },
+      // Cu at 4e → 2 in primitive
+      { label: "D", x: 0.0, y: 0.0, z: 0.37, role: "CuO2-plane" },
+      { label: "D", x: 0.0, y: 0.0, z: 0.63, role: "CuO2-plane" },
+      // O: 7 in primitive
+      { label: "E", x: 0.5, y: 0.0, z: 0.37, role: "O-planar" },
+      { label: "E", x: 0.0, y: 0.5, z: 0.37, role: "O-planar" },
+      { label: "E", x: 0.5, y: 0.0, z: 0.63, role: "O-planar" },
+      { label: "E", x: 0.0, y: 0.5, z: 0.63, role: "O-planar" },
+      { label: "E", x: 0.0, y: 0.0, z: 0.22, role: "O-apical" },
+      { label: "E", x: 0.0, y: 0.0, z: 0.78, role: "O-apical" },
+      { label: "E", x: 0.5, y: 0.5, z: 0.0, role: "O-Tl-layer" },
+    ],
+    stoichiometryRatio: [1, 2, 1, 2, 7],
+    coordination: [6, 10, 8, 5, 2],
+    chemistryRules: (elements) => {
+      if (elements.length !== 5) return false;
+      const hasO = elements.includes("O");
+      const hasCu = elements.includes("Cu");
+      const hasTl = elements.includes("Tl");
+      const hasAE = elements.some(e => ["Ba", "Sr"].includes(e));
+      const hasSpacer = elements.includes("Ca") || elements.some(e => isRareEarth(e) || e === "Y");
+      return hasO && hasCu && hasTl && hasAE && hasSpacer;
     },
   },
 
