@@ -88,6 +88,17 @@ const PACKING_FACTORS: Record<string, number> = {
   "Clathrate-Fm3m-MH10": 0.60,
   "Ternary-Clathrate-A2MHn": 0.58,
   "Ternary-Hex-Clathrate-A2MH9": 0.56,
+  // Additional families
+  "YBCO-123": 0.55,
+  "Hexaboride-MB6": 0.60,
+  "Diamond-Fd3m": 0.34,
+  "111-Pnictide-LiFeAs": 0.62,
+  "Delafossite-ABO2": 0.58,
+  "LayeredOxide-AMO2": 0.58,
+  "Chalcopyrite-ABX2": 0.52,
+  "Olivine-A2BO4": 0.60,
+  "DoublePerovskite-A2BBO6": 0.74,
+  "RP-n2-A3B2O7": 0.58,
 };
 
 const DEFAULT_PACKING_FACTOR = 0.68;
@@ -491,6 +502,263 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
     },
   },
   // ── End of hydride prototypes ──────────────────────────────────────────
+
+  // ── Additional structure families ──────────────────────────────────────
+
+  // YBCO-123 cuprate: ABa2Cu3O7 (Pmmm, orthorhombic simplified as tetragonal)
+  // For: YBa2Cu3O7, NdBa2Cu3O7, GdBa2Cu3O7, SmBa2Cu3O7, etc.
+  {
+    name: "YBCO-123",
+    spaceGroup: "Pmmm",
+    latticeType: "tetragonal",
+    cOverA: 3.06,
+    sites: [
+      { label: "A", x: 0.5, y: 0.5, z: 0.5, role: "rare-earth" },
+      { label: "B", x: 0.5, y: 0.5, z: 0.185, role: "Ba-site" },
+      { label: "B", x: 0.5, y: 0.5, z: 0.815, role: "Ba-site" },
+      { label: "C", x: 0.0, y: 0.0, z: 0.0, role: "Cu-chain" },
+      { label: "C", x: 0.0, y: 0.0, z: 0.356, role: "Cu-plane" },
+      { label: "C", x: 0.0, y: 0.0, z: 0.644, role: "Cu-plane" },
+      { label: "D", x: 0.0, y: 0.5, z: 0.0, role: "O-chain" },
+      { label: "D", x: 0.5, y: 0.0, z: 0.378, role: "O-plane" },
+      { label: "D", x: 0.5, y: 0.0, z: 0.622, role: "O-plane" },
+      { label: "D", x: 0.0, y: 0.5, z: 0.378, role: "O-plane" },
+      { label: "D", x: 0.0, y: 0.5, z: 0.622, role: "O-plane" },
+      { label: "D", x: 0.0, y: 0.0, z: 0.159, role: "O-apical" },
+      { label: "D", x: 0.0, y: 0.0, z: 0.841, role: "O-apical" },
+    ],
+    stoichiometryRatio: [1, 2, 3, 7],
+    coordination: [8, 10, 5, 2],
+    chemistryRules: (elements) => {
+      if (elements.length !== 4) return false;
+      const hasO = elements.includes("O");
+      const hasBa = elements.includes("Ba");
+      const hasCu = elements.includes("Cu");
+      const hasRE = elements.some(e => isRareEarth(e) || ["Y", "Bi", "Tl", "Hg"].includes(e));
+      return hasO && hasBa && hasCu && hasRE;
+    },
+  },
+  // Hexaboride: Pm-3m, 1 M + 6 B (MB6 stoichiometry)
+  // B forms octahedral cage. For: CaB6, LaB6, CeB6, SmB6, etc.
+  {
+    name: "Hexaboride-MB6",
+    spaceGroup: "Pm-3m",
+    latticeType: "cubic",
+    cOverA: 1.0,
+    sites: [
+      { label: "M", x: 0.0, y: 0.0, z: 0.0, role: "cage-center" },
+      { label: "B", x: 0.2, y: 0.5, z: 0.5, role: "B-octahedron" },
+      { label: "B", x: 0.8, y: 0.5, z: 0.5, role: "B-octahedron" },
+      { label: "B", x: 0.5, y: 0.2, z: 0.5, role: "B-octahedron" },
+      { label: "B", x: 0.5, y: 0.8, z: 0.5, role: "B-octahedron" },
+      { label: "B", x: 0.5, y: 0.5, z: 0.2, role: "B-octahedron" },
+      { label: "B", x: 0.5, y: 0.5, z: 0.8, role: "B-octahedron" },
+    ],
+    stoichiometryRatio: [1, 6],
+    coordination: [24, 5],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      return elements.includes("B") && elements.some(e =>
+        isRareEarth(e) || ["Ca", "Sr", "Ba", "Y", "Sc", "Th", "Eu", "Sm"].includes(e)
+      );
+    },
+  },
+  // Diamond cubic: Fd-3m, elemental (Si, Ge, C)
+  // 2 atoms in primitive cell at (0,0,0) and (0.25,0.25,0.25)
+  {
+    name: "Diamond-Fd3m",
+    spaceGroup: "Fd-3m",
+    latticeType: "cubic",
+    cOverA: 1.0,
+    sites: [
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "site-1" },
+      { label: "A", x: 0.25, y: 0.25, z: 0.25, role: "site-2" },
+    ],
+    stoichiometryRatio: [1],
+    coordination: [4],
+    chemistryRules: (elements) => {
+      if (elements.length !== 1) return false;
+      return ["C", "Si", "Ge", "Sn", "Pb"].includes(elements[0]);
+    },
+  },
+  // 111-type iron pnictide: P4/nmm, LiFeAs-type (3 elements, 1:1:1)
+  {
+    name: "111-Pnictide-LiFeAs",
+    spaceGroup: "P4/nmm",
+    latticeType: "tetragonal",
+    cOverA: 1.69,
+    sites: [
+      { label: "A", x: 0.25, y: 0.25, z: 0.345, role: "alkali" },
+      { label: "B", x: 0.75, y: 0.25, z: 0.0, role: "Fe-site" },
+      { label: "C", x: 0.25, y: 0.25, z: 0.737, role: "pnictogen" },
+    ],
+    stoichiometryRatio: [1, 1, 1],
+    coordination: [4, 4, 4],
+    chemistryRules: (elements) => {
+      if (elements.length !== 3) return false;
+      const hasAlkali = elements.some(e => ["Li", "Na", "K", "Cu"].includes(e));
+      const hasTM = elements.some(e => ["Fe", "Co", "Ni", "Mn", "Cr", "Ru"].includes(e));
+      const hasPn = elements.some(e => ["As", "P", "Sb", "Bi"].includes(e));
+      return hasAlkali && hasTM && hasPn;
+    },
+  },
+  // Delafossite: R-3m, ABO2 (CuFeO2-type)
+  // For: CuAlO2, CuFeO2, PdCoO2, PtCoO2 — topological and thermoelectric
+  {
+    name: "Delafossite-ABO2",
+    spaceGroup: "R-3m",
+    latticeType: "hexagonal",
+    cOverA: 5.6,
+    sites: [
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "linear-coord" },
+      { label: "B", x: 0.0, y: 0.0, z: 0.5, role: "octahedral" },
+      { label: "C", x: 0.0, y: 0.0, z: 0.11, role: "oxygen" },
+      { label: "C", x: 0.0, y: 0.0, z: 0.89, role: "oxygen" },
+    ],
+    stoichiometryRatio: [1, 1, 2],
+    coordination: [2, 6, 4],
+    chemistryRules: (elements) => {
+      if (elements.length !== 3) return false;
+      const hasNoble = elements.some(e => ["Cu", "Ag", "Pd", "Pt"].includes(e));
+      const hasTM = elements.some(e => ["Fe", "Al", "Cr", "Co", "Ga", "In", "Rh", "Ir"].includes(e));
+      const hasO = elements.includes("O");
+      return hasNoble && hasTM && hasO;
+    },
+  },
+  // Layered oxide: R-3m, AMO2 (LiCoO2-type, battery cathode)
+  // For: LiCoO2, LiNiO2, NaCoO2, LiMnO2, etc.
+  {
+    name: "LayeredOxide-AMO2",
+    spaceGroup: "R-3m",
+    latticeType: "hexagonal",
+    cOverA: 4.9,
+    sites: [
+      { label: "A", x: 0.0, y: 0.0, z: 0.5, role: "alkali-layer" },
+      { label: "B", x: 0.0, y: 0.0, z: 0.0, role: "TM-layer" },
+      { label: "C", x: 0.0, y: 0.0, z: 0.26, role: "O-layer" },
+      { label: "C", x: 0.0, y: 0.0, z: 0.74, role: "O-layer" },
+    ],
+    stoichiometryRatio: [1, 1, 2],
+    coordination: [6, 6, 6],
+    chemistryRules: (elements) => {
+      if (elements.length !== 3) return false;
+      const hasAlkali = elements.some(e => ["Li", "Na", "K"].includes(e));
+      const hasTM = elements.some(e => ["Co", "Ni", "Mn", "Fe", "V", "Cr", "Ti"].includes(e));
+      const hasO = elements.includes("O");
+      return hasAlkali && hasTM && hasO;
+    },
+  },
+  // Chalcopyrite: I-42d, ABX2 (CuFeS2-type)
+  // For: CuFeS2, CuGaS2, CuInSe2, AgGaSe2 — photovoltaic/thermoelectric
+  {
+    name: "Chalcopyrite-ABX2",
+    spaceGroup: "I-42d",
+    latticeType: "tetragonal",
+    cOverA: 1.97,
+    sites: [
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "cation-1" },
+      { label: "B", x: 0.0, y: 0.0, z: 0.5, role: "cation-2" },
+      { label: "C", x: 0.25, y: 0.125, z: 0.625, role: "anion" },
+      { label: "C", x: 0.75, y: 0.125, z: 0.875, role: "anion" },
+    ],
+    stoichiometryRatio: [1, 1, 2],
+    coordination: [4, 4, 4],
+    chemistryRules: (elements) => {
+      if (elements.length !== 3) return false;
+      const hasCu = elements.some(e => ["Cu", "Ag"].includes(e));
+      const hasTM = elements.some(e => ["Fe", "Ga", "In", "Al"].includes(e));
+      const hasCh = elements.some(e => ["S", "Se", "Te"].includes(e));
+      return hasCu && hasTM && hasCh;
+    },
+  },
+  // Olivine: Pnma, A2BO4 (LiFePO4-type, battery cathode)
+  // For: LiFePO4, LiMnPO4, LiCoPO4
+  {
+    name: "Olivine-A2BO4",
+    spaceGroup: "Pnma",
+    latticeType: "tetragonal",
+    cOverA: 0.47,
+    sites: [
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "octahedral-M1" },
+      { label: "A", x: 0.28, y: 0.25, z: 0.97, role: "octahedral-M2" },
+      { label: "B", x: 0.09, y: 0.25, z: 0.42, role: "tetrahedral" },
+      { label: "C", x: 0.10, y: 0.25, z: 0.74, role: "O1" },
+      { label: "C", x: 0.45, y: 0.25, z: 0.22, role: "O2" },
+      { label: "C", x: 0.16, y: 0.04, z: 0.28, role: "O3" },
+      { label: "C", x: 0.16, y: 0.46, z: 0.28, role: "O3" },
+    ],
+    stoichiometryRatio: [2, 1, 4],
+    coordination: [6, 4, 3],
+    chemistryRules: (elements) => {
+      if (elements.length < 3) return false;
+      const hasO = elements.includes("O");
+      const hasP = elements.some(e => ["P", "Si", "Ge"].includes(e));
+      const hasTM = elements.some(e => ["Fe", "Mn", "Co", "Ni", "Mg", "Li", "Na", "Ca"].includes(e));
+      return hasO && hasP && hasTM;
+    },
+  },
+  // Double perovskite: Fm-3m, A2BB'O6
+  // For: Sr2FeMoO6, Ba2CoWO6, La2NiMnO6
+  {
+    name: "DoublePerovskite-A2BBO6",
+    spaceGroup: "Fm-3m",
+    latticeType: "cubic",
+    cOverA: 1.0,
+    sites: [
+      { label: "A", x: 0.25, y: 0.25, z: 0.25, role: "A-site" },
+      { label: "A", x: 0.75, y: 0.75, z: 0.75, role: "A-site" },
+      { label: "B", x: 0.0, y: 0.0, z: 0.0, role: "B-site" },
+      { label: "C", x: 0.5, y: 0.5, z: 0.5, role: "B'-site" },
+      { label: "D", x: 0.25, y: 0.0, z: 0.0, role: "O-site" },
+      { label: "D", x: 0.75, y: 0.0, z: 0.0, role: "O-site" },
+      { label: "D", x: 0.0, y: 0.25, z: 0.0, role: "O-site" },
+      { label: "D", x: 0.0, y: 0.75, z: 0.0, role: "O-site" },
+      { label: "D", x: 0.0, y: 0.0, z: 0.25, role: "O-site" },
+      { label: "D", x: 0.0, y: 0.0, z: 0.75, role: "O-site" },
+    ],
+    stoichiometryRatio: [2, 1, 1, 6],
+    coordination: [12, 6, 6, 2],
+    chemistryRules: (elements) => {
+      if (elements.length !== 4) return false;
+      const hasO = elements.includes("O");
+      const hasAE = elements.some(e => ["Sr", "Ba", "Ca", "La", "Nd", "Pr", "Y"].includes(e));
+      const tmCount = elements.filter(e => isTransitionMetal(e)).length;
+      return hasO && hasAE && tmCount >= 2;
+    },
+  },
+  // Ruddlesden-Popper n=2: I4/mmm, A3B2O7
+  // For: Sr3Ru2O7, Ca3Mn2O7, La3Ni2O7
+  {
+    name: "RP-n2-A3B2O7",
+    spaceGroup: "I4/mmm",
+    latticeType: "tetragonal",
+    cOverA: 5.3,
+    sites: [
+      { label: "A", x: 0.0, y: 0.0, z: 0.5, role: "A-rock-salt" },
+      { label: "A", x: 0.0, y: 0.0, z: 0.318, role: "A-perovskite" },
+      { label: "A", x: 0.0, y: 0.0, z: 0.682, role: "A-perovskite" },
+      { label: "B", x: 0.0, y: 0.0, z: 0.1, role: "B-site" },
+      { label: "B", x: 0.0, y: 0.0, z: 0.9, role: "B-site" },
+      { label: "C", x: 0.0, y: 0.5, z: 0.1, role: "O-equatorial" },
+      { label: "C", x: 0.5, y: 0.0, z: 0.1, role: "O-equatorial" },
+      { label: "C", x: 0.0, y: 0.0, z: 0.2, role: "O-apical" },
+      { label: "C", x: 0.0, y: 0.0, z: 0.8, role: "O-apical" },
+      { label: "C", x: 0.0, y: 0.0, z: 0.0, role: "O-bridging" },
+      { label: "C", x: 0.0, y: 0.5, z: 0.9, role: "O-equatorial" },
+      { label: "C", x: 0.5, y: 0.0, z: 0.9, role: "O-equatorial" },
+    ],
+    stoichiometryRatio: [3, 2, 7],
+    coordination: [9, 6, 2],
+    chemistryRules: (elements) => {
+      if (elements.length !== 3) return false;
+      const hasO = elements.includes("O");
+      const hasAE = elements.some(e => ["Sr", "Ca", "Ba", "La", "Nd", "Pr"].includes(e));
+      const hasTM = elements.some(e => ["Ru", "Mn", "Ni", "Co", "Fe", "Ti", "Ir"].includes(e));
+      return hasO && hasAE && hasTM;
+    },
+  },
+
+  // ── End of additional families ─────────────────────────────────────────
   {
     name: "Heusler-L21",
     spaceGroup: "Fm-3m",
