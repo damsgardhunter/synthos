@@ -1127,6 +1127,30 @@ const KNOWN_STRUCTURES: Record<string, KnownStructure> = {
     { element: "Si", x: 0.401, y: 0.401, z: 0.25, wyckoff: "6g" },
   ]},
 
+  // GeS/SnSe — record-ZT thermoelectric (Pnma)
+  "SnSe": { formula: "SnSe", spaceGroup: "Pnma", spaceGroupNumber: 62, latticeType: "tetragonal", latticeA: 11.50, latticeC: 4.15, pressureGPa: 0, atoms: [
+    { element: "Sn", x: 0.12, y: 0.25, z: 0.10, wyckoff: "4c" },
+    { element: "Sn", x: 0.62, y: 0.75, z: 0.40, wyckoff: "4c" },
+    { element: "Se", x: 0.85, y: 0.25, z: 0.52, wyckoff: "4c" },
+    { element: "Se", x: 0.35, y: 0.75, z: 0.98, wyckoff: "4c" },
+  ]},
+  "GeSe": { formula: "GeSe", spaceGroup: "Pnma", spaceGroupNumber: 62, latticeType: "tetragonal", latticeA: 10.84, latticeC: 3.83, pressureGPa: 0, atoms: [
+    { element: "Ge", x: 0.12, y: 0.25, z: 0.10, wyckoff: "4c" },
+    { element: "Ge", x: 0.62, y: 0.75, z: 0.40, wyckoff: "4c" },
+    { element: "Se", x: 0.85, y: 0.25, z: 0.52, wyckoff: "4c" },
+    { element: "Se", x: 0.35, y: 0.75, z: 0.98, wyckoff: "4c" },
+  ]},
+
+  // A7 Rhombohedral — Bi (R-3m, topological semimetal)
+  "Bi": { formula: "Bi", spaceGroup: "R-3m", spaceGroupNumber: 166, latticeType: "hexagonal", latticeA: 4.55, latticeC: 11.86, pressureGPa: 0, atoms: [
+    { element: "Bi", x: 0.0, y: 0.0, z: 0.234, wyckoff: "6c" },
+    { element: "Bi", x: 0.0, y: 0.0, z: 0.766, wyckoff: "6c" },
+  ]},
+  "Sb": { formula: "Sb", spaceGroup: "R-3m", spaceGroupNumber: 166, latticeType: "hexagonal", latticeA: 4.31, latticeC: 11.27, pressureGPa: 0, atoms: [
+    { element: "Sb", x: 0.0, y: 0.0, z: 0.233, wyckoff: "6c" },
+    { element: "Sb", x: 0.0, y: 0.0, z: 0.767, wyckoff: "6c" },
+  ]},
+
   // Inverse Heusler — Mn2CoAl (F-43m)
   "Mn2CoAl": { formula: "Mn2CoAl", spaceGroup: "F-43m", spaceGroupNumber: 216, latticeType: "cubic", latticeA: 5.80, pressureGPa: 0, atoms: [
     { element: "Al", x: 0.0, y: 0.0, z: 0.0, wyckoff: "4a" },

@@ -135,6 +135,8 @@ const PACKING_FACTORS: Record<string, number> = {
   "DO3-A3B": 0.68,
   "LiNbO3-R3c": 0.65,
   "D88-A5B3": 0.74,
+  "GeS-Pnma": 0.58,
+  "A7-Rhombohedral": 0.34,
 };
 
 const DEFAULT_PACKING_FACTOR = 0.68;
@@ -2047,6 +2049,56 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
       const hasTM = elements.some(e => ["Mn", "Ti", "Cr", "V", "Nb", "Ta", "W", "Mo", "Fe", "Zr", "Hf"].includes(e));
       const hasSemimetal = elements.some(e => ["Si", "Ge", "Sn", "Ga", "Al", "In", "P", "As", "B"].includes(e));
       return hasTM && hasSemimetal;
+    },
+  },
+
+  // GeS/SnSe-type: Pnma (62), AB — orthorhombic IV-VI thermoelectric
+  // For: SnSe, SnS, GeSe, GeS, PbS (ortho), InSe — record-ZT thermoelectrics
+  // CRITICAL: SnSe had ZERO template match — Sn is not TM, so MnP/FeB/NiAs fail.
+  // Pnma with 2 formula units: 2A + 2B = 4 sites, ratio [1,1]
+  // Sn at 4c (x, 1/4, z), Se at 4c (x, 1/4, z)
+  {
+    name: "GeS-Pnma",
+    spaceGroup: "Pnma",
+    latticeType: "tetragonal",
+    cOverA: 0.92,
+    sites: [
+      // A (Sn/Ge/Pb/In) at 4c
+      { label: "A", x: 0.12, y: 0.25, z: 0.10, role: "cation" },
+      { label: "A", x: 0.62, y: 0.75, z: 0.40, role: "cation" },
+      // B (Se/S/Te) at 4c
+      { label: "B", x: 0.85, y: 0.25, z: 0.52, role: "anion" },
+      { label: "B", x: 0.35, y: 0.75, z: 0.98, role: "anion" },
+    ],
+    stoichiometryRatio: [1, 1],
+    coordination: [3, 3],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      // Group-14/15 main-group + chalcogen (no TM required)
+      const hasCation = elements.some(e => ["Sn", "Ge", "Pb", "In", "Tl", "Sb", "Bi", "As"].includes(e));
+      const hasChalcogen = elements.some(e => ["S", "Se", "Te"].includes(e));
+      return hasCation && hasChalcogen;
+    },
+  },
+  // A7 Rhombohedral elemental: R-3m (166) — Bi/Sb/As structure
+  // For: Bi, Sb, As — topological semimetals, pnictogen elements
+  // Distinct from FCC/BCC/HCP: buckled bilayer with rhombohedral stacking.
+  // Primitive cell: 2 atoms at (x, x, x) and (-x, -x, -x) with x ≈ 0.234
+  // Using hexagonal setting: 2 atoms, ratio [1]
+  {
+    name: "A7-Rhombohedral",
+    spaceGroup: "R-3m",
+    latticeType: "hexagonal",
+    cOverA: 2.61,
+    sites: [
+      { label: "A", x: 0.0, y: 0.0, z: 0.234, role: "pnictogen-up" },
+      { label: "A", x: 0.0, y: 0.0, z: 0.766, role: "pnictogen-down" },
+    ],
+    stoichiometryRatio: [1],
+    coordination: [3],
+    chemistryRules: (elements) => {
+      if (elements.length !== 1) return false;
+      return ["Bi", "Sb", "As", "P"].includes(elements[0]);
     },
   },
 
