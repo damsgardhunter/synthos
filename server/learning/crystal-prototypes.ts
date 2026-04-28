@@ -127,6 +127,8 @@ const PACKING_FACTORS: Record<string, number> = {
   "Sesquicarbide-A3C2": 0.65,
   "Dodecaboride-AB12": 0.62,
   "Hg1201-AB2CO4": 0.58,
+  "C11b-Disilicide-AB2": 0.68,
+  "Tetraboride-AB4": 0.60,
 };
 
 const DEFAULT_PACKING_FACTOR = 0.68;
@@ -1777,6 +1779,65 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
       const hasHg = elements.includes("Hg");
       const hasAE = elements.some(e => ["Ba", "Sr"].includes(e));
       return hasO && hasCu && hasHg && hasAE;
+    },
+  },
+
+  // C11b Disilicide: I4/mmm (139), AB2 — MoSi2-type
+  // Refractory disilicides/digermanides for high-temperature structural use.
+  // For: MoSi2, WSi2, CrSi2, TiSi2, NbSi2, TaSi2, VSi2
+  // Primitive cell (BCC → half conventional): 1A + 2B = 3 atoms, ratio [1,2]
+  // A at 2a (0,0,0), B at 4e (0,0,z) with z ≈ 0.335
+  {
+    name: "C11b-Disilicide-AB2",
+    spaceGroup: "I4/mmm",
+    latticeType: "tetragonal",
+    cOverA: 2.45,
+    sites: [
+      // A (Mo/W/Cr/Ti) at 2a → 1 in primitive
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "refractory-TM" },
+      // B (Si/Ge) at 4e → 2 in primitive
+      { label: "B", x: 0.0, y: 0.0, z: 0.335, role: "Si-layer" },
+      { label: "B", x: 0.0, y: 0.0, z: 0.665, role: "Si-layer" },
+    ],
+    stoichiometryRatio: [1, 2],
+    coordination: [10, 5],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      // Refractory TM + group-14 semimetal
+      const hasTM = elements.some(e => ["Mo", "W", "Cr", "Ti", "V", "Nb", "Ta", "Zr", "Hf", "Re"].includes(e));
+      const hasSi = elements.some(e => ["Si", "Ge"].includes(e));
+      return hasTM && hasSi;
+    },
+  },
+  // Tetraboride: P4/mbm (127), AB4 — YB4/ThB4-type boride
+  // For: YB4, LaB4, CeB4, ThB4, SmB4, NdB4, GdB4 — heavy-fermion, SC
+  // Primitive cell (P-type = conventional): per f.u. 1A + 4B = 5 atoms, ratio [1,4]
+  // A at 2a, B at 4g (x, x+1/2, 0) with x ≈ 0.18 + 4h (x, x+1/2, 1/2) with x ≈ 0.04
+  // Simplified to 1 formula unit representation
+  {
+    name: "Tetraboride-AB4",
+    spaceGroup: "P4/mbm",
+    latticeType: "tetragonal",
+    cOverA: 0.57,
+    sites: [
+      // M at 2a-like
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "metal" },
+      // B at 4g-like (x, x+1/2, 0)
+      { label: "B", x: 0.18, y: 0.68, z: 0.0, role: "B-ring-1" },
+      { label: "B", x: 0.32, y: 0.18, z: 0.0, role: "B-ring-2" },
+      // B at 4h-like (x, x+1/2, 1/2)
+      { label: "B", x: 0.04, y: 0.54, z: 0.5, role: "B-chain-1" },
+      { label: "B", x: 0.46, y: 0.04, z: 0.5, role: "B-chain-2" },
+    ],
+    stoichiometryRatio: [1, 4],
+    coordination: [18, 5],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      const hasB = elements.includes("B");
+      const hasMetal = elements.some(e =>
+        isRareEarth(e) || ["Y", "Sc", "Th", "U", "Zr", "Hf", "Ca", "Sr"].includes(e)
+      );
+      return hasB && hasMetal;
     },
   },
 

@@ -1010,6 +1010,27 @@ const KNOWN_STRUCTURES: Record<string, KnownStructure> = {
     { element: "O",  x: 0.0, y: 0.0, z: 0.84, wyckoff: "2e" },
   ]},
 
+  // C11b Disilicide — MoSi2 (I4/mmm)
+  "MoSi2": { formula: "MoSi2", spaceGroup: "I4/mmm", spaceGroupNumber: 139, latticeType: "tetragonal", latticeA: 3.20, latticeC: 7.86, pressureGPa: 0, atoms: [
+    { element: "Mo", x: 0.0, y: 0.0, z: 0.0, wyckoff: "2a" },
+    { element: "Si", x: 0.0, y: 0.0, z: 0.335, wyckoff: "4e" },
+    { element: "Si", x: 0.0, y: 0.0, z: 0.665, wyckoff: "4e" },
+  ]},
+  "WSi2": { formula: "WSi2", spaceGroup: "I4/mmm", spaceGroupNumber: 139, latticeType: "tetragonal", latticeA: 3.21, latticeC: 7.83, pressureGPa: 0, atoms: [
+    { element: "W",  x: 0.0, y: 0.0, z: 0.0, wyckoff: "2a" },
+    { element: "Si", x: 0.0, y: 0.0, z: 0.335, wyckoff: "4e" },
+    { element: "Si", x: 0.0, y: 0.0, z: 0.665, wyckoff: "4e" },
+  ]},
+
+  // Tetraboride — YB4 (P4/mbm)
+  "YB4": { formula: "YB4", spaceGroup: "P4/mbm", spaceGroupNumber: 127, latticeType: "tetragonal", latticeA: 7.11, latticeC: 4.02, pressureGPa: 0, atoms: [
+    { element: "Y", x: 0.0, y: 0.0, z: 0.0, wyckoff: "2a" },
+    { element: "B", x: 0.18, y: 0.68, z: 0.0, wyckoff: "4g" },
+    { element: "B", x: 0.32, y: 0.18, z: 0.0, wyckoff: "4g" },
+    { element: "B", x: 0.04, y: 0.54, z: 0.5, wyckoff: "4h" },
+    { element: "B", x: 0.46, y: 0.04, z: 0.5, wyckoff: "4h" },
+  ]},
+
   // Inverse Heusler — Mn2CoAl (F-43m)
   "Mn2CoAl": { formula: "Mn2CoAl", spaceGroup: "F-43m", spaceGroupNumber: 216, latticeType: "cubic", latticeA: 5.80, pressureGPa: 0, atoms: [
     { element: "Al", x: 0.0, y: 0.0, z: 0.0, wyckoff: "4a" },
