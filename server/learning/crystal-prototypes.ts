@@ -104,6 +104,7 @@ const PACKING_FACTORS: Record<string, number> = {
   "MAX312-M3AX2": 0.68,
   "MAX413-M4AX3": 0.68,
   "Brownmillerite-A2B2O5": 0.62,
+  "RP-n3-A4B3O10": 0.55,
 };
 
 const DEFAULT_PACKING_FACTOR = 0.68;
@@ -934,6 +935,59 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
       const hasO = elements.includes("O");
       const hasAE = elements.some(e => ["Ca", "Sr", "Ba", "La", "Y"].includes(e));
       const hasTM = elements.some(e => ["Fe", "Al", "Mn", "Co", "Cr", "Ga", "In"].includes(e));
+      return hasO && hasAE && hasTM;
+    },
+  },
+
+  // Ruddlesden-Popper n=3: I4/mmm (139), A4B3O10
+  // Triple-perovskite-block intergrown with rock-salt layer.
+  // For: Sr4Ru3O10, La4Ni3O10, Ca4Mn3O10, Sr4V3O10
+  // Primitive cell (BCC → half conventional): 4A + 3B + 10O = 17 atoms
+  // Based on La4Ni3O10 literature (Zhang et al., Nature 2024 high-Tc)
+  // z-coordinates scaled for c/a ≈ 7.2 (c ≈ 28 Å, a ≈ 3.85 Å)
+  {
+    name: "RP-n3-A4B3O10",
+    spaceGroup: "I4/mmm",
+    latticeType: "tetragonal",
+    cOverA: 7.2,
+    sites: [
+      // A-sites: 4 in primitive cell
+      // A1 at 2b: rock-salt boundary layer
+      { label: "A", x: 0.0, y: 0.0, z: 0.5, role: "A-rock-salt" },
+      // A2 at 4e: between outer and inner B layers
+      { label: "A", x: 0.0, y: 0.0, z: 0.321, role: "A-outer-perovskite" },
+      { label: "A", x: 0.0, y: 0.0, z: 0.679, role: "A-outer-perovskite" },
+      // A3 at 4e: between two inner B layers (at center of triple block)
+      { label: "A", x: 0.0, y: 0.0, z: 0.178, role: "A-inner-perovskite" },
+      // B-sites: 3 in primitive cell
+      // B1 at 4e: outer octahedral layers
+      { label: "B", x: 0.0, y: 0.0, z: 0.071, role: "B-outer-oct" },
+      { label: "B", x: 0.0, y: 0.0, z: 0.929, role: "B-outer-oct" },
+      // B2 at 2a: inner octahedral layer (center of triple block)
+      { label: "B", x: 0.0, y: 0.0, z: 0.0, role: "B-inner-oct" },
+      // O-sites: 10 in primitive cell
+      // O-equatorial around outer B (4 sites from 8g)
+      { label: "C", x: 0.0, y: 0.5, z: 0.071, role: "O-eq-outer" },
+      { label: "C", x: 0.5, y: 0.0, z: 0.071, role: "O-eq-outer" },
+      { label: "C", x: 0.0, y: 0.5, z: 0.929, role: "O-eq-outer" },
+      { label: "C", x: 0.5, y: 0.0, z: 0.929, role: "O-eq-outer" },
+      // O-equatorial around inner B (2 sites from 4c)
+      { label: "C", x: 0.0, y: 0.5, z: 0.0, role: "O-eq-inner" },
+      { label: "C", x: 0.5, y: 0.0, z: 0.0, role: "O-eq-inner" },
+      // O-apical between outer B and rock-salt (2 from 4e)
+      { label: "C", x: 0.0, y: 0.0, z: 0.393, role: "O-apical-outer" },
+      { label: "C", x: 0.0, y: 0.0, z: 0.607, role: "O-apical-outer" },
+      // O-apical bridging outer-inner B layers (2 from 4e)
+      { label: "C", x: 0.0, y: 0.0, z: 0.107, role: "O-apical-bridge" },
+      { label: "C", x: 0.0, y: 0.0, z: 0.893, role: "O-apical-bridge" },
+    ],
+    stoichiometryRatio: [4, 3, 10],
+    coordination: [9, 6, 2],
+    chemistryRules: (elements) => {
+      if (elements.length !== 3) return false;
+      const hasO = elements.includes("O");
+      const hasAE = elements.some(e => ["Sr", "Ca", "Ba", "La", "Nd", "Pr", "Y"].includes(e));
+      const hasTM = elements.some(e => ["Ru", "Mn", "Ni", "Co", "Fe", "Ti", "Ir", "V"].includes(e));
       return hasO && hasAE && hasTM;
     },
   },

@@ -714,6 +714,27 @@ const KNOWN_STRUCTURES: Record<string, KnownStructure> = {
     { element: "O",  x: 0.371, y: 0.25, z: 0.419, wyckoff: "8d" },
   ]},
 
+  // Ruddlesden-Popper n=3 — La4Ni3O10 (I4/mmm, high-Tc nickelate under pressure)
+  "La4Ni3O10": { formula: "La4Ni3O10", spaceGroup: "I4/mmm", spaceGroupNumber: 139, latticeType: "tetragonal", latticeA: 3.86, latticeC: 27.96, pressureGPa: 0, atoms: [
+    { element: "La", x: 0.0, y: 0.0, z: 0.5, wyckoff: "2b" },
+    { element: "La", x: 0.0, y: 0.0, z: 0.321, wyckoff: "4e" },
+    { element: "La", x: 0.0, y: 0.0, z: 0.679, wyckoff: "4e" },
+    { element: "La", x: 0.0, y: 0.0, z: 0.178, wyckoff: "4e" },
+    { element: "Ni", x: 0.0, y: 0.0, z: 0.071, wyckoff: "4e" },
+    { element: "Ni", x: 0.0, y: 0.0, z: 0.929, wyckoff: "4e" },
+    { element: "Ni", x: 0.0, y: 0.0, z: 0.0, wyckoff: "2a" },
+    { element: "O",  x: 0.0, y: 0.5, z: 0.071, wyckoff: "8g" },
+    { element: "O",  x: 0.5, y: 0.0, z: 0.071, wyckoff: "8g" },
+    { element: "O",  x: 0.0, y: 0.5, z: 0.929, wyckoff: "8g" },
+    { element: "O",  x: 0.5, y: 0.0, z: 0.929, wyckoff: "8g" },
+    { element: "O",  x: 0.0, y: 0.5, z: 0.0, wyckoff: "4c" },
+    { element: "O",  x: 0.5, y: 0.0, z: 0.0, wyckoff: "4c" },
+    { element: "O",  x: 0.0, y: 0.0, z: 0.393, wyckoff: "4e" },
+    { element: "O",  x: 0.0, y: 0.0, z: 0.607, wyckoff: "4e" },
+    { element: "O",  x: 0.0, y: 0.0, z: 0.107, wyckoff: "4e" },
+    { element: "O",  x: 0.0, y: 0.0, z: 0.893, wyckoff: "4e" },
+  ]},
+
   // Inverse Heusler — Mn2CoAl (F-43m)
   "Mn2CoAl": { formula: "Mn2CoAl", spaceGroup: "F-43m", spaceGroupNumber: 216, latticeType: "cubic", latticeA: 5.80, pressureGPa: 0, atoms: [
     { element: "Al", x: 0.0, y: 0.0, z: 0.0, wyckoff: "4a" },
