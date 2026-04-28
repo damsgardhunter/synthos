@@ -839,6 +839,30 @@ const KNOWN_STRUCTURES: Record<string, KnownStructure> = {
     { element: "S",  x: 0.245, y: 0.755, z: 0.872, wyckoff: "8i" },
   ]},
 
+  // Scheelite — CaWO4 (I41/a)
+  "CaWO4": { formula: "CaWO4", spaceGroup: "I41/a", spaceGroupNumber: 88, latticeType: "tetragonal", latticeA: 5.24, latticeC: 11.37, pressureGPa: 0, atoms: [
+    { element: "Ca", x: 0.0, y: 0.25, z: 0.625, wyckoff: "4b" },
+    { element: "Ca", x: 0.0, y: 0.75, z: 0.125, wyckoff: "4b" },
+    { element: "W",  x: 0.0, y: 0.25, z: 0.125, wyckoff: "4a" },
+    { element: "W",  x: 0.0, y: 0.75, z: 0.625, wyckoff: "4a" },
+    { element: "O",  x: 0.241, y: 0.150, z: 0.081, wyckoff: "16f" },
+    { element: "O",  x: 0.759, y: 0.350, z: 0.081, wyckoff: "16f" },
+    { element: "O",  x: 0.150, y: 0.741, z: 0.169, wyckoff: "16f" },
+    { element: "O",  x: 0.350, y: 0.259, z: 0.169, wyckoff: "16f" },
+    { element: "O",  x: 0.759, y: 0.850, z: 0.919, wyckoff: "16f" },
+    { element: "O",  x: 0.241, y: 0.650, z: 0.919, wyckoff: "16f" },
+    { element: "O",  x: 0.850, y: 0.259, z: 0.831, wyckoff: "16f" },
+    { element: "O",  x: 0.650, y: 0.741, z: 0.831, wyckoff: "16f" },
+  ]},
+
+  // Cementite — Fe3C (Pnma)
+  "Fe3C": { formula: "Fe3C", spaceGroup: "Pnma", spaceGroupNumber: 62, latticeType: "tetragonal", latticeA: 5.09, latticeC: 3.02, pressureGPa: 0, atoms: [
+    { element: "Fe", x: 0.036, y: 0.25, z: 0.838, wyckoff: "4c" },
+    { element: "Fe", x: 0.186, y: 0.065, z: 0.334, wyckoff: "8d" },
+    { element: "Fe", x: 0.186, y: 0.435, z: 0.334, wyckoff: "8d" },
+    { element: "C",  x: 0.890, y: 0.25, z: 0.443, wyckoff: "4c" },
+  ]},
+
   // Inverse Heusler — Mn2CoAl (F-43m)
   "Mn2CoAl": { formula: "Mn2CoAl", spaceGroup: "F-43m", spaceGroupNumber: 216, latticeType: "cubic", latticeA: 5.80, pressureGPa: 0, atoms: [
     { element: "Al", x: 0.0, y: 0.0, z: 0.0, wyckoff: "4a" },

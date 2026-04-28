@@ -113,6 +113,8 @@ const PACKING_FACTORS: Record<string, number> = {
   "PostPerovskite-ABO3": 0.65,
   "Aurivillius-Bi2BO6": 0.55,
   "Stannite-A2BCS4": 0.52,
+  "Scheelite-ABO4": 0.62,
+  "Cementite-A3B": 0.68,
 };
 
 const DEFAULT_PACKING_FACTOR = 0.68;
@@ -204,7 +206,9 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
     chemistryRules: (elements) => {
       if (elements.length !== 2) return false;
       const hasTM = elements.some(e => isTransitionMetal(e));
-      return hasTM;
+      // A15 compounds are two metals/semimetals (Nb3Sn, V3Si), never TM + light interstitial
+      const hasLightInterstitial = elements.some(e => ["C", "N", "B", "H"].includes(e));
+      return hasTM && !hasLightInterstitial;
     },
   },
   {
@@ -1291,6 +1295,73 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
       const hasSn = elements.some(e => ["Sn", "Ge", "Si"].includes(e));
       const hasCh = elements.some(e => ["S", "Se", "Te"].includes(e));
       return hasCu && hasZn && hasSn && hasCh;
+    },
+  },
+
+  // Scheelite: I41/a (88), ABO4 — scintillator/phosphor host
+  // For: CaWO4, SrWO4, BaWO4, PbWO4, CaMoO4, SrMoO4, YVO4
+  // Body-centered tetragonal. Primitive cell (half conventional):
+  // 2A + 2B + 8O = 12 atoms, ratio [1,1,4]
+  // Wyckoff: A at 4b, B at 4a, O at 16f
+  {
+    name: "Scheelite-ABO4",
+    spaceGroup: "I41/a",
+    latticeType: "tetragonal",
+    cOverA: 2.17,
+    sites: [
+      // A (Ca/Sr/Ba/Pb/RE) at 4b → 2 in primitive
+      { label: "A", x: 0.0, y: 0.25, z: 0.625, role: "A-site" },
+      { label: "A", x: 0.0, y: 0.75, z: 0.125, role: "A-site" },
+      // B (W/Mo/V) at 4a → 2 in primitive
+      { label: "B", x: 0.0, y: 0.25, z: 0.125, role: "B-site" },
+      { label: "B", x: 0.0, y: 0.75, z: 0.625, role: "B-site" },
+      // O at 16f → 8 in primitive
+      { label: "C", x: 0.241, y: 0.150, z: 0.081, role: "O-1" },
+      { label: "C", x: 0.759, y: 0.350, z: 0.081, role: "O-2" },
+      { label: "C", x: 0.150, y: 0.741, z: 0.169, role: "O-3" },
+      { label: "C", x: 0.350, y: 0.259, z: 0.169, role: "O-4" },
+      { label: "C", x: 0.759, y: 0.850, z: 0.919, role: "O-5" },
+      { label: "C", x: 0.241, y: 0.650, z: 0.919, role: "O-6" },
+      { label: "C", x: 0.850, y: 0.259, z: 0.831, role: "O-7" },
+      { label: "C", x: 0.650, y: 0.741, z: 0.831, role: "O-8" },
+    ],
+    stoichiometryRatio: [1, 1, 4],
+    coordination: [8, 4, 2],
+    chemistryRules: (elements) => {
+      if (elements.length !== 3) return false;
+      const hasO = elements.includes("O");
+      const hasA = elements.some(e => ["Ca", "Sr", "Ba", "Pb", "Bi", "Y", "La", "Ce", "Nd", "Gd", "Eu"].includes(e));
+      const hasB = elements.some(e => ["W", "Mo", "V", "Cr", "Re"].includes(e));
+      return hasO && hasA && hasB;
+    },
+  },
+  // Cementite: Pnma (62), A3B — Fe3C-type intermetallic carbide
+  // For: Fe3C, Mn3C, Cr3C, Co3C, Ni3C — steels, hard coatings, catalysts
+  // Orthorhombic primitive cell = conventional. Using 1 formula unit:
+  // 3 A + 1 B = 4 atoms. Reduced from full cell (Z=4, 16 atoms).
+  // Wyckoff: Fe1 at 4c (x,1/4,z), Fe2 at 8d (x,y,z), C at 4c (x,1/4,z)
+  // Simplified template with representative 4-atom f.u.
+  {
+    name: "Cementite-A3B",
+    spaceGroup: "Pnma",
+    latticeType: "tetragonal",
+    cOverA: 0.59,
+    sites: [
+      // Fe1 at 4c-like
+      { label: "A", x: 0.036, y: 0.25, z: 0.838, role: "metal-4c" },
+      // Fe2 at 8d-like (2 per f.u.)
+      { label: "A", x: 0.186, y: 0.065, z: 0.334, role: "metal-8d-1" },
+      { label: "A", x: 0.186, y: 0.435, z: 0.334, role: "metal-8d-2" },
+      // C at 4c-like
+      { label: "B", x: 0.890, y: 0.25, z: 0.443, role: "carbon" },
+    ],
+    stoichiometryRatio: [3, 1],
+    coordination: [6, 9],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      const hasTM = elements.some(e => ["Fe", "Mn", "Cr", "Co", "Ni", "W", "Mo", "V"].includes(e));
+      const hasLight = elements.some(e => ["C", "N", "B"].includes(e));
+      return hasTM && hasLight;
     },
   },
 
