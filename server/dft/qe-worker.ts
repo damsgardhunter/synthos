@@ -1786,9 +1786,11 @@ function generateSCFInput(
     atomicPositions += `  ${pos.element}  ${pos.x.toFixed(6)}  ${pos.y.toFixed(6)}  ${pos.z.toFixed(6)}\n`;
   }
 
+  const knownS = lookupKnownStructure(formula);
   const { cOverA } = determineCrystalSystem(elements, counts);
-  const bOverA = estimateBOverA(elements, counts);
-  const cellBlock = `\n${generateCellParameters(latticeA, cOverA, 0, bOverA, elements, counts)}`;
+  const bOverA = knownS?.latticeB ? knownS.latticeB / knownS.latticeA : estimateBOverA(elements, counts);
+  const effCOverA = knownS?.latticeC ? knownS.latticeC / knownS.latticeA : cOverA;
+  const cellBlock = `\n${generateCellParameters(latticeA, effCOverA, 0, bOverA, elements, counts, knownS?.alpha ?? 90, knownS?.beta ?? 90, knownS?.gamma ?? 90)}`;
 
   return `&CONTROL
   calculation = 'scf',
@@ -3031,9 +3033,14 @@ function generateSCFInputWithParams(
     atomicPositions += `  ${pos.element}  ${pos.x.toFixed(6)}  ${pos.y.toFixed(6)}  ${pos.z.toFixed(6)}\n`;
   }
 
-  const cOverA2 = estimateCOverA(elements, counts);
-  const bOverA2 = estimateBOverA(elements, counts);
-  const cellBlock2 = `\n${generateCellParameters(latticeA, cOverA2, 0, bOverA2, elements, counts)}`;
+  // Use known-structure lattice parameters when available (monoclinic/triclinic need angles)
+  const knownStruct = lookupKnownStructure(formula);
+  const cOverA2 = knownStruct?.latticeC ? knownStruct.latticeC / knownStruct.latticeA : estimateCOverA(elements, counts);
+  const bOverA2 = knownStruct?.latticeB ? knownStruct.latticeB / knownStruct.latticeA : estimateBOverA(elements, counts);
+  const cellAlpha = knownStruct?.alpha ?? 90;
+  const cellBeta = knownStruct?.beta ?? 90;
+  const cellGamma = knownStruct?.gamma ?? 90;
+  const cellBlock2 = `\n${generateCellParameters(latticeA, cOverA2, 0, bOverA2, elements, counts, cellAlpha, cellBeta, cellGamma)}`;
 
   // DFT+U overrides normal nspin/magnetization block when activated.
   // Broaden the detector beyond MAGNETIC_ELEMENTS so 4d/5d TMs and TM-hydrides
