@@ -1089,6 +1089,44 @@ const KNOWN_STRUCTURES: Record<string, KnownStructure> = {
     { element: "Bi", x: 0.0, y: 0.0, z: 0.0, wyckoff: "4a" },
   ]},
 
+  // LiNbO3 — ferroelectric/electro-optic (R3c)
+  "LiNbO3": { formula: "LiNbO3", spaceGroup: "R3c", spaceGroupNumber: 161, latticeType: "hexagonal", latticeA: 5.15, latticeC: 13.86, pressureGPa: 0, atoms: [
+    { element: "Li", x: 0.0, y: 0.0, z: 0.278, wyckoff: "6a" },
+    { element: "Li", x: 0.0, y: 0.0, z: 0.778, wyckoff: "6a" },
+    { element: "Nb", x: 0.0, y: 0.0, z: 0.0, wyckoff: "6a" },
+    { element: "Nb", x: 0.0, y: 0.0, z: 0.5, wyckoff: "6a" },
+    { element: "O",  x: 0.047, y: 0.343, z: 0.063, wyckoff: "18b" },
+    { element: "O",  x: 0.657, y: 0.953, z: 0.063, wyckoff: "18b" },
+    { element: "O",  x: 0.343, y: 0.047, z: 0.563, wyckoff: "18b" },
+    { element: "O",  x: 0.953, y: 0.657, z: 0.563, wyckoff: "18b" },
+    { element: "O",  x: 0.657, y: 0.704, z: 0.396, wyckoff: "18b" },
+    { element: "O",  x: 0.296, y: 0.953, z: 0.896, wyckoff: "18b" },
+  ]},
+  "LiTaO3": { formula: "LiTaO3", spaceGroup: "R3c", spaceGroupNumber: 161, latticeType: "hexagonal", latticeA: 5.15, latticeC: 13.78, pressureGPa: 0, atoms: [
+    { element: "Li", x: 0.0, y: 0.0, z: 0.281, wyckoff: "6a" },
+    { element: "Li", x: 0.0, y: 0.0, z: 0.781, wyckoff: "6a" },
+    { element: "Ta", x: 0.0, y: 0.0, z: 0.0, wyckoff: "6a" },
+    { element: "Ta", x: 0.0, y: 0.0, z: 0.5, wyckoff: "6a" },
+    { element: "O",  x: 0.051, y: 0.346, z: 0.064, wyckoff: "18b" },
+    { element: "O",  x: 0.654, y: 0.949, z: 0.064, wyckoff: "18b" },
+    { element: "O",  x: 0.346, y: 0.051, z: 0.564, wyckoff: "18b" },
+    { element: "O",  x: 0.949, y: 0.654, z: 0.564, wyckoff: "18b" },
+    { element: "O",  x: 0.654, y: 0.705, z: 0.397, wyckoff: "18b" },
+    { element: "O",  x: 0.295, y: 0.949, z: 0.897, wyckoff: "18b" },
+  ]},
+
+  // D88 — Ti5Si3 (P63/mcm, refractory silicide)
+  "Ti5Si3": { formula: "Ti5Si3", spaceGroup: "P63/mcm", spaceGroupNumber: 193, latticeType: "hexagonal", latticeA: 7.44, latticeC: 5.14, pressureGPa: 0, atoms: [
+    { element: "Ti", x: 0.3333, y: 0.6667, z: 0.0, wyckoff: "4d" },
+    { element: "Ti", x: 0.6667, y: 0.3333, z: 0.0, wyckoff: "4d" },
+    { element: "Ti", x: 0.236, y: 0.0, z: 0.25, wyckoff: "6g" },
+    { element: "Ti", x: 0.0, y: 0.236, z: 0.25, wyckoff: "6g" },
+    { element: "Ti", x: 0.764, y: 0.764, z: 0.25, wyckoff: "6g" },
+    { element: "Si", x: 0.599, y: 0.0, z: 0.25, wyckoff: "6g" },
+    { element: "Si", x: 0.0, y: 0.599, z: 0.25, wyckoff: "6g" },
+    { element: "Si", x: 0.401, y: 0.401, z: 0.25, wyckoff: "6g" },
+  ]},
+
   // Inverse Heusler — Mn2CoAl (F-43m)
   "Mn2CoAl": { formula: "Mn2CoAl", spaceGroup: "F-43m", spaceGroupNumber: 216, latticeType: "cubic", latticeA: 5.80, pressureGPa: 0, atoms: [
     { element: "Al", x: 0.0, y: 0.0, z: 0.0, wyckoff: "4a" },

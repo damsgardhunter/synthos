@@ -133,6 +133,8 @@ const PACKING_FACTORS: Record<string, number> = {
   "Matlockite-ABX": 0.58,
   "CaCu5-AB5": 0.74,
   "DO3-A3B": 0.68,
+  "LiNbO3-R3c": 0.65,
+  "D88-A5B3": 0.74,
 };
 
 const DEFAULT_PACKING_FACTOR = 0.68;
@@ -1969,6 +1971,82 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
       const hasLight = elements.some(e => ["Li", "Na", "K", "Rb", "Cs", "Mg", "Ca"].includes(e));
       const hasHeavy = elements.some(e => ["Bi", "Sb", "Sn", "Pb", "As", "Te", "In"].includes(e));
       return hasLight && hasHeavy;
+    },
+  },
+
+  // LiNbO3-type: R3c (161), ABO3 — ferroelectric/electro-optic
+  // Rhombohedral distortion of perovskite with small A-site cation.
+  // For: LiNbO3, LiTaO3, LiIO3, KNbO3-R3c — electro-optic, piezoelectric
+  // CRITICAL: These fail the cubic Perovskite template (Li/K too small for
+  // CATIONS_LARGE) and fail Ilmenite (needs divalent+tetravalent pair).
+  // Primitive cell: 2 f.u. = 2A + 2B + 6O = 10 atoms, ratio [1,1,3]
+  // A at 6a (0,0,zA≈0.278), B at 6a (0,0,zB≈0.0), O at 18b (x,y,z)
+  {
+    name: "LiNbO3-R3c",
+    spaceGroup: "R3c",
+    latticeType: "hexagonal",
+    cOverA: 2.69,
+    sites: [
+      // A (Li) at 6a → 2 in primitive
+      { label: "A", x: 0.0, y: 0.0, z: 0.278, role: "A-site" },
+      { label: "A", x: 0.0, y: 0.0, z: 0.778, role: "A-site" },
+      // B (Nb/Ta) at 6a → 2 in primitive
+      { label: "B", x: 0.0, y: 0.0, z: 0.0, role: "B-site" },
+      { label: "B", x: 0.0, y: 0.0, z: 0.5, role: "B-site" },
+      // O at 18b → 6 in primitive
+      { label: "C", x: 0.047, y: 0.343, z: 0.063, role: "O-1" },
+      { label: "C", x: 0.657, y: 0.953, z: 0.063, role: "O-2" },
+      { label: "C", x: 0.343, y: 0.047, z: 0.563, role: "O-3" },
+      { label: "C", x: 0.953, y: 0.657, z: 0.563, role: "O-4" },
+      { label: "C", x: 0.657, y: 0.704, z: 0.396, role: "O-5" },
+      { label: "C", x: 0.296, y: 0.953, z: 0.896, role: "O-6" },
+    ],
+    stoichiometryRatio: [1, 1, 3],
+    coordination: [6, 6, 4],
+    chemistryRules: (elements) => {
+      if (elements.length !== 3) return false;
+      const hasO = elements.includes("O");
+      // A-site: small cations that don't fit in CATIONS_LARGE (Li, Na, K, Ag, Cu)
+      const hasSmallA = elements.some(e => ["Li", "Na", "K", "Ag", "Cu"].includes(e));
+      // B-site: high-valence TM (Nb, Ta, V, W, Mo, Ti)
+      const hasB = elements.some(e => ["Nb", "Ta", "V", "W", "Mo", "Ti"].includes(e));
+      return hasO && hasSmallA && hasB;
+    },
+  },
+  // D88 Mn5Si3-type: P63/mcm (193), A5B3 — refractory silicide/germanide
+  // For: Mn5Si3, Ti5Si3, Cr5Si3, V5Si3, Nb5Si3, W5Si3 — high-temp structural
+  // Ratio [5,3] previously uncovered. Hexagonal with TM chains.
+  // Primitive = conventional (P-type). Per f.u.: 5A + 3B = 8 atoms.
+  // But Z=2 in conventional, so per f.u. in primitive: 5+3=8 from Z=2→ half = no,
+  // P63/mcm primitive IS conventional. 2 f.u.: 10A + 6B = 16 atoms.
+  // Use 1 f.u. representation: 5A + 3B = 8 atoms.
+  {
+    name: "D88-A5B3",
+    spaceGroup: "P63/mcm",
+    latticeType: "hexagonal",
+    cOverA: 0.66,
+    sites: [
+      // A (Mn/Ti/Cr) — 5 per f.u.
+      // 4d: (1/3, 2/3, 0) → 2 per f.u.
+      { label: "A", x: 0.3333, y: 0.6667, z: 0.0, role: "TM-4d-1" },
+      { label: "A", x: 0.6667, y: 0.3333, z: 0.0, role: "TM-4d-2" },
+      // 6g: (x, 0, 1/4) with x ≈ 0.236 → 3 per f.u.
+      { label: "A", x: 0.236, y: 0.0, z: 0.25, role: "TM-6g-1" },
+      { label: "A", x: 0.0, y: 0.236, z: 0.25, role: "TM-6g-2" },
+      { label: "A", x: 0.764, y: 0.764, z: 0.25, role: "TM-6g-3" },
+      // B (Si/Ge/Sn/Ga) — 3 per f.u.
+      // 6g: (x, 0, 1/4) with x ≈ 0.599
+      { label: "B", x: 0.599, y: 0.0, z: 0.25, role: "Si-6g-1" },
+      { label: "B", x: 0.0, y: 0.599, z: 0.25, role: "Si-6g-2" },
+      { label: "B", x: 0.401, y: 0.401, z: 0.25, role: "Si-6g-3" },
+    ],
+    stoichiometryRatio: [5, 3],
+    coordination: [12, 9],
+    chemistryRules: (elements) => {
+      if (elements.length !== 2) return false;
+      const hasTM = elements.some(e => ["Mn", "Ti", "Cr", "V", "Nb", "Ta", "W", "Mo", "Fe", "Zr", "Hf"].includes(e));
+      const hasSemimetal = elements.some(e => ["Si", "Ge", "Sn", "Ga", "Al", "In", "P", "As", "B"].includes(e));
+      return hasTM && hasSemimetal;
     },
   },
 
