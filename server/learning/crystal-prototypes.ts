@@ -147,6 +147,7 @@ const PACKING_FACTORS: Record<string, number> = {
   "BaAl4-AB4": 0.68,
   "QuaternaryHeusler-ABCD": 0.68,
   "Tl1212-AB2CD2O7": 0.55,
+  "MAB-phase": 0.68,
 };
 
 const DEFAULT_PACKING_FACTOR = 0.68;
@@ -2448,6 +2449,39 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
       const hasAE = elements.some(e => ["Ba", "Sr"].includes(e));
       const hasSpacer = elements.includes("Ca") || elements.some(e => isRareEarth(e) || e === "Y");
       return hasO && hasCu && hasTl && hasAE && hasSpacer;
+    },
+  },
+
+  // MAB phase: Cmcm (63), MAB — atomically layered ternary boride
+  // For: MoAlB, WAlB, CrAlB, Mn2AlB2, Fe2AlB2 — emerging hard/conductive
+  // Distinct from MAX phases (which have C/N, not B).
+  // Orthorhombic → tetragonal approximation. 1 f.u. = 3 atoms, ratio [1,1,1]
+  // M at 4c (0, y≈0.11, 1/4), A at 4c (0, y≈0.42, 1/4), B at 4c (0, y≈0.70, 1/4)
+  {
+    name: "MAB-phase",
+    spaceGroup: "Cmcm",
+    latticeType: "tetragonal",
+    cOverA: 0.46,
+    sites: [
+      // M (Mo/W/Cr/Fe/Mn) at 4c
+      { label: "A", x: 0.0, y: 0.107, z: 0.25, role: "TM-layer" },
+      { label: "A", x: 0.0, y: 0.893, z: 0.75, role: "TM-layer" },
+      // A-element (Al/Ga/In) at 4c
+      { label: "B", x: 0.0, y: 0.416, z: 0.25, role: "A-layer" },
+      { label: "B", x: 0.0, y: 0.584, z: 0.75, role: "A-layer" },
+      // B (boron) at 4c
+      { label: "C", x: 0.0, y: 0.703, z: 0.25, role: "B-layer" },
+      { label: "C", x: 0.0, y: 0.297, z: 0.75, role: "B-layer" },
+    ],
+    stoichiometryRatio: [1, 1, 1],
+    coordination: [6, 6, 6],
+    chemistryRules: (elements) => {
+      if (elements.length !== 3) return false;
+      // MAB: TM + A-group element + boron (specifically B, not C/N like MAX)
+      const hasB = elements.includes("B");
+      const hasTM = elements.some(e => ["Mo", "W", "Cr", "Fe", "Mn", "V", "Nb", "Ta", "Ti"].includes(e));
+      const hasA = elements.some(e => ["Al", "Ga", "In", "Si", "Ge"].includes(e));
+      return hasB && hasTM && hasA;
     },
   },
 

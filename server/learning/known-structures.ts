@@ -1251,6 +1251,24 @@ const KNOWN_STRUCTURES: Record<string, KnownStructure> = {
     { element: "O",  x: 0.0, y: 0.0, z: 0.88, wyckoff: "2g" },
   ]},
 
+  // MAB phase — MoAlB (Cmcm)
+  "MoAlB": { formula: "MoAlB", spaceGroup: "Cmcm", spaceGroupNumber: 63, latticeType: "tetragonal", latticeA: 3.21, latticeC: 13.98, pressureGPa: 0, atoms: [
+    { element: "Mo", x: 0.0, y: 0.107, z: 0.25, wyckoff: "4c" },
+    { element: "Mo", x: 0.0, y: 0.893, z: 0.75, wyckoff: "4c" },
+    { element: "Al", x: 0.0, y: 0.416, z: 0.25, wyckoff: "4c" },
+    { element: "Al", x: 0.0, y: 0.584, z: 0.75, wyckoff: "4c" },
+    { element: "B",  x: 0.0, y: 0.703, z: 0.25, wyckoff: "4c" },
+    { element: "B",  x: 0.0, y: 0.297, z: 0.75, wyckoff: "4c" },
+  ]},
+
+  // Bulk known-structure additions for high-impact materials
+  // Thermoelectric — Bi2Te3 family variants
+  "Sb2Te3": { formula: "Sb2Te3", spaceGroup: "R-3m", spaceGroupNumber: 166, latticeType: "hexagonal", latticeA: 4.26, latticeC: 30.46, pressureGPa: 0, atoms: [
+    { element: "Sb", x: 0.0, y: 0.0, z: 0.399, wyckoff: "6c" },
+    { element: "Te", x: 0.0, y: 0.0, z: 0.0, wyckoff: "3a" },
+    { element: "Te", x: 0.0, y: 0.0, z: 0.212, wyckoff: "6c" },
+  ]},
+
   // Inverse Heusler — Mn2CoAl (F-43m)
   "Mn2CoAl": { formula: "Mn2CoAl", spaceGroup: "F-43m", spaceGroupNumber: 216, latticeType: "cubic", latticeA: 5.80, pressureGPa: 0, atoms: [
     { element: "Al", x: 0.0, y: 0.0, z: 0.0, wyckoff: "4a" },
