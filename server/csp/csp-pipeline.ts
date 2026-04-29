@@ -31,14 +31,14 @@ import {
 } from "./csp-types";
 import { airssEngine } from "./airss-wrapper";
 import { calypsoEngine } from "./calypso-wrapper";
-import { uspexEngine } from "./uspex-wrapper";
+import { pyxtalEngine } from "./pyxtal-wrapper";
 import { latticeParamsToVectors } from "./poscar-io";
 
 // ---------------------------------------------------------------------------
 // Engine registry
 // ---------------------------------------------------------------------------
 
-const ENGINES = [airssEngine, calypsoEngine, uspexEngine];
+const ENGINES = [airssEngine, calypsoEngine, pyxtalEngine];
 
 function getAvailableEngines(): CSPEngineName[] {
   const available: CSPEngineName[] = ["vegard", "vca", "prototype", "random", "known-structure"];

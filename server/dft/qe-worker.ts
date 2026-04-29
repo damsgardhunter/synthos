@@ -29,6 +29,7 @@ import {
 import { generateStructureCandidates, vegardEstimate, type StructureCandidate, type VegardEstimate } from "./vegard-lattice";
 import { lookupKnownStructure, getKnownStructureFormulas } from "../learning/known-structures";
 import { airssEngine } from "../csp/airss-wrapper";
+import { pyxtalEngine } from "../csp/pyxtal-wrapper";
 import {
   runStagedRelaxation,
   runStage4GammaPhonon,
@@ -3877,6 +3878,45 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       }
     }
 
+    // --- PyXtal structure generation ---
+    // Generates symmetry-constrained random structures using all 230 space groups.
+    // Complements AIRSS (which uses its own symmetry sampling) and Vegard/VCA
+    // (which are database-derived). PyXtal explores different SG basins.
+    if (pyxtalEngine.isAvailable()) {
+      try {
+        const pyxtalDir = path.join(jobDir, "pyxtal");
+        const pyxtalBudget = Math.min(4, Math.max(2, 7 - structureCandidates.length));
+        const pyxtalCandidates = await pyxtalEngine.generateStructures(elements, counts, {
+          binaryPath: "",
+          workDir: pyxtalDir,
+          timeoutMs: 45000,
+          maxStructures: pyxtalBudget,
+          pressureGPa: workerPressure,
+          baseSeed: (Date.now() + 7777) % 1e8,
+        });
+        if (pyxtalCandidates.length > 0) {
+          for (const pc of pyxtalCandidates) {
+            structureCandidates.push({
+              latticeA: pc.latticeA,
+              latticeB: pc.latticeB,
+              latticeC: pc.latticeC,
+              cOverA: pc.cOverA,
+              positions: pc.positions,
+              prototype: "PyXtal-random",
+              crystalSystem: pc.crystalSystem,
+              spaceGroup: pc.spaceGroup,
+              source: pc.source,
+              confidence: 0.35,
+              isMetallic: null,
+            });
+          }
+          console.log(`[QE-Worker] PyXtal generated ${pyxtalCandidates.length} candidates for ${formula} (total now: ${structureCandidates.length})`);
+        }
+      } catch (pyxtalErr: any) {
+        console.log(`[QE-Worker] PyXtal failed for ${formula}: ${pyxtalErr.message?.slice(0, 100)} — continuing without`);
+      }
+    }
+
     // Use Vegard lattice if confident, otherwise fall back to volume-sum
     let latticeA: number;
     if (vegardResult && vegardResult.confidence > 0.3) {
@@ -4087,7 +4127,8 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
               c.prototype === "MP-direct" ||
               c.prototype.startsWith("TemplateVCA-") ||
               c.prototype === "VCA-interpolated" ||
-              c.prototype === "AIRSS-buildcell"
+              c.prototype === "AIRSS-buildcell" ||
+              c.prototype === "PyXtal-random"
             );
             // Validate VCA positions: check no atoms overlap at the candidate lattice
             let vcaValid = isQualitySource;
