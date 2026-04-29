@@ -565,16 +565,7 @@ class AflowServerDownError extends Error {
   }
 }
 
-// Global AFLOW server health tracker — shared across ALL materials.
-// When AFLOW returns 502-504, stop hitting it for 5 minutes.
-let _aflowTemplateRefDown = 0; // timestamp when we last saw a 504
-
 async function vegardAflowFetch(query: string): Promise<any[] | null> {
-  // Skip if AFLOW was recently down (global cooldown)
-  if (_aflowTemplateRefDown > 0 && Date.now() - _aflowTemplateRefDown < 300_000) {
-    return null;
-  }
-
   try {
     const url = `${AFLOW_API_BASE}/?${query},format(json)`;
     const response = await fetch(url, {
@@ -584,13 +575,10 @@ async function vegardAflowFetch(query: string): Promise<any[] | null> {
     if (!response.ok) {
       console.log(`[AFLOW-Vegard] HTTP ${response.status} for: ${query.slice(0, 60)}`);
       if (response.status >= 502 && response.status <= 504) {
-        _aflowTemplateRefDown = Date.now();
         throw new AflowServerDownError(response.status);
       }
       return null;
     }
-    // AFLOW responded — clear the global cooldown
-    _aflowTemplateRefDown = 0;
     const text = await response.text();
     const entries = parseAflowResponse(text);
     if (entries.length === 0) {
@@ -829,13 +817,15 @@ function parseAflowTemplateRefEntries(
 }
 
 /**
- * Tiered AFLOW template reference search.
+ * Single-request AFLOW template reference search.
  *
- * Tier 1: SG + species(targetElements) — exact element match (e.g. YH9Na2 → compounds with Y,Na,H in SG 194)
- * Tier 2: SG + species(keyElement) for each target element — partial element match (e.g. Y+H in SG 194)
- * Tier 3: SG + nspecies (original query) — fallback with no element filter
+ * Makes ONE AFLOW query: SG + nspecies, fetches a larger batch, then
+ * scores/filters locally by element overlap. This replaces the 7-request
+ * tiered approach that hammered AFLOW with sequential queries.
  *
- * Results are deduped by compound name across tiers so Tier 1 hits aren't displaced.
+ * The scoring ensures compounds sharing elements with the target are
+ * ranked first, but we still get fallback compounds if no element
+ * matches exist in this SG.
  */
 export async function fetchAflowBySpaceGroup(
   spaceGroupNumber: number,
@@ -853,7 +843,7 @@ export async function fetchAflowBySpaceGroup(
   const allEndpoints: AflowStructureEndpoint[] = [];
   const seenCompounds = new Set<string>();
 
-  const addResults = (entries: AflowStructureEndpoint[], tier: string) => {
+  const addResults = (entries: AflowStructureEndpoint[]) => {
     for (const ep of entries) {
       const key = ep.compound || `${ep.elements.join("-")}_${ep.volumeAtom.toFixed(1)}`;
       if (!seenCompounds.has(key)) {
@@ -863,69 +853,48 @@ export async function fetchAflowBySpaceGroup(
     }
   };
 
-  let aflowDown = false; // Set on 502/503/504 — skip remaining tiers
+  // Single query: fetch by SG + nspecies with a larger page size.
+  // We fetch more than needed and filter/rank locally by element overlap.
+  const fetchLimit = Math.max(limit, 24);
+  try {
+    const query = `spacegroup_relax(${spaceGroupNumber}),nspecies(${nSpecies}),paging(1,${fetchLimit}),${FIELDS}`;
+    console.log(`[AFLOW-TemplateRef] Fetching SG=${spaceGroupNumber} nspecies=${nSpecies} (limit ${fetchLimit})...`);
+    const raw = await vegardAflowFetch(query);
+    if (raw && raw.length > 0) {
+      const parsed = parseAflowTemplateRefEntries(raw, spaceGroupNumber);
 
-  // Tier 1: Exact element match — compounds containing ALL target elements in this SG
-  if (targetElements && targetElements.length >= 2) {
-    try {
-      const speciesFilter = `species(${targetElements.sort().join(",")})`;
-      const query = `spacegroup_relax(${spaceGroupNumber}),${speciesFilter},nspecies(${nSpecies}),paging(1,${limit}),${FIELDS}`;
-      console.log(`[AFLOW-TemplateRef] Tier 1: SG=${spaceGroupNumber} + species(${targetElements.join(",")}) (limit ${limit})...`);
-      const raw = await vegardAflowFetch(query);
-      if (raw && raw.length > 0) {
-        addResults(parseAflowTemplateRefEntries(raw, spaceGroupNumber), "tier1-exact");
-        console.log(`[AFLOW-TemplateRef] Tier 1: ${raw.length} entries (${allEndpoints.length} total)`);
-      }
-    } catch (err: any) {
-      if (err instanceof AflowServerDownError) {
-        aflowDown = true;
-        console.log(`[AFLOW-TemplateRef] AFLOW server down (HTTP ${err.status}) — skipping Tier 2+3`);
+      if (targetElements && targetElements.length > 0) {
+        // Score by element overlap with target, then sort best-first
+        const targetSet = new Set(targetElements);
+        const hasH = targetElements.includes("H");
+
+        const scored = parsed.map(ep => {
+          let score = 0;
+          for (const el of ep.elements) {
+            if (targetSet.has(el)) {
+              score += 5;
+              if (el === "H") score += 5; // bonus for sharing H
+            }
+          }
+          // Penalize compounds with zero element overlap
+          if (score === 0) score = -5;
+          // Bonus for having positions
+          if (ep.positions && ep.positions.length > 0) score += 3;
+          return { ep, score };
+        });
+        scored.sort((a, b) => b.score - a.score);
+
+        // Take the best up to limit, but always include some even without overlap
+        addResults(scored.slice(0, limit).map(s => s.ep));
+        console.log(`[AFLOW-TemplateRef] Got ${raw.length} entries, scored and kept ${allEndpoints.length} (best element overlap first)`);
+      } else {
+        addResults(parsed.slice(0, limit));
+        console.log(`[AFLOW-TemplateRef] Got ${raw.length} entries, kept ${allEndpoints.length}`);
       }
     }
-  }
-
-  // Tier 2: Partial element match — compounds containing each key element individually
-  // Skip H alone (too many hits) — pair it with a metal instead
-  if (!aflowDown && targetElements && targetElements.length >= 2 && allEndpoints.length < limit) {
-    const keyElements = targetElements.filter(e => e !== "H");
-    // If target has H, search for metal+H pairs
-    const hasH = targetElements.includes("H");
-    for (const el of keyElements) {
-      if (allEndpoints.length >= limit || aflowDown) break;
-      try {
-        const speciesFilter = hasH ? `species(${el},H)` : `species(${el})`;
-        const remaining = limit - allEndpoints.length;
-        const query = `spacegroup_relax(${spaceGroupNumber}),${speciesFilter},nspecies(${nSpecies}),paging(1,${remaining + 2}),${FIELDS}`;
-        console.log(`[AFLOW-TemplateRef] Tier 2: SG=${spaceGroupNumber} + species(${hasH ? el + ",H" : el}) (limit ${remaining + 2})...`);
-        const raw = await vegardAflowFetch(query);
-        if (raw && raw.length > 0) {
-          addResults(parseAflowTemplateRefEntries(raw, spaceGroupNumber), `tier2-${el}`);
-        }
-      } catch (err: any) {
-        if (err instanceof AflowServerDownError) {
-          aflowDown = true;
-          console.log(`[AFLOW-TemplateRef] AFLOW server down (HTTP ${err.status}) — skipping remaining Tier 2+3`);
-        }
-      }
-    }
-    if (allEndpoints.length > 0) {
-      console.log(`[AFLOW-TemplateRef] Tier 2: ${allEndpoints.length} total after partial element queries`);
-    }
-  }
-
-  // Tier 3: Original fallback — SG + nspecies only (no element filter)
-  if (!aflowDown && allEndpoints.length < 3) {
-    try {
-      const query = `spacegroup_relax(${spaceGroupNumber}),nspecies(${nSpecies}),paging(1,${limit}),${FIELDS}`;
-      console.log(`[AFLOW-TemplateRef] Tier 3 fallback: SG=${spaceGroupNumber} nspecies=${nSpecies} (limit ${limit})...`);
-      const raw = await vegardAflowFetch(query);
-      if (raw && raw.length > 0) {
-        addResults(parseAflowTemplateRefEntries(raw, spaceGroupNumber), "tier3-fallback");
-      }
-    } catch (err: any) {
-      if (err instanceof AflowServerDownError) {
-        console.log(`[AFLOW-TemplateRef] AFLOW server down (HTTP ${err.status}) at Tier 3`);
-      }
+  } catch (err: any) {
+    if (err instanceof AflowServerDownError) {
+      console.log(`[AFLOW-TemplateRef] AFLOW server down (HTTP ${err.status})`);
     }
   }
 
