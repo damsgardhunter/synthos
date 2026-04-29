@@ -17,10 +17,20 @@ export interface PrototypeTemplate {
   /** Triclinic angles in degrees (default 90 each). */
   alpha?: number;
   gamma?: number;
-  sites: { label: string; x: number; y: number; z: number; role: string }[];
+  sites: {
+    label: string;
+    x: number; y: number; z: number;
+    role: string;
+    /** Wyckoff label (e.g., "4a", "32f", "12d"). Populated for cage templates. */
+    wyckoff?: string;
+    /** Orbit fill priority for partial occupation (lower = fill first). */
+    orbitPriority?: number;
+  }[];
   stoichiometryRatio: number[];
   coordination: number[];
   chemistryRules: (elements: string[]) => boolean;
+  /** If this template represents a cage structure, tag the cage type. */
+  cageType?: "clathrate" | "sodalite" | "hex-clathrate" | "bcc-hydride";
 }
 
 export interface FilledPrototype {
@@ -462,11 +472,12 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
     spaceGroup: "Im-3m",
     latticeType: "cubic",
     cOverA: 1.0,
+    cageType: "bcc-hydride",
     sites: [
-      { label: "M", x: 0.0, y: 0.0, z: 0.0, role: "metal-center" },
-      { label: "H", x: 0.0, y: 0.5, z: 0.5, role: "octahedral" },
-      { label: "H", x: 0.5, y: 0.0, z: 0.5, role: "octahedral" },
-      { label: "H", x: 0.5, y: 0.5, z: 0.0, role: "octahedral" },
+      { label: "M", x: 0.0, y: 0.0, z: 0.0, role: "metal-center", wyckoff: "2a", orbitPriority: 0 },
+      { label: "H", x: 0.0, y: 0.5, z: 0.5, role: "octahedral", wyckoff: "6b", orbitPriority: 1 },
+      { label: "H", x: 0.5, y: 0.0, z: 0.5, role: "octahedral", wyckoff: "6b", orbitPriority: 1 },
+      { label: "H", x: 0.5, y: 0.5, z: 0.0, role: "octahedral", wyckoff: "6b", orbitPriority: 1 },
     ],
     stoichiometryRatio: [1, 3],
     coordination: [6, 2],
@@ -484,14 +495,15 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
     spaceGroup: "Im-3m",
     latticeType: "cubic",
     cOverA: 1.0,
+    cageType: "sodalite",
     sites: [
-      { label: "M", x: 0.0, y: 0.0, z: 0.0, role: "cage-center" },
-      { label: "H", x: 0.50, y: 0.75, z: 0.25, role: "sodalite-cage" },
-      { label: "H", x: 0.50, y: 0.25, z: 0.75, role: "sodalite-cage" },
-      { label: "H", x: 0.75, y: 0.50, z: 0.25, role: "sodalite-cage" },
-      { label: "H", x: 0.25, y: 0.50, z: 0.75, role: "sodalite-cage" },
-      { label: "H", x: 0.75, y: 0.25, z: 0.50, role: "sodalite-cage" },
-      { label: "H", x: 0.25, y: 0.75, z: 0.50, role: "sodalite-cage" },
+      { label: "M", x: 0.0, y: 0.0, z: 0.0, role: "cage-center", wyckoff: "2a", orbitPriority: 0 },
+      { label: "H", x: 0.50, y: 0.75, z: 0.25, role: "sodalite-cage", wyckoff: "12d", orbitPriority: 1 },
+      { label: "H", x: 0.50, y: 0.25, z: 0.75, role: "sodalite-cage", wyckoff: "12d", orbitPriority: 1 },
+      { label: "H", x: 0.75, y: 0.50, z: 0.25, role: "sodalite-cage", wyckoff: "12d", orbitPriority: 1 },
+      { label: "H", x: 0.25, y: 0.50, z: 0.75, role: "sodalite-cage", wyckoff: "12d", orbitPriority: 1 },
+      { label: "H", x: 0.75, y: 0.25, z: 0.50, role: "sodalite-cage", wyckoff: "12d", orbitPriority: 1 },
+      { label: "H", x: 0.25, y: 0.75, z: 0.50, role: "sodalite-cage", wyckoff: "12d", orbitPriority: 1 },
     ],
     stoichiometryRatio: [1, 6],
     coordination: [24, 4],
@@ -509,17 +521,18 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
     spaceGroup: "P63/mmc",
     latticeType: "hexagonal",
     cOverA: 1.55,
+    cageType: "hex-clathrate",
     sites: [
-      { label: "M", x: 0.3333, y: 0.6667, z: 0.25, role: "cage-center" },
-      { label: "H", x: 0.155, y: 0.310, z: 0.25, role: "hex-cage-6h" },
-      { label: "H", x: 0.690, y: 0.845, z: 0.25, role: "hex-cage-6h" },
-      { label: "H", x: 0.845, y: 0.155, z: 0.25, role: "hex-cage-6h" },
-      { label: "H", x: 0.0, y: 0.0, z: 0.25, role: "hex-cage-2b" },
-      { label: "H", x: 0.520, y: 0.040, z: 0.08, role: "hex-cage-12k" },
-      { label: "H", x: 0.960, y: 0.480, z: 0.08, role: "hex-cage-12k" },
-      { label: "H", x: 0.480, y: 0.520, z: 0.08, role: "hex-cage-12k" },
-      { label: "H", x: 0.040, y: 0.520, z: 0.42, role: "hex-cage-12k" },
-      { label: "H", x: 0.520, y: 0.480, z: 0.42, role: "hex-cage-12k" },
+      { label: "M", x: 0.3333, y: 0.6667, z: 0.25, role: "cage-center", wyckoff: "2d", orbitPriority: 0 },
+      { label: "H", x: 0.155, y: 0.310, z: 0.25, role: "hex-cage-6h", wyckoff: "6h", orbitPriority: 1 },
+      { label: "H", x: 0.690, y: 0.845, z: 0.25, role: "hex-cage-6h", wyckoff: "6h", orbitPriority: 1 },
+      { label: "H", x: 0.845, y: 0.155, z: 0.25, role: "hex-cage-6h", wyckoff: "6h", orbitPriority: 1 },
+      { label: "H", x: 0.0, y: 0.0, z: 0.25, role: "hex-cage-2b", wyckoff: "2b", orbitPriority: 2 },
+      { label: "H", x: 0.520, y: 0.040, z: 0.08, role: "hex-cage-12k", wyckoff: "12k", orbitPriority: 3 },
+      { label: "H", x: 0.960, y: 0.480, z: 0.08, role: "hex-cage-12k", wyckoff: "12k", orbitPriority: 3 },
+      { label: "H", x: 0.480, y: 0.520, z: 0.08, role: "hex-cage-12k", wyckoff: "12k", orbitPriority: 3 },
+      { label: "H", x: 0.040, y: 0.520, z: 0.42, role: "hex-cage-12k", wyckoff: "12k", orbitPriority: 3 },
+      { label: "H", x: 0.520, y: 0.480, z: 0.42, role: "hex-cage-12k", wyckoff: "12k", orbitPriority: 3 },
     ],
     stoichiometryRatio: [1, 9],
     coordination: [29, 3],
@@ -538,18 +551,19 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
     spaceGroup: "Fm-3m",
     latticeType: "cubic",
     cOverA: 1.0,
+    cageType: "clathrate",
     sites: [
-      { label: "M", x: 0.0, y: 0.0, z: 0.0, role: "cage-center" },
-      { label: "H", x: 0.375, y: 0.375, z: 0.375, role: "32f-cage" },
-      { label: "H", x: 0.375, y: 0.375, z: 0.875, role: "32f-cage" },
-      { label: "H", x: 0.375, y: 0.875, z: 0.375, role: "32f-cage" },
-      { label: "H", x: 0.875, y: 0.375, z: 0.375, role: "32f-cage" },
-      { label: "H", x: 0.625, y: 0.625, z: 0.625, role: "32f-cage" },
-      { label: "H", x: 0.625, y: 0.625, z: 0.125, role: "32f-cage" },
-      { label: "H", x: 0.625, y: 0.125, z: 0.625, role: "32f-cage" },
-      { label: "H", x: 0.125, y: 0.625, z: 0.625, role: "32f-cage" },
-      { label: "H", x: 0.25, y: 0.25, z: 0.25, role: "8c-interstitial" },
-      { label: "H", x: 0.75, y: 0.75, z: 0.75, role: "8c-interstitial" },
+      { label: "M", x: 0.0, y: 0.0, z: 0.0, role: "cage-center", wyckoff: "4a", orbitPriority: 0 },
+      { label: "H", x: 0.375, y: 0.375, z: 0.375, role: "32f-cage", wyckoff: "32f", orbitPriority: 1 },
+      { label: "H", x: 0.375, y: 0.375, z: 0.875, role: "32f-cage", wyckoff: "32f", orbitPriority: 1 },
+      { label: "H", x: 0.375, y: 0.875, z: 0.375, role: "32f-cage", wyckoff: "32f", orbitPriority: 1 },
+      { label: "H", x: 0.875, y: 0.375, z: 0.375, role: "32f-cage", wyckoff: "32f", orbitPriority: 1 },
+      { label: "H", x: 0.625, y: 0.625, z: 0.625, role: "32f-cage", wyckoff: "32f", orbitPriority: 1 },
+      { label: "H", x: 0.625, y: 0.625, z: 0.125, role: "32f-cage", wyckoff: "32f", orbitPriority: 1 },
+      { label: "H", x: 0.625, y: 0.125, z: 0.625, role: "32f-cage", wyckoff: "32f", orbitPriority: 1 },
+      { label: "H", x: 0.125, y: 0.625, z: 0.625, role: "32f-cage", wyckoff: "32f", orbitPriority: 1 },
+      { label: "H", x: 0.25, y: 0.25, z: 0.25, role: "8c-interstitial", wyckoff: "8c", orbitPriority: 2 },
+      { label: "H", x: 0.75, y: 0.75, z: 0.75, role: "8c-interstitial", wyckoff: "8c", orbitPriority: 2 },
     ],
     stoichiometryRatio: [1, 10],
     coordination: [32, 3],
@@ -569,6 +583,7 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
     spaceGroup: "Fm-3m",
     latticeType: "cubic",
     cOverA: 1.0,
+    cageType: "clathrate",
     sites: [
       { label: "M", x: 0.0, y: 0.0, z: 0.0, role: "cage-center" },
       { label: "A", x: 0.25, y: 0.25, z: 0.25, role: "interstitial" },
@@ -603,6 +618,7 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
     spaceGroup: "P63/mmc",
     latticeType: "hexagonal",
     cOverA: 1.55,
+    cageType: "hex-clathrate",
     sites: [
       { label: "M", x: 0.3333, y: 0.6667, z: 0.25, role: "cage-center" },
       { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "interstice" },

@@ -17,151 +17,20 @@
 
 import type { CSPCandidate } from "./csp-types";
 import { getKnownStructureFormulas, lookupKnownStructure } from "../learning/known-structures";
+import { PROTOTYPE_TEMPLATES, type PrototypeTemplate } from "../learning/crystal-prototypes";
 
 // ---------------------------------------------------------------------------
-// Cage Wyckoff templates — explicit cage-forming orbits per SG
+// Cage templates pulled from PROTOTYPE_TEMPLATES
 // ---------------------------------------------------------------------------
 
-interface CageWyckoffTemplate {
-  name: string;
-  spaceGroup: string;
-  sgNumber: number;
-  latticeType: "cubic" | "hexagonal";
-  defaultCOverA: number;
-  /** Metal site(s) — where the heavy atom sits. */
-  metalSites: Array<{ x: number; y: number; z: number; wyckoff: string; multiplicity: number }>;
-  /** H cage orbits — ordered by priority (fill first = most cage-like). */
-  hCageOrbits: Array<{
-    x: number; y: number; z: number;
-    wyckoff: string;
-    multiplicity: number;
-    /** All equivalent positions in the orbit (primitive cell). */
-    equivalents: Array<{ x: number; y: number; z: number }>;
-  }>;
+/**
+ * Get all cage-type templates from the existing 130+ PROTOTYPE_TEMPLATES.
+ * Uses the cageType tag + wyckoff/orbitPriority fields added to the template interface.
+ * No duplicate template database needed.
+ */
+function getCagePrototypeTemplates(): PrototypeTemplate[] {
+  return PROTOTYPE_TEMPLATES.filter(t => t.cageType != null);
 }
-
-const CAGE_WYCKOFF_TEMPLATES: CageWyckoffTemplate[] = [
-  {
-    // Fm-3m Clathrate (LaH10-type): 1 metal + 10 H in primitive cell
-    name: "clathrate-Fm3m",
-    spaceGroup: "Fm-3m",
-    sgNumber: 225,
-    latticeType: "cubic",
-    defaultCOverA: 1.0,
-    metalSites: [
-      { x: 0.0, y: 0.0, z: 0.0, wyckoff: "4a", multiplicity: 1 },
-    ],
-    hCageOrbits: [
-      {
-        wyckoff: "32f", multiplicity: 8,
-        x: 0.375, y: 0.375, z: 0.375,
-        equivalents: [
-          { x: 0.375, y: 0.375, z: 0.375 },
-          { x: 0.375, y: 0.375, z: 0.875 },
-          { x: 0.375, y: 0.875, z: 0.375 },
-          { x: 0.875, y: 0.375, z: 0.375 },
-          { x: 0.625, y: 0.625, z: 0.625 },
-          { x: 0.625, y: 0.625, z: 0.125 },
-          { x: 0.625, y: 0.125, z: 0.625 },
-          { x: 0.125, y: 0.625, z: 0.625 },
-        ],
-      },
-      {
-        wyckoff: "8c", multiplicity: 2,
-        x: 0.25, y: 0.25, z: 0.25,
-        equivalents: [
-          { x: 0.25, y: 0.25, z: 0.25 },
-          { x: 0.75, y: 0.75, z: 0.75 },
-        ],
-      },
-      {
-        // Extra interstice for higher hydrides (LaH12-type)
-        wyckoff: "octahedral", multiplicity: 3,
-        x: 0.5, y: 0.0, z: 0.0,
-        equivalents: [
-          { x: 0.5, y: 0.0, z: 0.0 },
-          { x: 0.0, y: 0.5, z: 0.0 },
-          { x: 0.0, y: 0.0, z: 0.5 },
-        ],
-      },
-    ],
-  },
-  {
-    // Im-3m Sodalite (CaH6-type): 1 metal + 6 H in primitive cell
-    name: "sodalite-Im3m",
-    spaceGroup: "Im-3m",
-    sgNumber: 229,
-    latticeType: "cubic",
-    defaultCOverA: 1.0,
-    metalSites: [
-      { x: 0.0, y: 0.0, z: 0.0, wyckoff: "2a", multiplicity: 1 },
-    ],
-    hCageOrbits: [
-      {
-        wyckoff: "12d", multiplicity: 6,
-        x: 0.5, y: 0.75, z: 0.25,
-        equivalents: [
-          { x: 0.5, y: 0.75, z: 0.25 },
-          { x: 0.5, y: 0.25, z: 0.75 },
-          { x: 0.75, y: 0.5, z: 0.25 },
-          { x: 0.25, y: 0.5, z: 0.75 },
-          { x: 0.75, y: 0.25, z: 0.5 },
-          { x: 0.25, y: 0.75, z: 0.5 },
-        ],
-      },
-      {
-        // Extra orbit for MH8+ compositions
-        wyckoff: "6b", multiplicity: 3,
-        x: 0.5, y: 0.5, z: 0.0,
-        equivalents: [
-          { x: 0.5, y: 0.5, z: 0.0 },
-          { x: 0.5, y: 0.0, z: 0.5 },
-          { x: 0.0, y: 0.5, z: 0.5 },
-        ],
-      },
-    ],
-  },
-  {
-    // P63/mmc Hex-clathrate (YH9-type): 1 metal + 9 H
-    name: "hex-clathrate-P63mmc",
-    spaceGroup: "P63/mmc",
-    sgNumber: 194,
-    latticeType: "hexagonal",
-    defaultCOverA: 1.55,
-    metalSites: [
-      { x: 0.3333, y: 0.6667, z: 0.25, wyckoff: "2d", multiplicity: 1 },
-    ],
-    hCageOrbits: [
-      {
-        wyckoff: "6h", multiplicity: 3,
-        x: 0.155, y: 0.31, z: 0.25,
-        equivalents: [
-          { x: 0.155, y: 0.31, z: 0.25 },
-          { x: 0.69, y: 0.845, z: 0.25 },
-          { x: 0.845, y: 0.155, z: 0.25 },
-        ],
-      },
-      {
-        wyckoff: "2b", multiplicity: 1,
-        x: 0.0, y: 0.0, z: 0.25,
-        equivalents: [
-          { x: 0.0, y: 0.0, z: 0.25 },
-        ],
-      },
-      {
-        wyckoff: "12k", multiplicity: 5,
-        x: 0.52, y: 0.04, z: 0.08,
-        equivalents: [
-          { x: 0.52, y: 0.04, z: 0.08 },
-          { x: 0.96, y: 0.48, z: 0.08 },
-          { x: 0.48, y: 0.52, z: 0.08 },
-          { x: 0.04, y: 0.52, z: 0.42 },
-          { x: 0.52, y: 0.48, z: 0.42 },
-        ],
-      },
-    ],
-  },
-];
 
 // ---------------------------------------------------------------------------
 // Strategy 1: Parent seeding
@@ -185,7 +54,7 @@ function parentSeed(
 
     const ksH = ks.atoms.filter(a => a.element === "H").length;
     const ksMetals = ks.atoms.filter(a => a.element !== "H");
-    const ksMetalEls = [...new Set(ksMetals.map(m => m.element))];
+    const ksMetalEls = Array.from(new Set(ksMetals.map(m => m.element)));
 
     // Skip if not a hydride or too different in size
     if (ksH < 3) continue;
@@ -236,24 +105,27 @@ function parentSeed(
     // Step 2: Adjust H count
     const currentH = positions.filter(p => p.element === "H").length;
     if (currentH < targetH) {
-      // Add H at interstitial Wyckoff sites
-      const template = CAGE_WYCKOFF_TEMPLATES.find(t => t.sgNumber === ks.spaceGroupNumber);
+      // Add H at interstitial Wyckoff sites from prototype templates
+      const template = getCagePrototypeTemplates().find(t =>
+        t.spaceGroup === ks.spaceGroup || t.name.includes(ks.spaceGroup.replace(/[\s-]/g, ""))
+      );
       if (template) {
         const toAdd = targetH - currentH;
         let added = 0;
-        for (const orbit of template.hCageOrbits) {
-          for (const eq of orbit.equivalents) {
-            if (added >= toAdd) break;
-            // Check not already occupied
-            const occupied = positions.some(p => {
-              let dx = Math.abs(p.x - eq.x), dy = Math.abs(p.y - eq.y), dz = Math.abs(p.z - eq.z);
-              dx = Math.min(dx, 1 - dx); dy = Math.min(dy, 1 - dy); dz = Math.min(dz, 1 - dz);
-              return Math.sqrt(dx * dx + dy * dy + dz * dz) < 0.05;
-            });
-            if (!occupied) {
-              positions.push({ element: "H", x: eq.x, y: eq.y, z: eq.z });
-              added++;
-            }
+        // Get H sites sorted by orbit priority from the prototype template
+        const hSites = template.sites
+          .filter(s => s.label === "H")
+          .sort((a, b) => (a.orbitPriority ?? 99) - (b.orbitPriority ?? 99));
+        for (const site of hSites) {
+          if (added >= toAdd) break;
+          const occupied = positions.some(p => {
+            let dx = Math.abs(p.x - site.x), dy = Math.abs(p.y - site.y), dz = Math.abs(p.z - site.z);
+            dx = Math.min(dx, 1 - dx); dy = Math.min(dy, 1 - dy); dz = Math.min(dz, 1 - dz);
+            return Math.sqrt(dx * dx + dy * dy + dz * dz) < 0.05;
+          });
+          if (!occupied) {
+            positions.push({ element: "H", x: site.x, y: site.y, z: site.z });
+            added++;
           }
         }
       }
@@ -310,32 +182,40 @@ function cageAwareWyckoff(
   const targetH = Math.round(counts["H"] ?? 0);
   const metals = elements.filter(e => e !== "H");
   const totalAtoms = Object.values(counts).reduce((s, n) => s + Math.round(n), 0);
+  const totalMetalCount = metals.reduce((s, m) => s + Math.round(counts[m] ?? 0), 0);
 
-  for (const template of CAGE_WYCKOFF_TEMPLATES) {
-    // Check if this cage template can fit the target composition
-    const metalSlots = template.metalSites.reduce((s, m) => s + m.multiplicity, 0);
-    const totalMetalCount = metals.reduce((s, m) => s + Math.round(counts[m] ?? 0), 0);
+  // Pull cage templates from the existing 130+ PROTOTYPE_TEMPLATES
+  const cageTemplates = getCagePrototypeTemplates();
 
-    // Metal count must be close to template metal slots
-    if (Math.abs(totalMetalCount - metalSlots) > 2) continue;
+  for (const template of cageTemplates) {
+    // Count metal and H sites in this template
+    const metalSites = template.sites.filter(s => s.label !== "H");
+    const hSites = template.sites.filter(s => s.label === "H");
 
-    // Build structure by filling Wyckoff orbits
+    // Metal slot count must be close to our target
+    if (Math.abs(totalMetalCount - metalSites.length) > 2) continue;
+
+    // Build structure by filling sites in orbitPriority order
+    const sortedSites = [...template.sites].sort((a, b) =>
+      (a.orbitPriority ?? 99) - (b.orbitPriority ?? 99)
+    );
+
     const positions: Array<{ element: string; x: number; y: number; z: number }> = [];
 
-    // Place metals
+    // Place metals on metal sites
     let metalIdx = 0;
-    for (const site of template.metalSites) {
+    for (const site of sortedSites) {
+      if (site.label === "H") continue;
       const metalEl = metals[metalIdx % metals.length] ?? metals[0];
       positions.push({ element: metalEl, x: site.x, y: site.y, z: site.z });
       metalIdx++;
     }
 
-    // Extra metals if needed (on remaining metal sites or interstitials)
+    // Extra metals if needed
     for (const metal of metals) {
       const placed = positions.filter(p => p.element === metal).length;
       const needed = Math.round(counts[metal] ?? 0) - placed;
       if (needed > 0) {
-        // Place at interstitial metal sites
         const interstitials = [
           { x: 0.25, y: 0.25, z: 0.25 },
           { x: 0.75, y: 0.75, z: 0.75 },
@@ -347,40 +227,41 @@ function cageAwareWyckoff(
       }
     }
 
-    // Fill H cage orbits up to target H count
+    // Fill H sites in priority order up to target H count
     let hPlaced = 0;
-    for (const orbit of template.hCageOrbits) {
-      for (const eq of orbit.equivalents) {
-        if (hPlaced >= targetH) break;
-        // Check not too close to metals
-        let tooClose = false;
-        for (const p of positions) {
-          let dx = eq.x - p.x, dy = eq.y - p.y, dz = eq.z - p.z;
-          dx -= Math.round(dx); dy -= Math.round(dy); dz -= Math.round(dz);
-          if (Math.sqrt(dx * dx + dy * dy + dz * dz) < 0.03) { tooClose = true; break; }
-        }
-        if (!tooClose) {
-          positions.push({ element: "H", x: eq.x, y: eq.y, z: eq.z });
-          hPlaced++;
-        }
-      }
+    const hSitesSorted = sortedSites.filter(s => s.label === "H");
+    for (const site of hSitesSorted) {
       if (hPlaced >= targetH) break;
+      // Check not overlapping with already-placed atoms
+      let tooClose = false;
+      for (const p of positions) {
+        let dx = site.x - p.x, dy = site.y - p.y, dz = site.z - p.z;
+        dx -= Math.round(dx); dy -= Math.round(dy); dz -= Math.round(dz);
+        if (Math.sqrt(dx * dx + dy * dy + dz * dz) < 0.03) { tooClose = true; break; }
+      }
+      if (!tooClose) {
+        positions.push({ element: "H", x: site.x, y: site.y, z: site.z });
+        hPlaced++;
+      }
     }
 
     // Estimate lattice constant
     const volPerAtom = pressureGPa > 100 ? 5.0 : 8.0;
     const vol = volPerAtom * positions.length;
-    const estA = Math.pow(vol / template.defaultCOverA, 1 / 3);
+    const estA = Math.pow(vol / template.cOverA, 1 / 3);
+
+    // Build orbit description from Wyckoff labels
+    const orbitsUsed = Array.from(new Set(hSitesSorted.slice(0, hPlaced).map(s => s.wyckoff ?? s.role)));
 
     candidates.push({
       latticeA: estA,
-      latticeC: template.latticeType === "hexagonal" ? estA * template.defaultCOverA : undefined,
-      cOverA: template.defaultCOverA,
+      latticeC: template.latticeType === "hexagonal" ? estA * template.cOverA : undefined,
+      cOverA: template.cOverA,
       positions,
       prototype: `cage-wyckoff-${template.name}`,
       crystalSystem: template.latticeType,
       spaceGroup: template.spaceGroup,
-      source: `Cage Wyckoff (${template.name}, ${hPlaced}H on ${template.hCageOrbits.map(o => o.wyckoff).join("+")})`,
+      source: `Cage Wyckoff (${template.name}, ${hPlaced}H on ${orbitsUsed.join("+")})`,
       confidence: 0.85,
       isMetallic: null,
       sourceEngine: "known-structure",
