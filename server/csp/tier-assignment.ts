@@ -125,10 +125,17 @@ function makeTier(
   const airssBudget = config.airssTotalCap;
   const pyxtalBudget = config.pyxtalTotalCap;
 
-  // Timeout: ~100ms per AIRSS structure (buildcell is fast) + ~1s per PyXtal
-  // Cap at 10 min for AIRSS, 15 min for PyXtal
+  // Timeout scaling:
+  // AIRSS: ~100ms per structure, cap at 10 min
+  // PyXtal: includes SG pre-filtering (~30s) + generation (~2-5s per structure).
+  // Pre-filtering tests each SG once — adds ~30-60s upfront but makes
+  // generation 5× faster by only sampling compatible SGs.
+  // Cap at 10 min for preview, 20 min for deep.
   const timeoutAirss = Math.min(600000, Math.max(30000, airssBudget * 100));
-  const timeoutPyxtal = Math.min(900000, Math.max(30000, pyxtalBudget * 1000));
+  const timeoutPyxtal = Math.min(
+    tier === "deep" || tier === "publication" ? 1200000 : 600000, // 20 min deep, 10 min preview
+    Math.max(60000, pyxtalBudget * 2000 + 60000), // 2s per target + 60s for pre-filter
+  );
   const timeoutMs = Math.max(timeoutAirss, timeoutPyxtal);
 
   return {

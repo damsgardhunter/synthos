@@ -124,30 +124,55 @@ try:
 
     generated = 0
     attempts = 0
-    max_attempts = n_structures * 50
+    max_attempts = n_structures * 30  # reduced — pre-filter catches incompatible SGs
     random.seed(base_seed)
+
+    # Pre-filter SGs by Wyckoff compatibility: test each SG once to see if
+    # it can fit the composition. This avoids the 80% failure rate from
+    # trying incompatible SGs repeatedly.
+    from pyxtal.symmetry import Group
+    high_sgs = ${JSON.stringify(SG_HIGH_SYMMETRY)}
+    med_sgs = ${JSON.stringify(SG_MEDIUM_SYMMETRY)}
+    low_sgs = ${JSON.stringify(SG_LOW_SYMMETRY)}
+
+    def filter_compatible_sgs(sg_list, comp_list):
+        compatible = []
+        for sg_num in sg_list:
+            for z in z_values:
+                comp = [n * z for n in comp_list]
+                if sum(comp) > max_atoms:
+                    continue
+                try:
+                    c = pyxtal()
+                    c.from_random(dim=3, group=sg_num, species=elements,
+                                  numIons=comp, factor=1.2, seed=42)
+                    if c.valid:
+                        compatible.append(sg_num)
+                        break
+                except Exception:
+                    continue
+        return compatible if compatible else [1, 2]  # fallback to P1/P-1
+
+    compatible_high = filter_compatible_sgs(high_sgs, base_composition)
+    compatible_med = filter_compatible_sgs(med_sgs, base_composition)
+    compatible_low = filter_compatible_sgs(low_sgs, base_composition)
+    all_compatible = compatible_high + compatible_med + compatible_low + [1, 2]
+    print(f"PYXTAL_DEBUG compatible SGs: high={len(compatible_high)}/{len(high_sgs)}, med={len(compatible_med)}/{len(med_sgs)}, low={len(compatible_low)}/{len(low_sgs)}, total={len(all_compatible)}", flush=True)
 
     while generated < n_structures and attempts < max_attempts:
         attempts += 1
 
-        # Tiered SG sampling: 40% high, 30% medium, 20% low, 10% P1/P-1
-        # After many failed attempts, shift more budget to low-symmetry
-        high_sgs = ${JSON.stringify(SG_HIGH_SYMMETRY)}
-        med_sgs = ${JSON.stringify(SG_MEDIUM_SYMMETRY)}
-        low_sgs = ${JSON.stringify(SG_LOW_SYMMETRY)}
-
+        # Sample from pre-filtered compatible SGs (tiered distribution)
         if attempts > max_attempts * 0.5 and generated == 0:
-            sg = random.choice([1, 2, 4, 14, 62])  # desperation fallback
+            sg = random.choice([1, 2])  # desperation fallback
+        elif compatible_high and random.random() < 0.40:
+            sg = random.choice(compatible_high)
+        elif compatible_med and random.random() < 0.55:
+            sg = random.choice(compatible_med)
+        elif compatible_low:
+            sg = random.choice(compatible_low)
         else:
-            r = random.random()
-            if r < 0.40:
-                sg = random.choice(high_sgs)
-            elif r < 0.70:
-                sg = random.choice(med_sgs)
-            elif r < 0.90:
-                sg = random.choice(low_sgs)
-            else:
-                sg = random.choice([1, 2])
+            sg = random.choice(all_compatible)
         seed = base_seed + attempts
         # Pressure-aware volume jitter
         if pressure_gpa < 20:
