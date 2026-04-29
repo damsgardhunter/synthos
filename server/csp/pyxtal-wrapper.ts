@@ -102,6 +102,7 @@ try:
     n_structures = ${nStructures}
     base_seed = ${baseSeed}
     vol_factor = ${volFactor}
+    pressure_gpa = ${pressureGPa}
     output_dir = ${JSON.stringify(outputDir.replace(/\\/g, "/"))}
     space_groups = ${JSON.stringify(sgs)}
 
@@ -159,7 +160,7 @@ try:
                             species_counts[el] = 0
                         species_counts[el] += 1
                     lines = []
-                    lines.append(f"PyXtal SG={sg} seed={seed} P={pressureGPa}GPa")
+                    lines.append(f"PyXtal SG={sg} seed={seed} P={pressure_gpa}GPa")
                     lines.append("1.0")
                     for v in lattice.matrix:
                         lines.append(f"  {v[0]:.10f}  {v[1]:.10f}  {v[2]:.10f}")
