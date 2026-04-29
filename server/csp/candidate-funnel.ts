@@ -19,11 +19,13 @@
  *   Raw: ~85 → F1: ~65 → F4: ~40 → F7: ~15 clusters → F8: 3-5 DFT
  */
 
+import * as path from "path";
 import type { CSPCandidate, ScreeningTier, ScreeningTierConfig } from "./csp-types";
 import { COVALENT_RADII, getPairMinsep, SCREENING_TIERS } from "./csp-types";
 import { analyzeHydrideChemistry, type HydrideAnalysis } from "./candidate-metadata";
 import { deduplicateCandidates, clusterCandidates, type StructureCluster } from "./dedup-cluster";
 import { selectForDFT, type DFTSelectionResult } from "./dft-admission";
+import { runChgnetEvaluation, isChgnetAvailable } from "./chgnet-wrapper";
 import { recordVolumeOutcome, recordGeneratorOutcome, logLearningState } from "./adaptive-learning";
 
 // ---------------------------------------------------------------------------
@@ -383,14 +385,14 @@ function computeDFT0Budget(tier: ScreeningTierConfig, nClusters: number): number
   return Math.min(tier.dft0Cap, Math.max(tier.dft0Floor, raw));
 }
 
-export function runCandidateFunnel(
+export async function runCandidateFunnel(
   rawCandidates: CSPCandidate[],
   formula: string,
   elements: string[],
   pressureGPa: number,
   nDFT: number = 3,
   tier: ScreeningTier = "preview",
-): FunnelResult {
+): Promise<FunnelResult> {
   const stats: FunnelStats = {
     f0_input: 0, f0_rejected: 0,
     f1_rejected: 0, f2_rejected: 0,
@@ -424,9 +426,35 @@ export function runCandidateFunnel(
   const f5 = f5_score(f4scored);
   stats.f5_scored = f5.length;
 
-  // F7: Clustering (skip F6/MLIP for now — placeholder)
+  // F6: CHGNet MLIP pre-relaxation (if available)
+  // Evaluates energy for all post-F5 candidates, optionally relaxes top ones.
+  // Ranks by MLIP energy so DFT only sees candidates in deep energy basins.
+  let f6Candidates = f5.map(s => s.candidate);
+  if (isChgnetAvailable() && f6Candidates.length > 5) {
+    try {
+      const tierConfig = SCREENING_TIERS[tier];
+      // Evaluate up to 300 candidates, relax top ones for deep/publication tiers
+      const doRelax = tier === "deep" || tier === "publication";
+      const maxEval = Math.min(f6Candidates.length, tier === "preview" ? 100 : 300);
+      const chgnetResult = await runChgnetEvaluation(
+        f6Candidates,
+        path.join(process.cwd(), "server", "csp", "chgnet_work_" + formula.replace(/[^a-zA-Z0-9]/g, "")),
+        doRelax,
+        maxEval,
+        tier === "preview" ? 120000 : 300000, // 2 min preview, 5 min deep
+      );
+      if (chgnetResult.stats.evaluated > 0) {
+        f6Candidates = chgnetResult.rankedCandidates;
+        console.log(`[CSP-Funnel] F6 CHGNet: ${chgnetResult.stats.evaluated} evaluated, best=${chgnetResult.stats.bestEnergy?.toFixed(4) ?? "?"} eV/atom`);
+      }
+    } catch (chgnetErr: any) {
+      console.log(`[CSP-Funnel] F6 CHGNet failed: ${chgnetErr.message?.slice(0, 100)} — continuing without`);
+    }
+  }
+
+  // F7: Clustering
   const clusters = clusterCandidates(
-    f5.map(s => s.candidate),
+    f6Candidates,
     formula,
     pressureGPa,
   );

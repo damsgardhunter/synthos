@@ -4022,7 +4022,7 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     // to 3-5 high-quality DFT-worthy structures with exploitation/exploration balance.
     if (structureCandidates.length > 5) {
       try {
-        const funnelResult = runCandidateFunnel(
+        const funnelResult = await runCandidateFunnel(
           structureCandidates as any,
           formula,
           elements,
