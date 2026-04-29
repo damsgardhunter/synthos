@@ -32,8 +32,7 @@ import { airssEngine } from "../csp/airss-wrapper";
 import { pyxtalEngine } from "../csp/pyxtal-wrapper";
 import { mutateTopCandidates } from "../csp/structure-mutator";
 import { logCandidateStats } from "../csp/candidate-metadata";
-import { dedupAndCluster } from "../csp/dedup-cluster";
-import { selectForDFT } from "../csp/dft-admission";
+import { runCandidateFunnel } from "../csp/candidate-funnel";
 import {
   runStagedRelaxation,
   runStage4GammaPhonon,
@@ -3971,41 +3970,37 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       logCandidateStats(structureCandidates as any, formula);
     } catch {}
 
-    // --- Dedup + Cluster + DFT Admission ---
-    // With 50+ AIRSS + 20+ PyXtal + 12 mutants, many structures are near-duplicates.
-    // Dedup by cheap fingerprint, cluster survivors, then select the best 3-5 for DFT
-    // using a multi-criteria admission score (exploitation + exploration balance).
-    if (structureCandidates.length > 10) {
+    // --- Candidate Funnel (F0 → F8) ---
+    // Full multi-stage filter: parse → geometry → chemistry → hydride →
+    // dedup → score → cluster → DFT admission. Reduces ~85 raw candidates
+    // to 3-5 high-quality DFT-worthy structures with exploitation/exploration balance.
+    if (structureCandidates.length > 5) {
       try {
-        const { clusters, stats } = dedupAndCluster(
+        const funnelResult = runCandidateFunnel(
           structureCandidates as any,
           formula,
+          elements,
           workerPressure,
+          Math.min(5, Math.max(3, Math.ceil(structureCandidates.length * 0.05))),
         );
 
-        if (clusters.length > 3) {
-          // Select top candidates using admission scoring
-          const { selected } = selectForDFT(clusters, Math.min(5, clusters.length));
-
-          // Replace candidate list with selected representatives
-          structureCandidates = selected.map(c => ({
+        if (funnelResult.selected.length > 0) {
+          structureCandidates = funnelResult.selected.map(c => ({
             latticeA: c.latticeA,
             latticeB: c.latticeB,
             latticeC: c.latticeC,
             cOverA: c.cOverA,
             positions: c.positions,
-            prototype: c.prototype ?? "cluster-rep",
+            prototype: c.prototype ?? "funnel-selected",
             crystalSystem: c.crystalSystem,
             spaceGroup: c.spaceGroup,
             source: c.source,
             confidence: c.confidence ?? 0.5,
             isMetallic: null,
           }));
-
-          console.log(`[QE-Worker] DFT admission: ${stats.total} → ${stats.afterDedup} deduped → ${clusters.length} clusters → ${structureCandidates.length} selected for DFT`);
         }
-      } catch (dedupErr: any) {
-        console.log(`[QE-Worker] Dedup/admission failed: ${dedupErr.message?.slice(0, 100)} — using all candidates`);
+      } catch (funnelErr: any) {
+        console.log(`[QE-Worker] Funnel failed: ${funnelErr.message?.slice(0, 100)} — using all candidates`);
       }
     }
 
