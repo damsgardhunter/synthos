@@ -80,115 +80,114 @@ function generatePyXtalScript(
 
   return `#!/usr/bin/env python3
 """PyXtal structure generation for ${elements.join("")} at ${pressureGPa} GPa."""
-import os, sys, random, warnings
+import os, sys, random, traceback, warnings
 warnings.filterwarnings("ignore")
 
 try:
     from pyxtal import pyxtal
 except ImportError:
-    print("PYXTAL_NOT_INSTALLED", file=sys.stderr)
+    print("PYXTAL_NOT_INSTALLED")
     sys.exit(1)
 
-elements = ${JSON.stringify(elements)}
-base_composition = ${JSON.stringify(baseComp)}
-z_values = ${JSON.stringify(zValues)}
-n_structures = ${nStructures}
-base_seed = ${baseSeed}
-vol_factor = ${volFactor}
-output_dir = ${JSON.stringify(outputDir.replace(/\\/g, "/"))}
-space_groups = ${JSON.stringify(sgs)}
+try:
+    import pymatgen
+except ImportError:
+    print("PYXTAL_ERROR pymatgen not installed (required by pyxtal for structure conversion)")
+    sys.exit(1)
 
-os.makedirs(output_dir, exist_ok=True)
+try:
+    elements = ${JSON.stringify(elements)}
+    base_composition = ${JSON.stringify(baseComp)}
+    z_values = ${JSON.stringify(zValues)}
+    n_structures = ${nStructures}
+    base_seed = ${baseSeed}
+    vol_factor = ${volFactor}
+    output_dir = ${JSON.stringify(outputDir.replace(/\\/g, "/"))}
+    space_groups = ${JSON.stringify(sgs)}
 
-generated = 0
-attempts = 0
-max_attempts = n_structures * 50  # Many SGs can't fit complex stoichiometry — need many retries
+    os.makedirs(output_dir, exist_ok=True)
 
-random.seed(base_seed)
+    generated = 0
+    attempts = 0
+    max_attempts = n_structures * 50
+    random.seed(base_seed)
 
-# For complex stoichiometries (like H9Na2Y), low-symmetry SGs succeed more often.
-# After 30% of budget, add P1 (no symmetry) to ensure we get SOME structures.
-total_atoms = sum(composition)
-is_complex = max(composition) >= 6 or total_atoms >= 10
+    while generated < n_structures and attempts < max_attempts:
+        attempts += 1
 
-while generated < n_structures and attempts < max_attempts:
-    attempts += 1
+        # After many failed attempts, fall back to low-symmetry SGs
+        if attempts > max_attempts * 0.3 and generated == 0:
+            sg = random.choice([1, 2, 4, 14, 62])
+        else:
+            sg = random.choice(space_groups)
+        seed = base_seed + attempts
+        vf = vol_factor + random.uniform(-0.2, 0.4)
 
-    # After many failed attempts, fall back to low-symmetry SGs
-    if attempts > max_attempts * 0.3 and generated == 0:
-        sg = random.choice([1, 2, 4, 14, 62])  # P1, P-1, P21, P21/c, Pnma
-    else:
-        sg = random.choice(space_groups)
-    seed = base_seed + attempts
-
-    # Try multiple volume factors if packing is tight
-    vf = vol_factor + random.uniform(-0.2, 0.4)
-
-    try:
-        crystal = None
-        # Try each Z multiplier until one is compatible with this SG
-        for z in z_values:
-            comp = [n * z for n in base_composition]
-            try:
-                crystal = pyxtal()
-                crystal.from_random(
-                    dim=3,
-                    group=sg,
-                    species=elements,
-                    numIons=comp,
-                    factor=max(0.9, vf),
-                    seed=seed,
-                )
-                if crystal.valid:
-                    break
-            except Exception:
-                crystal = None
+        try:
+            crystal = None
+            for z in z_values:
+                comp = [n * z for n in base_composition]
+                try:
+                    crystal = pyxtal()
+                    crystal.from_random(
+                        dim=3,
+                        group=sg,
+                        species=elements,
+                        numIons=comp,
+                        factor=max(0.9, vf),
+                        seed=seed,
+                    )
+                    if crystal.valid:
+                        break
+                except Exception:
+                    crystal = None
+                    continue
+            if crystal is None:
                 continue
-        if crystal is None:
-            continue
 
-        if crystal.valid:
-            # Write POSCAR directly (avoid pymatgen .to() API compatibility issues)
-            poscar_path = os.path.join(output_dir, f"POSCAR_{generated:04d}")
-            try:
-                struct = crystal.to_pymatgen_structure()
-                lattice = struct.lattice
-                # Build POSCAR manually
-                species_order = []
-                species_counts = {}
-                for site in struct:
-                    el = str(site.specie)
-                    if el not in species_counts:
-                        species_order.append(el)
-                        species_counts[el] = 0
-                    species_counts[el] += 1
-                lines = []
-                lines.append(f"PyXtal SG={sg} seed={seed} P={pressureGPa}GPa")
-                lines.append("1.0")
-                for v in lattice.matrix:
-                    lines.append(f"  {v[0]:.10f}  {v[1]:.10f}  {v[2]:.10f}")
-                lines.append("  ".join(species_order))
-                lines.append("  ".join(str(species_counts[s]) for s in species_order))
-                lines.append("Direct")
-                for s in species_order:
+            if crystal.valid:
+                poscar_path = os.path.join(output_dir, f"POSCAR_{generated:04d}")
+                try:
+                    struct = crystal.to_pymatgen_structure()
+                    lattice = struct.lattice
+                    species_order = []
+                    species_counts = {}
                     for site in struct:
-                        if str(site.specie) == s:
-                            fc = site.frac_coords
-                            lines.append(f"  {fc[0]:.10f}  {fc[1]:.10f}  {fc[2]:.10f}")
-                with open(poscar_path, "w") as f:
-                    f.write("\\n".join(lines) + "\\n")
-                generated += 1
-            except Exception as e2:
-                if attempts <= 3:
-                    print(f"PYXTAL_DEBUG attempt={attempts} sg={sg} write_error={str(e2)[:60]}", flush=True)
-        elif attempts <= 3:
-            print(f"PYXTAL_DEBUG attempt={attempts} sg={sg} valid=False factor={vf:.2f}", flush=True)
+                        el = str(site.specie)
+                        if el not in species_counts:
+                            species_order.append(el)
+                            species_counts[el] = 0
+                        species_counts[el] += 1
+                    lines = []
+                    lines.append(f"PyXtal SG={sg} seed={seed} P={pressureGPa}GPa")
+                    lines.append("1.0")
+                    for v in lattice.matrix:
+                        lines.append(f"  {v[0]:.10f}  {v[1]:.10f}  {v[2]:.10f}")
+                    lines.append("  ".join(species_order))
+                    lines.append("  ".join(str(species_counts[s]) for s in species_order))
+                    lines.append("Direct")
+                    for s in species_order:
+                        for site in struct:
+                            if str(site.specie) == s:
+                                fc = site.frac_coords
+                                lines.append(f"  {fc[0]:.10f}  {fc[1]:.10f}  {fc[2]:.10f}")
+                    with open(poscar_path, "w") as f:
+                        f.write("\\n".join(lines) + "\\n")
+                    generated += 1
+                except Exception as e2:
+                    if attempts <= 3:
+                        print(f"PYXTAL_DEBUG attempt={attempts} sg={sg} write_error={str(e2)[:60]}", flush=True)
+            elif attempts <= 3:
+                print(f"PYXTAL_DEBUG attempt={attempts} sg={sg} valid=False factor={vf:.2f}", flush=True)
 
-    except Exception as e:
-        if attempts <= 3:
-            print(f"PYXTAL_DEBUG attempt={attempts} sg={sg} error={str(e)[:80]}", flush=True)
+        except Exception as e:
+            if attempts <= 3:
+                print(f"PYXTAL_DEBUG attempt={attempts} sg={sg} error={str(e)[:80]}", flush=True)
 
-print(f"PYXTAL_DONE generated={generated} attempts={attempts}")
+    print(f"PYXTAL_DONE generated={generated} attempts={attempts}")
+except Exception as fatal:
+    print(f"PYXTAL_FATAL {traceback.format_exc()}")
+    sys.exit(1)
 `;
 }
 
