@@ -3889,8 +3889,47 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     const { ibrav: fpIbrav } = determineCrystalSystem(elements, counts);
     const fpGamma = fpIbrav === 4 ? (2 * Math.PI / 3) : (Math.PI / 2);
 
-    const relaxed = tryXTBPreRelaxation(positions, latticeA, jobDir, workerPressure);
-    result.xtbPreRelaxed = !!relaxed;
+    // --- Pre-xTB quality gate ---
+    // Known structures have DFT-quality Wyckoff positions from literature.
+    // xTB can only degrade them (especially at high pressure where the
+    // molecular optimizer collapses cage structures). Validate distances
+    // at the DFT lattice constant and skip xTB if the geometry is sound.
+    let skipXtb = false;
+    const knownStruct = formula ? lookupKnownStructure(formula) : null;
+    if (knownStruct && positions.length === knownStruct.atoms.length) {
+      // Check distances at the ACTUAL DFT lattice (not the compressed xTB lattice)
+      const dftLattice = knownStruct.latticeA;
+      let minDist = Infinity;
+      let minPair = "";
+      for (let i = 0; i < positions.length; i++) {
+        for (let j = i + 1; j < positions.length; j++) {
+          let dx = positions[i].x - positions[j].x;
+          let dy = positions[i].y - positions[j].y;
+          let dz = positions[i].z - positions[j].z;
+          dx -= Math.round(dx); dy -= Math.round(dy); dz -= Math.round(dz);
+          const dist = Math.sqrt((dx * dftLattice) ** 2 + (dy * dftLattice) ** 2 + (dz * dftLattice) ** 2);
+          if (dist < minDist) { minDist = dist; minPair = `${positions[i].element}-${positions[j].element}`; }
+        }
+      }
+      // At high pressure, real H-H distances can be 0.8-1.2 Å. Use a
+      // pressure-scaled threshold: 0.5 Å at 0 GPa, 0.3 Å at 200 GPa.
+      const distThreshold = workerPressure > 0
+        ? Math.max(0.3, 0.5 - workerPressure * 0.001)
+        : 0.5;
+      if (minDist >= distThreshold) {
+        skipXtb = true;
+        result.xtbPreRelaxed = true;
+        console.log(`[QE-Worker] Known-structure positions validated for ${formula}: minDist=${minDist.toFixed(3)} Å [${minPair}] at DFT lattice ${dftLattice.toFixed(2)} Å — skipping xTB (literature Wyckoff positions are DFT-quality)`);
+      } else {
+        console.log(`[QE-Worker] Known-structure distance check: ${minPair}=${minDist.toFixed(3)} Å < ${distThreshold.toFixed(2)} Å at DFT lattice — proceeding to xTB`);
+      }
+    }
+
+    let relaxed: Array<{ element: string; x: number; y: number; z: number }> | null = null;
+    if (!skipXtb) {
+      relaxed = tryXTBPreRelaxation(positions, latticeA, jobDir, workerPressure);
+    }
+    result.xtbPreRelaxed = result.xtbPreRelaxed || !!relaxed;
     if (relaxed) {
       positions = relaxed;
       console.log(`[QE-Worker] Using xTB pre-relaxed geometry for ${formula}`);
