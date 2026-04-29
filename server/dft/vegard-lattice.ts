@@ -21,6 +21,7 @@ import {
   type MPSummaryData,
 } from "../learning/materials-project-client";
 import { getElementData } from "../learning/elemental-data";
+import { getKnownStructureFormulas, lookupKnownStructure } from "../learning/known-structures";
 import { predictWithLocalXGB, loadLatestXGBWeights } from "./ml-weight-loader";
 import {
   selectPrototype,
@@ -576,19 +577,60 @@ export async function interpolateFromTemplateReferences(
 
   const nSpecies = elements.length;
   const totalAtoms = Object.values(counts).reduce((s, n) => s + Math.round(n), 0);
+  const targetFormula = elements.map(e => `${e}${Math.round(counts[e])}`).join("");
 
-  let refs: AflowStructureEndpoint[];
+  // --- Tier 0: Local known-structures database ---
+  // Our own database has DFT-quality Wyckoff positions from published papers.
+  // These are far better references than AFLOW entries (which are often
+  // ambient-pressure and may not contain hydrogen). Search for compounds
+  // in the same space group with shared elements and similar atom count.
+  const localRefs: AflowStructureEndpoint[] = [];
   try {
-    refs = await fetchAflowBySpaceGroup(sgNumber, nSpecies, 12, elements);
-  } catch {
-    return null;
-  }
+    for (const ksFormula of getKnownStructureFormulas()) {
+      if (ksFormula === targetFormula) continue; // skip self
+      const ks = lookupKnownStructure(ksFormula);
+      if (!ks || ks.spaceGroupNumber !== sgNumber) continue;
+      if (Math.abs(ks.atoms.length - totalAtoms) > 4) continue;
+      // Require at least one shared element
+      const ksElements = new Set(ks.atoms.map(a => a.element));
+      const shared = elements.filter(e => ksElements.has(e));
+      if (shared.length === 0) continue;
+      localRefs.push({
+        compound: ksFormula,
+        elements: Array.from(ksElements).sort(),
+        volumeAtom: (ks.latticeA ** 3) / ks.atoms.length,
+        latticeSystem: ks.latticeType,
+        spaceGroupNumber: ks.spaceGroupNumber,
+        spaceGroupSymbol: ks.spaceGroup,
+        enthalpyFormationAtom: null,
+        bandgap: null,
+        source: "known-structures",
+        geometry: [ks.latticeA, ks.latticeB ?? ks.latticeA, ks.latticeC ?? ks.latticeA, 90, 90,
+          ks.latticeType === "hexagonal" ? 120 : 90] as [number, number, number, number, number, number],
+        positions: ks.atoms.map(a => ({ element: a.element, x: a.x, y: a.y, z: a.z })),
+      });
+    }
+    if (localRefs.length > 0) {
+      console.log(`[VCA-Template] Found ${localRefs.length} local known-structure refs for SG=${sgNumber}: ${localRefs.map(r => r.compound).join(", ")}`);
+    }
+  } catch {}
 
-  // Filter to entries with positions and similar atom count
-  const withPositions = refs.filter(r =>
-    r.positions && r.positions.length > 0 &&
-    Math.abs(r.positions.length - totalAtoms) <= 2
-  );
+  // Combine local refs (higher quality) with AFLOW refs
+  let aflowRefs: AflowStructureEndpoint[] = [];
+  try {
+    aflowRefs = await fetchAflowBySpaceGroup(sgNumber, nSpecies, 12, elements);
+  } catch {}
+  const refs = [...localRefs, ...aflowRefs];
+
+  // Filter to entries with positions and similar atom count.
+  // Local known-structure refs get wider tolerance (±4) since they're
+  // DFT-quality — e.g. YH9 (10 atoms) is an excellent reference for
+  // YH9Na2 (12 atoms) despite a count difference of 2.
+  const withPositions = refs.filter(r => {
+    if (!r.positions || r.positions.length === 0) return false;
+    const maxDiff = r.source === "known-structures" ? 4 : 2;
+    return Math.abs(r.positions.length - totalAtoms) <= maxDiff;
+  });
   if (withPositions.length === 0) return null;
 
   // Score by chemical similarity to target.

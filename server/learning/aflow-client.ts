@@ -481,7 +481,7 @@ export interface AflowStructureEndpoint {
   spaceGroupSymbol: string;
   enthalpyFormationAtom: number | null;  // eV/atom
   bandgap: number | null;    // eV — 0 means metallic
-  source: "AFLOW";
+  source: "AFLOW" | "known-structures";
   /** DFT-relaxed lattice parameters [a, b, c, alpha, beta, gamma] from AFLOW geometry field. */
   geometry: [number, number, number, number, number, number] | null;
   /** DFT-relaxed fractional atomic positions from AFLOW. */
