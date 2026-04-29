@@ -32,6 +32,8 @@ import { airssEngine } from "../csp/airss-wrapper";
 import { pyxtalEngine } from "../csp/pyxtal-wrapper";
 import { mutateTopCandidates } from "../csp/structure-mutator";
 import { logCandidateStats } from "../csp/candidate-metadata";
+import { dedupAndCluster } from "../csp/dedup-cluster";
+import { selectForDFT } from "../csp/dft-admission";
 import {
   runStagedRelaxation,
   runStage4GammaPhonon,
@@ -3968,6 +3970,44 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     try {
       logCandidateStats(structureCandidates as any, formula);
     } catch {}
+
+    // --- Dedup + Cluster + DFT Admission ---
+    // With 50+ AIRSS + 20+ PyXtal + 12 mutants, many structures are near-duplicates.
+    // Dedup by cheap fingerprint, cluster survivors, then select the best 3-5 for DFT
+    // using a multi-criteria admission score (exploitation + exploration balance).
+    if (structureCandidates.length > 10) {
+      try {
+        const { clusters, stats } = dedupAndCluster(
+          structureCandidates as any,
+          formula,
+          workerPressure,
+        );
+
+        if (clusters.length > 3) {
+          // Select top candidates using admission scoring
+          const { selected } = selectForDFT(clusters, Math.min(5, clusters.length));
+
+          // Replace candidate list with selected representatives
+          structureCandidates = selected.map(c => ({
+            latticeA: c.latticeA,
+            latticeB: c.latticeB,
+            latticeC: c.latticeC,
+            cOverA: c.cOverA,
+            positions: c.positions,
+            prototype: c.prototype ?? "cluster-rep",
+            crystalSystem: c.crystalSystem,
+            spaceGroup: c.spaceGroup,
+            source: c.source,
+            confidence: c.confidence ?? 0.5,
+            isMetallic: null,
+          }));
+
+          console.log(`[QE-Worker] DFT admission: ${stats.total} → ${stats.afterDedup} deduped → ${clusters.length} clusters → ${structureCandidates.length} selected for DFT`);
+        }
+      } catch (dedupErr: any) {
+        console.log(`[QE-Worker] Dedup/admission failed: ${dedupErr.message?.slice(0, 100)} — using all candidates`);
+      }
+    }
 
     // Use Vegard lattice if confident, otherwise fall back to volume-sum
     let latticeA: number;
