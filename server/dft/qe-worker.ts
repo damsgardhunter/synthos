@@ -28,6 +28,7 @@ import {
 } from "../learning/physics-engine";
 import { generateStructureCandidates, vegardEstimate, type StructureCandidate, type VegardEstimate } from "./vegard-lattice";
 import { lookupKnownStructure, getKnownStructureFormulas } from "../learning/known-structures";
+import { airssEngine } from "../csp/airss-wrapper";
 import {
   runStagedRelaxation,
   runStage4GammaPhonon,
@@ -3835,6 +3836,47 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       console.log(`[QE-Worker] Vegard/candidate generation failed for ${formula}: ${vegardErr.message?.slice(0, 150)}, using volume-sum fallback`);
     }
 
+    // --- AIRSS structure generation ---
+    // Generate 3-5 sensible random structures via AIRSS buildcell.
+    // These complement Vegard/VCA candidates with structurally diverse
+    // starting points that aren't biased by known structure databases.
+    // Only runs if buildcell is installed; silently skipped otherwise.
+    if (airssEngine.isAvailable()) {
+      try {
+        const airssDir = path.join(jobDir, "airss");
+        const airssBudget = Math.min(5, Math.max(3, 8 - structureCandidates.length));
+        const airssCandidates = await airssEngine.generateStructures(elements, counts, {
+          binaryPath: "",
+          workDir: airssDir,
+          timeoutMs: 30000,
+          maxStructures: airssBudget,
+          pressureGPa: workerPressure,
+          baseSeed: Date.now() % 1e8,
+        });
+        if (airssCandidates.length > 0) {
+          // Convert CSPCandidate positions to StructureCandidate format
+          for (const ac of airssCandidates) {
+            structureCandidates.push({
+              latticeA: ac.latticeA,
+              latticeB: ac.latticeB,
+              latticeC: ac.latticeC,
+              cOverA: ac.cOverA,
+              positions: ac.positions,
+              prototype: "AIRSS-buildcell",
+              crystalSystem: ac.crystalSystem,
+              spaceGroup: ac.spaceGroup,
+              source: ac.source,
+              confidence: 0.40,
+              isMetallic: null,
+            });
+          }
+          console.log(`[QE-Worker] AIRSS generated ${airssCandidates.length} candidates for ${formula} (total now: ${structureCandidates.length})`);
+        }
+      } catch (airssErr: any) {
+        console.log(`[QE-Worker] AIRSS failed for ${formula}: ${airssErr.message?.slice(0, 100)} — continuing without`);
+      }
+    }
+
     // Use Vegard lattice if confident, otherwise fall back to volume-sum
     let latticeA: number;
     if (vegardResult && vegardResult.confidence > 0.3) {
@@ -4044,7 +4086,8 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
             const isQualitySource = c.positions.length > 0 && (
               c.prototype === "MP-direct" ||
               c.prototype.startsWith("TemplateVCA-") ||
-              c.prototype === "VCA-interpolated"
+              c.prototype === "VCA-interpolated" ||
+              c.prototype === "AIRSS-buildcell"
             );
             // Validate VCA positions: check no atoms overlap at the candidate lattice
             let vcaValid = isQualitySource;

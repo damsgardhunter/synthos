@@ -224,16 +224,21 @@ function parseCellOutput(
 // AIRSS Engine
 // ---------------------------------------------------------------------------
 
+let _airssAvailable: boolean | null = null;
+
 export const airssEngine: CSPEngine = {
   name: "airss",
 
   isAvailable(): boolean {
+    if (_airssAvailable !== null) return _airssAvailable;
     try {
       execSync(`${BUILDCELL_BIN} < /dev/null 2>&1 || true`, { timeout: 5000 });
-      return true;
+      _airssAvailable = true;
+      console.log(`[AIRSS] buildcell found at ${BUILDCELL_BIN}`);
     } catch {
-      return false;
+      _airssAvailable = false;
     }
+    return _airssAvailable;
   },
 
   async generateStructures(
