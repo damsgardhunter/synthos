@@ -4245,8 +4245,10 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     if (structureCandidates.length > 0) {
       // Run staged relaxation (Stage 1 + Stage 2) on structure candidates
       const qeCallbacks = buildQERunnerCallbacks();
+      // Only skip vc-relax in staged relaxation for known compounds or TSC/all-TM.
+      // Novel high-P hydrides NEED vc-relax to discover the correct lattice.
       const skipVcRelax = (
-        (workerPressure >= 100 && elements.includes("H") && elements.length >= 2) ||
+        (workerPressure >= 100 && elements.includes("H") && elements.length >= 2 && isKnownCompound) ||
         !!opts?.forceSpin ||
         (elements.length >= 3 && elements.every(el => TRANSITION_METALS.has(el)))
       );
@@ -4350,17 +4352,21 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       result.vcRelaxed = true;
     }
 
-    // Skip vc-relax for high-pressure hydrides (binary or ternary+).
-    // Empirically these burn ~90 min per attempt on worker2 and produce no
-    // usable geometry (vc-relax exit=2, no final ATOMIC_POSITIONS block):
-    // Apr-15: YH9Na2, Li2LaH12, LaH11Li2 (ternary); Apr-15 p2: LaH12
-    // (binary). Cell optimisation is extremely stiff at >100 GPa and BFGS
-    // destabilises. Use the xTB pre-relaxed geometry + prototype lattice
-    // directly and let SCF do its job. Threshold lowered from 3 to 2
-    // elements after LaH12 slipped through.
+    // Skip vc-relax for high-pressure hydrides ONLY if we have a literature
+    // lattice to fall back on. For novel materials without a known structure,
+    // vc-relax is the ONLY path to the correct lattice — we must run it even
+    // though it's slow and may not converge. The mini-EOS correction will
+    // help refine the pressure match afterward.
     if (!result.vcRelaxed && workerPressure >= 100 && elements.includes("H") && elements.length >= 2) {
-      console.log(`[QE-Worker] Skipping vc-relax for ${formula} — high-P hydride (P=${workerPressure} GPa, ${elements.length} elements); cell optimisation unreliable above 100 GPa, proceeding with xTB geometry (saves ~90 min)`);
-      result.vcRelaxed = true;
+      if (isKnownCompound) {
+        // Known compound: safe to skip vc-relax (literature lattice available)
+        console.log(`[QE-Worker] Skipping vc-relax for ${formula} — known high-P hydride with literature lattice (saves ~90 min)`);
+        result.vcRelaxed = true;
+      } else {
+        // Novel compound: MUST run vc-relax to discover the correct lattice.
+        // Pipeline can't rely on known-structures for novel materials.
+        console.log(`[QE-Worker] Running vc-relax for ${formula} — novel high-P hydride (P=${workerPressure} GPa), no literature lattice available, vc-relax needed to find correct cell`);
+      }
     }
 
     // Skip vc-relax for TSC candidates. With forceSpin=true we emit
