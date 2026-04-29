@@ -148,7 +148,7 @@ try:
             if crystal.valid:
                 poscar_path = os.path.join(output_dir, f"POSCAR_{generated:04d}")
                 try:
-                    struct = crystal.to_pymatgen_structure()
+                    struct = crystal.to_pymatgen()
                     lattice = struct.lattice
                     species_order = []
                     species_counts = {}
