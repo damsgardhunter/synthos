@@ -129,22 +129,50 @@ function parseCellOutput(
   pressureGPa: number,
   stage: 1 | 2 | 3,
 ): CSPCandidate | null {
-  // Parse lattice vectors
-  const latMatch = content.match(
+  // Parse lattice vectors — handle both LATTICE_CART and LATTICE_ABC formats
+  let vecs: [number, number, number][] = [];
+
+  const latCartMatch = content.match(
     /%BLOCK\s+LATTICE_CART\s*\n([\s\S]*?)%ENDBLOCK\s+LATTICE_CART/i
   );
-  if (!latMatch) return null;
+  const latAbcMatch = !latCartMatch
+    ? content.match(/%BLOCK\s+LATTICE_ABC\s*\n([\s\S]*?)%ENDBLOCK\s+LATTICE_ABC/i)
+    : null;
 
-  const latLines = latMatch[1].trim().split("\n");
-  if (latLines.length < 3) return null;
-
-  const vecs: [number, number, number][] = [];
-  for (const line of latLines) {
-    const parts = line.trim().split(/\s+/).map(Number);
-    if (parts.length >= 3 && !parts.some(isNaN)) {
-      vecs.push([parts[0], parts[1], parts[2]]);
+  if (latCartMatch) {
+    const latLines = latCartMatch[1].trim().split("\n");
+    for (const line of latLines) {
+      const parts = line.trim().split(/\s+/).map(Number);
+      if (parts.length >= 3 && !parts.some(isNaN)) {
+        vecs.push([parts[0], parts[1], parts[2]]);
+      }
+    }
+  } else if (latAbcMatch) {
+    // LATTICE_ABC format: two lines — "a b c" then "alpha beta gamma" (degrees)
+    const abcLines = latAbcMatch[1].trim().split("\n").map(l => l.trim()).filter(l => l.length > 0);
+    if (abcLines.length >= 2) {
+      const [aVal, bVal, cVal] = abcLines[0].split(/\s+/).map(Number);
+      const [alpha, beta, gamma] = abcLines[1].split(/\s+/).map(Number);
+      if ([aVal, bVal, cVal, alpha, beta, gamma].every(v => !isNaN(v))) {
+        // Convert ABC + angles to Cartesian vectors
+        const toRad = (deg: number) => (deg * Math.PI) / 180;
+        const cosA = Math.cos(toRad(alpha));
+        const cosB = Math.cos(toRad(beta));
+        const cosG = Math.cos(toRad(gamma));
+        const sinG = Math.sin(toRad(gamma));
+        vecs = [
+          [aVal, 0, 0],
+          [bVal * cosG, bVal * sinG, 0],
+          [
+            cVal * cosB,
+            cVal * (cosA - cosB * cosG) / sinG,
+            cVal * Math.sqrt(1 - cosA ** 2 - cosB ** 2 - cosG ** 2 + 2 * cosA * cosB * cosG) / sinG,
+          ],
+        ];
+      }
     }
   }
+
   if (vecs.length < 3) return null;
 
   // Parse fractional positions
@@ -173,6 +201,13 @@ function parseCellOutput(
   const c = Math.sqrt(vecs[2][0] ** 2 + vecs[2][1] ** 2 + vecs[2][2] ** 2);
   const volume = cellVolumeFromVectors(vecs);
 
+  // Compute angles from dot products
+  const dot = (u: number[], v: number[]) => u[0] * v[0] + u[1] * v[1] + u[2] * v[2];
+  const toDeg = (rad: number) => (rad * 180) / Math.PI;
+  const alpha = toDeg(Math.acos(Math.max(-1, Math.min(1, dot(vecs[1], vecs[2]) / (b * c)))));
+  const beta = toDeg(Math.acos(Math.max(-1, Math.min(1, dot(vecs[0], vecs[2]) / (a * c)))));
+  const gamma = toDeg(Math.acos(Math.max(-1, Math.min(1, dot(vecs[0], vecs[1]) / (a * b)))));
+
   return {
     latticeA: a,
     latticeB: b,
@@ -191,7 +226,7 @@ function parseCellOutput(
     pressureGPa,
     cellVolume: volume,
     cellVectors: vecs,
-    latticeParams: { a, b, c, alpha: 90, beta: 90, gamma: 90 },
+    latticeParams: { a, b, c, alpha, beta, gamma },
     relaxationLevel: "raw",
   };
 }
@@ -251,7 +286,7 @@ export const airssEngine: CSPEngine = {
           candidates.push(candidate);
         } else if (i === 0) {
           // Log first parse failure to diagnose format issues
-          console.log(`[AIRSS] buildcell ran but parse failed. Output (first 300 chars): ${output.slice(0, 300)}`);
+          console.log(`[AIRSS] buildcell ran but parse failed. Output (first 600 chars): ${output.slice(0, 600)}`);
           // Keep the input file for debugging
           console.log(`[AIRSS] Input file: ${inputPath}`);
         }

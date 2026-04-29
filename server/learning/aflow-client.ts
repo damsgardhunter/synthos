@@ -557,6 +557,14 @@ function extractPaginatedEntries(obj: Record<string, any>): any[] {
   return entries;
 }
 
+/** Thrown when AFLOW returns 502/503/504 — signals the server is down, not a query issue. */
+class AflowServerDownError extends Error {
+  constructor(public status: number) {
+    super(`AFLOW server error ${status}`);
+    this.name = "AflowServerDownError";
+  }
+}
+
 async function vegardAflowFetch(query: string): Promise<any[] | null> {
   try {
     const url = `${AFLOW_API_BASE}/?${query},format(json)`;
@@ -566,6 +574,9 @@ async function vegardAflowFetch(query: string): Promise<any[] | null> {
     });
     if (!response.ok) {
       console.log(`[AFLOW-Vegard] HTTP ${response.status} for: ${query.slice(0, 60)}`);
+      if (response.status >= 502 && response.status <= 504) {
+        throw new AflowServerDownError(response.status);
+      }
       return null;
     }
     const text = await response.text();
@@ -577,6 +588,7 @@ async function vegardAflowFetch(query: string): Promise<any[] | null> {
     }
     return entries;
   } catch (err: any) {
+    if (err instanceof AflowServerDownError) throw err; // propagate server-down signal
     console.log(`[AFLOW-Vegard] Fetch failed: ${err?.message?.slice(0, 80) ?? "unknown"}`);
     return null;
   }
@@ -839,6 +851,8 @@ export async function fetchAflowBySpaceGroup(
     }
   };
 
+  let aflowDown = false; // Set on 502/503/504 — skip remaining tiers
+
   // Tier 1: Exact element match — compounds containing ALL target elements in this SG
   if (targetElements && targetElements.length >= 2) {
     try {
@@ -850,17 +864,22 @@ export async function fetchAflowBySpaceGroup(
         addResults(parseAflowTemplateRefEntries(raw, spaceGroupNumber), "tier1-exact");
         console.log(`[AFLOW-TemplateRef] Tier 1: ${raw.length} entries (${allEndpoints.length} total)`);
       }
-    } catch {}
+    } catch (err: any) {
+      if (err instanceof AflowServerDownError) {
+        aflowDown = true;
+        console.log(`[AFLOW-TemplateRef] AFLOW server down (HTTP ${err.status}) — skipping Tier 2+3`);
+      }
+    }
   }
 
   // Tier 2: Partial element match — compounds containing each key element individually
   // Skip H alone (too many hits) — pair it with a metal instead
-  if (targetElements && targetElements.length >= 2 && allEndpoints.length < limit) {
+  if (!aflowDown && targetElements && targetElements.length >= 2 && allEndpoints.length < limit) {
     const keyElements = targetElements.filter(e => e !== "H");
     // If target has H, search for metal+H pairs
     const hasH = targetElements.includes("H");
     for (const el of keyElements) {
-      if (allEndpoints.length >= limit) break;
+      if (allEndpoints.length >= limit || aflowDown) break;
       try {
         const speciesFilter = hasH ? `species(${el},H)` : `species(${el})`;
         const remaining = limit - allEndpoints.length;
@@ -870,7 +889,12 @@ export async function fetchAflowBySpaceGroup(
         if (raw && raw.length > 0) {
           addResults(parseAflowTemplateRefEntries(raw, spaceGroupNumber), `tier2-${el}`);
         }
-      } catch {}
+      } catch (err: any) {
+        if (err instanceof AflowServerDownError) {
+          aflowDown = true;
+          console.log(`[AFLOW-TemplateRef] AFLOW server down (HTTP ${err.status}) — skipping remaining Tier 2+3`);
+        }
+      }
     }
     if (allEndpoints.length > 0) {
       console.log(`[AFLOW-TemplateRef] Tier 2: ${allEndpoints.length} total after partial element queries`);
@@ -878,7 +902,7 @@ export async function fetchAflowBySpaceGroup(
   }
 
   // Tier 3: Original fallback — SG + nspecies only (no element filter)
-  if (allEndpoints.length < 3) {
+  if (!aflowDown && allEndpoints.length < 3) {
     try {
       const query = `spacegroup_relax(${spaceGroupNumber}),nspecies(${nSpecies}),paging(1,${limit}),${FIELDS}`;
       console.log(`[AFLOW-TemplateRef] Tier 3 fallback: SG=${spaceGroupNumber} nspecies=${nSpecies} (limit ${limit})...`);
@@ -886,7 +910,11 @@ export async function fetchAflowBySpaceGroup(
       if (raw && raw.length > 0) {
         addResults(parseAflowTemplateRefEntries(raw, spaceGroupNumber), "tier3-fallback");
       }
-    } catch {}
+    } catch (err: any) {
+      if (err instanceof AflowServerDownError) {
+        console.log(`[AFLOW-TemplateRef] AFLOW server down (HTTP ${err.status}) at Tier 3`);
+      }
+    }
   }
 
   await setAflowCachedData(cacheKey, "template_ref", allEndpoints);
