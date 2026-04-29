@@ -19,7 +19,7 @@
  *   Raw: ~85 → F1: ~65 → F4: ~40 → F7: ~15 clusters → F8: 3-5 DFT
  */
 
-import type { CSPCandidate, ScreeningTierConfig } from "./csp-types";
+import type { CSPCandidate, ScreeningTier, ScreeningTierConfig } from "./csp-types";
 import { COVALENT_RADII, getPairMinsep, SCREENING_TIERS } from "./csp-types";
 import { analyzeHydrideChemistry, type HydrideAnalysis } from "./candidate-metadata";
 import { deduplicateCandidates, clusterCandidates, type StructureCluster } from "./dedup-cluster";
@@ -233,11 +233,17 @@ function f2_chemistry(scored: ScoredCandidate[], stats: FunnelStats): ScoredCand
       }
     }
 
-    // Unphysical density check
+    // Pressure-dependent density check
+    // At high pressure, dense structures are physical (5 Å³/atom = 0.2 atoms/Å³)
     const vol = c.cellVolume ?? (a * a * a * cOverA);
     const density = n / vol; // atoms per Å³
-    if (density > 0.2) {
-      chemScore -= 0.3; // Very dense — suspicious
+    const pressureGPaLocal = (c as any).pressureGPa ?? 0;
+    const densityLimit = pressureGPaLocal > 150 ? 0.50 :
+                         pressureGPaLocal > 50 ? 0.35 : 0.20;
+    if (density > densityLimit) {
+      chemScore -= 0.3;
+    } else if (density > densityLimit * 0.8) {
+      chemScore -= 0.1; // mild penalty near the limit
     }
 
     if (chemScore < 0.1) {
@@ -368,12 +374,22 @@ export interface FunnelResult {
  * @param pressureGPa - Target pressure
  * @param nDFT - How many candidates to send to DFT (default 3)
  */
+/**
+ * Compute tier-based DFT-0 budget.
+ * nDFT = min(cap, max(floor, clusters × clusterFraction))
+ */
+function computeDFT0Budget(tier: ScreeningTierConfig, nClusters: number): number {
+  const raw = Math.floor(nClusters * tier.dft0ClusterFraction);
+  return Math.min(tier.dft0Cap, Math.max(tier.dft0Floor, raw));
+}
+
 export function runCandidateFunnel(
   rawCandidates: CSPCandidate[],
   formula: string,
   elements: string[],
   pressureGPa: number,
   nDFT: number = 3,
+  tier: ScreeningTier = "preview",
 ): FunnelResult {
   const stats: FunnelStats = {
     f0_input: 0, f0_rejected: 0,
@@ -416,12 +432,16 @@ export function runCandidateFunnel(
   );
   stats.f7_clusters = clusters.length;
 
-  // F8: DFT admission
+  // F8: DFT admission — tier-based budget
   let dftSelection: DFTSelectionResult | null = null;
   let selected: CSPCandidate[] = [];
 
   if (clusters.length > 0) {
-    dftSelection = selectForDFT(clusters, nDFT, f5.map(s => s.candidate));
+    const tierConfig = SCREENING_TIERS[tier];
+    const dft0Budget = computeDFT0Budget(tierConfig, clusters.length);
+    console.log(`[CSP-Funnel] DFT-0 budget: ${dft0Budget} (tier=${tier}, clusters=${clusters.length}, floor=${tierConfig.dft0Floor}, cap=${tierConfig.dft0Cap})`);
+
+    dftSelection = selectForDFT(clusters, dft0Budget, f5.map(s => s.candidate));
     selected = dftSelection.selected;
     stats.f8_selected = selected.length;
   }

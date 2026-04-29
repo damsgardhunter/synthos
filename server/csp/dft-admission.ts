@@ -50,20 +50,27 @@ function scoreCandidate(
   // --- Confidence (30%) ---
   const confidence = Math.min(1.0, candidate.confidence ?? 0.3);
 
-  // --- Enthalpy rank (25%) ---
-  // Rank this candidate's enthalpy among all candidates.
-  // Lower enthalpy = better. If no enthalpy, use confidence as proxy.
-  let enthalpyRank = 0.5; // default middle
-  if (candidate.enthalpyPerAtom != null) {
-    const enthalpies = allCandidates
-      .filter(c => c.enthalpyPerAtom != null)
-      .map(c => c.enthalpyPerAtom!);
-    if (enthalpies.length > 1) {
-      enthalpies.sort((a, b) => a - b);
-      const idx = enthalpies.indexOf(candidate.enthalpyPerAtom);
-      enthalpyRank = 1 - (idx / (enthalpies.length - 1)); // 1 = best, 0 = worst
-    }
-  }
+  // --- Pre-relax proxy (25%) ---
+  // Before DFT/MLIP, we don't have real enthalpy. Use a composite proxy
+  // from geometry + hydride chemistry + volume reasonableness + cluster support.
+  // This replaces the fake enthalpyRank that was pretending to rank by energy.
+  const vol = candidate.cellVolume ?? 100;
+  const volPerAtom = vol / Math.max(1, candidate.positions.length);
+  const volReasonable = (volPerAtom >= 5 && volPerAtom <= 30) ? 1.0 :
+                        (volPerAtom >= 3 && volPerAtom <= 50) ? 0.7 : 0.3;
+  const clusterSupport = cluster ? Math.min(1.0, cluster.size * 0.05) : 0.3;
+  const geomFromConf = candidate.confidence ?? 0.5;
+
+  const hydrideForProxy = analyzeHydrideChemistry(candidate);
+  const hydrogenProxy = hydrideForProxy?.hasCageStructure ? 1.0 :
+                        (hydrideForProxy?.networkType === "extended-chain" ? 0.8 : 0.5);
+
+  const preRelaxProxy =
+    0.35 * geomFromConf +
+    0.25 * hydrogenProxy +
+    0.20 * volReasonable +
+    0.10 * (cluster ? Math.min(1.0, cluster.sources.length * 0.25) : 0.3) +
+    0.10 * clusterSupport;
 
   // --- Diversity (15%) ---
   // How different is this candidate from the rest? Use cluster size as proxy:
@@ -117,7 +124,7 @@ function scoreCandidate(
   // --- Weighted total ---
   const total =
     0.30 * confidence +
-    0.25 * enthalpyRank +
+    0.25 * preRelaxProxy +
     0.15 * diversity +
     0.10 * hydrideChemistry +
     0.10 * sourceDiversity +
@@ -127,7 +134,7 @@ function scoreCandidate(
   return {
     total,
     components: {
-      confidence, enthalpyRank, diversity,
+      confidence, enthalpyRank: preRelaxProxy, diversity,
       hydrideChemistry, sourceDiversity, novelty, exploration,
     },
     selectionCategory: "exploitation", // will be assigned during selection

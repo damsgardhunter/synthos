@@ -246,6 +246,7 @@ export const airssEngine: CSPEngine = {
         pyxtalBudgetPerZ: 0,
         pyxtalTotalCap: 0,
         volumeEnsemble: [0.85, 1.0, 1.15],
+        dft0Floor: 3, dft0Cap: 8, dft0ClusterFraction: 0.03,
       };
     }
 

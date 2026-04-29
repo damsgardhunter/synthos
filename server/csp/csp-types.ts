@@ -225,6 +225,10 @@ export interface ScreeningTierConfig {
   pyxtalTotalCap: number;
   /** Volume fractions to explore (relative to V0 estimate). */
   volumeEnsemble: number[];
+  /** DFT-0 budget: floor, cap, and cluster fraction. */
+  dft0Floor: number;
+  dft0Cap: number;
+  dft0ClusterFraction: number;
 }
 
 export const SCREENING_TIERS: Record<ScreeningTier, ScreeningTierConfig> = {
@@ -237,6 +241,9 @@ export const SCREENING_TIERS: Record<ScreeningTier, ScreeningTierConfig> = {
     pyxtalBudgetPerZ: 50,
     pyxtalTotalCap: 250,
     volumeEnsemble: [0.85, 1.0, 1.15],
+    dft0Floor: 3,
+    dft0Cap: 8,
+    dft0ClusterFraction: 0.03,
   },
   standard: {
     tier: "standard",
@@ -247,6 +254,9 @@ export const SCREENING_TIERS: Record<ScreeningTier, ScreeningTierConfig> = {
     pyxtalBudgetPerZ: 100,
     pyxtalTotalCap: 500,
     volumeEnsemble: [0.70, 0.85, 1.0, 1.15, 1.30],
+    dft0Floor: 15,
+    dft0Cap: 40,
+    dft0ClusterFraction: 0.10,
   },
   deep: {
     tier: "deep",
@@ -257,6 +267,9 @@ export const SCREENING_TIERS: Record<ScreeningTier, ScreeningTierConfig> = {
     pyxtalBudgetPerZ: 150,
     pyxtalTotalCap: 1000,
     volumeEnsemble: [0.70, 0.85, 1.0, 1.15, 1.30],
+    dft0Floor: 50,
+    dft0Cap: 120,
+    dft0ClusterFraction: 0.25,
   },
   publication: {
     tier: "publication",
@@ -267,6 +280,9 @@ export const SCREENING_TIERS: Record<ScreeningTier, ScreeningTierConfig> = {
     pyxtalBudgetPerZ: 200,
     pyxtalTotalCap: 1000,
     volumeEnsemble: [0.60, 0.70, 0.85, 1.0, 1.15, 1.30, 1.50],
+    dft0Floor: 120,
+    dft0Cap: 300,
+    dft0ClusterFraction: 0.40,
   },
 };
 
@@ -305,6 +321,13 @@ export const COVALENT_RADII: Record<string, number> = {
  * Get element-pair minimum separation for structure generation.
  * Uses covalent radii sum scaled by pair type and pressure.
  */
+/** Absolute minimum distances — never go below these regardless of scaling. */
+const ABSOLUTE_FLOOR: Record<string, number> = {
+  "H-H": 0.45,  // H2 bond = 0.74 Å; 0.45 catches true overlap
+  "M-H": 0.80,  // no metal-H bond shorter than this exists
+  "M-M": 1.50,  // metallic bonds floor
+};
+
 export function getPairMinsep(el1: string, el2: string, pressureGPa: number): number {
   const r1 = COVALENT_RADII[el1] ?? 1.2;
   const r2 = COVALENT_RADII[el2] ?? 1.2;
@@ -315,7 +338,11 @@ export function getPairMinsep(el1: string, el2: string, pressureGPa: number): nu
   const baseScale = isHH ? 0.50 : (isMH ? 0.60 : 0.75);
 
   const baseMinsep = (r1 + r2) * baseScale;
-  return pressureScaledMinsep(baseMinsep, pressureGPa);
+  const scaled = pressureScaledMinsep(baseMinsep, pressureGPa);
+
+  // Apply absolute floor — never allow below physical minimum
+  const floorKey = isHH ? "H-H" : (isMH ? "M-H" : "M-M");
+  return Math.max(scaled, ABSOLUTE_FLOOR[floorKey]);
 }
 
 /**

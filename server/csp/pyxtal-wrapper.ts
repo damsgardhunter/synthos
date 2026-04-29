@@ -149,7 +149,15 @@ try:
             else:
                 sg = random.choice([1, 2])
         seed = base_seed + attempts
-        vf = 1.1 + random.uniform(-0.2, 0.4)
+        # Pressure-aware volume jitter
+        if pressure_gpa < 20:
+            vf = 1.1 + random.uniform(-0.25, 0.40)   # 0.85-1.50
+        elif pressure_gpa < 100:
+            vf = 1.0 + random.uniform(-0.25, 0.25)    # 0.75-1.25
+        elif pressure_gpa < 200:
+            vf = 0.85 + random.uniform(-0.20, 0.25)   # 0.65-1.10
+        else:
+            vf = 0.75 + random.uniform(-0.20, 0.25)   # 0.55-1.00
 
         try:
             crystal = None
@@ -267,6 +275,7 @@ export const pyxtalEngine: CSPEngine = {
         pyxtalBudgetPerZ: Math.ceil(config.maxStructures / 3),
         pyxtalTotalCap: config.maxStructures,
         volumeEnsemble: [1.0],
+        dft0Floor: 3, dft0Cap: 8, dft0ClusterFraction: 0.03,
       };
     }
 

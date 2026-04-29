@@ -3980,7 +3980,8 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
           formula,
           elements,
           workerPressure,
-          Math.min(5, Math.max(3, Math.ceil(structureCandidates.length * 0.05))),
+          3, // nDFT fallback (overridden by tier-based budget inside funnel)
+          tierDecision.tier,
         );
 
         if (funnelResult.selected.length > 0) {
