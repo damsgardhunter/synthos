@@ -63,10 +63,11 @@ function generatePyXtalScript(
   const composition = elements.map(e => Math.round(counts[e]));
   const sgs = spaceGroups ?? SC_SPACE_GROUPS;
 
-  // Volume factor: compress for high pressure
-  const volFactor = pressureGPa > 0
-    ? Math.max(0.5, 1.0 - pressureGPa * 0.002)
-    : 1.0;
+  // Volume factor: use ambient-like volume for structure generation.
+  // Trying to pack atoms into compressed high-P volumes fails because
+  // most space groups can't fit the composition. DFT handles compression.
+  // Use factor slightly > 1.0 to give PyXtal room for valid packings.
+  const volFactor = 1.1;
 
   return `#!/usr/bin/env python3
 """PyXtal structure generation for ${elements.join("")} at ${pressureGPa} GPa."""
@@ -91,14 +92,27 @@ os.makedirs(output_dir, exist_ok=True)
 
 generated = 0
 attempts = 0
-max_attempts = n_structures * 20  # Allow many retries — some SGs are hard
+max_attempts = n_structures * 50  # Many SGs can't fit complex stoichiometry — need many retries
 
 random.seed(base_seed)
 
+# For complex stoichiometries (like H9Na2Y), low-symmetry SGs succeed more often.
+# After 30% of budget, add P1 (no symmetry) to ensure we get SOME structures.
+total_atoms = sum(composition)
+is_complex = max(composition) >= 6 or total_atoms >= 10
+
 while generated < n_structures and attempts < max_attempts:
     attempts += 1
-    sg = random.choice(space_groups)
+
+    # After many failed attempts, fall back to low-symmetry SGs
+    if attempts > max_attempts * 0.3 and generated == 0 and is_complex:
+        sg = random.choice([1, 2, 4, 14, 62])  # P1, P-1, P21, P21/c, Pnma
+    else:
+        sg = random.choice(space_groups)
     seed = base_seed + attempts
+
+    # Try multiple volume factors if packing is tight
+    vf = vol_factor + random.uniform(-0.2, 0.3)
 
     try:
         crystal = pyxtal()
@@ -107,7 +121,7 @@ while generated < n_structures and attempts < max_attempts:
             group=sg,
             species=elements,
             numIons=composition,
-            factor=vol_factor,
+            factor=max(0.8, vf),
             seed=seed,
         )
 

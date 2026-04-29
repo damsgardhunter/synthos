@@ -53,17 +53,15 @@ const VOL_PER_ATOM: Record<string, number> = {
   Re: 14.7, Pb: 30.3, Bi: 35.4, Th: 32.8,
 };
 
-function estimateVolume(elements: string[], counts: Record<string, number>, pressureGPa: number): number {
+function estimateVolume(elements: string[], counts: Record<string, number>, _pressureGPa: number): number {
   let vol = 0;
   for (const el of elements) {
     const v = VOL_PER_ATOM[el] ?? 15;
     vol += v * Math.round(counts[el]);
   }
-  // Compress for high pressure (Birch-Murnaghan-like scaling)
-  if (pressureGPa > 0) {
-    const compressionFactor = Math.pow(1 + 4 * pressureGPa / 100, -1 / 4);
-    vol *= Math.max(0.4, compressionFactor);
-  }
+  // Do NOT compress for pressure here — buildcell needs ambient-like volume
+  // to successfully pack atoms. The DFT pipeline handles compression later
+  // via Murnaghan EOS / literature lattice override.
   return vol;
 }
 
@@ -91,22 +89,29 @@ function generateCellInput(
   }
   cell += specParts.join(",") + "\n";
 
-  // Minimum separations from covalent radii (scaled by 0.7 for high-P)
-  const distScale = pressureGPa > 50 ? 0.7 : 0.85;
-  cell += `#MINSEP=${(1.5 * distScale).toFixed(2)}\n`;
+  // Minimum separations — use scaled covalent radii.
+  // Keep global MINSEP modest so buildcell can pack hydrogen-rich compounds.
+  const hasH = elements.includes("H");
+  const globalMinSep = hasH ? 0.8 : 1.2;
+  cell += `#MINSEP=${globalMinSep.toFixed(2)}\n`;
 
-  // Element-specific minimum separations
+  // Element-specific minimum separations (more relaxed for H pairs)
   for (let i = 0; i < elements.length; i++) {
     for (let j = i; j < elements.length; j++) {
       const ri = COVALENT_RADII[elements[i]] ?? 1.2;
       const rj = COVALENT_RADII[elements[j]] ?? 1.2;
-      const minDist = (ri + rj) * distScale;
+      // H-H can be very close in cage structures (~1.0-1.5 Å)
+      const isHH = elements[i] === "H" && elements[j] === "H";
+      const isMH = elements[i] === "H" || elements[j] === "H";
+      const scale = isHH ? 0.5 : (isMH ? 0.6 : 0.75);
+      const minDist = (ri + rj) * scale;
       cell += `#MINSEP=${elements[i]}-${elements[j]}=${minDist.toFixed(2)}\n`;
     }
   }
 
-  // Symmetry — let buildcell choose random space groups for diversity
-  cell += `#SYMMOPS=2-48\n`;
+  // Symmetry — allow low-symmetry SGs (1-4 ops) for easier packing of
+  // complex stoichiometries like H9Na2Y, plus high-symmetry for diversity.
+  cell += `#SYMMOPS=1-48\n`;
 
   // Volume range
   cell += `#VARVOL=${volMin.toFixed(1)}-${volMax.toFixed(1)}\n`;
