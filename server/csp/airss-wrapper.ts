@@ -77,55 +77,32 @@ function generateCellInput(
   const totalAtoms = Object.values(counts).reduce((s, n) => s + Math.round(n), 0);
   const targetVol = estimateVolume(elements, counts, pressureGPa);
 
-  // Target volume with ±20% range for buildcell to explore
-  const volMin = targetVol * 0.80;
-  const volMax = targetVol * 1.20;
-
-  let cell = `#TARGVOL=${((volMin + volMax) / 2).toFixed(1)}\n`;
-
-  // Minimum separations — use scaled covalent radii.
-  // Keep global MINSEP modest so buildcell can pack hydrogen-rich compounds.
+  // Buildcell .cell format:
+  // - #TARGVOL: target cell volume in Angstrom^3
+  // - #MINSEP: global minimum interatomic distance
+  // - %BLOCK LATTICE_CART: template lattice (buildcell randomizes it)
+  // - %BLOCK POSITIONS_FRAC: one line per atom (buildcell randomizes positions)
+  //
+  // IMPORTANT: Do NOT use #SPECIES (conflicts with POSITIONS_FRAC),
+  // #VARVOL (invalid syntax), or #MINSEP=El1-El2=X (Fortran parse error).
+  // Keep directives minimal — buildcell is picky about format.
   const hasH = elements.includes("H");
-  const globalMinSep = hasH ? 0.8 : 1.2;
+  const globalMinSep = hasH ? 0.7 : 1.0;
+  const a = Math.pow(targetVol, 1 / 3);
+
+  let cell = `#TARGVOL=${targetVol.toFixed(1)}\n`;
   cell += `#MINSEP=${globalMinSep.toFixed(2)}\n`;
 
-  // Element-specific minimum separations (more relaxed for H pairs)
-  for (let i = 0; i < elements.length; i++) {
-    for (let j = i; j < elements.length; j++) {
-      const ri = COVALENT_RADII[elements[i]] ?? 1.2;
-      const rj = COVALENT_RADII[elements[j]] ?? 1.2;
-      // H-H can be very close in cage structures (~1.0-1.5 Å)
-      const isHH = elements[i] === "H" && elements[j] === "H";
-      const isMH = elements[i] === "H" || elements[j] === "H";
-      const scale = isHH ? 0.5 : (isMH ? 0.6 : 0.75);
-      const minDist = (ri + rj) * scale;
-      cell += `#MINSEP=${elements[i]}-${elements[j]}=${minDist.toFixed(2)}\n`;
-    }
-  }
-
-  // Symmetry — allow low-symmetry SGs (1-4 ops) for easier packing of
-  // complex stoichiometries like H9Na2Y, plus high-symmetry for diversity.
-  cell += `#SYMMOPS=1-48\n`;
-
-  // Volume range
-  cell += `#VARVOL=${volMin.toFixed(1)}-${volMax.toFixed(1)}\n`;
-
-  // Seed for reproducibility
-  cell += `#SEED=${seed}\n`;
-
-  // Lattice block (buildcell needs a template cell to randomize)
-  const a = Math.pow(targetVol, 1 / 3);
   cell += `\n%BLOCK LATTICE_CART\n`;
   cell += `${a.toFixed(4)} 0.0000 0.0000\n`;
   cell += `0.0000 ${a.toFixed(4)} 0.0000\n`;
   cell += `0.0000 0.0000 ${a.toFixed(4)}\n`;
   cell += `%ENDBLOCK LATTICE_CART\n`;
 
-  // Atomic positions block (buildcell randomizes these)
   cell += `\n%BLOCK POSITIONS_FRAC\n`;
   for (const el of elements) {
     for (let i = 0; i < Math.round(counts[el]); i++) {
-      cell += `${el} 0.0 0.0 0.0 # ${el}${i + 1}\n`;
+      cell += `${el} 0.0 0.0 0.0\n`;
     }
   }
   cell += `%ENDBLOCK POSITIONS_FRAC\n`;

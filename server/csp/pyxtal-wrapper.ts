@@ -148,15 +148,39 @@ while generated < n_structures and attempts < max_attempts:
             continue
 
         if crystal.valid:
-            # Write as POSCAR
+            # Write POSCAR directly (avoid pymatgen .to() API compatibility issues)
             poscar_path = os.path.join(output_dir, f"POSCAR_{generated:04d}")
-            poscar_str = crystal.to_pymatgen_structure().to(fmt="poscar")
-            # Prepend metadata to comment line
-            lines = poscar_str.split("\\n")
-            lines[0] = f"PyXtal SG={sg} seed={seed} P={pressureGPa}GPa | {lines[0]}"
-            with open(poscar_path, "w") as f:
-                f.write("\\n".join(lines))
-            generated += 1
+            try:
+                struct = crystal.to_pymatgen_structure()
+                lattice = struct.lattice
+                # Build POSCAR manually
+                species_order = []
+                species_counts = {}
+                for site in struct:
+                    el = str(site.specie)
+                    if el not in species_counts:
+                        species_order.append(el)
+                        species_counts[el] = 0
+                    species_counts[el] += 1
+                lines = []
+                lines.append(f"PyXtal SG={sg} seed={seed} P={pressureGPa}GPa")
+                lines.append("1.0")
+                for v in lattice.matrix:
+                    lines.append(f"  {v[0]:.10f}  {v[1]:.10f}  {v[2]:.10f}")
+                lines.append("  ".join(species_order))
+                lines.append("  ".join(str(species_counts[s]) for s in species_order))
+                lines.append("Direct")
+                for s in species_order:
+                    for site in struct:
+                        if str(site.specie) == s:
+                            fc = site.frac_coords
+                            lines.append(f"  {fc[0]:.10f}  {fc[1]:.10f}  {fc[2]:.10f}")
+                with open(poscar_path, "w") as f:
+                    f.write("\\n".join(lines) + "\\n")
+                generated += 1
+            except Exception as e2:
+                if attempts <= 3:
+                    print(f"PYXTAL_DEBUG attempt={attempts} sg={sg} write_error={str(e2)[:60]}", flush=True)
         elif attempts <= 3:
             print(f"PYXTAL_DEBUG attempt={attempts} sg={sg} valid=False factor={vf:.2f}", flush=True)
 
