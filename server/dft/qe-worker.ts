@@ -33,6 +33,7 @@ import { pyxtalEngine } from "../csp/pyxtal-wrapper";
 import { mutateTopCandidates } from "../csp/structure-mutator";
 import { logCandidateStats } from "../csp/candidate-metadata";
 import { runCandidateFunnel } from "../csp/candidate-funnel";
+import { assignTier, logTierDecision } from "../csp/tier-assignment";
 import {
   runStagedRelaxation,
   runStage4GammaPhonon,
@@ -3840,24 +3841,26 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       console.log(`[QE-Worker] Vegard/candidate generation failed for ${formula}: ${vegardErr.message?.slice(0, 150)}, using volume-sum fallback`);
     }
 
+    // --- Tier assignment ---
+    // Determine how many CSP candidates to generate based on the material's
+    // characteristics, priority, and prior knowledge.
+    const tierDecision = assignTier(
+      formula, elements, workerPressure,
+      opts?.ensembleScore ? Math.round(opts.ensembleScore * 100) : 50,
+      false, // hasCompletedDFT — would need DB lookup
+      opts?.forceSpin ? "scf_tsc" : "scf",
+    );
+    logTierDecision(formula, tierDecision);
+
     // --- AIRSS structure generation ---
-    // Generate sensible random structures via AIRSS buildcell with Z sweeps
-    // and volume ensemble. Budget scales with screening tier:
-    //   preview: up to 2500 across Z=[1,2,4] × 3 volumes
-    //   standard: up to 5000 across Z=[1,2,3,4,6] × 5 volumes
-    // For inline DFT jobs, we use a moderate budget (~50 structures) that
-    // still covers multiple Z values and volume targets.
     if (airssEngine.isAvailable()) {
       try {
         const airssDir = path.join(jobDir, "airss");
-        // Inline budget: enough for Z sweeps with 2-3 volumes (~50 total)
-        // The AIRSS wrapper auto-selects tier based on maxStructures
-        const airssBudget = 50;
         const airssCandidates = await airssEngine.generateStructures(elements, counts, {
           binaryPath: "",
           workDir: airssDir,
-          timeoutMs: 120000, // 2 min for larger batch
-          maxStructures: airssBudget,
+          timeoutMs: tierDecision.timeoutMs,
+          maxStructures: tierDecision.airssBudget,
           pressureGPa: workerPressure,
           baseSeed: Date.now() % 1e8,
         });
@@ -3886,18 +3889,14 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     }
 
     // --- PyXtal structure generation ---
-    // Generates symmetry-constrained random structures across 230 SGs with
-    // Z sweeps. Budget: ~20 structures covering multiple Z values, enough
-    // to find compatible SGs for complex stoichiometries.
     if (pyxtalEngine.isAvailable()) {
       try {
         const pyxtalDir = path.join(jobDir, "pyxtal");
-        const pyxtalBudget = 20;
         const pyxtalCandidates = await pyxtalEngine.generateStructures(elements, counts, {
           binaryPath: "",
           workDir: pyxtalDir,
-          timeoutMs: 90000, // 90s for larger batch with Z sweeps
-          maxStructures: pyxtalBudget,
+          timeoutMs: tierDecision.timeoutMs,
+          maxStructures: tierDecision.pyxtalBudget,
           pressureGPa: workerPressure,
           baseSeed: (Date.now() + 7777) % 1e8,
         });
