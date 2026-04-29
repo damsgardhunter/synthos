@@ -267,26 +267,34 @@ export const airssEngine: CSPEngine = {
         fs.writeFileSync(inputPath, cellInput);
 
         const result = execSync(
-          `${BUILDCELL_BIN} < ${inputPath} 2>/dev/null`,
+          `${BUILDCELL_BIN} < ${inputPath} 2>&1`,
           { cwd: workDir, timeout: config.timeoutMs / config.maxStructures, maxBuffer: 1024 * 1024 }
         );
 
         const output = result.toString("utf-8");
         const candidate = parseCellOutput(output, elements, seed, config.pressureGPa, 1);
         if (candidate) {
-          // Inject seed structures as bias (volume/distance from best seeds)
           if (config.seedStructures && config.seedStructures.length > 0) {
             candidate.parentSeeds = config.seedStructures.map(s => s.seed);
           }
           candidates.push(candidate);
+        } else if (i === 0) {
+          // Log first parse failure to diagnose format issues
+          console.log(`[AIRSS] buildcell ran but parse failed. Output (first 300 chars): ${output.slice(0, 300)}`);
+          // Keep the input file for debugging
+          console.log(`[AIRSS] Input file: ${inputPath}`);
         }
 
-        // Clean up input file
-        try { fs.unlinkSync(inputPath); } catch {}
+        // Clean up input file (keep first one if it failed for debugging)
+        if (candidate || i > 0) {
+          try { fs.unlinkSync(inputPath); } catch {}
+        }
       } catch (err: any) {
-        // buildcell can fail for some random configs — that's normal, skip
         if (i === 0) {
-          console.log(`[AIRSS] First structure failed: ${err.message?.slice(0, 80)} — continuing`);
+          console.log(`[AIRSS] First structure exception: ${err.message?.slice(0, 200)}`);
+          // Also log stderr if available
+          if (err.stderr) console.log(`[AIRSS] stderr: ${err.stderr.toString().slice(0, 200)}`);
+          if (err.stdout) console.log(`[AIRSS] stdout: ${err.stdout.toString().slice(0, 200)}`);
         }
       }
     }

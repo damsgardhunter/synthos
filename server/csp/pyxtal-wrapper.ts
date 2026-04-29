@@ -105,14 +105,14 @@ while generated < n_structures and attempts < max_attempts:
     attempts += 1
 
     # After many failed attempts, fall back to low-symmetry SGs
-    if attempts > max_attempts * 0.3 and generated == 0 and is_complex:
+    if attempts > max_attempts * 0.3 and generated == 0:
         sg = random.choice([1, 2, 4, 14, 62])  # P1, P-1, P21, P21/c, Pnma
     else:
         sg = random.choice(space_groups)
     seed = base_seed + attempts
 
     # Try multiple volume factors if packing is tight
-    vf = vol_factor + random.uniform(-0.2, 0.3)
+    vf = vol_factor + random.uniform(-0.2, 0.4)
 
     try:
         crystal = pyxtal()
@@ -121,7 +121,7 @@ while generated < n_structures and attempts < max_attempts:
             group=sg,
             species=elements,
             numIons=composition,
-            factor=max(0.8, vf),
+            factor=max(0.9, vf),
             seed=seed,
         )
 
@@ -135,9 +135,12 @@ while generated < n_structures and attempts < max_attempts:
             with open(poscar_path, "w") as f:
                 f.write("\\n".join(lines))
             generated += 1
+        elif attempts <= 3:
+            print(f"PYXTAL_DEBUG attempt={attempts} sg={sg} valid=False factor={vf:.2f}", flush=True)
 
-    except Exception:
-        pass  # Many SG/composition combos are incompatible — expected
+    except Exception as e:
+        if attempts <= 3:
+            print(f"PYXTAL_DEBUG attempt={attempts} sg={sg} error={str(e)[:80]}", flush=True)
 
 print(f"PYXTAL_DONE generated={generated} attempts={attempts}")
 `;
@@ -210,9 +213,17 @@ export const pyxtalEngine: CSPEngine = {
         { cwd: workDir, timeout: config.timeoutMs, maxBuffer: 5 * 1024 * 1024 }
       );
       const output = result.toString();
+      // Log debug lines from the Python script
+      const debugLines = output.split("\n").filter(l => l.startsWith("PYXTAL_DEBUG"));
+      if (debugLines.length > 0) {
+        console.log(`[PyXtal] Debug: ${debugLines.slice(0, 5).join(" | ")}`);
+      }
       const match = output.match(/PYXTAL_DONE generated=(\d+) attempts=(\d+)/);
       if (match) {
         console.log(`[PyXtal] Done: ${match[1]} structures from ${match[2]} attempts`);
+      } else {
+        // No DONE marker — script may have crashed
+        console.log(`[PyXtal] Script output (first 500 chars): ${output.slice(0, 500)}`);
       }
       if (output.includes("PYXTAL_NOT_INSTALLED")) {
         console.log("[PyXtal] Not installed — skipping");
