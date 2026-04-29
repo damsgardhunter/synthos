@@ -60,8 +60,17 @@ function generatePyXtalScript(
   outputDir: string,
   spaceGroups?: number[],
 ): string {
-  const composition = elements.map(e => Math.round(counts[e]));
+  const baseComp = elements.map(e => Math.round(counts[e]));
   const sgs = spaceGroups ?? SC_SPACE_GROUPS;
+
+  // Try multiple formula unit multiplicities (Z = 1, 2, 4) to find
+  // compositions compatible with more space groups.
+  // E.g., Nb3Ge [3,1] can't fit SG 223, but [6,2] (Z=2) uses 2a+6c perfectly.
+  // PyXtal will try each Z and use the first that works for the chosen SG.
+  const zValues = [1, 2, 4].filter(z => {
+    const total = baseComp.reduce((s, n) => s + n * z, 0);
+    return total <= 20; // keep cell size manageable for DFT
+  });
 
   // Volume factor: use ambient-like volume for structure generation.
   // Trying to pack atoms into compressed high-P volumes fails because
@@ -81,7 +90,8 @@ except ImportError:
     sys.exit(1)
 
 elements = ${JSON.stringify(elements)}
-composition = ${JSON.stringify(composition)}
+base_composition = ${JSON.stringify(baseComp)}
+z_values = ${JSON.stringify(zValues)}
 n_structures = ${nStructures}
 base_seed = ${baseSeed}
 vol_factor = ${volFactor}
@@ -115,15 +125,27 @@ while generated < n_structures and attempts < max_attempts:
     vf = vol_factor + random.uniform(-0.2, 0.4)
 
     try:
-        crystal = pyxtal()
-        crystal.from_random(
-            dim=3,
-            group=sg,
-            species=elements,
-            numIons=composition,
-            factor=max(0.9, vf),
-            seed=seed,
-        )
+        crystal = None
+        # Try each Z multiplier until one is compatible with this SG
+        for z in z_values:
+            comp = [n * z for n in base_composition]
+            try:
+                crystal = pyxtal()
+                crystal.from_random(
+                    dim=3,
+                    group=sg,
+                    species=elements,
+                    numIons=comp,
+                    factor=max(0.9, vf),
+                    seed=seed,
+                )
+                if crystal.valid:
+                    break
+            except Exception:
+                crystal = None
+                continue
+        if crystal is None:
+            continue
 
         if crystal.valid:
             # Write as POSCAR

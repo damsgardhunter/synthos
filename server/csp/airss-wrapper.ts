@@ -82,12 +82,6 @@ function generateCellInput(
   const volMax = targetVol * 1.20;
 
   let cell = `#TARGVOL=${((volMin + volMax) / 2).toFixed(1)}\n`;
-  cell += `#SPECIES=`;
-  const specParts: string[] = [];
-  for (const el of elements) {
-    specParts.push(`${el}%NUM=${Math.round(counts[el])}`);
-  }
-  cell += specParts.join(",") + "\n";
 
   // Minimum separations — use scaled covalent radii.
   // Keep global MINSEP modest so buildcell can pack hydrogen-rich compounds.
