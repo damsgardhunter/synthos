@@ -17,11 +17,65 @@ import { parsePOSCAR } from "./poscar-io";
 
 const PYTHON_BIN = process.env.PYTHON_BIN ?? "python3";
 
-// Superconductor-relevant space groups (weighted by frequency)
-const SC_SPACE_GROUPS = [
-  225, 229, 194, 139, 221, 223, 166, 129, 191, 227,
-  62, 12, 123, 148, 164, 216, 63, 14, 2, 1,
+// Tiered space group sampling for PyXtal structure generation.
+// Distribution: 40% high-symmetry hydride SGs, 30% medium, 20% low, 10% P1/P-1
+const SG_HIGH_SYMMETRY = [
+  225, // Fm-3m (LaH10, NaCl)
+  229, // Im-3m (CaH6, H3S, BCC)
+  194, // P63/mmc (YH9, MgB2)
+  139, // I4/mmm (BaFe2As2)
+  221, // Pm-3m (perovskite)
+  223, // Pm-3n (A15, Nb3Sn)
+  166, // R-3m (Bi2Te3)
+  191, // P6/mmm (AlB2)
+  227, // Fd-3m (spinel)
+  216, // F-43m (half-Heusler)
 ];
+const SG_MEDIUM_SYMMETRY = [
+  12,  // C2/m (monoclinic layered)
+  62,  // Pnma (GdFeO3, orthorhombic)
+  129, // P4/nmm (FeSe, LiFeAs)
+  123, // P4/mmm
+  63,  // Cmcm
+  136, // P42/mnm (rutile)
+  148, // R-3
+  164, // P-3m1
+  140, // I4/mcm
+  127, // P4/mbm
+  15,  // C2/c
+  71,  // Immm
+  65,  // Cmmm
+  167, // R-3c
+  87,  // I4/m
+];
+const SG_LOW_SYMMETRY = [
+  14,  // P21/c (most common monoclinic)
+  19,  // P212121 (orthorhombic chiral)
+  33,  // Pna21
+  29,  // Pca21
+  4,   // P21
+  9,   // Cc
+  11,  // P21/m
+  61,  // Pbca
+  56,  // Pccn
+  60,  // Pbcn
+];
+const SG_FALLBACK = [1, 2]; // P1, P-1
+
+/**
+ * Sample a space group from the tiered distribution.
+ * 40% high-symmetry, 30% medium, 20% low, 10% P1/P-1
+ */
+function sampleSpaceGroup(rng: () => number): number {
+  const r = rng();
+  if (r < 0.40) return SG_HIGH_SYMMETRY[Math.floor(rng() * SG_HIGH_SYMMETRY.length)];
+  if (r < 0.70) return SG_MEDIUM_SYMMETRY[Math.floor(rng() * SG_MEDIUM_SYMMETRY.length)];
+  if (r < 0.90) return SG_LOW_SYMMETRY[Math.floor(rng() * SG_LOW_SYMMETRY.length)];
+  return SG_FALLBACK[Math.floor(rng() * SG_FALLBACK.length)];
+}
+
+// All SGs combined for the Python script
+const ALL_SPACE_GROUPS = [...SG_HIGH_SYMMETRY, ...SG_MEDIUM_SYMMETRY, ...SG_LOW_SYMMETRY, ...SG_FALLBACK];
 
 /**
  * Generate the Python script for PyXtal structure generation.
@@ -37,7 +91,7 @@ function generatePyXtalScript(
   maxAtoms: number,
   spaceGroups?: number[],
 ): string {
-  const sgs = spaceGroups ?? SC_SPACE_GROUPS;
+  const sgs = spaceGroups ?? ALL_SPACE_GROUPS;
 
   return `#!/usr/bin/env python3
 import os, sys, random, traceback, warnings
@@ -76,11 +130,24 @@ try:
     while generated < n_structures and attempts < max_attempts:
         attempts += 1
 
-        # After many failed attempts, fall back to low-symmetry SGs
-        if attempts > max_attempts * 0.3 and generated == 0:
-            sg = random.choice([1, 2, 4, 14, 62])
+        # Tiered SG sampling: 40% high, 30% medium, 20% low, 10% P1/P-1
+        # After many failed attempts, shift more budget to low-symmetry
+        high_sgs = ${JSON.stringify(SG_HIGH_SYMMETRY)}
+        med_sgs = ${JSON.stringify(SG_MEDIUM_SYMMETRY)}
+        low_sgs = ${JSON.stringify(SG_LOW_SYMMETRY)}
+
+        if attempts > max_attempts * 0.5 and generated == 0:
+            sg = random.choice([1, 2, 4, 14, 62])  # desperation fallback
         else:
-            sg = random.choice(space_groups)
+            r = random.random()
+            if r < 0.40:
+                sg = random.choice(high_sgs)
+            elif r < 0.70:
+                sg = random.choice(med_sgs)
+            elif r < 0.90:
+                sg = random.choice(low_sgs)
+            else:
+                sg = random.choice([1, 2])
         seed = base_seed + attempts
         vf = 1.1 + random.uniform(-0.2, 0.4)
 
@@ -218,7 +285,7 @@ export const pyxtalEngine: CSPEngine = {
         .map(s => parseInt(s.spaceGroup))
         .filter(n => !isNaN(n));
       if (seedSGs.length > 0) {
-        targetSGs = [...seedSGs, ...seedSGs, ...seedSGs, ...SC_SPACE_GROUPS.slice(0, 10)];
+        targetSGs = [...seedSGs, ...seedSGs, ...seedSGs, ...SG_HIGH_SYMMETRY];
       }
     }
 

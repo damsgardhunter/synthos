@@ -30,6 +30,8 @@ import { generateStructureCandidates, vegardEstimate, type StructureCandidate, t
 import { lookupKnownStructure, getKnownStructureFormulas } from "../learning/known-structures";
 import { airssEngine } from "../csp/airss-wrapper";
 import { pyxtalEngine } from "../csp/pyxtal-wrapper";
+import { mutateTopCandidates } from "../csp/structure-mutator";
+import { logCandidateStats } from "../csp/candidate-metadata";
 import {
   runStagedRelaxation,
   runStage4GammaPhonon,
@@ -3920,6 +3922,52 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
         console.log(`[QE-Worker] PyXtal failed for ${formula}: ${pyxtalErr.message?.slice(0, 100)} — continuing without`);
       }
     }
+
+    // --- Structure mutation layer ---
+    // Take the best candidates and generate variants through physically
+    // motivated perturbations (lattice strain, H shuffle, symmetry break, etc.)
+    // This helps VCA-derived structures escape local minima.
+    if (structureCandidates.length >= 2) {
+      try {
+        const hasH = elements.includes("H");
+        // Convert StructureCandidates to CSPCandidate-like for the mutator
+        const cspLike = structureCandidates.slice(0, 3).map((c, i) => ({
+          ...c,
+          sourceEngine: "vegard" as const,
+          generationStage: 1 as const,
+          seed: Date.now() + i,
+          pressureGPa: workerPressure,
+          relaxationLevel: "raw" as const,
+          fingerprint: undefined,
+        }));
+        const mutants = mutateTopCandidates(cspLike as any, 3, 4, hasH);
+        for (const m of mutants) {
+          structureCandidates.push({
+            latticeA: m.latticeA,
+            latticeB: m.latticeB,
+            latticeC: m.latticeC,
+            cOverA: m.cOverA,
+            positions: m.positions,
+            prototype: m.prototype ?? "mutant",
+            crystalSystem: m.crystalSystem,
+            spaceGroup: m.spaceGroup,
+            source: m.source,
+            confidence: Math.max(0.15, (m.confidence ?? 0.3) * 0.8),
+            isMetallic: null,
+          });
+        }
+        if (mutants.length > 0) {
+          console.log(`[QE-Worker] Mutation layer: ${mutants.length} variants from top 3 candidates (total now: ${structureCandidates.length})`);
+        }
+      } catch (mutErr: any) {
+        console.log(`[QE-Worker] Mutation failed for ${formula}: ${mutErr.message?.slice(0, 80)} — continuing`);
+      }
+    }
+
+    // --- Candidate stats logging ---
+    try {
+      logCandidateStats(structureCandidates as any, formula);
+    } catch {}
 
     // Use Vegard lattice if confident, otherwise fall back to volume-sum
     let latticeA: number;
