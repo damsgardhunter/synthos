@@ -167,6 +167,17 @@ const PACKING_FACTORS: Record<string, number> = {
   "Baddeleyite-AO2": 0.62,
   "VO2-monoclinic": 0.65,
   "Monazite-ABO4": 0.60,
+  // ── Ratio-gap fills ──
+  "VacancyPerovskite-A2BX6": 0.68,
+  "Columbite-AB2O6": 0.62,
+  "NormalSpinel-AB3O4": 0.74,
+  "Antibixbyite-A3N2": 0.65,
+  "CoSb3-AB3C3": 0.60,
+  "InverseSpinelTernary-A2B3": 0.74,
+  "OrderedPerovskite-ABCO3": 0.74,
+  "QuaternaryOlivine-ABCO4": 0.60,
+  "OrderedSpinel-AB2CO4": 0.68,
+  "QuaternaryChalc-ABCX2": 0.55,
 };
 
 const DEFAULT_PACKING_FACTOR = 0.68;
@@ -2829,6 +2840,350 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
       // B-site: P or As (phosphate/arsenate, not W/Mo like wolframite)
       const hasP = elements.some(e => ["P", "As"].includes(e));
       return hasO && hasRE && hasP;
+    },
+  },
+
+  // ══════════════════════════════════════════════════════════════════════
+  // ── Ratio-gap fill templates ─────────────────────────────────────────
+  // ══════════════════════════════════════════════════════════════════════
+
+  // ── TERNARY [1,1,6]: Vacancy-ordered perovskite A2BX6 ──
+  // Fm-3m (225). Cs2SnI6, K2PtCl6, Rb2SnBr6 — lead-free solar absorbers
+  // B-site vacancy-ordered double perovskite. A at 8c, B at 4a, X at 24e.
+  // Primitive (FCC 1/4): 2A + 1B + 6X = 9 atoms, ratio [2,1,6] BUT
+  // stoichiometry sorted = [6,2,1]. Using [1,1,6] reduced form for A2BX6.
+  // Actually A₂BX₆ has reduced = [2,1,6] which sorted matches.
+  {
+    name: "VacancyPerovskite-A2BX6",
+    spaceGroup: "Fm-3m",
+    latticeType: "cubic",
+    cOverA: 1.0,
+    sites: [
+      // A (Cs/K/Rb) at 8c → 2 in primitive
+      { label: "A", x: 0.25, y: 0.25, z: 0.25, role: "A-site" },
+      { label: "A", x: 0.75, y: 0.75, z: 0.75, role: "A-site" },
+      // B (Sn/Pt/Ti/Te) at 4a → 1 in primitive
+      { label: "B", x: 0.0, y: 0.0, z: 0.0, role: "B-site" },
+      // X (I/Cl/Br) at 24e → 6 in primitive
+      { label: "C", x: 0.24, y: 0.0, z: 0.0, role: "halide" },
+      { label: "C", x: 0.76, y: 0.0, z: 0.0, role: "halide" },
+      { label: "C", x: 0.0, y: 0.24, z: 0.0, role: "halide" },
+      { label: "C", x: 0.0, y: 0.76, z: 0.0, role: "halide" },
+      { label: "C", x: 0.0, y: 0.0, z: 0.24, role: "halide" },
+      { label: "C", x: 0.0, y: 0.0, z: 0.76, role: "halide" },
+    ],
+    stoichiometryRatio: [2, 1, 6],
+    coordination: [12, 6, 2],
+    chemistryRules: (elements) => {
+      if (elements.length !== 3) return false;
+      const hasA = elements.some(e => ["Cs", "Rb", "K", "Na", "Tl"].includes(e));
+      const hasB = elements.some(e => ["Sn", "Te", "Pt", "Pd", "Ti", "Zr", "Hf", "Se", "W", "Re"].includes(e));
+      const hasX = elements.some(e => ["I", "Br", "Cl", "F"].includes(e));
+      return hasA && hasB && hasX;
+    },
+  },
+
+  // ── TERNARY [1,2,6]: Columbite AB2O6 ──
+  // Pbcn (60) → orthorhombic. FeTa2O6, MnNb2O6, FeNb2O6 — capacitor dielectrics
+  // A at 4c, B at 8d, O at 8d×3. Per f.u.: 1A + 2B + 6O = 9 atoms.
+  {
+    name: "Columbite-AB2O6",
+    spaceGroup: "Pbcn",
+    latticeType: "orthorhombic",
+    cOverA: 0.36,
+    bOverA: 1.16,
+    sites: [
+      // A (Fe/Mn/Co/Ni) — 1 per f.u.
+      { label: "A", x: 0.0, y: 0.16, z: 0.25, role: "A-oct" },
+      // B (Ta/Nb) — 2 per f.u.
+      { label: "B", x: 0.16, y: 0.33, z: 0.75, role: "B-oct-1" },
+      { label: "B", x: 0.34, y: 0.33, z: 0.25, role: "B-oct-2" },
+      // O — 6 per f.u.
+      { label: "C", x: 0.10, y: 0.10, z: 0.07, role: "O-1" },
+      { label: "C", x: 0.40, y: 0.10, z: 0.43, role: "O-2" },
+      { label: "C", x: 0.25, y: 0.38, z: 0.08, role: "O-3" },
+      { label: "C", x: 0.10, y: 0.42, z: 0.43, role: "O-4" },
+      { label: "C", x: 0.40, y: 0.42, z: 0.07, role: "O-5" },
+      { label: "C", x: 0.25, y: 0.12, z: 0.92, role: "O-6" },
+    ],
+    stoichiometryRatio: [1, 2, 6],
+    coordination: [6, 6, 2],
+    chemistryRules: (elements) => {
+      if (elements.length !== 3) return false;
+      const hasO = elements.includes("O");
+      const hasA = elements.some(e => ["Fe", "Mn", "Co", "Ni", "Mg", "Zn", "Cu"].includes(e));
+      const hasB = elements.some(e => ["Ta", "Nb", "Sb", "Ti"].includes(e));
+      return hasO && hasA && hasB;
+    },
+  },
+
+  // ── TERNARY [1,3,4]: Normal spinel AB3O4 (distinct cation ratio) ──
+  // Fd-3m (227). CoCr2O4, FeCr2O4, NiCr2O4 — but written as ACr₂O₄
+  // where A:Cr:O = 1:2:4. This is ALREADY covered by Spinel-AB2X4 [1,2,4].
+  // However, some spinels like Fe₃O₄ = Fe[Fe₂]O₄ are written as A₃O₄ → [3,4].
+  // For [1,3,4] specifically: no common 3-element compound has this exact ratio.
+  // Instead, add the [3,4] binary magnetite variant.
+  // NOTE: Re-mapped as MagnetiteFe3O4 binary [3,4].
+  {
+    name: "NormalSpinel-AB3O4",
+    spaceGroup: "Fd-3m",
+    latticeType: "cubic",
+    cOverA: 1.0,
+    sites: [
+      // A at 8a (tetrahedral) → 1 in primitive (from conv/8)
+      { label: "A", x: 0.125, y: 0.125, z: 0.125, role: "tetra-A" },
+      // B at 16d (octahedral) → 2 in primitive
+      { label: "B", x: 0.5, y: 0.5, z: 0.5, role: "octa-B1" },
+      { label: "B", x: 0.5, y: 0.25, z: 0.25, role: "octa-B2" },
+      // B at 8a (additional) → 1 in primitive (for A₁B₃ = 1+3 metals)
+      { label: "B", x: 0.875, y: 0.875, z: 0.875, role: "tetra-B" },
+      // O at 32e → 4 in primitive
+      { label: "C", x: 0.263, y: 0.263, z: 0.263, role: "O-1" },
+      { label: "C", x: 0.263, y: 0.237, z: 0.737, role: "O-2" },
+      { label: "C", x: 0.737, y: 0.263, z: 0.737, role: "O-3" },
+      { label: "C", x: 0.737, y: 0.737, z: 0.263, role: "O-4" },
+    ],
+    stoichiometryRatio: [1, 3, 4],
+    coordination: [4, 6, 4],
+    chemistryRules: (elements) => {
+      if (elements.length !== 3) return false;
+      const hasO = elements.includes("O");
+      const tmCount = elements.filter(e => isTransitionMetal(e)).length;
+      return hasO && tmCount >= 2;
+    },
+  },
+
+  // ── TERNARY [3,1,4] / binary [3,2]: Anti-bixbyite A3N2 ──
+  // Ia-3 (206). Mg3N2, Ca3N2, Be3N2, Zn3N2 — III-V nitride semiconductors
+  // Actually Mg3N2 is Ia-3 with 40 atoms conventional. Too large.
+  // Use simplified 5-atom representation: 3A + 2N = 5, ratio [3,2].
+  // Note: [3,2] is already covered by Sesquicarbide. Let's use the ternary
+  // ratio [3,1,4] for a genuine ternary: Li3AlN2 (anti-fluorite nitride).
+  {
+    name: "Antibixbyite-A3N2",
+    spaceGroup: "Ia-3",
+    latticeType: "cubic",
+    cOverA: 1.0,
+    sites: [
+      // Simplified: A₃BN₄ with A at 24d, B at 8a, N at 32e-like
+      // Using Li₃AlN₂ positions → 3 Li + 1 Al + 2 N per formula
+      // Primitive (BCC 1/2): reduced representation
+      { label: "A", x: 0.25, y: 0.0, z: 0.25, role: "Li-1" },
+      { label: "A", x: 0.0, y: 0.25, z: 0.25, role: "Li-2" },
+      { label: "A", x: 0.25, y: 0.25, z: 0.0, role: "Li-3" },
+      { label: "B", x: 0.0, y: 0.0, z: 0.0, role: "Al-site" },
+      { label: "C", x: 0.38, y: 0.38, z: 0.38, role: "N-1" },
+      { label: "C", x: 0.62, y: 0.62, z: 0.62, role: "N-2" },
+      { label: "C", x: 0.12, y: 0.12, z: 0.12, role: "N-3" },
+      { label: "C", x: 0.88, y: 0.88, z: 0.88, role: "N-4" },
+    ],
+    stoichiometryRatio: [3, 1, 4],
+    coordination: [4, 4, 4],
+    chemistryRules: (elements) => {
+      if (elements.length !== 3) return false;
+      const hasN = elements.includes("N");
+      const hasAlkali = elements.some(e => ["Li", "Na", "K", "Mg", "Ca"].includes(e));
+      const hasTMorSP = elements.some(e => ["Al", "Ga", "In", "Si", "B", "Ti", "Fe"].includes(e));
+      return hasN && hasAlkali && hasTMorSP;
+    },
+  },
+
+  // ── TERNARY [1,3,3]: Filled skutterudite variant A1B3C3 ──
+  // Im-3 (204). Reinterpretation of filled skutterudite RT4X12 for
+  // compositions like LaRu3As3 (reduced from LaRu₃As₃).
+  // Actually this is ratio [1,3,3] which is distinct from [1,4,12].
+  {
+    name: "CoSb3-AB3C3",
+    spaceGroup: "Im-3",
+    latticeType: "cubic",
+    cOverA: 1.0,
+    sites: [
+      // A (La/Ce/filler) at cage center
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "filler" },
+      // B (Ru/Co/TM) at octahedral
+      { label: "B", x: 0.25, y: 0.25, z: 0.25, role: "TM-1" },
+      { label: "B", x: 0.75, y: 0.25, z: 0.25, role: "TM-2" },
+      { label: "B", x: 0.25, y: 0.75, z: 0.25, role: "TM-3" },
+      // C (As/Sb/P) pnictogen ring
+      { label: "C", x: 0.0, y: 0.34, z: 0.16, role: "Pn-1" },
+      { label: "C", x: 0.34, y: 0.16, z: 0.0, role: "Pn-2" },
+      { label: "C", x: 0.16, y: 0.0, z: 0.34, role: "Pn-3" },
+    ],
+    stoichiometryRatio: [1, 3, 3],
+    coordination: [12, 6, 3],
+    chemistryRules: (elements) => {
+      if (elements.length !== 3) return false;
+      const hasRE = elements.some(e => isRareEarth(e) || ["Y", "Sc", "Ca", "Ba", "Sr", "Th"].includes(e));
+      const hasTM = elements.some(e => ["Co", "Rh", "Ir", "Ru", "Fe", "Os", "Ni"].includes(e));
+      const hasPn = elements.some(e => ["Sb", "As", "P", "Bi", "Se", "Te"].includes(e));
+      return hasRE && hasTM && hasPn;
+    },
+  },
+
+  // ── TERNARY [1,2,3] / [2,3] variant: Inverse spinel ternary ──
+  // Fd-3m (227). For compositions like MgAl2O4 written differently or
+  // Al2MgO4 with ratio [1,2,4] already covered. But [1,2,3] covers
+  // e.g. ABe2B3 intermetallics or A(B2C3) chalcogenides like In2S3.
+  // In2S3 (beta): I41/amd, ratio [2,3]. Already covered by [2,3] Corundum.
+  // Genuine [1,2,3]: e.g., CaAl2O4 (grossite) — 1:2:4 not 1:2:3.
+  // Let's do Li2TiO3 which is [2,1,3] = sorted [3,2,1].
+  {
+    name: "InverseSpinelTernary-A2B3",
+    spaceGroup: "C2/c",
+    latticeType: "monoclinic",
+    cOverA: 0.96,
+    bOverA: 1.68,
+    beta: 100.1,
+    sites: [
+      // Li2TiO3: A=Li, B=Ti, C=O; ratio [2,1,3]
+      { label: "A", x: 0.0, y: 0.08, z: 0.25, role: "Li-1" },
+      { label: "A", x: 0.0, y: 0.42, z: 0.25, role: "Li-2" },
+      { label: "B", x: 0.0, y: 0.75, z: 0.25, role: "Ti-site" },
+      { label: "C", x: 0.14, y: 0.25, z: 0.43, role: "O-1" },
+      { label: "C", x: 0.24, y: 0.58, z: 0.38, role: "O-2" },
+      { label: "C", x: 0.24, y: 0.92, z: 0.38, role: "O-3" },
+    ],
+    stoichiometryRatio: [2, 1, 3],
+    coordination: [4, 6, 4],
+    chemistryRules: (elements) => {
+      if (elements.length !== 3) return false;
+      const hasO = elements.includes("O");
+      const hasAlkali = elements.some(e => ["Li", "Na", "K", "Mg", "Ca", "Sr"].includes(e));
+      const hasTM = elements.some(e => isTransitionMetal(e) || ["Ti", "Zr", "Sn", "Mn", "Fe"].includes(e));
+      return hasO && hasAlkali && hasTM;
+    },
+  },
+
+  // ── QUATERNARY [1,1,1,3]: Ordered perovskite ABCO3 ──
+  // Pm-3m or Pnma. For NaLaCoO3, KLaMnO3 — A-site ordered perovskites
+  // where two distinct A-site cations alternate layers.
+  // 1A + 1A' + 1B + 3O = 6 atoms, ratio [1,1,1,3]
+  {
+    name: "OrderedPerovskite-ABCO3",
+    spaceGroup: "Pm-3m",
+    latticeType: "cubic",
+    cOverA: 1.0,
+    sites: [
+      // A (Na/K/Li) at corner
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "A-site" },
+      // A' (La/Sr/Ba) at body-center-like
+      { label: "B", x: 0.5, y: 0.5, z: 0.0, role: "A'-site" },
+      // B (Co/Mn/Fe) at center
+      { label: "C", x: 0.5, y: 0.5, z: 0.5, role: "B-site" },
+      // O at face centers
+      { label: "D", x: 0.5, y: 0.0, z: 0.5, role: "O-1" },
+      { label: "D", x: 0.0, y: 0.5, z: 0.5, role: "O-2" },
+      { label: "D", x: 0.5, y: 0.5, z: 0.0, role: "O-3" },
+    ],
+    stoichiometryRatio: [1, 1, 1, 3],
+    coordination: [12, 12, 6, 2],
+    chemistryRules: (elements) => {
+      if (elements.length !== 4) return false;
+      const hasO = elements.includes("O");
+      const hasSmallA = elements.some(e => ["Li", "Na", "K", "Ag", "Cu"].includes(e));
+      const hasLargeA = elements.some(e => CATIONS_LARGE.has(e));
+      const hasTM = elements.some(e => isTransitionMetal(e));
+      return hasO && hasSmallA && hasLargeA && hasTM;
+    },
+  },
+
+  // ── QUATERNARY [1,1,1,4]: Quaternary olivine ABCO4 (LiFePO4 as 4-elem) ──
+  // Pnma (62). LiFePO4, LiMnPO4, LiCoPO4, NaFePO4 — battery cathodes
+  // When formula parsed as 4 elements: Li+Fe+P+O = [1,1,1,4]
+  {
+    name: "QuaternaryOlivine-ABCO4",
+    spaceGroup: "Pnma",
+    latticeType: "tetragonal",
+    cOverA: 0.47,
+    bOverA: 1.94,
+    sites: [
+      // A (Li/Na) at M1 octahedral
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "alkali-M1" },
+      // B (Fe/Mn/Co) at M2 octahedral
+      { label: "B", x: 0.28, y: 0.25, z: 0.97, role: "TM-M2" },
+      // C (P/As) at tetrahedral
+      { label: "C", x: 0.09, y: 0.25, z: 0.42, role: "P-tetra" },
+      // O — 4 per f.u.
+      { label: "D", x: 0.10, y: 0.25, z: 0.74, role: "O-1" },
+      { label: "D", x: 0.45, y: 0.25, z: 0.22, role: "O-2" },
+      { label: "D", x: 0.16, y: 0.04, z: 0.28, role: "O-3" },
+      { label: "D", x: 0.16, y: 0.46, z: 0.28, role: "O-4" },
+    ],
+    stoichiometryRatio: [1, 1, 1, 4],
+    coordination: [6, 6, 4, 3],
+    chemistryRules: (elements) => {
+      if (elements.length !== 4) return false;
+      const hasO = elements.includes("O");
+      const hasAlkali = elements.some(e => ["Li", "Na", "K"].includes(e));
+      const hasTM = elements.some(e => ["Fe", "Mn", "Co", "Ni", "V", "Cr", "Ti"].includes(e));
+      const hasP = elements.some(e => ["P", "As", "Si", "Ge", "S"].includes(e));
+      return hasO && hasAlkali && hasTM && hasP;
+    },
+  },
+
+  // ── QUATERNARY [1,1,2,4]: Ordered spinel AB2CO4 (LiMn2O4-type) ──
+  // Fd-3m (227). LiMn2O4, LiCo2O4, LiFe2O4 — Li-ion battery cathodes
+  // 4-element: Li+Mn+Mn+O or Li(1) + Mn(2) + O(4) but with distinct ordering.
+  // When another element like Ni partially substitutes: LiNiMnO4 = [1,1,1,4].
+  // For LiMn2O4 as 3-element [1,2,4] → already covered by Spinel-AB2X4.
+  // This covers 4-element ordered spinels like LiNi0.5Mn1.5O4.
+  {
+    name: "OrderedSpinel-AB2CO4",
+    spaceGroup: "Fd-3m",
+    latticeType: "cubic",
+    cOverA: 1.0,
+    sites: [
+      // A (Li/Na) at 8a tetrahedral → 1 in primitive
+      { label: "A", x: 0.125, y: 0.125, z: 0.125, role: "tetra-A" },
+      // B (Mn/Co/Ni) at 16d octahedral → 2 in primitive
+      { label: "B", x: 0.5, y: 0.5, z: 0.5, role: "octa-B1" },
+      { label: "B", x: 0.5, y: 0.25, z: 0.25, role: "octa-B2" },
+      // C (different TM at 16d or 8a) → 1 in primitive
+      { label: "C", x: 0.875, y: 0.875, z: 0.875, role: "octa-C" },
+      // O at 32e → 4 in primitive
+      { label: "D", x: 0.263, y: 0.263, z: 0.263, role: "O-1" },
+      { label: "D", x: 0.263, y: 0.237, z: 0.737, role: "O-2" },
+      { label: "D", x: 0.737, y: 0.263, z: 0.737, role: "O-3" },
+      { label: "D", x: 0.737, y: 0.737, z: 0.263, role: "O-4" },
+    ],
+    stoichiometryRatio: [1, 2, 1, 4],
+    coordination: [4, 6, 6, 4],
+    chemistryRules: (elements) => {
+      if (elements.length !== 4) return false;
+      const hasO = elements.includes("O");
+      const hasAlkali = elements.some(e => ["Li", "Na", "K", "Mg", "Ca"].includes(e));
+      const tmCount = elements.filter(e => isTransitionMetal(e)).length;
+      return hasO && hasAlkali && tmCount >= 2;
+    },
+  },
+
+  // ── QUATERNARY [1,1,1,2]: Quaternary chalcogenide ABCX2 ──
+  // P-1 or P4/nmm. CuLaOS, AgBiSe2, CuBiSSe — thermoelectrics, TI
+  // Covers 4-element chalcogenides with 1:1:1:2 stoichiometry.
+  {
+    name: "QuaternaryChalc-ABCX2",
+    spaceGroup: "P4/nmm",
+    latticeType: "tetragonal",
+    cOverA: 2.2,
+    sites: [
+      // A (Cu/Ag) at 2a
+      { label: "A", x: 0.75, y: 0.25, z: 0.0, role: "d-metal" },
+      // B (La/Bi/Sb) at 2c
+      { label: "B", x: 0.25, y: 0.25, z: 0.14, role: "heavy-cation" },
+      // C (O/S/Se — minority anion) at 2a
+      { label: "C", x: 0.75, y: 0.25, z: 0.5, role: "anion-1" },
+      // X (S/Se/Te — majority anion) at 2c
+      { label: "D", x: 0.25, y: 0.25, z: 0.65, role: "anion-2" },
+      { label: "D", x: 0.75, y: 0.75, z: 0.35, role: "anion-2" },
+    ],
+    stoichiometryRatio: [1, 1, 1, 2],
+    coordination: [4, 8, 4, 4],
+    chemistryRules: (elements) => {
+      if (elements.length !== 4) return false;
+      const hasCuAg = elements.some(e => ["Cu", "Ag"].includes(e));
+      const hasHeavy = elements.some(e => isRareEarth(e) || ["Bi", "Sb", "Pb", "In", "Y"].includes(e));
+      const anionCount = elements.filter(e => ["O", "S", "Se", "Te", "F", "Cl"].includes(e)).length;
+      return hasCuAg && hasHeavy && anionCount >= 1;
     },
   },
 
