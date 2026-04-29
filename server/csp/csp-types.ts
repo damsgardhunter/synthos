@@ -203,6 +203,148 @@ export interface CSPEngineConfig {
   baseSeed?: number;
 }
 
+// ---------------------------------------------------------------------------
+// Screening tiers — controls atom count caps and generation budgets
+// ---------------------------------------------------------------------------
+
+export type ScreeningTier = "preview" | "standard" | "deep" | "publication";
+
+export interface ScreeningTierConfig {
+  tier: ScreeningTier;
+  /** Maximum atoms in the primitive cell. */
+  maxAtoms: number;
+  /** Formula-unit multiplicities to explore. */
+  zValues: number[];
+  /** AIRSS budget per Z × volume combo. */
+  airssBudgetPerCombo: number;
+  /** Total AIRSS cap (across all Z × volume combos). */
+  airssTotalCap: number;
+  /** PyXtal budget per Z value. */
+  pyxtalBudgetPerZ: number;
+  /** Total PyXtal cap. */
+  pyxtalTotalCap: number;
+  /** Volume fractions to explore (relative to V0 estimate). */
+  volumeEnsemble: number[];
+}
+
+export const SCREENING_TIERS: Record<ScreeningTier, ScreeningTierConfig> = {
+  preview: {
+    tier: "preview",
+    maxAtoms: 20,
+    zValues: [1, 2, 4],
+    airssBudgetPerCombo: 100,
+    airssTotalCap: 2500,
+    pyxtalBudgetPerZ: 50,
+    pyxtalTotalCap: 250,
+    volumeEnsemble: [0.85, 1.0, 1.15],
+  },
+  standard: {
+    tier: "standard",
+    maxAtoms: 40,
+    zValues: [1, 2, 3, 4, 6],
+    airssBudgetPerCombo: 200,
+    airssTotalCap: 5000,
+    pyxtalBudgetPerZ: 100,
+    pyxtalTotalCap: 500,
+    volumeEnsemble: [0.70, 0.85, 1.0, 1.15, 1.30],
+  },
+  deep: {
+    tier: "deep",
+    maxAtoms: 80,
+    zValues: [1, 2, 3, 4, 6, 8],
+    airssBudgetPerCombo: 300,
+    airssTotalCap: 10000,
+    pyxtalBudgetPerZ: 150,
+    pyxtalTotalCap: 1000,
+    volumeEnsemble: [0.70, 0.85, 1.0, 1.15, 1.30],
+  },
+  publication: {
+    tier: "publication",
+    maxAtoms: 120,
+    zValues: [1, 2, 3, 4, 6, 8],
+    airssBudgetPerCombo: 500,
+    airssTotalCap: 10000,
+    pyxtalBudgetPerZ: 200,
+    pyxtalTotalCap: 1000,
+    volumeEnsemble: [0.60, 0.70, 0.85, 1.0, 1.15, 1.30, 1.50],
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Pressure-aware MINSEP profiles
+// ---------------------------------------------------------------------------
+
+/**
+ * Get pressure-scaled minimum interatomic distance.
+ * High-pressure structures (especially hydrides) have physically shorter
+ * bond lengths. This prevents structure generators from rejecting valid
+ * dense packings.
+ */
+export function pressureScaledMinsep(baseMinsep: number, pressureGPa: number): number {
+  if (pressureGPa < 20) return baseMinsep;
+  if (pressureGPa < 100) return baseMinsep * 0.90;
+  if (pressureGPa < 200) return baseMinsep * 0.82;
+  return baseMinsep * 0.75;
+}
+
+/** Element-pair covalent radii sums (Angstrom) for MINSEP calculation. */
+export const COVALENT_RADII: Record<string, number> = {
+  H: 0.31, He: 0.28, Li: 1.28, Be: 0.96, B: 0.84, C: 0.76, N: 0.71,
+  O: 0.66, F: 0.57, Na: 1.66, Mg: 1.41, Al: 1.21, Si: 1.11, P: 1.07,
+  S: 1.05, Cl: 1.02, K: 2.03, Ca: 1.76, Sc: 1.70, Ti: 1.60, V: 1.53,
+  Cr: 1.39, Mn: 1.39, Fe: 1.32, Co: 1.26, Ni: 1.24, Cu: 1.32, Zn: 1.22,
+  Ga: 1.22, Ge: 1.20, As: 1.19, Se: 1.20, Br: 1.20, Rb: 2.20, Sr: 1.95,
+  Y: 1.90, Zr: 1.75, Nb: 1.64, Mo: 1.54, Ru: 1.46, Rh: 1.42, Pd: 1.39,
+  Ag: 1.45, Cd: 1.44, In: 1.42, Sn: 1.39, Sb: 1.39, Te: 1.38, I: 1.39,
+  Cs: 2.44, Ba: 2.15, La: 2.07, Ce: 2.04, Hf: 1.75, Ta: 1.70, W: 1.62,
+  Re: 1.51, Os: 1.44, Ir: 1.41, Pt: 1.36, Au: 1.36, Pb: 1.46, Bi: 1.48,
+  Th: 2.06,
+};
+
+/**
+ * Get element-pair minimum separation for structure generation.
+ * Uses covalent radii sum scaled by pair type and pressure.
+ */
+export function getPairMinsep(el1: string, el2: string, pressureGPa: number): number {
+  const r1 = COVALENT_RADII[el1] ?? 1.2;
+  const r2 = COVALENT_RADII[el2] ?? 1.2;
+
+  // Base scaling by pair type
+  const isHH = el1 === "H" && el2 === "H";
+  const isMH = el1 === "H" || el2 === "H";
+  const baseScale = isHH ? 0.50 : (isMH ? 0.60 : 0.75);
+
+  const baseMinsep = (r1 + r2) * baseScale;
+  return pressureScaledMinsep(baseMinsep, pressureGPa);
+}
+
+/**
+ * Pressure-conditioned volume estimates (Angstrom^3/atom).
+ * Returns an array of target volumes for the volume ensemble.
+ */
+export function pressureVolumeEnsemble(
+  volumePerAtom: number,
+  pressureGPa: number,
+  fractions: number[],
+): number[] {
+  // Apply Birch-Murnaghan-like compression to the base volume
+  let compressedV0 = volumePerAtom;
+  if (pressureGPa > 0) {
+    const compressionFactor = Math.pow(1 + 4 * pressureGPa / 100, -1 / 4);
+    compressedV0 = volumePerAtom * Math.max(0.4, compressionFactor);
+  }
+
+  // For high pressure, shift the ensemble toward compressed volumes
+  // but still keep some expanded ones for exploration
+  if (pressureGPa >= 100) {
+    // Add extra compressed points
+    const extraCompressed = [0.55, 0.65].filter(f => !fractions.includes(f));
+    return [...extraCompressed, ...fractions].map(f => compressedV0 * f);
+  }
+
+  return fractions.map(f => compressedV0 * f);
+}
+
 export interface CSPEngine {
   name: CSPEngineName;
   /** Check if the binary is installed and runnable. */

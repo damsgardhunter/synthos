@@ -1,15 +1,11 @@
 /**
  * AIRSS (Ab Initio Random Structure Searching) wrapper.
  *
- * Uses `buildcell` to generate sensible random structures.
- * buildcell reads a `.cell` file with composition/symmetry constraints
- * and outputs a randomized structure in the same format.
- *
- * AIRSS is ideal for Stage 1 broad exploration because:
- * - buildcell is extremely fast (~10ms per structure)
- * - Generates physically sensible structures (respects min distances, symmetry)
- * - Good at sampling diverse structural motifs
- * - No evolutionary bias — true exploration of configuration space
+ * Uses `buildcell` to generate sensible random structures with:
+ * - Formula-unit (Z) sweeps: Z = 1, 2, 3, 4, 6, 8
+ * - Volume ensemble: multiple TARGVOL values per composition
+ * - Pressure-aware MINSEP: element-pair distances scaled by pressure
+ * - Screening tiers: preview (2500), standard (5000), deep (10000)
  *
  * Reference: Pickard & Needs, J. Phys.: Condens. Matter 23 (2011) 053201
  */
@@ -17,30 +13,20 @@
 import * as fs from "fs";
 import * as path from "path";
 import { execSync } from "child_process";
-import type { CSPCandidate, CSPEngine, CSPEngineConfig } from "./csp-types";
-import { latticeParamsToVectors, parsePOSCAR } from "./poscar-io";
-import { cellVolumeFromVectors } from "./csp-types";
+import type { CSPCandidate, CSPEngine, CSPEngineConfig, ScreeningTierConfig } from "./csp-types";
+import {
+  cellVolumeFromVectors,
+  COVALENT_RADII,
+  getPairMinsep,
+  pressureVolumeEnsemble,
+  SCREENING_TIERS,
+} from "./csp-types";
 
-// Binary paths — try env var, then common install locations
 const BUILDCELL_BIN = process.env.AIRSS_BIN
   ?? process.env.BUILDCELL_BIN
   ?? "/usr/local/bin/buildcell";
 
-// Covalent radii for minimum separation (Angstrom)
-const COVALENT_RADII: Record<string, number> = {
-  H: 0.31, He: 0.28, Li: 1.28, Be: 0.96, B: 0.84, C: 0.76, N: 0.71,
-  O: 0.66, F: 0.57, Na: 1.66, Mg: 1.41, Al: 1.21, Si: 1.11, P: 1.07,
-  S: 1.05, Cl: 1.02, K: 2.03, Ca: 1.76, Sc: 1.70, Ti: 1.60, V: 1.53,
-  Cr: 1.39, Mn: 1.39, Fe: 1.32, Co: 1.26, Ni: 1.24, Cu: 1.32, Zn: 1.22,
-  Ga: 1.22, Ge: 1.20, As: 1.19, Se: 1.20, Br: 1.20, Rb: 2.20, Sr: 1.95,
-  Y: 1.90, Zr: 1.75, Nb: 1.64, Mo: 1.54, Ru: 1.46, Rh: 1.42, Pd: 1.39,
-  Ag: 1.45, Cd: 1.44, In: 1.42, Sn: 1.39, Sb: 1.39, Te: 1.38, I: 1.39,
-  Cs: 2.44, Ba: 2.15, La: 2.07, Ce: 2.04, Hf: 1.75, Ta: 1.70, W: 1.62,
-  Re: 1.51, Os: 1.44, Ir: 1.41, Pt: 1.36, Au: 1.36, Pb: 1.46, Bi: 1.48,
-  Th: 2.06,
-};
-
-// Estimated volume per atom (Angstrom^3/atom) for target volume calculation
+// Volume per atom estimates (Angstrom^3/atom)
 const VOL_PER_ATOM: Record<string, number> = {
   H: 3.5, Li: 21.3, Be: 8.1, B: 7.3, C: 5.7, N: 6.0, O: 5.5,
   Na: 39.5, Mg: 23.2, Al: 16.6, Si: 20.0, P: 17.4, S: 15.6,
@@ -53,45 +39,48 @@ const VOL_PER_ATOM: Record<string, number> = {
   Re: 14.7, Pb: 30.3, Bi: 35.4, Th: 32.8,
 };
 
-function estimateVolume(elements: string[], counts: Record<string, number>, _pressureGPa: number): number {
-  let vol = 0;
+function estimateVolumePerAtom(elements: string[], counts: Record<string, number>): number {
+  let totalVol = 0;
+  let totalAtoms = 0;
   for (const el of elements) {
-    const v = VOL_PER_ATOM[el] ?? 15;
-    vol += v * Math.round(counts[el]);
+    const n = Math.round(counts[el]);
+    totalVol += (VOL_PER_ATOM[el] ?? 15) * n;
+    totalAtoms += n;
   }
-  // Do NOT compress for pressure here — buildcell needs ambient-like volume
-  // to successfully pack atoms. The DFT pipeline handles compression later
-  // via Murnaghan EOS / literature lattice override.
-  return vol;
+  return totalAtoms > 0 ? totalVol / totalAtoms : 15;
 }
 
 /**
- * Generate the AIRSS .cell input file.
+ * Generate a .cell input file for buildcell.
  */
 function generateCellInput(
   elements: string[],
   counts: Record<string, number>,
+  z: number,
+  targetVolume: number,
   pressureGPa: number,
-  seed: number,
 ): string {
-  const totalAtoms = Object.values(counts).reduce((s, n) => s + Math.round(n), 0);
-  const targetVol = estimateVolume(elements, counts, pressureGPa);
+  // Scale counts by Z
+  const scaledCounts: Record<string, number> = {};
+  let totalAtoms = 0;
+  for (const el of elements) {
+    scaledCounts[el] = Math.round(counts[el]) * z;
+    totalAtoms += scaledCounts[el];
+  }
 
-  // Buildcell .cell format:
-  // - #TARGVOL: target cell volume in Angstrom^3
-  // - #MINSEP: global minimum interatomic distance
-  // - %BLOCK LATTICE_CART: template lattice (buildcell randomizes it)
-  // - %BLOCK POSITIONS_FRAC: one line per atom (buildcell randomizes positions)
-  //
-  // IMPORTANT: Do NOT use #SPECIES (conflicts with POSITIONS_FRAC),
-  // #VARVOL (invalid syntax), or #MINSEP=El1-El2=X (Fortran parse error).
-  // Keep directives minimal — buildcell is picky about format.
-  const hasH = elements.includes("H");
-  const globalMinSep = hasH ? 0.7 : 1.0;
-  const a = Math.pow(targetVol, 1 / 3);
+  const cellVol = targetVolume * totalAtoms;
+  const a = Math.pow(cellVol, 1 / 3);
 
-  let cell = `#TARGVOL=${targetVol.toFixed(1)}\n`;
-  cell += `#MINSEP=${globalMinSep.toFixed(2)}\n`;
+  // Global MINSEP: use the smallest pair distance
+  let globalMin = Infinity;
+  for (const el1 of elements) {
+    for (const el2 of elements) {
+      globalMin = Math.min(globalMin, getPairMinsep(el1, el2, pressureGPa));
+    }
+  }
+
+  let cell = `#TARGVOL=${cellVol.toFixed(1)}\n`;
+  cell += `#MINSEP=${Math.max(0.3, globalMin).toFixed(2)}\n`;
 
   cell += `\n%BLOCK LATTICE_CART\n`;
   cell += `${a.toFixed(4)} 0.0000 0.0000\n`;
@@ -101,13 +90,12 @@ function generateCellInput(
 
   cell += `\n%BLOCK POSITIONS_FRAC\n`;
   for (const el of elements) {
-    for (let i = 0; i < Math.round(counts[el]); i++) {
+    for (let i = 0; i < scaledCounts[el]; i++) {
       cell += `${el} 0.0 0.0 0.0\n`;
     }
   }
   cell += `%ENDBLOCK POSITIONS_FRAC\n`;
 
-  // Pressure constraint (for enthalpy optimization context)
   if (pressureGPa > 0) {
     cell += `\n%BLOCK EXTERNAL_PRESSURE\n`;
     cell += `${pressureGPa.toFixed(1)} 0.0 0.0\n`;
@@ -120,7 +108,7 @@ function generateCellInput(
 }
 
 /**
- * Parse AIRSS .cell output format into a CSPCandidate.
+ * Parse buildcell output (.cell format) into a CSPCandidate.
  */
 function parseCellOutput(
   content: string,
@@ -128,8 +116,9 @@ function parseCellOutput(
   seed: number,
   pressureGPa: number,
   stage: 1 | 2 | 3,
+  z: number,
 ): CSPCandidate | null {
-  // Parse lattice vectors — handle both LATTICE_CART and LATTICE_ABC formats
+  // Parse lattice vectors — handle both LATTICE_CART and LATTICE_ABC
   let vecs: [number, number, number][] = [];
 
   const latCartMatch = content.match(
@@ -140,42 +129,33 @@ function parseCellOutput(
     : null;
 
   if (latCartMatch) {
-    const latLines = latCartMatch[1].trim().split("\n");
-    for (const line of latLines) {
+    for (const line of latCartMatch[1].trim().split("\n")) {
       const parts = line.trim().split(/\s+/).map(Number);
       if (parts.length >= 3 && !parts.some(isNaN)) {
         vecs.push([parts[0], parts[1], parts[2]]);
       }
     }
   } else if (latAbcMatch) {
-    // LATTICE_ABC format: two lines — "a b c" then "alpha beta gamma" (degrees)
-    const abcLines = latAbcMatch[1].trim().split("\n").map(l => l.trim()).filter(l => l.length > 0);
+    const abcLines = latAbcMatch[1].trim().split("\n").filter(l => l.trim().length > 0);
     if (abcLines.length >= 2) {
       const [aVal, bVal, cVal] = abcLines[0].split(/\s+/).map(Number);
       const [alpha, beta, gamma] = abcLines[1].split(/\s+/).map(Number);
       if ([aVal, bVal, cVal, alpha, beta, gamma].every(v => !isNaN(v))) {
-        // Convert ABC + angles to Cartesian vectors
-        const toRad = (deg: number) => (deg * Math.PI) / 180;
-        const cosA = Math.cos(toRad(alpha));
-        const cosB = Math.cos(toRad(beta));
-        const cosG = Math.cos(toRad(gamma));
-        const sinG = Math.sin(toRad(gamma));
+        const toRad = (d: number) => (d * Math.PI) / 180;
+        const cosA = Math.cos(toRad(alpha)), cosB = Math.cos(toRad(beta));
+        const cosG = Math.cos(toRad(gamma)), sinG = Math.sin(toRad(gamma));
         vecs = [
           [aVal, 0, 0],
           [bVal * cosG, bVal * sinG, 0],
-          [
-            cVal * cosB,
-            cVal * (cosA - cosB * cosG) / sinG,
-            cVal * Math.sqrt(1 - cosA ** 2 - cosB ** 2 - cosG ** 2 + 2 * cosA * cosB * cosG) / sinG,
-          ],
+          [cVal * cosB, cVal * (cosA - cosB * cosG) / sinG,
+           cVal * Math.sqrt(Math.max(0, 1 - cosA ** 2 - cosB ** 2 - cosG ** 2 + 2 * cosA * cosB * cosG)) / sinG],
         ];
       }
     }
   }
-
   if (vecs.length < 3) return null;
 
-  // Parse fractional positions
+  // Parse positions
   const posMatch = content.match(
     /%BLOCK\s+POSITIONS_FRAC\s*\n([\s\S]*?)%ENDBLOCK\s+POSITIONS_FRAC/i
   );
@@ -185,15 +165,17 @@ function parseCellOutput(
   for (const line of posMatch[1].trim().split("\n")) {
     const parts = line.trim().split(/\s+/);
     if (parts.length >= 4 && /^[A-Z][a-z]?$/.test(parts[0])) {
-      const x = parseFloat(parts[1]);
-      const y = parseFloat(parts[2]);
-      const z = parseFloat(parts[3]);
-      if (!isNaN(x) && !isNaN(y) && !isNaN(z)) {
-        positions.push({ element: parts[0], x: ((x % 1) + 1) % 1, y: ((y % 1) + 1) % 1, z: ((z % 1) + 1) % 1 });
+      const x = parseFloat(parts[1]), y = parseFloat(parts[2]), zz = parseFloat(parts[3]);
+      if (!isNaN(x) && !isNaN(y) && !isNaN(zz)) {
+        positions.push({
+          element: parts[0],
+          x: ((x % 1) + 1) % 1,
+          y: ((y % 1) + 1) % 1,
+          z: ((zz % 1) + 1) % 1,
+        });
       }
     }
   }
-
   if (positions.length === 0) return null;
 
   const a = Math.sqrt(vecs[0][0] ** 2 + vecs[0][1] ** 2 + vecs[0][2] ** 2);
@@ -201,39 +183,25 @@ function parseCellOutput(
   const c = Math.sqrt(vecs[2][0] ** 2 + vecs[2][1] ** 2 + vecs[2][2] ** 2);
   const volume = cellVolumeFromVectors(vecs);
 
-  // Compute angles from dot products
-  const dot = (u: number[], v: number[]) => u[0] * v[0] + u[1] * v[1] + u[2] * v[2];
-  const toDeg = (rad: number) => (rad * 180) / Math.PI;
-  const alpha = toDeg(Math.acos(Math.max(-1, Math.min(1, dot(vecs[1], vecs[2]) / (b * c)))));
-  const beta = toDeg(Math.acos(Math.max(-1, Math.min(1, dot(vecs[0], vecs[2]) / (a * c)))));
-  const gamma = toDeg(Math.acos(Math.max(-1, Math.min(1, dot(vecs[0], vecs[1]) / (a * b)))));
-
   return {
-    latticeA: a,
-    latticeB: b,
-    latticeC: c,
-    cOverA: c / a,
+    latticeA: a, latticeB: b, latticeC: c, cOverA: c / a,
     positions,
     prototype: "AIRSS-buildcell",
     crystalSystem: "unknown",
     spaceGroup: "",
-    source: `AIRSS buildcell (seed=${seed})`,
+    source: `AIRSS (seed=${seed}, Z=${z})`,
     confidence: 0.4,
     isMetallic: null,
     sourceEngine: "airss",
-    generationStage: stage,
+    generationStage: 1,
     seed,
     pressureGPa,
     cellVolume: volume,
     cellVectors: vecs,
-    latticeParams: { a, b, c, alpha, beta, gamma },
+    latticeParams: { a, b, c, alpha: 90, beta: 90, gamma: 90 },
     relaxationLevel: "raw",
   };
 }
-
-// ---------------------------------------------------------------------------
-// AIRSS Engine
-// ---------------------------------------------------------------------------
 
 let _airssAvailable: boolean | null = null;
 
@@ -260,52 +228,87 @@ export const airssEngine: CSPEngine = {
     const candidates: CSPCandidate[] = [];
     const baseSeed = config.baseSeed ?? Math.floor(Math.random() * 1e8);
     const workDir = config.workDir;
-
     fs.mkdirSync(workDir, { recursive: true });
 
-    console.log(`[AIRSS] Generating ${config.maxStructures} structures for ${elements.join("")} at ${config.pressureGPa} GPa (baseSeed=${baseSeed})`);
-
-    for (let i = 0; i < config.maxStructures; i++) {
-      const seed = baseSeed + i;
-      try {
-        const cellInput = generateCellInput(elements, counts, config.pressureGPa, seed);
-        const inputPath = path.join(workDir, `airss_${seed}.cell`);
-        fs.writeFileSync(inputPath, cellInput);
-
-        const result = execSync(
-          `${BUILDCELL_BIN} < ${inputPath} 2>&1`,
-          { cwd: workDir, timeout: config.timeoutMs / config.maxStructures, maxBuffer: 1024 * 1024 }
-        );
-
-        const output = result.toString("utf-8");
-        const candidate = parseCellOutput(output, elements, seed, config.pressureGPa, 1);
-        if (candidate) {
-          if (config.seedStructures && config.seedStructures.length > 0) {
-            candidate.parentSeeds = config.seedStructures.map(s => s.seed);
-          }
-          candidates.push(candidate);
-        } else if (i === 0) {
-          // Log first parse failure to diagnose format issues
-          console.log(`[AIRSS] buildcell ran but parse failed. Output (first 600 chars): ${output.slice(0, 600)}`);
-          // Keep the input file for debugging
-          console.log(`[AIRSS] Input file: ${inputPath}`);
-        }
-
-        // Clean up input file (keep first one if it failed for debugging)
-        if (candidate || i > 0) {
-          try { fs.unlinkSync(inputPath); } catch {}
-        }
-      } catch (err: any) {
-        if (i === 0) {
-          console.log(`[AIRSS] First structure exception: ${err.message?.slice(0, 200)}`);
-          // Also log stderr if available
-          if (err.stderr) console.log(`[AIRSS] stderr: ${err.stderr.toString().slice(0, 200)}`);
-          if (err.stdout) console.log(`[AIRSS] stdout: ${err.stdout.toString().slice(0, 200)}`);
-        }
-      }
+    // Determine screening tier from budget
+    let tierConfig: ScreeningTierConfig;
+    if (config.maxStructures >= 10000) tierConfig = SCREENING_TIERS.deep;
+    else if (config.maxStructures >= 5000) tierConfig = SCREENING_TIERS.standard;
+    else if (config.maxStructures >= 2500) tierConfig = SCREENING_TIERS.preview;
+    else {
+      // Small budget (called from qe-worker inline) — use minimal sweep
+      tierConfig = {
+        tier: "preview",
+        maxAtoms: 20,
+        zValues: [1, 2],
+        airssBudgetPerCombo: Math.ceil(config.maxStructures / 2),
+        airssTotalCap: config.maxStructures,
+        pyxtalBudgetPerZ: 0,
+        pyxtalTotalCap: 0,
+        volumeEnsemble: [0.85, 1.0, 1.15],
+      };
     }
 
-    console.log(`[AIRSS] Generated ${candidates.length}/${config.maxStructures} structures`);
+    const formulaAtoms = Object.values(counts).reduce((s, n) => s + Math.round(n), 0);
+    const volPerAtom = estimateVolumePerAtom(elements, counts);
+    const volumeTargets = pressureVolumeEnsemble(
+      volPerAtom, config.pressureGPa, tierConfig.volumeEnsemble
+    );
+
+    // Filter Z values by atom count cap
+    const validZ = tierConfig.zValues.filter(z => formulaAtoms * z <= tierConfig.maxAtoms);
+    if (validZ.length === 0) validZ.push(1); // always try Z=1
+
+    const totalCombos = validZ.length * volumeTargets.length;
+    const budgetPerCombo = Math.min(
+      tierConfig.airssBudgetPerCombo,
+      Math.ceil(tierConfig.airssTotalCap / totalCombos),
+    );
+
+    console.log(`[AIRSS] Generating for ${elements.join("")} at ${config.pressureGPa} GPa: Z=[${validZ.join(",")}], ${volumeTargets.length} volumes, ${budgetPerCombo}/combo, cap=${tierConfig.airssTotalCap} (${tierConfig.tier} tier)`);
+
+    let totalGenerated = 0;
+    let seedCounter = 0;
+
+    for (const z of validZ) {
+      for (const targetVol of volumeTargets) {
+        if (totalGenerated >= tierConfig.airssTotalCap) break;
+
+        const batchBudget = Math.min(budgetPerCombo, tierConfig.airssTotalCap - totalGenerated);
+        let batchGenerated = 0;
+
+        for (let i = 0; i < batchBudget; i++) {
+          const seed = baseSeed + seedCounter++;
+          try {
+            const cellInput = generateCellInput(elements, counts, z, targetVol, config.pressureGPa);
+            const inputPath = path.join(workDir, `airss_${seed}.cell`);
+            fs.writeFileSync(inputPath, cellInput);
+
+            const result = execSync(
+              `${BUILDCELL_BIN} < ${inputPath} 2>&1`,
+              { cwd: workDir, timeout: 10000, maxBuffer: 1024 * 1024 }
+            );
+
+            const output = result.toString("utf-8");
+            const candidate = parseCellOutput(output, elements, seed, config.pressureGPa, 1, z);
+            if (candidate) {
+              candidates.push(candidate);
+              batchGenerated++;
+              totalGenerated++;
+            }
+
+            try { fs.unlinkSync(inputPath); } catch {}
+          } catch (err: any) {
+            if (batchGenerated === 0 && i === 0) {
+              console.log(`[AIRSS] Z=${z} vol=${targetVol.toFixed(1)} first fail: ${err.message?.slice(0, 100)}`);
+            }
+          }
+        }
+      }
+      if (totalGenerated >= tierConfig.airssTotalCap) break;
+    }
+
+    console.log(`[AIRSS] Generated ${totalGenerated} structures (Z sweep: ${validZ.join(",")}, ${volumeTargets.length} volumes)`);
     return candidates;
   },
 };

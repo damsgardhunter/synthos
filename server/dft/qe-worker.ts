@@ -3838,18 +3838,22 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     }
 
     // --- AIRSS structure generation ---
-    // Generate 3-5 sensible random structures via AIRSS buildcell.
-    // These complement Vegard/VCA candidates with structurally diverse
-    // starting points that aren't biased by known structure databases.
-    // Only runs if buildcell is installed; silently skipped otherwise.
+    // Generate sensible random structures via AIRSS buildcell with Z sweeps
+    // and volume ensemble. Budget scales with screening tier:
+    //   preview: up to 2500 across Z=[1,2,4] × 3 volumes
+    //   standard: up to 5000 across Z=[1,2,3,4,6] × 5 volumes
+    // For inline DFT jobs, we use a moderate budget (~50 structures) that
+    // still covers multiple Z values and volume targets.
     if (airssEngine.isAvailable()) {
       try {
         const airssDir = path.join(jobDir, "airss");
-        const airssBudget = Math.min(5, Math.max(3, 8 - structureCandidates.length));
+        // Inline budget: enough for Z sweeps with 2-3 volumes (~50 total)
+        // The AIRSS wrapper auto-selects tier based on maxStructures
+        const airssBudget = 50;
         const airssCandidates = await airssEngine.generateStructures(elements, counts, {
           binaryPath: "",
           workDir: airssDir,
-          timeoutMs: 30000,
+          timeoutMs: 120000, // 2 min for larger batch
           maxStructures: airssBudget,
           pressureGPa: workerPressure,
           baseSeed: Date.now() % 1e8,
@@ -3879,17 +3883,17 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     }
 
     // --- PyXtal structure generation ---
-    // Generates symmetry-constrained random structures using all 230 space groups.
-    // Complements AIRSS (which uses its own symmetry sampling) and Vegard/VCA
-    // (which are database-derived). PyXtal explores different SG basins.
+    // Generates symmetry-constrained random structures across 230 SGs with
+    // Z sweeps. Budget: ~20 structures covering multiple Z values, enough
+    // to find compatible SGs for complex stoichiometries.
     if (pyxtalEngine.isAvailable()) {
       try {
         const pyxtalDir = path.join(jobDir, "pyxtal");
-        const pyxtalBudget = Math.min(4, Math.max(2, 7 - structureCandidates.length));
+        const pyxtalBudget = 20;
         const pyxtalCandidates = await pyxtalEngine.generateStructures(elements, counts, {
           binaryPath: "",
           workDir: pyxtalDir,
-          timeoutMs: 45000,
+          timeoutMs: 90000, // 90s for larger batch with Z sweeps
           maxStructures: pyxtalBudget,
           pressureGPa: workerPressure,
           baseSeed: (Date.now() + 7777) % 1e8,
