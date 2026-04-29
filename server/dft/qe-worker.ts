@@ -31,6 +31,7 @@ import { lookupKnownStructure, getKnownStructureFormulas } from "../learning/kno
 import { airssEngine } from "../csp/airss-wrapper";
 import { pyxtalEngine } from "../csp/pyxtal-wrapper";
 import { mutateTopCandidates } from "../csp/structure-mutator";
+import { generateCageSeededCandidates } from "../csp/cage-seeder";
 import { logCandidateStats } from "../csp/candidate-metadata";
 import { runCandidateFunnel } from "../csp/candidate-funnel";
 import { assignTier, logTierDecision } from "../csp/tier-assignment";
@@ -3932,6 +3933,36 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
         }
       } catch (pyxtalErr: any) {
         console.log(`[QE-Worker] PyXtal failed for ${formula}: ${pyxtalErr.message?.slice(0, 100)} — continuing without`);
+      }
+    }
+
+    // --- Cage-aware seeding ---
+    // For hydrides, generate candidates from known cage templates using
+    // parent seeding (modify existing cage structures) and Wyckoff-aware
+    // generation (place H on specific cage-forming orbits like 32f, 12d, 6h).
+    if (elements.includes("H")) {
+      try {
+        const cageCandidates = generateCageSeededCandidates(elements, counts, workerPressure);
+        for (const cc of cageCandidates) {
+          structureCandidates.push({
+            latticeA: cc.latticeA,
+            latticeB: cc.latticeB,
+            latticeC: cc.latticeC,
+            cOverA: cc.cOverA,
+            positions: cc.positions,
+            prototype: cc.prototype ?? "cage-seed",
+            crystalSystem: cc.crystalSystem,
+            spaceGroup: cc.spaceGroup,
+            source: cc.source,
+            confidence: cc.confidence ?? 0.80,
+            isMetallic: null,
+          });
+        }
+        if (cageCandidates.length > 0) {
+          console.log(`[QE-Worker] Cage seeder: ${cageCandidates.length} cage-aware candidates (total now: ${structureCandidates.length})`);
+        }
+      } catch (cageErr: any) {
+        console.log(`[QE-Worker] Cage seeder failed: ${cageErr.message?.slice(0, 80)}`);
       }
     }
 
