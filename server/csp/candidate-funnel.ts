@@ -441,7 +441,7 @@ export async function runCandidateFunnel(
         path.join(process.cwd(), "server", "csp", "chgnet_work_" + formula.replace(/[^a-zA-Z0-9]/g, "")),
         doRelax,
         maxEval,
-        tier === "preview" ? 120000 : 300000, // 2 min preview, 5 min deep
+        300000, // 5 min for all tiers — larger structures need more time
       );
       if (chgnetResult.stats.evaluated > 0) {
         f6Candidates = chgnetResult.rankedCandidates;
