@@ -2816,17 +2816,15 @@ function validateFormulaForDFT(formula: string, counts: Record<string, number>):
   }
 
   const ALKALINE_EARTH_SYMBOLS = new Set(["Ca", "Sr", "Ba", "Mg"]);
-  const KNOWN_SUPERHYDRIDE_PRESSURES: Record<string, number> = {
-    LaH10: 150, LaH9: 120, LaH11: 200, LaH12: 175,
-    YH6: 160, YH9: 200, YH10: 200,
-    CeH9: 150, CeH10: 170,
-    ThH10: 175, CaH6: 200,
-    ScH9: 130, BaH12: 150, LaBeH8: 100,
-    // Ternary superhydrides — pressure estimated from constituent binary analogues
-    Li2LaH12: 175, LaH11Li2: 175, LaLiH12: 175,
-    YH9Na2: 200, NaYH9: 200, Na2YH9: 200,
-    Li2CeH12: 170, Li2YH12: 175,
-  };
+  // Auto-populate from known-structures.ts — any compound with pressureGPa > 0
+  // in the database gets its known pressure. No manual sync needed.
+  const KNOWN_SUPERHYDRIDE_PRESSURES: Record<string, number> = {};
+  for (const ksFormula of getKnownStructureFormulas()) {
+    const ks = lookupKnownStructure(ksFormula);
+    if (ks && ks.pressureGPa > 0) {
+      KNOWN_SUPERHYDRIDE_PRESSURES[ksFormula] = ks.pressureGPa;
+    }
+  }
   const hCount = counts["H"] || 0;
   if (hCount > 0 && totalAtoms > 2) {
     const hRatio = hCount / totalAtoms;
@@ -2851,11 +2849,17 @@ function validateFormulaForDFT(formula: string, counts: Record<string, number>):
       return { valid: true, reason: `Known superhydride ${cleanFormula} — requires ~${knownPressure} GPa`, highPressure: true, estimatedPressureGPa: knownPressure };
     }
 
-    if (hPerMetal > 6) {
+    if (hPerMetal >= 6) {
       return { valid: true, reason: `High H/metal ratio ${hPerMetal.toFixed(1)} — tagged as high-pressure candidate (>100 GPa required)`, highPressure: true, estimatedPressureGPa: Math.min(300, 50 + hPerMetal * 15) };
     }
 
-    if (hRatio > 0.75) {
+    // H/metal ratio 3-6: moderate-pressure hydride (H3S-class)
+    // These aren't as extreme as LaH10 but still require high pressure
+    if (hPerMetal >= 3) {
+      return { valid: true, reason: `Moderate H/metal ratio ${hPerMetal.toFixed(1)} — tagged as high-pressure candidate`, highPressure: true, estimatedPressureGPa: Math.min(250, 100 + hPerMetal * 20) };
+    }
+
+    if (hRatio >= 0.75) {
       return { valid: true, reason: `Hydrogen fraction ${(hRatio * 100).toFixed(0)}% — tagged as high-pressure superhydride candidate`, highPressure: true, estimatedPressureGPa: Math.min(300, 100 + hRatio * 100) };
     }
   }
@@ -4176,14 +4180,21 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       console.log(`[QE-Worker] ${formula} xTB pre-relax failed — proceeding with raw positions to vc-relax`);
     }
 
-    const stabilityCheck = runXTBStabilityCheck(positions, latticeA, jobDir, workerPressure);
-    if (stabilityCheck && !stabilityCheck.stable) {
-      result.error = `xTB stability pre-filter: ${stabilityCheck.basis}`;
-      result.failureStage = "xtb_prefilter";
-      result.rejectionReason = `Unstable: ${stabilityCheck.basis}`;
-      stageFailureCounts.xtb_prefilter++;
-      console.log(`[QE-Worker] ${formula} unstable by xTB pre-filter: ${stabilityCheck.basis}${workerPressure > 0 ? ` @ ${workerPressure} GPa` : ""}`);
-      return result;
+    // xTB stability pre-filter: skip if known-structure positions were validated
+    // (literature Wyckoff positions are DFT-proven, xTB can't improve on that),
+    // or if pressure > 50 GPa (xTB is parameterized for ambient only).
+    if (!skipXtb) {
+      const stabilityCheck = runXTBStabilityCheck(positions, latticeA, jobDir, workerPressure);
+      if (stabilityCheck && !stabilityCheck.stable) {
+        result.error = `xTB stability pre-filter: ${stabilityCheck.basis}`;
+        result.failureStage = "xtb_prefilter";
+        result.rejectionReason = `Unstable: ${stabilityCheck.basis}`;
+        stageFailureCounts.xtb_prefilter++;
+        console.log(`[QE-Worker] ${formula} unstable by xTB pre-filter: ${stabilityCheck.basis}${workerPressure > 0 ? ` @ ${workerPressure} GPa` : ""}`);
+        return result;
+      }
+    } else {
+      console.log(`[QE-Worker] ${formula} skipping xTB stability check (known-structure validated)`);
     }
 
     const postRelaxFingerprint = computeStructureFingerprint(positions, latticeA, fpCoverA, fpGamma);
