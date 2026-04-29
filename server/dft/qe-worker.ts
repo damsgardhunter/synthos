@@ -4461,6 +4461,118 @@ ${cellBlockRelax}
       }
     }
 
+    // --- Mini-EOS pressure correction ---
+    // When vc-relax is skipped for high-P hydrides, the lattice is from
+    // literature or Vegard — not optimized at the target pressure. Run a
+    // mini equation-of-state: 5 volume points, short static SCF at each,
+    // pick the one with stress closest to the target pressure.
+    if (result.vcRelaxed && workerPressure > 0 && positions.length > 0 && positions.length <= 16) {
+      try {
+        const eosScales = [0.96, 0.98, 1.00, 1.02, 1.04];
+        const eosPrefix = formula.replace(/[^a-zA-Z0-9]/g, "") + "_eos";
+        const hasHEos = elements.includes("H");
+        const ecutwfcEos = Math.max(computeEcutwfc(elements, 0, 80, 45), hasHEos ? 80 : 50);
+        const ecutrhoEos = ecutwfcEos * ecutrhoMultiplier(elements);
+        const cOverAEos = estimateCOverA(elements, counts);
+        const bOverAEos = estimateBOverA(elements, counts);
+        const hasMagEos = mayHaveMagneticMoment(elements);
+        const nspinEos = hasMagEos ? 2 : 1;
+        const magLinesEos = hasMagEos ? generateMagnetizationLines(elements, counts, isAFMCandidate(elements, counts), !elements.some(el => el in MAGNETIC_ELEMENTS)) : "";
+
+        let atomicSpeciesEos = "";
+        for (const el of elements) {
+          atomicSpeciesEos += `  ${el}  ${getAtomicMass(el).toFixed(3)}  ${resolvePPFilename(el)}\n`;
+        }
+        let atomicPosEos = "";
+        for (const pos of positions) {
+          atomicPosEos += `  ${pos.element}  ${pos.x.toFixed(6)}  ${pos.y.toFixed(6)}  ${pos.z.toFixed(6)}\n`;
+        }
+
+        const targetKbar = workerPressure * 10;
+        let bestScale = 1.0;
+        let bestPressDiff = Infinity;
+
+        console.log(`[QE-Worker] Mini-EOS for ${formula}: testing ${eosScales.length} volume points around a=${latticeA.toFixed(3)} Å (target P=${workerPressure} GPa)`);
+
+        for (const scale of eosScales) {
+          const eosA = latticeA * Math.pow(scale, 1 / 3);
+          const cellBlockEos = generateCellParameters(eosA, cOverAEos, 0, bOverAEos, elements, counts);
+          const kptsEos = autoKPoints(eosA, cOverAEos, bOverAEos, undefined, 0.6, { stage: "relax", totalAtoms: positions.length }).trim();
+          const eosInput = `&CONTROL
+  calculation = 'scf',
+  restart_mode = 'from_scratch',
+  prefix = '${eosPrefix}',
+  outdir = './tmp',
+  disk_io = 'low',
+  pseudo_dir = '${QE_PSEUDO_DIR_INPUT}',
+  tprnfor = .true.,
+  tstress = .true.,
+  max_seconds = 300,
+/
+&SYSTEM
+  ibrav = 0,
+  nat = ${positions.length},
+  ntyp = ${elements.length},
+  ecutwfc = ${ecutwfcEos},
+  ecutrho = ${ecutrhoEos},
+  input_dft = 'PBE',
+  occupations = 'smearing',
+  smearing = 'mv',
+  degauss = 0.015,
+  nspin = ${nspinEos},
+${magLinesEos}/
+&ELECTRONS
+  electron_maxstep = 100,
+  conv_thr = 1.0d-4,
+  mixing_beta = 0.4,
+  mixing_mode = 'local-TF',
+  diagonalization = 'david',
+  scf_must_converge = .false.,
+/
+ATOMIC_SPECIES
+${atomicSpeciesEos}
+ATOMIC_POSITIONS {crystal}
+${atomicPosEos}
+K_POINTS {automatic}
+${kptsEos}
+
+${cellBlockEos}
+`;
+          const eosFile = path.join(jobDir, `eos_${scale.toFixed(2)}.in`);
+          fs.writeFileSync(eosFile, eosInput);
+          try {
+            const eosResult = await runQECommand(
+              path.posix.join(getQEBinDir(), "pw.x"), eosFile, jobDir, 360000,
+            );
+            // Parse pressure from output
+            const pressMatch = eosResult.stdout.match(/total\s+stress.*\n.*P=\s*([-\d.]+)/);
+            if (pressMatch) {
+              const pKbar = parseFloat(pressMatch[1]);
+              const diff = Math.abs(pKbar - targetKbar);
+              if (diff < bestPressDiff) {
+                bestPressDiff = diff;
+                bestScale = scale;
+              }
+              console.log(`[QE-Worker] Mini-EOS scale=${scale.toFixed(2)}: a=${eosA.toFixed(3)} Å, P=${(pKbar / 10).toFixed(1)} GPa (target ${workerPressure}), diff=${(diff / 10).toFixed(1)} GPa`);
+            }
+          } catch {}
+          cleanQETmpDir(path.join(jobDir, "tmp"));
+          try { fs.unlinkSync(eosFile); } catch {}
+        }
+
+        if (bestScale !== 1.0) {
+          const oldA = latticeA;
+          latticeA = latticeA * Math.pow(bestScale, 1 / 3);
+          result.relaxedLatticeA = latticeA;
+          console.log(`[QE-Worker] Mini-EOS selected scale=${bestScale.toFixed(2)}: a=${oldA.toFixed(3)} → ${latticeA.toFixed(3)} Å (best pressure match, diff=${(bestPressDiff / 10).toFixed(1)} GPa)`);
+        } else {
+          console.log(`[QE-Worker] Mini-EOS: a=${latticeA.toFixed(3)} Å unchanged (scale=1.00 was best)`);
+        }
+      } catch (eosErr: any) {
+        console.log(`[QE-Worker] Mini-EOS failed for ${formula}: ${eosErr.message?.slice(0, 100)} — continuing with current lattice`);
+      }
+    }
+
     try {
       if (result.vcRelaxed) {
         // Already set from verified-compound shortcut, skip the actual run
