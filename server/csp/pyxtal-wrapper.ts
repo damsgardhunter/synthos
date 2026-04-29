@@ -185,9 +185,28 @@ try:
                 continue
 
             if crystal.valid:
+                # Reject H₂-molecular structures: check if any H-H pair < 0.90 Å
+                # This prevents wasting DFT on structures that are just molecular hydrogen
+                struct_check = crystal.to_pymatgen()
+                has_h2 = False
+                h_sites = [s for s in struct_check if str(s.specie) == "H"]
+                if len(h_sites) >= 2:
+                    for i_h in range(len(h_sites)):
+                        for j_h in range(i_h + 1, len(h_sites)):
+                            d_hh = struct_check.lattice.get_all_distances(
+                                [h_sites[i_h].frac_coords], [h_sites[j_h].frac_coords]
+                            )[0][0]
+                            if d_hh < 0.90:
+                                has_h2 = True
+                                break
+                        if has_h2:
+                            break
+                if has_h2:
+                    continue  # skip this H₂-like structure
+
                 poscar_path = os.path.join(output_dir, f"POSCAR_{generated:04d}")
                 try:
-                    struct = crystal.to_pymatgen()
+                    struct = struct_check
                     lattice = struct.lattice
                     species_order = []
                     species_counts = {}

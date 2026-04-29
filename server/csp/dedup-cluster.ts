@@ -122,15 +122,17 @@ function computeCheapFingerprint(c: CSPCandidate): CheapFingerprint {
 /**
  * Fast check: are two fingerprints "close enough" to be duplicates?
  */
-function areFingerprintsSimilar(a: CheapFingerprint, b: CheapFingerprint, threshold: number = 0.05): boolean {
+function areFingerprintsSimilar(a: CheapFingerprint, b: CheapFingerprint, threshold: number = 0.08): boolean {
   // Must have same composition and atom count
   if (a.compositionKey !== b.compositionKey) return false;
   if (a.nAtoms !== b.nAtoms) return false;
 
-  // Volume must be within 1.0 Å³/atom
-  if (Math.abs(a.volumeBin - b.volumeBin) > 1.0) return false;
+  // Volume must be within 0.5 Å³/atom — TIGHTER volume check so structures
+  // at different volume points from the ensemble are NOT considered duplicates.
+  // This preserves volume diversity from the ensemble (0.70×, 0.85×, 1.00×, etc.)
+  if (Math.abs(a.volumeBin - b.volumeBin) > 0.5) return false;
 
-  // Pair-distance histogram cosine distance
+  // Pair-distance histogram cosine distance (loosened from 0.05 to 0.08)
   let dot = 0, na = 0, nb = 0;
   for (let i = 0; i < a.pairDistHist.length; i++) {
     dot += a.pairDistHist[i] * b.pairDistHist[i];

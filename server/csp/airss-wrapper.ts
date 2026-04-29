@@ -17,7 +17,7 @@ import type { CSPCandidate, CSPEngine, CSPEngineConfig, ScreeningTierConfig } fr
 import {
   cellVolumeFromVectors,
   COVALENT_RADII,
-  getPairMinsep,
+  getGeneratorMinsep,
   pressureVolumeEnsemble,
   SCREENING_TIERS,
 } from "./csp-types";
@@ -72,15 +72,18 @@ function generateCellInput(
   const a = Math.pow(cellVol, 1 / 3);
 
   // Global MINSEP: use the smallest pair distance
+  // Use generator MINSEP (higher than validation) to prevent H₂ formation.
+  // H-H generator floor = 0.95 Å at ambient — blocks molecular H₂ (0.74 Å)
+  // while allowing cage H-H (1.0-1.5 Å).
   let globalMin = Infinity;
   for (const el1 of elements) {
     for (const el2 of elements) {
-      globalMin = Math.min(globalMin, getPairMinsep(el1, el2, pressureGPa));
+      globalMin = Math.min(globalMin, getGeneratorMinsep(el1, el2, pressureGPa));
     }
   }
 
   let cell = `#TARGVOL=${cellVol.toFixed(1)}\n`;
-  cell += `#MINSEP=${Math.max(0.3, globalMin).toFixed(2)}\n`;
+  cell += `#MINSEP=${Math.max(0.5, globalMin).toFixed(2)}\n`;
 
   cell += `\n%BLOCK LATTICE_CART\n`;
   cell += `${a.toFixed(4)} 0.0000 0.0000\n`;

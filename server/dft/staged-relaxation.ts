@@ -247,9 +247,13 @@ export async function runStagedRelaxation(opts: StagedRelaxationOpts): Promise<S
   const STAGE1_TOTAL_BUDGET_MS = 5_400_000; // 90 min total for all candidates
   const perCandidateMs = s1Params.timeoutMs;
   const budgetBasedMax = Math.max(1, Math.floor(STAGE1_TOTAL_BUDGET_MS / perCandidateMs));
-  const maxS1 = Math.min(
-    opts.maxStage1Candidates ?? budgetBasedMax,
-    budgetBasedMax,
+  // Always test at least 2 candidates if 2+ were admitted — the funnel
+  // selected these for a reason (exploitation vs diversity). Testing only 1
+  // wastes the admission selection.
+  const minCandidates = Math.min(2, candidates.length);
+  const maxS1 = Math.max(
+    minCandidates,
+    Math.min(opts.maxStage1Candidates ?? budgetBasedMax, budgetBasedMax),
   );
 
   let bestPositions = candidates[0]?.positions ?? [];

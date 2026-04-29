@@ -328,11 +328,14 @@ const ABSOLUTE_FLOOR: Record<string, number> = {
   "M-M": 1.50,  // metallic bonds floor
 };
 
+/**
+ * Get element-pair minimum separation for VALIDATION (funnel F1).
+ * This is the soft/hard threshold for rejecting structures.
+ */
 export function getPairMinsep(el1: string, el2: string, pressureGPa: number): number {
   const r1 = COVALENT_RADII[el1] ?? 1.2;
   const r2 = COVALENT_RADII[el2] ?? 1.2;
 
-  // Base scaling by pair type
   const isHH = el1 === "H" && el2 === "H";
   const isMH = el1 === "H" || el2 === "H";
   const baseScale = isHH ? 0.50 : (isMH ? 0.60 : 0.75);
@@ -340,9 +343,39 @@ export function getPairMinsep(el1: string, el2: string, pressureGPa: number): nu
   const baseMinsep = (r1 + r2) * baseScale;
   const scaled = pressureScaledMinsep(baseMinsep, pressureGPa);
 
-  // Apply absolute floor — never allow below physical minimum
   const floorKey = isHH ? "H-H" : (isMH ? "M-H" : "M-M");
   return Math.max(scaled, ABSOLUTE_FLOOR[floorKey]);
+}
+
+/**
+ * Get element-pair minimum separation for STRUCTURE GENERATION (AIRSS/PyXtal).
+ * Higher than validation MINSEP to prevent H₂ molecular formation.
+ * Cage structures have H-H at 1.0-2.0 Å — we want to PREVENT <0.9 Å
+ * (molecular) while ALLOWING 1.0+ Å (extended network).
+ */
+export function getGeneratorMinsep(el1: string, el2: string, pressureGPa: number): number {
+  const r1 = COVALENT_RADII[el1] ?? 1.2;
+  const r2 = COVALENT_RADII[el2] ?? 1.2;
+
+  const isHH = el1 === "H" && el2 === "H";
+  const isMH = el1 === "H" || el2 === "H";
+
+  if (isHH) {
+    // H-H generator floor: 0.95 Å at ambient, pressure-scaled down
+    // This PREVENTS H₂ formation (0.74 Å) while allowing cage H-H (1.0-1.5 Å)
+    const baseHH = 0.95;
+    return pressureScaledMinsep(baseHH, pressureGPa);
+  }
+
+  if (isMH) {
+    // M-H: use covalent radii sum × 0.70 (tighter packing but no overlap)
+    const baseMH = (r1 + r2) * 0.70;
+    return Math.max(pressureScaledMinsep(baseMH, pressureGPa), 1.0);
+  }
+
+  // M-M: use covalent radii sum × 0.80
+  const baseMM = (r1 + r2) * 0.80;
+  return Math.max(pressureScaledMinsep(baseMM, pressureGPa), 1.8);
 }
 
 /**

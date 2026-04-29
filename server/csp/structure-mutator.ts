@@ -90,11 +90,12 @@ function mutateLatticeStrain(parent: CSPCandidate, seed: number): MutationResult
   const rng = seededRandom(seed);
   const mut = cloneCandidate(parent, "lattice-strain", seed);
 
-  // Random strain tensor: isotropic with small anisotropic perturbation
-  const isoStrain = 1.0 + (rng() - 0.5) * 0.10; // ±5%
-  const anisoX = 1.0 + (rng() - 0.5) * 0.04;     // ±2%
-  const anisoY = 1.0 + (rng() - 0.5) * 0.04;
-  const anisoZ = 1.0 + (rng() - 0.5) * 0.04;
+  // Larger strain to survive fingerprint dedup.
+  // ±10% iso + ±5% aniso gives ~30% volume change — clearly different structure.
+  const isoStrain = 1.0 + (rng() - 0.5) * 0.20; // ±10%
+  const anisoX = 1.0 + (rng() - 0.5) * 0.10;     // ±5%
+  const anisoY = 1.0 + (rng() - 0.5) * 0.10;
+  const anisoZ = 1.0 + (rng() - 0.5) * 0.10;
 
   mut.latticeA = parent.latticeA * isoStrain * anisoX;
   if (mut.latticeB) mut.latticeB = mut.latticeB * isoStrain * anisoY;
@@ -147,7 +148,7 @@ function mutateVolumeExpand(parent: CSPCandidate, seed: number): MutationResult 
 function mutateAtomicDisplacement(parent: CSPCandidate, seed: number): MutationResult {
   const rng = seededRandom(seed);
   const mut = cloneCandidate(parent, "atomic-displacement", seed);
-  const sigma = 0.02 + rng() * 0.04; // 2-6% of lattice in fractional coords
+  const sigma = 0.05 + rng() * 0.10; // 5-15% of lattice — must survive dedup fingerprint
 
   let maxDisp = 0;
   for (const pos of mut.positions) {
@@ -215,7 +216,7 @@ function mutateHydrogenShuffle(parent: CSPCandidate, seed: number): MutationResu
   }
 
   // Larger displacement for H than for metals
-  const hSigma = 0.05 + rng() * 0.10; // 5-15% fractional
+  const hSigma = 0.10 + rng() * 0.15; // 10-25% fractional — large enough to rearrange cage
   for (const idx of hIndices) {
     mut.positions[idx].x = wrapFrac(mut.positions[idx].x + gaussianRandom(rng) * hSigma);
     mut.positions[idx].y = wrapFrac(mut.positions[idx].y + gaussianRandom(rng) * hSigma);
