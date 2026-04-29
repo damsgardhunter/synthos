@@ -911,7 +911,18 @@ let lastStaleCleanup = 0;
 // High-priority compounds that must always be at the front of the queue.
 // These are submitted at priority 9999 on startup if not already running/completed.
 const CRITICAL_PRIORITY_FORMULAS: string[] = [
-  "Li2LaH12", "LaH11Li2", "LaH12", "YH9Na2", "LaH10",
+  // Ternary high-P hydrides (flagship discoveries)
+  "Li2LaH12", "LaH11Li2", "LaH12", "YH9Na2",
+  // Binary high-P hydrides (benchmark superconductors)
+  "LaH10", "CaH6", "YH6", "H3S", "YH9", "ThH10", "CeH9",
+  // Conventional superconductors (validation targets)
+  "MgB2", "Nb3Sn", "Nb3Ge", "V3Si",
+  // Iron-based (pnictide/chalcogenide families)
+  "BaFe2As2", "LaFeAsO", "FeSe", "LiFeAs",
+  // Cuprates
+  "YBa2Cu3O7", "La2CuO4", "Bi2Sr2CaCu2O8",
+  // Heavy-fermion / unconventional
+  "CeCoIn5", "Sr2RuO4",
 ];
 
 async function bootstrapCriticalCandidates(): Promise<void> {
