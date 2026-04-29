@@ -3906,6 +3906,93 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
       return hasTM && hasA && hasX;
     },
   },
+
+  // ── A3B3C (Pm-3n, SG 223): Nb3Re3Sn-type — intermetallic 3:3:1 ──
+  // Cr3Si-derived ternary: two TMs share the chain sites + one sp-element
+  // at the corner/body-center. Examples: Nb3Os3B, Mo3Re3C, V3Ir3Sn
+  {
+    name: "A3B3C-Intermetallic",
+    spaceGroup: "Pm-3n",
+    latticeType: "cubic",
+    cOverA: 1.0,
+    sites: [
+      // C at 2a Wyckoff (corner + body center)
+      { label: "C", x: 0.0, y: 0.0, z: 0.0, role: "corner" },
+      // A at 6c chain sites (face-center edges)
+      { label: "A", x: 0.25, y: 0.0, z: 0.5, role: "chain-A" },
+      { label: "A", x: 0.75, y: 0.0, z: 0.5, role: "chain-A" },
+      { label: "A", x: 0.5, y: 0.25, z: 0.0, role: "chain-A" },
+      // B at remaining 6c positions
+      { label: "B", x: 0.0, y: 0.5, z: 0.25, role: "chain-B" },
+      { label: "B", x: 0.0, y: 0.5, z: 0.75, role: "chain-B" },
+      { label: "B", x: 0.5, y: 0.75, z: 0.0, role: "chain-B" },
+    ],
+    stoichiometryRatio: [3, 3, 1],
+    coordination: [12, 12, 14],
+    chemistryRules: (elements) => {
+      if (elements.length !== 3) return false;
+      // Two transition metals + one metalloid/post-TM, or three TMs
+      const tmCount = elements.filter(e => isTransitionMetal(e)).length;
+      const hasMetalloid = elements.some(e => ["Al", "Ga", "In", "Si", "Ge", "Sn", "Sb", "Bi", "B", "C", "N", "Pb"].includes(e));
+      return tmCount >= 2 && (tmCount === 3 || hasMetalloid);
+    },
+  },
+
+  // ── IV-IV-VI₂ Chalcogenide (I-42d, SG 122): GeSnTe₂-type ──
+  // Chalcopyrite-derived but with group-IV cations instead of I-III.
+  // Common thermoelectrics: GeSeTe, SnGeSe₂, PbSnTe₂
+  {
+    name: "Chalcopyrite-IV-IV-VI2",
+    spaceGroup: "I-42d",
+    latticeType: "tetragonal",
+    cOverA: 1.97,
+    sites: [
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "cation-1" },
+      { label: "B", x: 0.0, y: 0.0, z: 0.5, role: "cation-2" },
+      { label: "C", x: 0.25, y: 0.125, z: 0.625, role: "anion" },
+      { label: "C", x: 0.75, y: 0.125, z: 0.875, role: "anion" },
+    ],
+    stoichiometryRatio: [1, 1, 2],
+    coordination: [4, 4, 4],
+    chemistryRules: (elements) => {
+      if (elements.length !== 3) return false;
+      const hasChalcogen = elements.some(e => ["S", "Se", "Te"].includes(e));
+      const hasGroupIV = elements.some(e => ["Si", "Ge", "Sn", "Pb"].includes(e));
+      // Need chalcogen + at least one group-IV; the third can be TM, another IV, or metalloid
+      const groupIVcount = elements.filter(e => ["Si", "Ge", "Sn", "Pb"].includes(e)).length;
+      const hasTMorMet = elements.some(e =>
+        isTransitionMetal(e) || ["Bi", "Sb", "In", "Ga", "Al", "Tl", "Cu", "Ag"].includes(e)
+      );
+      return hasChalcogen && hasGroupIV && (groupIVcount >= 2 || hasTMorMet);
+    },
+  },
+
+  // ── Broadened Chalcopyrite (I-42d): for TM-based ABX₂ not caught by original ──
+  // Original requires Cu/Ag; this covers TM-TM-chalcogenide and TM-metalloid-chalcogenide
+  {
+    name: "Chalcopyrite-TM-ABX2",
+    spaceGroup: "I-42d",
+    latticeType: "tetragonal",
+    cOverA: 1.97,
+    sites: [
+      { label: "A", x: 0.0, y: 0.0, z: 0.0, role: "cation-1" },
+      { label: "B", x: 0.0, y: 0.0, z: 0.5, role: "cation-2" },
+      { label: "C", x: 0.25, y: 0.125, z: 0.625, role: "anion" },
+      { label: "C", x: 0.75, y: 0.125, z: 0.875, role: "anion" },
+    ],
+    stoichiometryRatio: [1, 1, 2],
+    coordination: [4, 4, 4],
+    chemistryRules: (elements) => {
+      if (elements.length !== 3) return false;
+      const hasChalcogen = elements.some(e => ["S", "Se", "Te"].includes(e));
+      const hasTM = elements.some(e => isTransitionMetal(e));
+      const hasCation2 = elements.some(e =>
+        isTransitionMetal(e) || isRareEarth(e) ||
+        ["Al", "Ga", "In", "Si", "Ge", "Sn", "Sb", "Bi", "Pb", "Mg", "Ca", "Sr", "Ba"].includes(e)
+      );
+      return hasChalcogen && hasTM && hasCation2;
+    },
+  },
 ];
 
 function parseFormulaCounts(formula: string): Record<string, number> {

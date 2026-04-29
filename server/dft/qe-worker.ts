@@ -3992,15 +3992,27 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
           formula,
           elements,
           counts,
-          // Replace crude grid positions in Vegard candidates with proper
+          // Replace crude grid/fallback positions with proper
           // generateAtomicPositions() output — uses prototypes, Wyckoff sites,
           // cage placement for hydrides. Keep the Vegard lattice constant.
-          candidates: structureCandidates.map(c => ({
-            ...c,
-            positions: c.positions.length > 0 && c.prototype !== "MP-direct"
-              ? generateAtomicPositions(elements, counts, formula, c.latticeA)
-              : c.positions,
-          })),
+          // PRESERVE positions from high-quality sources that already have
+          // physics-grounded atomic coordinates:
+          //   - MP-direct: DFT-relaxed from Materials Project
+          //   - TemplateVCA-*: interpolated from AFLOW reference structures
+          //   - VCA-interpolated: interpolated from binary endpoint positions
+          candidates: structureCandidates.map(c => {
+            const hasQualityPositions = c.positions.length > 0 && (
+              c.prototype === "MP-direct" ||
+              c.prototype.startsWith("TemplateVCA-") ||
+              c.prototype === "VCA-interpolated"
+            );
+            return {
+              ...c,
+              positions: hasQualityPositions
+                ? c.positions
+                : generateAtomicPositions(elements, counts, formula, c.latticeA),
+            };
+          }),
           pressureGPa: workerPressure,
           jobDir,
           callbacks: qeCallbacks,

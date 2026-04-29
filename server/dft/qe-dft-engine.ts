@@ -336,7 +336,8 @@ type PrototypeName =
   | "BiS2-layered" | "Kagome-variant" | "Chevrel" | "Pyrite" | "Wurtzite"
   | "Antifluorite" | "Laves-C14" | "Laves-C15" | "HfFe6Ge6" | "CeCu2Si2"
   | "PuCoGa5-115" | "Infinite-layer" | "T-prime" | "Ruddlesden-Popper"
-  | "Double-perovskite" | "Garnet";
+  | "Double-perovskite" | "Garnet"
+  | "A3B3C-Intermetallic" | "Chalcopyrite-IV";
 
 const PROTOTYPE_MATCH_TOLERANCE = 0.5;
 const PROTOTYPE_FUZZY_TOLERANCE = 0.8;
@@ -1036,6 +1037,35 @@ const CRYSTAL_PROTOTYPES: PrototypeStructure[] = [
     aRatio: 1.0,
     cOverA: 1.0,
     stoichiometryPattern: "A3B2C12",
+  },
+  {
+    name: "A3B3C-Intermetallic",
+    fractionalPositions: [
+      { site: "C", x: 0.0, y: 0.0, z: 0.0 },
+      { site: "A", x: 0.25, y: 0.0, z: 0.5 },
+      { site: "A", x: 0.75, y: 0.0, z: 0.5 },
+      { site: "A", x: 0.5, y: 0.25, z: 0.0 },
+      { site: "B", x: 0.0, y: 0.5, z: 0.25 },
+      { site: "B", x: 0.0, y: 0.5, z: 0.75 },
+      { site: "B", x: 0.5, y: 0.75, z: 0.0 },
+    ],
+    latticeType: "cubic",
+    aRatio: 1.0,
+    cOverA: 1.0,
+    stoichiometryPattern: "A3B3C1",
+  },
+  {
+    name: "Chalcopyrite-IV",
+    fractionalPositions: [
+      { site: "A", x: 0.0, y: 0.0, z: 0.0 },
+      { site: "B", x: 0.0, y: 0.0, z: 0.5 },
+      { site: "C", x: 0.25, y: 0.125, z: 0.625 },
+      { site: "C", x: 0.75, y: 0.125, z: 0.875 },
+    ],
+    latticeType: "tetragonal",
+    aRatio: 1.0,
+    cOverA: 1.97,
+    stoichiometryPattern: "A1B1C2",
   },
 ];
 
