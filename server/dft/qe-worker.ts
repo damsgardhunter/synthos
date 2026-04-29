@@ -302,6 +302,18 @@ export interface QEFullResult {
     totalWallTime: number;
   };
   gammaPhononPassed?: boolean;
+  /** Quality tier — determines what downstream analysis is trustworthy. */
+  qualityTier?: "failed" | "partial_screening" | "screening_converged" | "relaxed" | "final_converged" | "publication_ready";
+  /** CSP provenance: which generator, Z, volume, cluster, DFT rank. */
+  provenance?: {
+    generator: string;
+    zValue?: number;
+    volumeMultiplier?: number;
+    clusterId?: string;
+    funnelTier: string;
+    dft0Rank?: number;
+    selectionCategory?: string;
+  };
 }
 
 const HASH_CACHE_MAX = 2000;
@@ -4248,7 +4260,9 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
           callbacks: qeCallbacks,
           skipVcRelax: skipVcRelax || isKnownCompound,  // Known compounds: skip vc-relax (lattice is correct) but still run Stage 1 (positions need fixing)
           skipRelaxation: false,
-          maxStage1Candidates: 3,
+          // Test ALL admitted candidates from F8, not just top 3.
+          // The funnel already selected the best — don't throw any away before DFT.
+          maxStage1Candidates: structureCandidates.length,
           isMetallic: vegardResult?.isMetallic ?? undefined,
         });
 
@@ -4701,8 +4715,16 @@ ${cellBlockRelax}
       // from_scratch + startingpot='file' which reads the charge density but
       // generates fresh wavefunctions — recovers ~50-70% of SCF progress
       // without needing the wfc files that wall-time kills may not write.
-      const canRecover = attempt > firstAttempt && !(params as any).startingwfc;
+      // Charge contamination control:
+      //   Attempts 1-3: try to recover from previous charge density (fast)
+      //   Attempt 4+: force clean restart — bad charge can make things worse
+      //   After CHARGE_WRONG or wild Fermi artifact: always clean
+      const forceClean = attempt >= 3 + firstAttempt || !!(handlerOverride as any)?._forceClean;
+      const canRecover = attempt > firstAttempt && !(params as any).startingwfc && !forceClean;
       const recoveryParams = canRecover ? { startingpot: "file" as string } : {};
+      if (forceClean && attempt > firstAttempt) {
+        console.log(`[QE-Worker] SCF attempt ${attempt + 1}: forced clean restart (charge contamination control)`);
+      }
       const scfInput = generateSCFInputWithParams(formula, elements, counts, latticeA, positions, {
         ...params,
         ...recoveryParams,
@@ -4714,10 +4736,8 @@ ${cellBlockRelax}
       const scfInputFile = path.join(jobDir, `scf_attempt${attempt}.in`);
       fs.writeFileSync(scfInputFile, scfInput);
 
-      // When canRecover=true, preserve tmp/ so startingpot='file' can read
-      // the charge density from the previous attempt. Otherwise clean to
-      // avoid stale-state bugs (e.g. after CHARGE_WRONG → startingwfc=random).
-      if (attempt > 0 && !canRecover) {
+      // Clean tmp/ when not recovering or when forcing clean restart
+      if (attempt > 0 && (!canRecover || forceClean)) {
         cleanQETmpDir(path.join(jobDir, "tmp"));
       }
 
@@ -4888,9 +4908,11 @@ ${cellBlockRelax}
           nextOverride.diagoThrInit = "1.0d-4";
         } else if (classifier === " [CHARGE_WRONG]") {
           // Restart wavefunctions/potential from atomic superposition.
+          // Force clean on next attempt — bad charge density is poison.
           nextOverride.startingwfc = "random";
           nextOverride.startingpot = "atomic";
           nextOverride.mixingBeta = Math.max(0.05, (params.mixingBeta ?? 0.3) * 0.5);
+          (nextOverride as any)._forceClean = true;
         } else if (classifier === " [SMEARING_NEEDED]") {
           // Metal mis-detected as insulator: widen smearing + force MV.
           nextOverride.smearing = "mv";
@@ -4960,6 +4982,18 @@ ${cellBlockRelax}
         }
       }
     }
+
+    // Assign quality tier based on convergence state
+    if (scfConverged && result.vcRelaxed) {
+      result.qualityTier = "relaxed";
+    } else if (scfConverged) {
+      result.qualityTier = "screening_converged";
+    } else if (scfUsable) {
+      result.qualityTier = "partial_screening";
+    } else {
+      result.qualityTier = "failed";
+    }
+    // Upgraded later: final_converged after phonon, publication_ready after e-ph
 
     if (!scfConverged && !scfUsable) {
       result.failureStage = "scf";
@@ -5418,8 +5452,25 @@ ${cellBlockRelax}
         const bOverAVal = estimateBOverA(elements, counts);
         const latticeBVal = latticeA * bOverAVal;
 
+        // Isolate band structure workspace: copy .save/ so bands.x doesn't
+        // clobber the phonon wavefunctions. This prevents the "0 modes" bug
+        // where band-path wavefunctions overwrite SCF wavefunctions.
+        const prefix = formula.replace(/[^a-zA-Z0-9]/g, "");
+        const saveSrc = path.join(jobDir, "tmp", `${prefix}.save`);
+        const bandsDir = path.join(jobDir, "bands_workspace");
+        const bandsSaveDst = path.join(bandsDir, "tmp", `${prefix}.save`);
+        try {
+          if (fs.existsSync(saveSrc)) {
+            fs.mkdirSync(path.join(bandsDir, "tmp"), { recursive: true });
+            fs.cpSync(saveSrc, bandsSaveDst, { recursive: true });
+            console.log(`[QE-Worker] Copied .save/ to isolated bands workspace for ${formula}`);
+          }
+        } catch (copyErr: any) {
+          console.log(`[QE-Worker] Failed to copy .save/ for bands: ${copyErr.message?.slice(0, 80)} — using shared workspace`);
+        }
+        const bandJobDir = fs.existsSync(bandsSaveDst) ? bandsDir : jobDir;
+
         // Use the same PAW/USPP ecutrho multiplier as the SCF to avoid FFT grid OOM.
-        // band-structure-calculator.ts previously hardcoded 8x (too large for PAW).
         const ecutrhoForBands = baseEcutwfcBands * ecutrhoMultiplier(elements);
         const bandResult = await computeDFTBandStructure(
           formula,
@@ -5428,7 +5479,7 @@ ${cellBlockRelax}
           latticeA,
           positions,
           result.scf!.fermiEnergy,
-          jobDir,
+          bandJobDir,
           cOverAVal,
           baseEcutwfcBands,
           nspinBands,
@@ -5478,15 +5529,41 @@ ${cellBlockRelax}
     result.error = err.message;
     console.log(`[QE-Worker] Error for ${formula}: ${err.message}`);
   } finally {
-    for (let cleanAttempt = 0; cleanAttempt < 3; cleanAttempt++) {
-      try {
-        fs.rmSync(jobDir, { recursive: true, force: true });
-        break;
-      } catch (rmErr: any) {
-        if (cleanAttempt < 2 && rmErr.code === "EBUSY") {
-          await new Promise(r => setTimeout(r, 500 * (cleanAttempt + 1)));
-        }
+    // Tiered cleanup — keep logs/structures for debugging, delete heavy scratch
+    try {
+      // Always delete heavy QE scratch (wavefunctions, charge density)
+      const tmpDir = path.join(jobDir, "tmp");
+      if (fs.existsSync(tmpDir)) {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
       }
+      const bandsTmp = path.join(jobDir, "bands_workspace");
+      if (fs.existsSync(bandsTmp)) {
+        fs.rmSync(bandsTmp, { recursive: true, force: true });
+      }
+
+      // For failed/rejected: keep error logs for 7 days, delete rest
+      // For promising: keep QE inputs/outputs + structures
+      // For now: delete everything except .in/.out/.json files
+      if (fs.existsSync(jobDir)) {
+        const files = fs.readdirSync(jobDir);
+        for (const f of files) {
+          const fp = path.join(jobDir, f);
+          const stat = fs.statSync(fp);
+          if (stat.isDirectory()) {
+            // Delete subdirectories (airss/, pyxtal/, stage1_*/)
+            try { fs.rmSync(fp, { recursive: true, force: true }); } catch {}
+          }
+          // Keep: .in, .out, .json files for debugging
+          // Delete: .wfc, .save, large binary files
+          else if (!f.endsWith(".in") && !f.endsWith(".out") && !f.endsWith(".json")) {
+            try { fs.unlinkSync(fp); } catch {}
+          }
+        }
+        // If directory is now empty (or just logs), clean up after 1 hour
+        // (actual deletion deferred to system cron)
+      }
+    } catch (cleanErr: any) {
+      // Don't block on cleanup failure
     }
   }
 

@@ -239,12 +239,18 @@ export async function runStagedRelaxation(opts: StagedRelaxationOpts): Promise<S
   const { formula, elements, counts, candidates, pressureGPa, jobDir, callbacks } = opts;
   const stages: StageResult[] = [];
   const startTime = Date.now();
-  // Limit candidates for expensive systems — no point testing 3 candidates
-  // if each takes 50+ min on shared VM. Heavy+magnetic systems test only 1.
+  // Dynamic candidate limit: test as many as the wall-time budget allows.
+  // Each candidate gets its own timeout from the cost model. Total budget
+  // is capped at 90 min for Stage 1 across all candidates combined.
   const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
   const s1Params = computeStage1Params(elements, totalAtoms, counts);
-  const defaultMax = s1Params.timeoutMs > 2_400_000 ? 1 : s1Params.timeoutMs > 1_500_000 ? 2 : 3;
-  const maxS1 = opts.maxStage1Candidates ?? defaultMax;
+  const STAGE1_TOTAL_BUDGET_MS = 5_400_000; // 90 min total for all candidates
+  const perCandidateMs = s1Params.timeoutMs;
+  const budgetBasedMax = Math.max(1, Math.floor(STAGE1_TOTAL_BUDGET_MS / perCandidateMs));
+  const maxS1 = Math.min(
+    opts.maxStage1Candidates ?? budgetBasedMax,
+    budgetBasedMax,
+  );
 
   let bestPositions = candidates[0]?.positions ?? [];
   let bestLatticeA = candidates[0]?.latticeA ?? 5.0;
