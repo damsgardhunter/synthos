@@ -53,85 +53,90 @@ export function assignTier(
 
   // --- Critical benchmarks (priority 9999) ---
   // These are LaH10, CaH6, Nb3Sn etc. — we have literature positions,
-  // no need for massive structure search. Use preview or skip CSP entirely.
+  // no need for massive structure search. Minimal CSP.
+  if (priority >= 9000 && isKnown) {
+    return makeTier("preview", "critical benchmark with known structure — minimal CSP");
+  }
   if (priority >= 9000) {
-    if (isKnown) {
-      return makeTier("preview", "critical benchmark with known structure — minimal CSP", 30, 10);
-    }
-    return makeTier("preview", "critical benchmark — preview CSP", 50, 20);
+    return makeTier("preview", "critical benchmark — preview CSP");
   }
 
   // --- Already completed DFT successfully ---
-  // Re-runs (retries, TSC follow-ups) don't need full structure search
   if (hasCompletedDFT || jobType === "scf_retry") {
-    return makeTier("preview", "re-run/retry — positions already established", 20, 10);
-  }
-
-  // --- TSC candidates (topological superconductor screening) ---
-  // These are speculative — need more exploration
-  if (jobType === "scf_tsc") {
-    return makeTier("standard", "TSC candidate — broader exploration", 100, 40);
+    return makeTier("preview", "re-run/retry — positions already established");
   }
 
   // --- Known structure exists ---
-  // Literature positions are DFT-quality, CSP is supplementary
   if (isKnown) {
-    return makeTier("preview", "known structure — CSP supplementary only", 30, 10);
+    return makeTier("preview", "known structure — CSP supplementary only");
   }
 
   // --- High-pressure hydrides (most important for discovery) ---
   if (hasH && pressureGPa >= 100) {
     if (nElements >= 3) {
       // Ternary+ high-P hydrides: maximum exploration
-      return makeTier("deep", "ternary high-P hydride — deep exploration", 200, 80);
+      // deep tier = AIRSS up to 10,000, PyXtal up to 1,000
+      return makeTier("deep", "ternary high-P hydride — deep exploration");
     }
     // Binary high-P hydrides
-    return makeTier("standard", "binary high-P hydride — standard exploration", 100, 40);
+    return makeTier("standard", "binary high-P hydride — standard exploration");
+  }
+
+  // --- TSC candidates (topological superconductor screening) ---
+  if (jobType === "scf_tsc") {
+    return makeTier("standard", "TSC candidate — broader exploration");
   }
 
   // --- Moderate-pressure hydrides ---
   if (hasH && pressureGPa >= 20) {
-    return makeTier("standard", "moderate-P hydride — standard", 100, 40);
+    return makeTier("standard", "moderate-P hydride — standard");
   }
 
   // --- Ambient-pressure hydrides ---
   if (hasH) {
-    return makeTier("preview", "ambient hydride — preview", 50, 20);
+    return makeTier("preview", "ambient hydride — preview");
   }
 
   // --- Complex stoichiometry (4+ elements) ---
   if (nElements >= 4) {
-    return makeTier("standard", "complex stoichiometry — broader search", 100, 40);
+    return makeTier("standard", "complex stoichiometry — broader search");
   }
 
   // --- Iron pnictides, chalcogenides ---
   if (family === "pnictide" || family === "chalcogenide") {
-    return makeTier("standard", `${family} — standard exploration`, 80, 30);
+    return makeTier("standard", `${family} — standard exploration`);
   }
 
   // --- Default: simple binary/ternary compounds ---
-  return makeTier("preview", "standard material — preview", 50, 20);
+  return makeTier("preview", "standard material — preview");
 }
 
 function makeTier(
   tier: ScreeningTier,
   reason: string,
-  airssBudget: number,
-  pyxtalBudget: number,
 ): TierDecision {
   const config = SCREENING_TIERS[tier];
 
-  // Timeout scales with budget: ~2s per AIRSS structure, ~5s per PyXtal
-  const timeoutAirss = Math.max(30000, airssBudget * 2000);
-  const timeoutPyxtal = Math.max(30000, pyxtalBudget * 5000);
+  // Use the tier's full budget caps — these are the designed values:
+  // preview: AIRSS=2500, PyXtal=250
+  // standard: AIRSS=5000, PyXtal=500
+  // deep: AIRSS=10000, PyXtal=1000
+  // publication: AIRSS=10000, PyXtal=1000
+  const airssBudget = config.airssTotalCap;
+  const pyxtalBudget = config.pyxtalTotalCap;
+
+  // Timeout: ~100ms per AIRSS structure (buildcell is fast) + ~1s per PyXtal
+  // Cap at 10 min for AIRSS, 15 min for PyXtal
+  const timeoutAirss = Math.min(600000, Math.max(30000, airssBudget * 100));
+  const timeoutPyxtal = Math.min(900000, Math.max(30000, pyxtalBudget * 1000));
   const timeoutMs = Math.max(timeoutAirss, timeoutPyxtal);
 
   return {
     tier,
     config,
     reason,
-    airssBudget: Math.min(airssBudget, config.airssTotalCap),
-    pyxtalBudget: Math.min(pyxtalBudget, config.pyxtalTotalCap),
+    airssBudget,
+    pyxtalBudget,
     timeoutMs,
   };
 }
