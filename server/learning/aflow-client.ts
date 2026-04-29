@@ -565,7 +565,16 @@ class AflowServerDownError extends Error {
   }
 }
 
+// Global AFLOW server health tracker — shared across ALL materials.
+// When AFLOW returns 502-504, stop hitting it for 5 minutes.
+let _aflowTemplateRefDown = 0; // timestamp when we last saw a 504
+
 async function vegardAflowFetch(query: string): Promise<any[] | null> {
+  // Skip if AFLOW was recently down (global cooldown)
+  if (_aflowTemplateRefDown > 0 && Date.now() - _aflowTemplateRefDown < 300_000) {
+    return null;
+  }
+
   try {
     const url = `${AFLOW_API_BASE}/?${query},format(json)`;
     const response = await fetch(url, {
@@ -575,10 +584,13 @@ async function vegardAflowFetch(query: string): Promise<any[] | null> {
     if (!response.ok) {
       console.log(`[AFLOW-Vegard] HTTP ${response.status} for: ${query.slice(0, 60)}`);
       if (response.status >= 502 && response.status <= 504) {
+        _aflowTemplateRefDown = Date.now();
         throw new AflowServerDownError(response.status);
       }
       return null;
     }
+    // AFLOW responded — clear the global cooldown
+    _aflowTemplateRefDown = 0;
     const text = await response.text();
     const entries = parseAflowResponse(text);
     if (entries.length === 0) {
