@@ -579,7 +579,7 @@ export async function interpolateFromTemplateReferences(
 
   let refs: AflowStructureEndpoint[];
   try {
-    refs = await fetchAflowBySpaceGroup(sgNumber, nSpecies, 12);
+    refs = await fetchAflowBySpaceGroup(sgNumber, nSpecies, 12, elements);
   } catch {
     return null;
   }

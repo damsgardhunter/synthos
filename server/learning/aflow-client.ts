@@ -751,24 +751,10 @@ export async function fetchAflowByTernaryElements(
  * same space group to use as reference structures for position interpolation.
  * Cached 7 days under dataType="template_ref".
  */
-export async function fetchAflowBySpaceGroup(
+function parseAflowTemplateRefEntries(
+  rawEntries: any[],
   spaceGroupNumber: number,
-  nSpecies: number,
-  limit: number = 8,
-): Promise<AflowStructureEndpoint[]> {
-  const cacheKey = `sg${spaceGroupNumber}_n${nSpecies}`;
-  const cached = await getAflowCachedData(cacheKey, "template_ref");
-  if (cached && Array.isArray(cached) && cached.length > 0) return cached as AflowStructureEndpoint[];
-
-  const query = `spacegroup_relax(${spaceGroupNumber}),nspecies(${nSpecies}),paging(1,${limit}),volume_atom,lattice_system_relax,enthalpy_formation_atom,Egap,geometry,positions_fractional,composition,species_pp,compound`;
-
-  console.log(`[AFLOW-TemplateRef] Fetching SG=${spaceGroupNumber} nspecies=${nSpecies} (limit ${limit})...`);
-  const rawEntries = await vegardAflowFetch(query);
-  if (!rawEntries || rawEntries.length === 0) {
-    await setAflowCachedData(cacheKey, "template_ref", []);
-    return [];
-  }
-
+): AflowStructureEndpoint[] {
   const endpoints: AflowStructureEndpoint[] = [];
   for (const entry of rawEntries) {
     const volNum = entry.volume_atom != null ? Number(entry.volume_atom) : 15;
@@ -815,8 +801,95 @@ export async function fetchAflowBySpaceGroup(
       positions: aflowPositions,
     });
   }
-
-  await setAflowCachedData(cacheKey, "template_ref", endpoints);
-  console.log(`[AFLOW-TemplateRef] Cached ${endpoints.length} entries for SG=${spaceGroupNumber} (${endpoints.filter(e => e.positions).length} with positions)`);
   return endpoints;
+}
+
+/**
+ * Tiered AFLOW template reference search.
+ *
+ * Tier 1: SG + species(targetElements) — exact element match (e.g. YH9Na2 → compounds with Y,Na,H in SG 194)
+ * Tier 2: SG + species(keyElement) for each target element — partial element match (e.g. Y+H in SG 194)
+ * Tier 3: SG + nspecies (original query) — fallback with no element filter
+ *
+ * Results are deduped by compound name across tiers so Tier 1 hits aren't displaced.
+ */
+export async function fetchAflowBySpaceGroup(
+  spaceGroupNumber: number,
+  nSpecies: number,
+  limit: number = 8,
+  targetElements?: string[],
+): Promise<AflowStructureEndpoint[]> {
+  const cacheKey = targetElements
+    ? `sg${spaceGroupNumber}_n${nSpecies}_${targetElements.sort().join("")}`
+    : `sg${spaceGroupNumber}_n${nSpecies}`;
+  const cached = await getAflowCachedData(cacheKey, "template_ref");
+  if (cached && Array.isArray(cached) && cached.length > 0) return cached as AflowStructureEndpoint[];
+
+  const FIELDS = "volume_atom,lattice_system_relax,enthalpy_formation_atom,Egap,geometry,positions_fractional,composition,species_pp,compound";
+  const allEndpoints: AflowStructureEndpoint[] = [];
+  const seenCompounds = new Set<string>();
+
+  const addResults = (entries: AflowStructureEndpoint[], tier: string) => {
+    for (const ep of entries) {
+      const key = ep.compound || `${ep.elements.join("-")}_${ep.volumeAtom.toFixed(1)}`;
+      if (!seenCompounds.has(key)) {
+        seenCompounds.add(key);
+        allEndpoints.push(ep);
+      }
+    }
+  };
+
+  // Tier 1: Exact element match — compounds containing ALL target elements in this SG
+  if (targetElements && targetElements.length >= 2) {
+    try {
+      const speciesFilter = `species(${targetElements.sort().join(",")})`;
+      const query = `spacegroup_relax(${spaceGroupNumber}),${speciesFilter},nspecies(${nSpecies}),paging(1,${limit}),${FIELDS}`;
+      console.log(`[AFLOW-TemplateRef] Tier 1: SG=${spaceGroupNumber} + species(${targetElements.join(",")}) (limit ${limit})...`);
+      const raw = await vegardAflowFetch(query);
+      if (raw && raw.length > 0) {
+        addResults(parseAflowTemplateRefEntries(raw, spaceGroupNumber), "tier1-exact");
+        console.log(`[AFLOW-TemplateRef] Tier 1: ${raw.length} entries (${allEndpoints.length} total)`);
+      }
+    } catch {}
+  }
+
+  // Tier 2: Partial element match — compounds containing each key element individually
+  // Skip H alone (too many hits) — pair it with a metal instead
+  if (targetElements && targetElements.length >= 2 && allEndpoints.length < limit) {
+    const keyElements = targetElements.filter(e => e !== "H");
+    // If target has H, search for metal+H pairs
+    const hasH = targetElements.includes("H");
+    for (const el of keyElements) {
+      if (allEndpoints.length >= limit) break;
+      try {
+        const speciesFilter = hasH ? `species(${el},H)` : `species(${el})`;
+        const remaining = limit - allEndpoints.length;
+        const query = `spacegroup_relax(${spaceGroupNumber}),${speciesFilter},nspecies(${nSpecies}),paging(1,${remaining + 2}),${FIELDS}`;
+        console.log(`[AFLOW-TemplateRef] Tier 2: SG=${spaceGroupNumber} + species(${hasH ? el + ",H" : el}) (limit ${remaining + 2})...`);
+        const raw = await vegardAflowFetch(query);
+        if (raw && raw.length > 0) {
+          addResults(parseAflowTemplateRefEntries(raw, spaceGroupNumber), `tier2-${el}`);
+        }
+      } catch {}
+    }
+    if (allEndpoints.length > 0) {
+      console.log(`[AFLOW-TemplateRef] Tier 2: ${allEndpoints.length} total after partial element queries`);
+    }
+  }
+
+  // Tier 3: Original fallback — SG + nspecies only (no element filter)
+  if (allEndpoints.length < 3) {
+    try {
+      const query = `spacegroup_relax(${spaceGroupNumber}),nspecies(${nSpecies}),paging(1,${limit}),${FIELDS}`;
+      console.log(`[AFLOW-TemplateRef] Tier 3 fallback: SG=${spaceGroupNumber} nspecies=${nSpecies} (limit ${limit})...`);
+      const raw = await vegardAflowFetch(query);
+      if (raw && raw.length > 0) {
+        addResults(parseAflowTemplateRefEntries(raw, spaceGroupNumber), "tier3-fallback");
+      }
+    } catch {}
+  }
+
+  await setAflowCachedData(cacheKey, "template_ref", allEndpoints);
+  console.log(`[AFLOW-TemplateRef] Cached ${allEndpoints.length} entries for SG=${spaceGroupNumber} (${allEndpoints.filter(e => e.positions).length} with positions)`);
+  return allEndpoints;
 }
