@@ -683,6 +683,25 @@ export async function interpolateFromTemplateReferences(
     geometry = { a: ga / gw, b: gb / gw, c: gc / gw, alpha: galpha / gw, beta: gbeta / gw, gamma: ggamma / gw };
   }
 
+  // Validate: reject VCA positions if any atoms overlap.
+  // Mixing reference positions with template fallback positions can create
+  // overlaps when the reference structure has a different atom arrangement
+  // (e.g., C4Sc6Zr2 mapped onto YH9Na2 template produces atoms #4/#7 overlap).
+  const estLattice = geometry?.a ?? 5.0;
+  for (let i = 0; i < positions.length; i++) {
+    for (let j = i + 1; j < positions.length; j++) {
+      let dx = positions[i].x - positions[j].x;
+      let dy = positions[i].y - positions[j].y;
+      let dz = positions[i].z - positions[j].z;
+      dx -= Math.round(dx); dy -= Math.round(dy); dz -= Math.round(dz);
+      const dist = Math.sqrt((dx * estLattice) ** 2 + (dy * estLattice) ** 2 + (dz * estLattice) ** 2);
+      if (dist < 0.3) {
+        console.log(`[VCA-Template] Rejected: atoms ${i} (${positions[i].element}) and ${j} (${positions[j].element}) overlap at ${dist.toFixed(3)} Å (${template.name}, refs: ${referencesUsed.join(", ")})`);
+        return null;
+      }
+    }
+  }
+
   const confidence = Math.min(1.0, 0.5 + referencesUsed.length * 0.1);
   console.log(`[VCA-Template] Interpolated ${positions.length} positions from ${referencesUsed.length} AFLOW refs (${template.name}, SG=${sgNumber}): ${referencesUsed.join(", ")}`);
   return { positions, geometry, referencesUsed, confidence };

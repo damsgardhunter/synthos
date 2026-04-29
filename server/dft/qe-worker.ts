@@ -27,7 +27,7 @@ import {
   type ElectronPhononCoupling,
 } from "../learning/physics-engine";
 import { generateStructureCandidates, vegardEstimate, type StructureCandidate, type VegardEstimate } from "./vegard-lattice";
-import { lookupKnownStructure } from "../learning/known-structures";
+import { lookupKnownStructure, getKnownStructureFormulas } from "../learning/known-structures";
 import {
   runStagedRelaxation,
   runStage4GammaPhonon,
@@ -3992,12 +3992,14 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     // Quick 10-min sanity check: optimizes atomic positions with the cell fixed.
     // Catches badly-placed atoms early before wasting 30 min on vc-relax.
     const normFormula = formula.replace(/\s+/g, "");
-    const VERIFIED_LATTICE_A: Record<string, number> = {
-      LaH10: 5.10, H3S: 3.10, YH6: 3.95, YH9: 4.20, CeH9: 4.85,
-      CaH6: 3.85, MgB2: 3.09, Nb3Sn: 5.29, Nb3Ge: 5.14, NbN: 4.39,
-      NbC: 4.47, V3Si: 4.72, NbTi: 3.30, ScH3: 4.48, YH3: 5.14,
-      ScH9: 4.20, ThH9: 4.62, ThH10: 4.79, SrH6: 4.10, BaH2: 4.16, CaH2: 3.59,
-    };
+    // Auto-populate VERIFIED_LATTICE_A from the known-structures database
+    // so any compound in known-structures.ts automatically gets its
+    // literature lattice used (no manual sync needed).
+    const VERIFIED_LATTICE_A: Record<string, number> = {};
+    for (const ksFormula of getKnownStructureFormulas()) {
+      const ks = lookupKnownStructure(ksFormula);
+      if (ks) VERIFIED_LATTICE_A[ksFormula] = ks.latticeA;
+    }
     const isKnownCompound = !!VERIFIED_LATTICE_A[normFormula];
 
     // For known compounds with no Vegard candidates, create one using
@@ -4035,19 +4037,37 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
           // generateAtomicPositions() output — uses prototypes, Wyckoff sites,
           // cage placement for hydrides. Keep the Vegard lattice constant.
           // PRESERVE positions from high-quality sources that already have
-          // physics-grounded atomic coordinates:
-          //   - MP-direct: DFT-relaxed from Materials Project
-          //   - TemplateVCA-*: interpolated from AFLOW reference structures
-          //   - VCA-interpolated: interpolated from binary endpoint positions
+          // physics-grounded atomic coordinates, BUT validate them first —
+          // VCA interpolation can produce overlapping atoms (e.g. YH9Na2
+          // Template VCA from C4Sc6Zr2 had atoms #4 and #7 overlap).
           candidates: structureCandidates.map(c => {
-            const hasQualityPositions = c.positions.length > 0 && (
+            const isQualitySource = c.positions.length > 0 && (
               c.prototype === "MP-direct" ||
               c.prototype.startsWith("TemplateVCA-") ||
               c.prototype === "VCA-interpolated"
             );
+            // Validate VCA positions: check no atoms overlap at the candidate lattice
+            let vcaValid = isQualitySource;
+            if (isQualitySource && c.prototype !== "MP-direct") {
+              const cLat = c.latticeA || 5.0;
+              for (let i = 0; i < c.positions.length && vcaValid; i++) {
+                for (let j = i + 1; j < c.positions.length; j++) {
+                  let dx = c.positions[i].x - c.positions[j].x;
+                  let dy = c.positions[i].y - c.positions[j].y;
+                  let dz = c.positions[i].z - c.positions[j].z;
+                  dx -= Math.round(dx); dy -= Math.round(dy); dz -= Math.round(dz);
+                  const dist = Math.sqrt((dx * cLat) ** 2 + (dy * cLat) ** 2 + (dz * cLat) ** 2);
+                  if (dist < 0.3) {
+                    console.log(`[QE-Worker] VCA positions rejected for ${formula} (${c.prototype}): atoms ${i} and ${j} overlap at ${dist.toFixed(3)} Å — falling back to generateAtomicPositions`);
+                    vcaValid = false;
+                    break;
+                  }
+                }
+              }
+            }
             return {
               ...c,
-              positions: hasQualityPositions
+              positions: vcaValid
                 ? c.positions
                 : generateAtomicPositions(elements, counts, formula, c.latticeA),
             };
