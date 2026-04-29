@@ -591,12 +591,23 @@ export async function interpolateFromTemplateReferences(
   );
   if (withPositions.length === 0) return null;
 
-  // Score by chemical similarity to target
+  // Score by chemical similarity to target.
+  // Strongly prefer references that share elements (especially H — hydrogen
+  // positions are structurally unique and can't be inferred from non-H refs).
+  const targetHasH = elements.includes("H");
   const scored = withPositions.map(ref => {
     let score = 0;
     const refElements = new Set(ref.positions!.map(p => p.element));
+    let sharedCount = 0;
     for (const el of elements) {
-      if (refElements.has(el)) { score += 5; continue; }
+      if (refElements.has(el)) {
+        score += 5;
+        sharedCount++;
+        // Extra bonus for sharing hydrogen — H cage positions are
+        // structurally unique and irreplaceable by non-H references
+        if (el === "H") score += 10;
+        continue;
+      }
       const targetRadius = getElementData(el)?.atomicRadius ?? 130;
       let bestDiff = Infinity;
       Array.from(refElements).forEach(rel => {
@@ -604,6 +615,12 @@ export async function interpolateFromTemplateReferences(
       });
       score -= bestDiff * 0.02;
     }
+    // Penalize refs that share zero elements — positions from a completely
+    // different chemistry (e.g. C4Sc6Zr2 for YH9Na2) are unreliable
+    if (sharedCount === 0) score -= 10;
+    // Penalize non-H refs when target contains H: H positions in cages/clathrates
+    // are unique and a non-H reference can't represent them
+    if (targetHasH && !refElements.has("H")) score -= 8;
     if (ref.positions!.length === totalAtoms) score += 3;
     return { ref, score };
   });
