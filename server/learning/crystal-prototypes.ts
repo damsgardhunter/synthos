@@ -3696,6 +3696,16 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
     coordination: [12, 12],
     chemistryRules: (elements) => {
       if (elements.length !== 2) return false;
+      // Exclude A15 compounds: Nb3Sn, V3Si, Nb3Ge have A15 (Pm-3n) structure,
+      // not Cu3Au (Pm-3m). A15 has TM on chain sites — different from Cu3Au FCC.
+      // Check: if the majority element (3x) is a known A15 chain former, prefer A15.
+      const a15ChainFormers = new Set(["Nb", "V", "Ta", "Cr", "Mo", "W"]);
+      const counts: Record<string, number> = {};
+      // We don't have counts here, but if a known A15-forming TM is present
+      // alongside a metalloid/post-TM, A15 is more likely than Cu3Au.
+      const hasA15TM = elements.some(e => a15ChainFormers.has(e));
+      const hasA15Partner = elements.some(e => ["Sn", "Ge", "Si", "Ga", "Al", "Sb"].includes(e));
+      if (hasA15TM && hasA15Partner) return false; // → A15 should match
       return elements.some(e => ["Au", "Pt", "Pd", "Ni", "Al", "Sn", "In"].includes(e));
     },
   },
