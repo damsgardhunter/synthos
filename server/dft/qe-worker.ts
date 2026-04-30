@@ -4493,6 +4493,26 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       console.log(`[QE-Worker] Z-mismatch: reset preVcLatticeA to ${latticeA.toFixed(3)} Å (positions already at target lattice, no rescaling needed)`);
     }
 
+    // --- Lattice-mismatch guard for known compounds ---
+    // If the Stage 1 winner's lattice is significantly different from the
+    // literature lattice, the Stage 1 positions (optimized at a different
+    // lattice) are wrong for the target cell. Use the known-structure
+    // positions directly — they're already correct for the literature lattice.
+    // LaH11Li2 hit force=1.56 Ry/bohr because Stage 1 positions (a=4.747)
+    // were used at a=5.100 — a 7.4% mismatch that iterative rescaling
+    // couldn't fix in one step.
+    if (isKnownCompound && result.vcRelaxed) {
+      const stageLatticeShift = Math.abs(latticeA - preVcLatticeA) / Math.max(1e-6, preVcLatticeA);
+      if (stageLatticeShift > 0.05) {
+        const ksLookup = lookupKnownStructure(normFormula);
+        if (ksLookup) {
+          console.log(`[QE-Worker] Lattice-mismatch guard for ${formula}: Stage 1 positions at a=${preVcLatticeA.toFixed(3)} Å but literature is a=${latticeA.toFixed(3)} Å (${(stageLatticeShift * 100).toFixed(1)}% shift) — using known-structure positions instead`);
+          positions = ksLookup.atoms.map(a => ({ element: a.element, x: a.x, y: a.y, z: a.z }));
+          preVcLatticeA = latticeA; // Positions are now at target lattice, skip rescaling
+        }
+      }
+    }
+
     // When vc-relax is skipped and the lattice was rescaled significantly
     // (e.g., from Vegard estimate to literature value), atomic positions are
     // wrong for the new cell. Run a quick fixed-cell relax to bring forces
