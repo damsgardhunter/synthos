@@ -4406,7 +4406,10 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       // gradually to the target lattice.
       const startA = preVcLatticeA;
       const targetA = latticeA;
-      const MAX_STEP_PCT = 0.10; // max 10% per step
+      // Smaller steps for larger shifts — atoms need gentler transitions
+      const MAX_STEP_PCT = latticeShiftPct > 0.40 ? 0.06 :  // 40-50%: 6% per step (~7-8 steps)
+                           latticeShiftPct > 0.20 ? 0.08 :  // 20-40%: 8% per step (~3-5 steps)
+                           0.10;                            // <20%: 10% per step (1-2 steps)
 
       // Calculate intermediate lattice constants
       const nSteps = Math.max(1, Math.ceil(latticeShiftPct / MAX_STEP_PCT));
@@ -4437,9 +4440,13 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       for (let step = 0; step < stepLattices.length; step++) {
         const stepA = stepLattices[step];
         const stepPct = Math.abs(stepA - (step === 0 ? startA : stepLattices[step - 1])) / (step === 0 ? startA : stepLattices[step - 1]);
-        // More time for larger steps and later steps (closer to target)
-        const stepMaxSec = step === stepLattices.length - 1 ? 1800 : 900; // last step gets 30 min, others 15 min
-        const stepNstep = step === stepLattices.length - 1 ? 150 : 80;
+        // More time for larger total shifts and the final step
+        const isLastStep = step === stepLattices.length - 1;
+        const isLargeShift = latticeShiftPct > 0.40;
+        const stepMaxSec = isLastStep ? (isLargeShift ? 2400 : 1800) :  // last: 40 min (large) / 30 min
+                           isLargeShift ? 1200 : 900;                   // intermediate: 20 min (large) / 15 min
+        const stepNstep = isLastStep ? (isLargeShift ? 250 : 150) :     // last: 250 (large) / 150 steps
+                          isLargeShift ? 120 : 80;                      // intermediate: 120 (large) / 80 steps
 
         let atomicPosRelax = "";
         for (const pos of positions) {
