@@ -289,7 +289,7 @@ export async function runChgnetEvaluation(
   try {
     const result = execSync(
       `${PYTHON_BIN} ${scriptPath} 2>&1`,
-      { cwd: workDir, timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 }
+      { cwd: workDir, timeout: Math.round(timeoutMs), maxBuffer: 10 * 1024 * 1024 }
     );
     const output = result.toString();
 
