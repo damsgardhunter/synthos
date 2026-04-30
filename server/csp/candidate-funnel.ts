@@ -435,14 +435,15 @@ export async function runCandidateFunnel(
       const maxEval = Math.min(f6Candidates.length, tier === "preview" ? 100 : 300);
 
       // Scale timeout with number of structures and estimated atom count.
-      // Full relaxation with fmax=0.02 and 100-500 steps takes ~15-30s per
-      // structure for 10-15 atom hydride cells (observed from production logs).
-      // Previous 200ms/atom was too optimistic — actual is ~1-2s per atom.
+      // Full relaxation with fmax=0.02 and 100-500 steps takes ~20-30s per
+      // structure for 10-15 atom hydride cells (observed: 52 structures × 12
+      // atoms took ~1040s = 20s/struct = 1.7s/atom). Use 2.5s/atom with 50%
+      // safety margin to avoid cutting off right at the boundary.
       const avgAtoms = f6Candidates.reduce((sum, c) => sum + (c.positions?.length ?? 10), 0) / f6Candidates.length;
-      const perStructureMs = Math.max(10000, Math.round(avgAtoms * 1500)); // ~1.5s per atom for full relaxation
+      const perStructureMs = Math.max(15000, Math.round(avgAtoms * 2500)); // ~2.5s per atom for full relaxation
       const timeoutMs = Math.round(Math.min(
-        1800000, // hard cap: 30 min (full relaxation of 100 structures can take a while)
-        Math.max(600000, maxEval * perStructureMs + 120000) // base 120s overhead + per-structure
+        1800000, // hard cap: 30 min
+        Math.max(600000, Math.round(maxEval * perStructureMs * 1.5) + 120000) // 50% safety margin + 120s overhead
       ));
 
       const chgnetResult = await runChgnetEvaluation(
