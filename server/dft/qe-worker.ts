@@ -1558,11 +1558,25 @@ function computeEcutwfc(elements: string[], extraBoost: number = 0, hydrogenFloo
 // Formula mirrors aiida-quantumespresso's PwBaseWorkChain default:
 // nbnd = ceil(nelec/2) + max(4, ceil(nelec * 0.10))
 // Doubled when nspin=2 because each band is per-spin in QE.
-function computeNbnd(elements: string[], counts: Record<string, number>, nspin: number = 1): number {
+/**
+ * Compute nbnd for QE. Uses actual atom count from positions (not formula
+ * counts) to handle supercells correctly. Known structures like Nb3Sn in
+ * Pm-3n have Z=2 (8 atoms), so the formula gives 53 electrons but the
+ * cell has 106 electrons → nbnd must match the cell, not the formula.
+ */
+function computeNbnd(elements: string[], counts: Record<string, number>, nspin: number = 1, actualPositions?: Array<{ element: string }>): number {
   let nelec = 0;
-  for (const el of elements) {
-    const n = Math.round(counts[el] ?? 0);
-    nelec += n * getZValence(el);
+  if (actualPositions && actualPositions.length > 0) {
+    // Use actual positions in the cell (handles supercells correctly)
+    for (const pos of actualPositions) {
+      nelec += getZValence(pos.element);
+    }
+  } else {
+    // Fallback to formula counts
+    for (const el of elements) {
+      const n = Math.round(counts[el] ?? 0);
+      nelec += n * getZValence(el);
+    }
   }
   const nbndSpin1 = Math.ceil(nelec / 2) + Math.max(4, Math.ceil(nelec * 0.10));
   return nspin === 2 ? nbndSpin1 * 2 : nbndSpin1;
@@ -3184,7 +3198,7 @@ function generateSCFInputWithParams(
   const hubbardBlock = params.dftPlusULines ?? "";
 
   const nspinOut = useNspin2 ? 2 : 1;
-  const nbnd = computeNbnd(elements, counts, nspinOut);
+  const nbnd = computeNbnd(elements, counts, nspinOut, positions);
   // restart_mode='restart' on retry attempts 2+ preserves the partial SCF
   // charge density from the previous wall-time-killed attempt instead of
   // throwing it away — aiida's standard move for ElectronicMaxStep /
