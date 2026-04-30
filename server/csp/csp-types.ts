@@ -19,7 +19,7 @@ import type { StructureCandidate } from "../dft/vegard-lattice";
 
 export type CSPEngineName = "airss" | "calypso" | "uspex" | "vegard" | "vca" | "prototype" | "random" | "known-structure";
 
-export type RelaxationLevel = "raw" | "xtb" | "single-point-qe" | "relax-qe" | "vc-relax-qe";
+export type RelaxationLevel = "raw" | "mlip-relaxed" | "xtb" | "single-point-qe" | "relax-qe" | "vc-relax-qe";
 
 // ---------------------------------------------------------------------------
 // Unified candidate

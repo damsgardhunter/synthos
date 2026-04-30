@@ -426,26 +426,34 @@ export async function runCandidateFunnel(
   const f5 = f5_score(f4scored);
   stats.f5_scored = f5.length;
 
-  // F6: CHGNet MLIP pre-relaxation (if available)
-  // Evaluates energy for all post-F5 candidates, optionally relaxes top ones.
-  // Ranks by MLIP energy so DFT only sees candidates in deep energy basins.
+  // F6: CHGNet MLIP full relaxation (if available)
+  // Relaxes ALL post-F5 candidates to find deep energy basins.
+  // Ranks by relaxed MLIP energy so DFT only sees lowest-energy structures.
   let f6Candidates = f5.map(s => s.candidate);
-  if (isChgnetAvailable() && f6Candidates.length > 5) {
+  if (isChgnetAvailable() && f6Candidates.length > 3) {
     try {
-      const tierConfig = SCREENING_TIERS[tier];
-      // Evaluate up to 300 candidates, relax top ones for deep/publication tiers
-      const doRelax = tier === "deep" || tier === "publication";
       const maxEval = Math.min(f6Candidates.length, tier === "preview" ? 100 : 300);
+
+      // Scale timeout with number of structures and estimated atom count
+      // Full relaxation: ~2-10s per structure depending on atom count
+      // Base: 5 min + 8s per structure (covers ~50-atom cells with margin)
+      const avgAtoms = f6Candidates.reduce((sum, c) => sum + (c.positions?.length ?? 10), 0) / f6Candidates.length;
+      const perStructureMs = Math.max(5000, avgAtoms * 200); // ~200ms per atom for relaxation
+      const timeoutMs = Math.min(
+        900000,  // hard cap: 15 min
+        Math.max(300000, maxEval * perStructureMs + 60000) // base 60s overhead + per-structure
+      );
+
       const chgnetResult = await runChgnetEvaluation(
         f6Candidates,
         path.join(process.cwd(), "server", "csp", "chgnet_work_" + formula.replace(/[^a-zA-Z0-9]/g, "")),
-        doRelax,
+        true, // always relax
         maxEval,
-        300000, // 5 min for all tiers — larger structures need more time
+        timeoutMs,
       );
       if (chgnetResult.stats.evaluated > 0) {
         f6Candidates = chgnetResult.rankedCandidates;
-        console.log(`[CSP-Funnel] F6 CHGNet: ${chgnetResult.stats.evaluated} evaluated, best=${chgnetResult.stats.bestEnergy?.toFixed(4) ?? "?"} eV/atom`);
+        console.log(`[CSP-Funnel] F6 CHGNet: ${chgnetResult.stats.evaluated} evaluated, ${chgnetResult.stats.relaxed} relaxed, best=${chgnetResult.stats.bestEnergy?.toFixed(4) ?? "?"} eV/atom, time=${chgnetResult.stats.totalRelaxTimeS.toFixed(0)}s (timeout=${Math.round(timeoutMs / 1000)}s)`);
       }
     } catch (chgnetErr: any) {
       console.log(`[CSP-Funnel] F6 CHGNet failed: ${chgnetErr.message?.slice(0, 100)} — continuing without`);
