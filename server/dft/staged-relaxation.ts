@@ -283,14 +283,17 @@ function computeStage1Params(elements: string[], totalAtoms: number, counts?: Re
 
   // Floor at 15 min (simple systems).
   // Cap depends on system complexity:
-  // - Simple non-magnetic: 90 min (5400s)
+  // - Simple non-magnetic ambient: 90 min (5400s)
+  // - High-P hydrides (10-15 atoms, tricky H convergence): 150 min (9000s)
   // - Magnetic (nspin=2): 150 min (9000s) — spin-polarized SCF converges
   //   much slower, especially for pnictides (BaFe2As2, FeSe) where spin
-  //   ordering competes with charge ordering. BaFe2As2 S1 candidate 1
-  //   hit the 90-min cap without producing positions.
+  //   ordering competes with charge ordering.
   // - Magnetic + heavy elements: 180 min (10800s)
+  const hasH = elements.includes("H");
+  const isHighPressureHydride = hasH && totalAtoms >= 7;
   const maxTimeoutS = hasMagnetic
     ? (heavyCount >= 1 ? 10800 : 9000)
+    : isHighPressureHydride ? 9000
     : 5400;
   const clampedTimeoutS = Math.max(900, Math.min(timeoutSeconds, maxTimeoutS));
   const timeoutMs = clampedTimeoutS * 1000;
