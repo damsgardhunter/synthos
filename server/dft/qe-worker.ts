@@ -35,6 +35,8 @@ import { generateCageSeededCandidates } from "../csp/cage-seeder";
 import { logCandidateStats } from "../csp/candidate-metadata";
 import { runCandidateFunnel } from "../csp/candidate-funnel";
 import { assignTier, logTierDecision } from "../csp/tier-assignment";
+import type { CSPCandidate } from "../csp/csp-types";
+import { generateRound2Candidates, screenRound2, shouldDoRound2 } from "../csp/iterative-search";
 import {
   runStagedRelaxation,
   runStage4GammaPhonon,
@@ -5194,6 +5196,175 @@ ${cellBlockEos}
       }
     } else if (!scfConverged && scfUsable) {
       console.log(`[QE-Worker] SCF near-converged for ${formula} (accuracy=${result.scf!.lastScfAccuracyRy?.toExponential(2)} Ry < 1e-4 Ry, quality=${result.scf!.convergenceQuality}): E=${result.scf!.totalEnergy.toFixed(4)} eV, Ef=${result.scf!.fermiEnergy} — proceeding with caution`);
+    }
+
+    // ── Round 2: Iterative search around DFT winner ──────────────────────────
+    // After SCF converges, generate focused variants around the DFT-optimized
+    // structure and check if any have lower energy. This catches nearby basins
+    // that the initial broad search missed.
+    if (scfConverged && result.scf && !isPartialWalltime && tierDecision.tier !== "preview") {
+      const r2Decision = shouldDoRound2(
+        scfConverged,
+        result.scf.totalForce ?? null,
+        result.scf.isMetallic ?? null,
+        result.qualityTier,
+      );
+
+      if (r2Decision.doRound2) {
+        console.log(`[QE-Worker] Round 2 search for ${formula}: ${r2Decision.reason}`);
+        try {
+          // Build a CSPCandidate from the DFT-optimized structure
+          const dftWinner: CSPCandidate = {
+            latticeA,
+            positions: positions.map(p => ({ ...p })),
+            prototype: result.prototypeUsed ?? "dft-optimized",
+            crystalSystem: "unknown",
+            spaceGroup: "",
+            source: `DFT-optimized (E=${result.scf.totalEnergy.toFixed(2)} eV)`,
+            confidence: 0.95,
+            isMetallic: result.scf.isMetallic ?? null,
+            sourceEngine: "known-structure",
+            generationStage: 1,
+            seed: Date.now() % 1e8,
+            pressureGPa: workerPressure,
+            relaxationLevel: "relax-qe",
+            enthalpyPerAtom: result.scf.totalEnergy / positions.length,
+          };
+
+          const r2Candidates = generateRound2Candidates(
+            dftWinner, result.scf.totalEnergy, latticeA,
+            elements, counts, workerPressure,
+          );
+
+          if (r2Candidates.length > 0) {
+            const r2WorkDir = path.join(jobDir, "round2_chgnet");
+            const r2Selected = await screenRound2(
+              r2Candidates, formula,
+              result.scf.totalEnergy / positions.length,
+              r2WorkDir,
+            );
+
+            if (r2Selected.length > 0) {
+              // Run Stage 1 atomic relax on the best Round 2 candidate
+              const r2Best = r2Selected[0];
+              console.log(`[QE-Worker] Round 2 best candidate: ${r2Best.source} (CHGNet E=${r2Best.enthalpyPerAtom?.toFixed(4) ?? "?"} eV/atom)`);
+
+              // Quick fixed-cell relax of the Round 2 candidate
+              try {
+                const r2Prefix = formula.replace(/[^a-zA-Z0-9]/g, "") + "_r2";
+                const r2EcutwfcRelax = Math.max(computeEcutwfc(elements, 0, 80, 45), elements.includes("H") ? 80 : 50);
+                const r2EcutrhoRelax = r2EcutwfcRelax * ecutrhoMultiplier(elements);
+                const r2COverA = estimateCOverA(elements, counts);
+                const r2BOverA = estimateBOverA(elements, counts);
+                const r2Kpts = autoKPoints(r2Best.latticeA, r2COverA, r2BOverA, undefined, 0.5, { stage: "scf", totalAtoms: positions.length }).trim();
+                const r2Nspin = mayHaveMagneticMoment(elements) ? 2 : 1;
+                const r2MagLines = r2Nspin === 2 ? generateMagnetizationLines(elements, counts, isAFMCandidate(elements, counts), !elements.some(el => el in MAGNETIC_ELEMENTS)) : "";
+
+                let r2Species = "";
+                for (const el of elements) {
+                  r2Species += `  ${el}  ${getAtomicMass(el).toFixed(3)}  ${resolvePPFilename(el)}\n`;
+                }
+                let r2Pos = "";
+                for (const pos of r2Best.positions) {
+                  r2Pos += `  ${pos.element}  ${pos.x.toFixed(6)}  ${pos.y.toFixed(6)}  ${pos.z.toFixed(6)}\n`;
+                }
+                const r2Cell = generateCellParameters(r2Best.latticeA, r2COverA, 0, r2BOverA, elements, counts);
+
+                const r2Input = `&CONTROL
+  calculation = 'relax',
+  restart_mode = 'from_scratch',
+  prefix = '${r2Prefix}',
+  outdir = './tmp',
+  disk_io = 'low',
+  pseudo_dir = '${QE_PSEUDO_DIR_INPUT}',
+  tprnfor = .true.,
+  tstress = .true.,
+  forc_conv_thr = 1.0d-3,
+  etot_conv_thr = 1.0d-4,
+  nstep = 100,
+  max_seconds = 1800,
+/
+&SYSTEM
+  ibrav = 0,
+  nat = ${r2Best.positions.length},
+  ntyp = ${elements.length},
+  ecutwfc = ${r2EcutwfcRelax},
+  ecutrho = ${r2EcutrhoRelax},
+  input_dft = 'PBE',
+  occupations = 'smearing',
+  smearing = 'mv',
+  degauss = 0.015,
+  nspin = ${r2Nspin},
+${r2MagLines}/
+&ELECTRONS
+  electron_maxstep = 200,
+  conv_thr = 1.0d-6,
+  mixing_beta = 0.3,
+  mixing_mode = 'local-TF',
+  diagonalization = 'david',
+/
+&IONS
+  ion_dynamics = 'bfgs',
+/
+ATOMIC_SPECIES
+${r2Species}
+ATOMIC_POSITIONS {crystal}
+${r2Pos}
+K_POINTS {automatic}
+${r2Kpts}
+
+${r2Cell}
+`;
+                const r2File = path.join(jobDir, "round2_relax.in");
+                fs.writeFileSync(r2File, r2Input);
+                const r2Result = await runQECommand(
+                  path.posix.join(getQEBinDir(), "pw.x"), r2File, jobDir, 1860000,
+                );
+                fs.writeFileSync(path.join(jobDir, "round2_relax.out"), r2Result.stdout);
+
+                // Parse Round 2 energy
+                const r2EnergyMatch = r2Result.stdout.match(/!\s+total energy\s+=\s+([-\d.]+)\s+Ry/g);
+                if (r2EnergyMatch) {
+                  const r2LastE = r2EnergyMatch[r2EnergyMatch.length - 1].match(/([-\d.]+)\s+Ry/);
+                  if (r2LastE) {
+                    const r2Energy = parseFloat(r2LastE[1]) * 13.6057; // Ry → eV
+                    console.log(`[QE-Worker] Round 2 DFT result: E=${r2Energy.toFixed(4)} eV (Round 1: ${result.scf!.totalEnergy.toFixed(4)} eV, diff=${(r2Energy - result.scf!.totalEnergy).toFixed(4)} eV)`);
+
+                    if (r2Energy < result.scf!.totalEnergy - 0.01) {
+                      // Round 2 found a deeper basin!
+                      console.log(`[QE-Worker] Round 2 found lower energy for ${formula}! Using Round 2 structure (${(result.scf!.totalEnergy - r2Energy).toFixed(4)} eV improvement)`);
+
+                      // Parse Round 2 positions
+                      const r2PosBlocks = r2Result.stdout.match(/ATOMIC_POSITIONS\s*[{(]?\s*(?:crystal|angstrom|bohr|alat)?\s*[})]?\s*\n([\s\S]*?)(?=\n\s*(?:CELL_PARAMETERS|K_POINTS|End final|End of|ATOMIC_SPECIES|\n\s*\n)|$)/gi);
+                      if (r2PosBlocks && r2PosBlocks.length > 0) {
+                        const r2LastBlock = r2PosBlocks[r2PosBlocks.length - 1];
+                        const r2ParsedPos: Array<{ element: string; x: number; y: number; z: number }> = [];
+                        for (const line of r2LastBlock.split("\n").slice(1)) {
+                          const m = line.trim().match(/^([A-Z][a-z]?)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)/);
+                          if (m) r2ParsedPos.push({ element: m[1], x: parseFloat(m[2]), y: parseFloat(m[3]), z: parseFloat(m[4]) });
+                        }
+                        if (r2ParsedPos.length === positions.length) {
+                          positions = r2ParsedPos;
+                          latticeA = r2Best.latticeA;
+                          // Re-run SCF with Round 2 positions for clean phonon input
+                          console.log(`[QE-Worker] Re-running SCF with Round 2 structure for ${formula}`);
+                        }
+                      }
+                    } else {
+                      console.log(`[QE-Worker] Round 2 did not improve energy for ${formula} — keeping Round 1 structure`);
+                    }
+                  }
+                }
+                cleanQETmpDir(path.join(jobDir, "tmp"));
+              } catch (r2DftErr: any) {
+                console.log(`[QE-Worker] Round 2 DFT failed: ${r2DftErr.message?.slice(0, 100)} — keeping Round 1`);
+              }
+            }
+          }
+        } catch (r2Err: any) {
+          console.log(`[QE-Worker] Round 2 search failed: ${r2Err.message?.slice(0, 100)} — keeping Round 1`);
+        }
+      }
     }
 
     // ── Phonon BEFORE bands (cycle 1374 fix for "0 modes" bug) ───────────────
