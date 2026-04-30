@@ -4399,56 +4399,55 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     // IEEE_UNDERFLOW_FLAG because DFPT needs forces < 0.05 Ry/bohr.
     const latticeShiftPct = Math.abs(latticeA - preVcLatticeA) / Math.max(1e-6, preVcLatticeA);
     if (result.vcRelaxed && latticeShiftPct > 0.03 && positions.length > 0) {
-      // For large lattice rescalings (>15%), Stage 1 positions are useless —
-      // they were optimized at a completely different cell. Use known-structure
-      // positions directly at the literature lattice instead of trying to fix
-      // positions that are 40% wrong.
-      if (latticeShiftPct > 0.15 && knownStruct) {
-        // Known structure: use literature positions directly — they're already
-        // correct for this lattice constant.
-        const litPositions = knownStruct.atoms.map(a => ({
-          element: a.element, x: a.x, y: a.y, z: a.z,
-        }));
-        if (litPositions.length > 0) {
-          positions = litPositions;
-          console.log(`[QE-Worker] Large lattice rescale ${(latticeShiftPct * 100).toFixed(1)}% — using literature Wyckoff positions directly (${litPositions.length} atoms at a=${latticeA.toFixed(3)} Å)`);
-        }
-      } else if (latticeShiftPct > 0.15 && !knownStruct) {
-        // Novel material, no literature: regenerate positions at the target
-        // lattice using prototype/Wyckoff templates. Better than trying to
-        // stretch positions that were optimized 40% smaller.
-        const freshPositions = generateAtomicPositions(elements, counts, formula, latticeA);
-        if (freshPositions.length > 0) {
-          positions = freshPositions;
-          console.log(`[QE-Worker] Large lattice rescale ${(latticeShiftPct * 100).toFixed(1)}% (novel material) — regenerated positions at target lattice a=${latticeA.toFixed(3)} Å`);
-        }
+      // --- Iterative lattice rescaling ---
+      // Instead of jumping from 3.557 → 5.1 Å in one step (43% — too much
+      // for positions to follow), do intermediate steps of max ~10% each,
+      // relaxing positions at each step. This lets the structure adjust
+      // gradually to the target lattice.
+      const startA = preVcLatticeA;
+      const targetA = latticeA;
+      const MAX_STEP_PCT = 0.10; // max 10% per step
+
+      // Calculate intermediate lattice constants
+      const nSteps = Math.max(1, Math.ceil(latticeShiftPct / MAX_STEP_PCT));
+      const stepLattices: number[] = [];
+      for (let s = 1; s <= nSteps; s++) {
+        const frac = s / nSteps;
+        stepLattices.push(startA + (targetA - startA) * frac);
       }
 
-      console.log(`[QE-Worker] Lattice rescaled by ${(latticeShiftPct * 100).toFixed(1)}% (${preVcLatticeA.toFixed(3)} → ${latticeA.toFixed(3)} Å) — running fixed-cell relax to refine positions`);
-      try {
-        const relaxPrefix = formula.replace(/[^a-zA-Z0-9]/g, "") + "_fixcell";
-        const hasHRelax = elements.includes("H");
-        const ecutwfcRelax = Math.max(computeEcutwfc(elements, 0, 80, 45), hasHRelax ? 80 : 50);
-        const ecutrhoRelax = ecutwfcRelax * ecutrhoMultiplier(elements);
-        const cOverARelax = estimateCOverA(elements, counts);
-        const bOverARelax = estimateBOverA(elements, counts);
-        const kptsRelax = autoKPoints(latticeA, cOverARelax, bOverARelax, undefined, 0.6, { stage: "relax", totalAtoms: positions.length }).trim();
-        const hasMagRelax = mayHaveMagneticMoment(elements);
-        const nspinRelax = hasMagRelax ? 2 : 1;
-        const magLinesRelax = hasMagRelax ? generateMagnetizationLines(elements, counts, isAFMCandidate(elements, counts), !elements.some(el => el in MAGNETIC_ELEMENTS)) : "";
-        let atomicSpeciesRelax = "";
-        for (const el of elements) {
-          atomicSpeciesRelax += `  ${el}  ${getAtomicMass(el).toFixed(3)}  ${resolvePPFilename(el)}\n`;
-        }
+      console.log(`[QE-Worker] Iterative rescaling for ${formula}: ${(latticeShiftPct * 100).toFixed(1)}% in ${nSteps} steps (${startA.toFixed(3)} → ${stepLattices.map(a => a.toFixed(3)).join(" → ")} Å)`);
+
+      // Common QE parameters for all steps
+      const relaxPrefix = formula.replace(/[^a-zA-Z0-9]/g, "") + "_fixcell";
+      const hasHRelax = elements.includes("H");
+      const ecutwfcRelax = Math.max(computeEcutwfc(elements, 0, 80, 45), hasHRelax ? 80 : 50);
+      const ecutrhoRelax = ecutwfcRelax * ecutrhoMultiplier(elements);
+      const cOverARelax = estimateCOverA(elements, counts);
+      const bOverARelax = estimateBOverA(elements, counts);
+      const hasMagRelax = mayHaveMagneticMoment(elements);
+      const nspinRelax = hasMagRelax ? 2 : 1;
+      const magLinesRelax = hasMagRelax ? generateMagnetizationLines(elements, counts, isAFMCandidate(elements, counts), !elements.some(el => el in MAGNETIC_ELEMENTS)) : "";
+      let atomicSpeciesRelax = "";
+      for (const el of elements) {
+        atomicSpeciesRelax += `  ${el}  ${getAtomicMass(el).toFixed(3)}  ${resolvePPFilename(el)}\n`;
+      }
+
+      // Run each step
+      for (let step = 0; step < stepLattices.length; step++) {
+        const stepA = stepLattices[step];
+        const stepPct = Math.abs(stepA - (step === 0 ? startA : stepLattices[step - 1])) / (step === 0 ? startA : stepLattices[step - 1]);
+        // More time for larger steps and later steps (closer to target)
+        const stepMaxSec = step === stepLattices.length - 1 ? 1800 : 900; // last step gets 30 min, others 15 min
+        const stepNstep = step === stepLattices.length - 1 ? 150 : 80;
+
         let atomicPosRelax = "";
         for (const pos of positions) {
           atomicPosRelax += `  ${pos.element}  ${pos.x.toFixed(6)}  ${pos.y.toFixed(6)}  ${pos.z.toFixed(6)}\n`;
         }
-        const cellBlockRelax = generateCellParameters(latticeA, cOverARelax, 0, bOverARelax, elements, counts);
-        // Scale relax time with lattice shift — bigger shift needs more time
-        const FIXCELL_RELAX_MAX_SECONDS = latticeShiftPct > 0.15 ? 1800 : // 30 min for large shifts
-                                          latticeShiftPct > 0.08 ? 1200 : // 20 min for moderate
-                                          900;                            // 15 min for small
+        const kptsRelax = autoKPoints(stepA, cOverARelax, bOverARelax, undefined, 0.6, { stage: "relax", totalAtoms: positions.length }).trim();
+        const cellBlockRelax = generateCellParameters(stepA, cOverARelax, 0, bOverARelax, elements, counts);
+
         const relaxInput = `&CONTROL
   calculation = 'relax',
   restart_mode = 'from_scratch',
@@ -4460,8 +4459,8 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
   tstress = .true.,
   forc_conv_thr = 1.0d-3,
   etot_conv_thr = 1.0d-4,
-  nstep = ${latticeShiftPct > 0.15 ? 200 : latticeShiftPct > 0.08 ? 120 : 80},
-  max_seconds = ${FIXCELL_RELAX_MAX_SECONDS},
+  nstep = ${stepNstep},
+  max_seconds = ${stepMaxSec},
 /
 &SYSTEM
   ibrav = 0,
@@ -4495,45 +4494,41 @@ ${kptsRelax}
 
 ${cellBlockRelax}
 `;
-        const relaxFile = path.join(jobDir, "fixcell_relax.in");
-        fs.writeFileSync(relaxFile, relaxInput);
-        const relaxKillMs = (FIXCELL_RELAX_MAX_SECONDS + 60) * 1000;
-        const relaxResult = await runQECommand(
-          path.posix.join(getQEBinDir(), "pw.x"),
-          relaxFile,
-          jobDir,
-          relaxKillMs,
-        );
-        fs.writeFileSync(path.join(jobDir, "fixcell_relax.out"), relaxResult.stdout);
+        try {
+          const relaxFile = path.join(jobDir, `fixcell_relax_step${step}.in`);
+          fs.writeFileSync(relaxFile, relaxInput);
+          const relaxResult = await runQECommand(
+            path.posix.join(getQEBinDir(), "pw.x"),
+            relaxFile, jobDir, (stepMaxSec + 60) * 1000,
+          );
+          fs.writeFileSync(path.join(jobDir, `fixcell_relax_step${step}.out`), relaxResult.stdout);
 
-        // Parse relaxed positions
-        const posBlocks = relaxResult.stdout.match(/ATOMIC_POSITIONS\s*[{(]?\s*(?:crystal|angstrom|bohr|alat)?\s*[})]?\s*\n([\s\S]*?)(?=\n\s*(?:CELL_PARAMETERS|K_POINTS|End final|End of|ATOMIC_SPECIES|\n\s*\n)|$)/gi);
-        if (posBlocks && posBlocks.length > 0) {
-          const lastBlock = posBlocks[posBlocks.length - 1];
-          const parsedPositions: Array<{ element: string; x: number; y: number; z: number }> = [];
-          for (const line of lastBlock.split("\n").slice(1)) {
-            const m = line.trim().match(/^([A-Z][a-z]?)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)/);
-            if (m) parsedPositions.push({ element: m[1], x: parseFloat(m[2]), y: parseFloat(m[3]), z: parseFloat(m[4]) });
-          }
-          if (parsedPositions.length === positions.length) {
-            positions = parsedPositions;
-            const forceMatch = relaxResult.stdout.match(/Total force\s*=\s*([\d.]+)/g);
-            const lastForce = forceMatch ? forceMatch[forceMatch.length - 1].match(/([\d.]+)/) : null;
-            const resForce = lastForce ? parseFloat(lastForce[0]) : null;
-            // Parse wall time from QE output
-            const wallMatch = relaxResult.stdout.match(/PWSCF\s*:\s*(?:(\d+)h)?(?:(\d+)m)?\s*([\d.]+)s\s+CPU/);
-            const wallSec = wallMatch ? (parseInt(wallMatch[1] || "0") * 3600 + parseInt(wallMatch[2] || "0") * 60 + parseFloat(wallMatch[3] || "0")) : 0;
-            console.log(`[QE-Worker] Fixed-cell relax done for ${formula}: ${parsedPositions.length} atoms, residual force=${resForce?.toFixed(4) ?? "?"} Ry/bohr, wall=${Math.round(wallSec)}s`);
+          // Parse relaxed positions
+          const posBlocks = relaxResult.stdout.match(/ATOMIC_POSITIONS\s*[{(]?\s*(?:crystal|angstrom|bohr|alat)?\s*[})]?\s*\n([\s\S]*?)(?=\n\s*(?:CELL_PARAMETERS|K_POINTS|End final|End of|ATOMIC_SPECIES|\n\s*\n)|$)/gi);
+          if (posBlocks && posBlocks.length > 0) {
+            const lastBlock = posBlocks[posBlocks.length - 1];
+            const parsedPositions: Array<{ element: string; x: number; y: number; z: number }> = [];
+            for (const line of lastBlock.split("\n").slice(1)) {
+              const m = line.trim().match(/^([A-Z][a-z]?)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)/);
+              if (m) parsedPositions.push({ element: m[1], x: parseFloat(m[2]), y: parseFloat(m[3]), z: parseFloat(m[4]) });
+            }
+            if (parsedPositions.length === positions.length) {
+              positions = parsedPositions;
+              const forceMatch = relaxResult.stdout.match(/Total force\s*=\s*([\d.]+)/g);
+              const lastForce = forceMatch ? forceMatch[forceMatch.length - 1].match(/([\d.]+)/) : null;
+              const resForce = lastForce ? parseFloat(lastForce[0]) : null;
+              console.log(`[QE-Worker] Iterative relax step ${step + 1}/${nSteps} for ${formula}: a=${stepA.toFixed(3)} Å, force=${resForce?.toFixed(4) ?? "?"} Ry/bohr`);
+            } else {
+              console.log(`[QE-Worker] Iterative relax step ${step + 1}/${nSteps}: position count mismatch — keeping previous positions`);
+            }
           } else {
-            console.log(`[QE-Worker] Fixed-cell relax produced ${parsedPositions.length} atoms (expected ${positions.length}) — keeping original positions`);
+            console.log(`[QE-Worker] Iterative relax step ${step + 1}/${nSteps}: no positions extracted — keeping previous`);
           }
-        } else {
-          console.log(`[QE-Worker] Fixed-cell relax produced no positions for ${formula} — keeping original`);
+          cleanQETmpDir(path.join(jobDir, "tmp"));
+        } catch (stepErr: any) {
+          console.log(`[QE-Worker] Iterative relax step ${step + 1}/${nSteps} failed: ${(stepErr.message || "").slice(0, 100)} — continuing with current positions`);
+          cleanQETmpDir(path.join(jobDir, "tmp"));
         }
-        cleanQETmpDir(path.join(jobDir, "tmp"));
-      } catch (relaxErr: any) {
-        console.log(`[QE-Worker] Fixed-cell relax failed for ${formula}: ${(relaxErr.message || "").slice(0, 200)} — continuing with original positions`);
-        cleanQETmpDir(path.join(jobDir, "tmp"));
       }
     }
 
