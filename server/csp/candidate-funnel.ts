@@ -432,7 +432,9 @@ export async function runCandidateFunnel(
   let f6Candidates = f5.map(s => s.candidate);
   if (isChgnetAvailable() && f6Candidates.length > 3) {
     try {
-      const maxEval = Math.min(f6Candidates.length, tier === "preview" ? 100 : 300);
+      // Preview: 50 candidates max (full relaxation of 100 at 15+ atoms hits 30 min cap)
+      // Standard/deep: 150-300 (more budget, more candidates worth screening)
+      const maxEval = Math.min(f6Candidates.length, tier === "preview" ? 50 : tier === "standard" ? 150 : 300);
 
       // Scale timeout with number of structures and estimated atom count.
       // Full relaxation with fmax=0.02 and 100-500 steps takes ~20-30s per
