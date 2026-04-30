@@ -45,6 +45,9 @@ export interface GeneratorSuccessRecord {
   generatorSuccess: Record<string, number>;
   /** Total trials per generator. */
   generatorTrials: Record<string, number>;
+  /** Cage seeder subtype tracking (sodalite, clathrate, hex_clathrate, bcc_hydride, custom_template). */
+  cageSubtypeSuccess?: Record<string, number>;
+  cageSubtypeTrials?: Record<string, number>;
 }
 
 export interface FamilyLearningRecord {
@@ -155,23 +158,64 @@ function getOrCreateRecord(family: MaterialFamily, pressureBin: PressureBin): Fa
 // ---------------------------------------------------------------------------
 
 /**
+ * Quality-based signal weights for adaptive learning.
+ *
+ * Only update success weights based on appropriate-quality results.
+ * Cheap surrogate results get weak signal, DFT+phonon gets strong signal.
+ *
+ *   survived F4 dedup:        weight = 0.1 (weak)
+ *   selected for DFT (F8):    weight = 0.3
+ *   DFT-0 converged:          weight = 0.5
+ *   DFT-1 low enthalpy:       weight = 1.0
+ *   DFT-2 near hull:          weight = 2.0
+ *   phonon stable:            weight = 3.0
+ *   DFPT e-ph good lambda:    weight = 4.0 (strongest)
+ */
+export type LearningSignalQuality =
+  | "funnel_survival"       // 0.1
+  | "dft_selected"          // 0.3
+  | "dft0_converged"        // 0.5
+  | "dft1_low_enthalpy"     // 1.0
+  | "dft2_near_hull"        // 2.0
+  | "phonon_stable"         // 3.0
+  | "dfpt_good_lambda";     // 4.0
+
+const SIGNAL_WEIGHTS: Record<LearningSignalQuality, number> = {
+  funnel_survival: 0.1,
+  dft_selected: 0.3,
+  dft0_converged: 0.5,
+  dft1_low_enthalpy: 1.0,
+  dft2_near_hull: 2.0,
+  phonon_stable: 3.0,
+  dfpt_good_lambda: 4.0,
+};
+
+export function getSignalWeight(quality: LearningSignalQuality): number {
+  return SIGNAL_WEIGHTS[quality];
+}
+
+/**
  * Record that a candidate at a given volume multiplier survived (or didn't)
- * through a funnel stage.
+ * through a pipeline stage. Weight scales with signal quality.
+ *
+ * @param weight - Signal weight (default 0.1 = funnel survival).
+ *   Use getSignalWeight() or pass directly. Higher weight = stronger learning update.
  */
 export function recordVolumeOutcome(
   elements: string[],
   pressureGPa: number,
   volumeMultiplier: number,
   survived: boolean,
+  weight: number = 0.1,
 ): void {
   const family = classifyFamily(elements);
   const pBin = classifyPressureBin(pressureGPa);
   const record = getOrCreateRecord(family, pBin);
   const key = volumeMultiplier.toFixed(2);
 
-  record.volumeData.multiplierTrials[key] = (record.volumeData.multiplierTrials[key] ?? 0) + 1;
+  record.volumeData.multiplierTrials[key] = (record.volumeData.multiplierTrials[key] ?? 0) + weight;
   if (survived) {
-    record.volumeData.multiplierSuccess[key] = (record.volumeData.multiplierSuccess[key] ?? 0) + 1;
+    record.volumeData.multiplierSuccess[key] = (record.volumeData.multiplierSuccess[key] ?? 0) + weight;
   }
   record.lastUpdated = Date.now();
   saveStore();
@@ -179,23 +223,97 @@ export function recordVolumeOutcome(
 
 /**
  * Record that a candidate from a given generator survived (or didn't).
+ * Weight scales with signal quality to prevent over-learning from cheap results.
+ *
+ * @param weight - Signal weight (default 0.1 = funnel survival).
  */
 export function recordGeneratorOutcome(
   elements: string[],
   pressureGPa: number,
   generatorName: string,
   survived: boolean,
+  weight: number = 0.1,
 ): void {
   const family = classifyFamily(elements);
   const pBin = classifyPressureBin(pressureGPa);
   const record = getOrCreateRecord(family, pBin);
 
-  record.generatorData.generatorTrials[generatorName] = (record.generatorData.generatorTrials[generatorName] ?? 0) + 1;
+  record.generatorData.generatorTrials[generatorName] = (record.generatorData.generatorTrials[generatorName] ?? 0) + weight;
   if (survived) {
-    record.generatorData.generatorSuccess[generatorName] = (record.generatorData.generatorSuccess[generatorName] ?? 0) + 1;
+    record.generatorData.generatorSuccess[generatorName] = (record.generatorData.generatorSuccess[generatorName] ?? 0) + weight;
   }
   record.lastUpdated = Date.now();
   saveStore();
+}
+
+/**
+ * Record outcome for a cage seeder subtype (sodalite, clathrate, hex_clathrate,
+ * bcc_hydride, custom_template). This allows the system to learn which cage
+ * geometries work best for each material family and pressure.
+ *
+ * Example: "For rare-earth hydrides at 150-250 GPa, sodalite seeds survive best"
+ */
+export function recordCageSubtypeOutcome(
+  elements: string[],
+  pressureGPa: number,
+  cageSubtype: string,
+  survived: boolean,
+  weight: number = 1.0,
+): void {
+  const family = classifyFamily(elements);
+  const pBin = classifyPressureBin(pressureGPa);
+  const record = getOrCreateRecord(family, pBin);
+
+  if (!record.generatorData.cageSubtypeTrials) record.generatorData.cageSubtypeTrials = {};
+  if (!record.generatorData.cageSubtypeSuccess) record.generatorData.cageSubtypeSuccess = {};
+
+  record.generatorData.cageSubtypeTrials[cageSubtype] = (record.generatorData.cageSubtypeTrials[cageSubtype] ?? 0) + weight;
+  if (survived) {
+    record.generatorData.cageSubtypeSuccess[cageSubtype] = (record.generatorData.cageSubtypeSuccess[cageSubtype] ?? 0) + weight;
+  }
+  record.lastUpdated = Date.now();
+  saveStore();
+}
+
+/**
+ * Get learned cage subtype weights for a material family + pressure bin.
+ * Returns success rates per cage subtype with Bayesian smoothing.
+ */
+export function getLearnedCageWeights(
+  elements: string[],
+  pressureGPa: number,
+): Record<string, number> {
+  const family = classifyFamily(elements);
+  const pBin = classifyPressureBin(pressureGPa);
+  const store = loadStore();
+  const key = getKey(family, pBin);
+  const record = store.records[key];
+
+  const DEFAULT_SUBTYPES = ["sodalite", "clathrate", "hex_clathrate", "bcc_hydride", "custom_template"];
+  const weights: Record<string, number> = {};
+
+  if (!record || !record.generatorData.cageSubtypeTrials) {
+    for (const st of DEFAULT_SUBTYPES) weights[st] = 1.0 / DEFAULT_SUBTYPES.length;
+    return weights;
+  }
+
+  const PRIOR = 0.5;
+  const PSEUDO = 3;
+  let total = 0;
+
+  for (const st of DEFAULT_SUBTYPES) {
+    const trials = record.generatorData.cageSubtypeTrials[st] ?? 0;
+    const successes = record.generatorData.cageSubtypeSuccess?.[st] ?? 0;
+    const rate = (successes + PRIOR * PSEUDO) / (trials + PSEUDO);
+    weights[st] = rate;
+    total += rate;
+  }
+
+  if (total > 0) {
+    for (const k of Object.keys(weights)) weights[k] /= total;
+  }
+
+  return weights;
 }
 
 // ---------------------------------------------------------------------------
@@ -340,5 +458,18 @@ export function logLearningState(elements: string[], pressureGPa: number): void 
         return `${k}=${succ}/${trials}(${(succ / trials * 100).toFixed(0)}%)`;
       }).join(", ");
     console.log(`[CSP-Learn] ${family}/${pBin} generators: ${gSummary}`);
+  }
+
+  // Log cage subtype stats
+  if (record.generatorData.cageSubtypeTrials) {
+    const totalCageTrials = Object.values(record.generatorData.cageSubtypeTrials).reduce((s, v) => s + v, 0);
+    if (totalCageTrials > 0) {
+      const cSummary = Object.entries(record.generatorData.cageSubtypeTrials)
+        .map(([k, trials]) => {
+          const succ = record.generatorData.cageSubtypeSuccess?.[k] ?? 0;
+          return `${k}=${succ.toFixed(1)}/${trials.toFixed(1)}(${(succ / trials * 100).toFixed(0)}%)`;
+        }).join(", ");
+      console.log(`[CSP-Learn] ${family}/${pBin} cage subtypes: ${cSummary}`);
+    }
   }
 }

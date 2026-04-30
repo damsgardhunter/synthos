@@ -66,6 +66,17 @@ export interface CSPCandidate extends StructureCandidate {
   postRelaxForce?: number;
   /** Relaxation history: which engines processed this candidate. */
   relaxationHistory?: string[];
+
+  // --- Pre-MLIP snapshot (preserved when CHGNet relaxes) ---
+  /** Lattice before CHGNet relaxation (raw CSP structure). */
+  preMLIPLatticeA?: number;
+  preMLIPLatticeB?: number;
+  preMLIPLatticeC?: number;
+  preMLIPVolume?: number;
+  /** Volume change from CHGNet relaxation (%). */
+  mlipVolumeChangePct?: number;
+  /** True if CHGNet drift was too high and raw CSP geometry was kept instead. */
+  mlipDriftRejected?: boolean;
 }
 
 // ---------------------------------------------------------------------------

@@ -84,6 +84,66 @@ export interface StagedRelaxationOpts {
   maxStage1Candidates?: number;
   /** Is this a metallic system (from Vegard/MP lookup)? */
   isMetallic?: boolean;
+  /** Screening tier — controls how many Stage 1 winners advance to Stage 2.
+   *  preview: top 2, standard: top 5, deep: top 10-15, publication: top 20-30 */
+  screeningTier?: "preview" | "standard" | "deep" | "publication";
+}
+
+// ---------------------------------------------------------------------------
+// Post-DFT structure deduplication
+// ---------------------------------------------------------------------------
+
+/**
+ * Simple pair-distance fingerprint for post-DFT deduplication.
+ * Compares relaxed structures by sorted interatomic distances.
+ * Returns true if two structures are essentially the same DFT minimum.
+ */
+function areStructuresDuplicate(
+  pos1: Array<{ element: string; x: number; y: number; z: number }>,
+  a1: number,
+  pos2: Array<{ element: string; x: number; y: number; z: number }>,
+  a2: number,
+  tolerance: number = 0.03, // 3% tolerance on distances
+): boolean {
+  if (pos1.length !== pos2.length) return false;
+
+  // Compare lattice constants
+  if (Math.abs(a1 - a2) / Math.max(a1, a2) > 0.05) return false;
+
+  // Compare sorted pair distances (first 20)
+  const dists1 = computeSortedDistances(pos1, a1).slice(0, 20);
+  const dists2 = computeSortedDistances(pos2, a2).slice(0, 20);
+
+  if (dists1.length !== dists2.length) return false;
+
+  let maxRelDiff = 0;
+  for (let i = 0; i < dists1.length; i++) {
+    const avg = (dists1[i] + dists2[i]) / 2;
+    if (avg < 0.01) continue;
+    const relDiff = Math.abs(dists1[i] - dists2[i]) / avg;
+    maxRelDiff = Math.max(maxRelDiff, relDiff);
+  }
+
+  return maxRelDiff < tolerance;
+}
+
+function computeSortedDistances(
+  positions: Array<{ element: string; x: number; y: number; z: number }>,
+  latticeA: number,
+): number[] {
+  const dists: number[] = [];
+  for (let i = 0; i < positions.length; i++) {
+    for (let j = i + 1; j < positions.length; j++) {
+      let dx = positions[i].x - positions[j].x;
+      let dy = positions[i].y - positions[j].y;
+      let dz = positions[i].z - positions[j].z;
+      dx -= Math.round(dx); dy -= Math.round(dy); dz -= Math.round(dz);
+      const dist = Math.sqrt((dx * latticeA) ** 2 + (dy * latticeA) ** 2 + (dz * latticeA) ** 2);
+      dists.push(dist);
+    }
+  }
+  dists.sort((a, b) => a - b);
+  return dists;
 }
 
 // ---------------------------------------------------------------------------
@@ -292,20 +352,38 @@ export async function runStagedRelaxation(opts: StagedRelaxationOpts): Promise<S
       }
     }
 
-    // Pick the passing candidate with lowest energy
+    // Determine how many Stage 1 winners to advance to Stage 2.
+    // Different structures can respond differently to vc-relax, pressure
+    // correction, or symmetry lowering — picking only 1 too early loses
+    // structures that may become better after cell optimization.
+    const tier = opts.screeningTier ?? "preview";
+    const stage2KeepCount: Record<string, number> = {
+      preview: 2,
+      standard: 5,
+      deep: 10,
+      publication: 20,
+    };
+    const maxStage2Candidates = stage2KeepCount[tier] ?? 2;
+
+    // Sort Stage 1 results by energy (lowest first)
     const passedS1 = stage1Results.filter(r => r.result.passed);
+    const allS1Sorted = passedS1.length > 0 ? passedS1 : stage1Results;
+    allS1Sorted.sort((a, b) => a.result.totalEnergy - b.result.totalEnergy);
+
     if (passedS1.length > 0) {
-      passedS1.sort((a, b) => a.result.totalEnergy - b.result.totalEnergy);
-      const best = passedS1[0];
+      const kept = passedS1.slice(0, maxStage2Candidates);
+      const best = kept[0];
       bestPositions = best.result.positions;
       bestLatticeA = best.result.latticeA;
       candidateSource = best.candidate.source;
       stages.push(best.result);
-      console.log(`[Staged-Relax] ${formula} Stage 1: selected candidate from ${candidateSource} (E=${best.result.totalEnergy.toFixed(4)} eV)`);
+      console.log(`[Staged-Relax] ${formula} Stage 1: ${passedS1.length} passed, keeping top ${kept.length} for Stage 2 (tier=${tier})`);
+      for (let ki = 0; ki < kept.length; ki++) {
+        console.log(`[Staged-Relax]   #${ki + 1}: ${kept[ki].candidate.source} (E=${kept[ki].result.totalEnergy.toFixed(4)} eV)`);
+      }
     } else if (stage1Results.length > 0) {
       // No candidate passed — use the one with lowest energy anyway (best effort)
-      stage1Results.sort((a, b) => a.result.totalEnergy - b.result.totalEnergy);
-      const best = stage1Results[0];
+      const best = allS1Sorted[0];
       bestPositions = best.result.positions.length > 0 ? best.result.positions : best.candidate.positions;
       bestLatticeA = best.result.latticeA > 0 ? best.result.latticeA : best.candidate.latticeA;
       candidateSource = best.candidate.source;
@@ -321,34 +399,105 @@ export async function runStagedRelaxation(opts: StagedRelaxationOpts): Promise<S
     }
 
     // === STAGE 2: vc-relax (full cell optimization) ===
+    // Run vc-relax on multiple Stage 1 winners (tier-dependent count).
+    // Different fixed-cell structures can respond differently after cell
+    // optimization — the lowest Stage 1 energy may not stay lowest after
+    // vc-relax.
     if (opts.skipVcRelax) {
       console.log(`[Staged-Relax] ${formula}: skipping Stage 2 (vc-relax skip condition)`);
     } else {
-      console.log(`[Staged-Relax] ${formula} Stage 2/5 (vc-relax): a=${bestLatticeA.toFixed(3)} A, ${bestPositions.length} atoms`);
-      try {
-        const s2 = await runStage2VcRelax(
-          formula, elements, counts, bestPositions, bestLatticeA, pressureGPa, jobDir, callbacks
-        );
-        stages.push(s2);
+      const s2Candidates = passedS1.length > 0
+        ? passedS1.slice(0, maxStage2Candidates)
+        : (allS1Sorted.length > 0 ? [allS1Sorted[0]] : []);
 
-        if (s2.passed) {
-          bestPositions = s2.positions;
-          bestLatticeA = s2.latticeA;
-          bestCellVectors = s2.cellVectors;
-          console.log(`[Staged-Relax] ${formula} Stage 2: PASSED (force=${s2.maxForce?.toExponential(2)}, a=${s2.latticeA.toFixed(3)} A, P=${s2.pressure?.toFixed(1)} kbar, wall=${s2.wallTimeSeconds.toFixed(0)}s)`);
-        } else {
-          // Use whatever geometry came out (may be partial)
-          if (s2.positions.length > 0) bestPositions = s2.positions;
-          if (s2.latticeA > 0) bestLatticeA = s2.latticeA;
-          bestCellVectors = s2.cellVectors;
-          console.log(`[Staged-Relax] ${formula} Stage 2: FAILED — ${s2.failReason}, using partial geometry`);
+      if (s2Candidates.length > 1) {
+        console.log(`[Staged-Relax] ${formula} Stage 2/5 (vc-relax): testing ${s2Candidates.length} Stage 1 winners`);
+      } else {
+        console.log(`[Staged-Relax] ${formula} Stage 2/5 (vc-relax): a=${bestLatticeA.toFixed(3)} A, ${bestPositions.length} atoms`);
+      }
+
+      let bestS2Energy = Infinity;
+      let bestS2Result: StageResult | null = null;
+      let bestS2Source = candidateSource;
+      // Post-DFT dedup: track relaxed structures to detect when multiple
+      // starting points collapse to the same DFT minimum. Saves phonon compute.
+      const relaxedStructures: Array<{ positions: Array<{ element: string; x: number; y: number; z: number }>; latticeA: number; source: string }> = [];
+      let s2Duplicates = 0;
+
+      for (let s2i = 0; s2i < s2Candidates.length; s2i++) {
+        const s2Cand = s2Candidates[s2i];
+        const s2Positions = s2Cand.result.positions.length > 0 ? s2Cand.result.positions : s2Cand.candidate.positions;
+        const s2LatticeA = s2Cand.result.latticeA > 0 ? s2Cand.result.latticeA : s2Cand.candidate.latticeA;
+
+        if (s2Candidates.length > 1) {
+          console.log(`[Staged-Relax] ${formula} Stage 2 candidate ${s2i + 1}/${s2Candidates.length}: ${s2Cand.candidate.source}, a=${s2LatticeA.toFixed(3)} A`);
         }
-      } catch (err: any) {
-        console.log(`[Staged-Relax] ${formula} Stage 2: ERROR — ${err.message?.slice(0, 200)}`);
+
+        try {
+          const s2 = await runStage2VcRelax(
+            formula, elements, counts, s2Positions, s2LatticeA, pressureGPa, jobDir, callbacks
+          );
+
+          // Post-DFT dedup: check if this relaxed structure duplicates one we already have
+          if (s2.passed && s2.positions.length > 0) {
+            const isDuplicate = relaxedStructures.some(rs =>
+              areStructuresDuplicate(rs.positions, rs.latticeA, s2.positions, s2.latticeA)
+            );
+
+            if (isDuplicate) {
+              s2Duplicates++;
+              console.log(`[Staged-Relax] ${formula} Stage 2 candidate ${s2i + 1}: DUPLICATE of already-relaxed structure — skipping (saves phonon compute)`);
+              continue;
+            }
+
+            relaxedStructures.push({ positions: s2.positions, latticeA: s2.latticeA, source: s2Cand.candidate.source });
+          }
+
+          if (s2.passed && s2.totalEnergy < bestS2Energy) {
+            bestS2Energy = s2.totalEnergy;
+            bestS2Result = s2;
+            bestS2Source = s2Cand.candidate.source;
+            console.log(`[Staged-Relax] ${formula} Stage 2 candidate ${s2i + 1}: PASSED (force=${s2.maxForce?.toExponential(2)}, E=${s2.totalEnergy.toFixed(4)} eV, a=${s2.latticeA.toFixed(3)} A, P=${s2.pressure?.toFixed(1)} kbar, wall=${s2.wallTimeSeconds.toFixed(0)}s) — new best`);
+          } else if (s2.passed) {
+            console.log(`[Staged-Relax] ${formula} Stage 2 candidate ${s2i + 1}: PASSED but not lowest E (E=${s2.totalEnergy.toFixed(4)} vs best=${bestS2Energy.toFixed(4)})`);
+          } else {
+            console.log(`[Staged-Relax] ${formula} Stage 2 candidate ${s2i + 1}: FAILED — ${s2.failReason}`);
+            // Track partial result if it's the only one
+            if (!bestS2Result && s2.positions.length > 0) {
+              bestS2Result = s2;
+              bestS2Energy = s2.totalEnergy;
+              bestS2Source = s2Cand.candidate.source;
+            }
+          }
+        } catch (err: any) {
+          console.log(`[Staged-Relax] ${formula} Stage 2 candidate ${s2i + 1}: ERROR — ${err.message?.slice(0, 200)}`);
+        }
+      }
+
+      if (s2Duplicates > 0) {
+        console.log(`[Staged-Relax] ${formula} Stage 2 post-DFT dedup: ${s2Duplicates} duplicate(s) collapsed to same minimum, ${relaxedStructures.length} unique structures`);
+      }
+
+      if (bestS2Result) {
+        stages.push(bestS2Result);
+        if (bestS2Result.passed) {
+          bestPositions = bestS2Result.positions;
+          bestLatticeA = bestS2Result.latticeA;
+          bestCellVectors = bestS2Result.cellVectors;
+          candidateSource = bestS2Source;
+          console.log(`[Staged-Relax] ${formula} Stage 2: best winner from ${bestS2Source} (E=${bestS2Energy.toFixed(4)} eV, a=${bestLatticeA.toFixed(3)} A)`);
+        } else {
+          if (bestS2Result.positions.length > 0) bestPositions = bestS2Result.positions;
+          if (bestS2Result.latticeA > 0) bestLatticeA = bestS2Result.latticeA;
+          bestCellVectors = bestS2Result.cellVectors;
+          console.log(`[Staged-Relax] ${formula} Stage 2: FAILED — ${bestS2Result.failReason}, using partial geometry`);
+        }
+      } else {
         stages.push({
-          stage: 2, passed: false, failReason: `exception: ${err.message?.slice(0, 100)}`,
+          stage: 2, passed: false, failReason: "all Stage 2 candidates failed",
           positions: bestPositions, latticeA: bestLatticeA, totalEnergy: 0, wallTimeSeconds: 0,
         });
+        console.log(`[Staged-Relax] ${formula} Stage 2: all candidates failed, using Stage 1 geometry`);
       }
     }
   }

@@ -143,15 +143,29 @@ export function generateRound2Candidates(
 /**
  * Screen Round 2 candidates with CHGNet and select the best for DFT.
  */
+/**
+ * Screen Round 2 candidates using enthalpy (H = E + PV), not just energy.
+ *
+ * Selection criteria (meV/atom thresholds, not percentages):
+ * - Enthalpy improves by >= 10 meV/atom → promote
+ * - Within 10 meV/atom but structurally diverse → keep
+ * - Worse but high novelty or better hydride cage → keep 1 exploration candidate
+ */
 export async function screenRound2(
   candidates: CSPCandidate[],
   formula: string,
-  round1BestEnergy: number,
+  round1BestEnthalpyPerAtom: number,
   workDir: string,
+  pressureGPa: number = 0,
 ): Promise<CSPCandidate[]> {
   // Dedup first
   const { unique } = deduplicateCandidates(candidates, 0.08);
   console.log(`[Iterative] Round 2 dedup: ${candidates.length} → ${unique.length}`);
+
+  // Improvement threshold in eV/atom (10 meV/atom = 0.010 eV/atom)
+  const PROMOTE_THRESHOLD = 0.010;    // >= 10 meV/atom improvement → definitely promote
+  const KEEP_THRESHOLD = 0.005;       // >= 5 meV/atom improvement → keep if diverse
+  const isHighPressure = pressureGPa > 20;
 
   // CHGNet energy ranking
   if (isChgnetAvailable() && unique.length > 5) {
@@ -164,16 +178,50 @@ export async function screenRound2(
     if (chgnetResult.stats.evaluated > 0) {
       console.log(`[Iterative] Round 2 CHGNet: ${chgnetResult.stats.evaluated} evaluated, best=${chgnetResult.stats.bestEnergy?.toFixed(4)} eV/atom`);
 
-      // Select top candidates that are LOWER than round 1 best
-      const promising = chgnetResult.rankedCandidates.filter(c =>
-        c.enthalpyPerAtom != null && c.enthalpyPerAtom < round1BestEnergy * 0.98 // at least 2% lower
-      );
+      const selected: CSPCandidate[] = [];
 
-      if (promising.length > 0) {
-        console.log(`[Iterative] Round 2: ${promising.length} candidates with energy below Round 1 best (${round1BestEnergy.toFixed(4)} eV/atom)`);
-        return promising.slice(0, 5); // top 5 for DFT
+      // For high-pressure materials, use enthalpy H = E + PV.
+      // CHGNet's enthalpyPerAtom already includes the PV term if pressure
+      // was set during relaxation, but the candidates may have different
+      // pressures. Compare apples to apples using enthalpy per atom.
+      const r1H = round1BestEnthalpyPerAtom;
+
+      // Category 1: Strong improvement (>= 10 meV/atom lower enthalpy)
+      const promoted = chgnetResult.rankedCandidates.filter(c => {
+        const h = c.enthalpyPerAtom;
+        return h != null && (r1H - h) >= PROMOTE_THRESHOLD;
+      });
+
+      // Category 2: Mild improvement (5-10 meV/atom) — keep if structurally diverse
+      const mild = chgnetResult.rankedCandidates.filter(c => {
+        const h = c.enthalpyPerAtom;
+        if (h == null) return false;
+        const improvement = r1H - h;
+        return improvement >= KEEP_THRESHOLD && improvement < PROMOTE_THRESHOLD;
+      });
+
+      // Category 3: Exploration — 1 candidate that's different even if enthalpy
+      // isn't better (cage-type, different symmetry, novel source)
+      const exploration = chgnetResult.rankedCandidates.find(c => {
+        if (selected.some(s => s === c) || promoted.includes(c) || mild.includes(c)) return false;
+        // Prefer candidates with cage/novel sources
+        const source = c.source ?? "";
+        return source.includes("cage") ||
+               source.includes("pressure-scan") ||
+               source.includes("symmetry-lowered") ||
+               source.includes("distortion");
+      });
+
+      // Assemble: promoted first, then mild (diverse), then 1 exploration
+      for (const c of promoted.slice(0, 3)) selected.push(c);
+      for (const c of mild.slice(0, 2)) selected.push(c);
+      if (exploration && selected.length < 5) selected.push(exploration);
+
+      if (selected.length > 0) {
+        console.log(`[Iterative] Round 2: ${promoted.length} promoted (>=${PROMOTE_THRESHOLD * 1000} meV/atom), ${mild.length} mild improvement, ${exploration ? 1 : 0} exploration (R1 H=${r1H.toFixed(4)} eV/atom${isHighPressure ? `, P=${pressureGPa} GPa` : ""})`);
+        return selected.slice(0, 5);
       } else {
-        console.log(`[Iterative] Round 2: no candidates significantly below Round 1 best — using top 3 anyway for exploration`);
+        console.log(`[Iterative] Round 2: no candidates beat R1 enthalpy (${r1H.toFixed(4)} eV/atom) — using top 3 for exploration`);
         return chgnetResult.rankedCandidates.slice(0, 3);
       }
     }

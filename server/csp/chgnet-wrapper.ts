@@ -339,8 +339,13 @@ export async function runChgnetEvaluation(
     relaxTimeS: r.relax_time_s,
   }));
 
-  // Attach MLIP energy + relaxed geometry to candidates and sort by energy
+  // Attach MLIP energy + relaxed geometry to candidates and sort by energy.
+  // DRIFT GATE: track both raw CSP and CHGNet-relaxed structures.
+  // If CHGNet drifts too far (volume change > 30%, distance collapse, etc.),
+  // keep the raw CSP geometry instead — ML potentials can collapse or bias
+  // structures incorrectly, especially for high-pressure hydrides.
   const ranked: CSPCandidate[] = [];
+  let driftRejected = 0;
   for (const r of results) {
     const candidate = candidateMap.get(r.file);
     if (candidate) {
@@ -355,17 +360,57 @@ export async function runChgnetEvaluation(
         candidate.postRelaxForce = forceEvAng / 25.711;
       }
 
-      // Update lattice with CHGNet-relaxed geometry (better starting point for DFT)
+      // --- CHGNet drift gate ---
+      // Save pre-MLIP snapshot before potentially overwriting
       if (r.relaxed && r.relaxedLatticeA != null) {
-        candidate.latticeA = r.relaxedLatticeA;
-        if (r.relaxedLatticeB != null) candidate.latticeB = r.relaxedLatticeB;
-        if (r.relaxedLatticeC != null) candidate.latticeC = r.relaxedLatticeC;
-        if (r.relaxedVolume != null) candidate.cellVolume = r.relaxedVolume;
-        candidate.relaxationLevel = "mlip-relaxed";
+        candidate.preMLIPLatticeA = candidate.latticeA;
+        candidate.preMLIPLatticeB = candidate.latticeB;
+        candidate.preMLIPLatticeC = candidate.latticeC;
+        candidate.preMLIPVolume = candidate.cellVolume;
+        candidate.mlipVolumeChangePct = r.volumeChangePct ?? 0;
+
+        const volChangePct = Math.abs(r.volumeChangePct ?? 0);
+
+        // Check for excessive drift
+        let driftTooHigh = false;
+        let driftReason = "";
+
+        // Volume change > 30% — MLIP likely collapsed or expanded unreasonably
+        if (volChangePct > 30) {
+          driftTooHigh = true;
+          driftReason = `volume change ${(r.volumeChangePct ?? 0).toFixed(1)}% > 30%`;
+        }
+
+        // Minimum distance collapse check: if relaxed lattice is very small,
+        // MLIP may have crushed the structure
+        if (r.relaxedLatticeA != null && r.relaxedLatticeA < candidate.latticeA * 0.5) {
+          driftTooHigh = true;
+          driftReason = `lattice collapsed (${candidate.latticeA.toFixed(2)} → ${r.relaxedLatticeA.toFixed(2)} Å)`;
+        }
+
+        if (driftTooHigh) {
+          // Keep raw CSP geometry, mark as drift-rejected
+          candidate.mlipDriftRejected = true;
+          candidate.relaxationLevel = "raw";
+          driftRejected++;
+          console.log(`[CHGNet] Drift gate REJECTED for ${r.file}: ${driftReason} — keeping raw CSP geometry`);
+        } else {
+          // Accept CHGNet-relaxed geometry
+          candidate.latticeA = r.relaxedLatticeA;
+          if (r.relaxedLatticeB != null) candidate.latticeB = r.relaxedLatticeB;
+          if (r.relaxedLatticeC != null) candidate.latticeC = r.relaxedLatticeC;
+          if (r.relaxedVolume != null) candidate.cellVolume = r.relaxedVolume;
+          candidate.mlipDriftRejected = false;
+          candidate.relaxationLevel = "mlip-relaxed";
+        }
       }
 
       ranked.push(candidate);
     }
+  }
+
+  if (driftRejected > 0) {
+    console.log(`[CHGNet] Drift gate: ${driftRejected}/${results.length} candidates had excessive MLIP drift — raw CSP geometry preserved`);
   }
 
   // Add unevaluated candidates at the end (worst rank)

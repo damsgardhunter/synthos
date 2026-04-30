@@ -37,6 +37,7 @@ import { runCandidateFunnel } from "../csp/candidate-funnel";
 import { assignTier, logTierDecision } from "../csp/tier-assignment";
 import type { CSPCandidate } from "../csp/csp-types";
 import { generateRound2Candidates, screenRound2, shouldDoRound2 } from "../csp/iterative-search";
+import { recordGeneratorOutcome, recordVolumeOutcome, getSignalWeight, classifyFamily, classifyPressureBin } from "../csp/adaptive-learning";
 import {
   runStagedRelaxation,
   runStage4GammaPhonon,
@@ -630,7 +631,7 @@ function runXTBStabilityCheck(
   latticeA: number,
   workDir: string,
   pressureGpa: number = 0,
-): { stable: boolean; ePerAtom: number; basis: string } | null {
+): { stable: boolean; ePerAtom: number; basis: string; formationEnergyEv?: number; confidencePenalty: number } | null {
   // xTB is parameterised for ambient conditions — compressed interatomic distances
   // at high pressure fall outside its valid range and produce spuriously large
   // repulsive energies (~20-30 eV/atom) that would incorrectly reject valid
@@ -687,8 +688,11 @@ function runXTBStabilityCheck(
 
     let isStable: boolean;
     let basis: string;
+    let formationEnergyEv: number | undefined;
+    let confidencePenalty = 0;
     if (hasRef) {
       const formationLike = (ePerAtomHa - refEPerAtom) * HA_TO_EV;
+      formationEnergyEv = formationLike;
       // Real formation-like energies live within ±10 eV/atom. Values outside
       // that window mean xTB didn't produce a trustworthy number (SCF non-
       // convergence on heavy-element/high-pressure cells, bad atomic ref, etc).
@@ -696,14 +700,36 @@ function runXTBStabilityCheck(
       if (!isFinite(formationLike) || Math.abs(formationLike) > 10.0) {
         return null;
       }
-      isStable = formationLike < 2.0;
-      basis = `relative (Ef-like=${formationLike.toFixed(3)} eV/atom)`;
+      // Soft penalty instead of hard rejection:
+      // - < 1.0 eV/atom: stable, no penalty
+      // - 1.0–2.0 eV/atom: mildly unstable, small confidence penalty
+      // - 2.0–2.5 eV/atom: unstable, larger penalty but still proceeds
+      // - > 2.5 eV/atom: very unstable, marked but still not hard-rejected
+      //   (hard reject only if ALSO bad geometry AND no prototype support)
+      if (formationLike < 1.0) {
+        isStable = true;
+        confidencePenalty = 0;
+      } else if (formationLike < 2.0) {
+        isStable = true;
+        confidencePenalty = 0.15;
+      } else if (formationLike < 2.5) {
+        isStable = true;
+        confidencePenalty = 0.30;
+      } else {
+        // > 2.5 eV/atom — very unstable by xTB, but xTB is unreliable for
+        // high-P hydrides and unusual compositions. Mark as unstable with
+        // heavy penalty, but let high-confidence candidates through.
+        isStable = false;
+        confidencePenalty = 0.50;
+      }
+      basis = `relative (Ef-like=${formationLike.toFixed(3)} eV/atom, penalty=${confidencePenalty.toFixed(2)})`;
     } else {
       isStable = ePerAtomEv < -1.0;
+      confidencePenalty = isStable ? 0 : 0.30;
       basis = `absolute (E/atom=${ePerAtomEv.toFixed(3)} eV)`;
     }
 
-    return { stable: isStable, ePerAtom: ePerAtomEv, basis };
+    return { stable: isStable, ePerAtom: ePerAtomEv, basis, formationEnergyEv, confidencePenalty };
   } catch {
     return null;
   }
@@ -4182,18 +4208,48 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       console.log(`[QE-Worker] ${formula} xTB pre-relax failed — proceeding with raw positions to vc-relax`);
     }
 
-    // xTB stability pre-filter: skip if known-structure positions were validated
-    // (literature Wyckoff positions are DFT-proven, xTB can't improve on that),
-    // or if pressure > 50 GPa (xTB is parameterized for ambient only).
+    // xTB stability pre-filter: soft penalty, NOT hard rejection.
+    // xTB is unreliable for high-pressure hydrides and unusual compositions —
+    // it should not be allowed to kill a DFT-worthy candidate. Instead, apply
+    // a confidence penalty that lowers priority in Stage 1 candidate selection.
+    // Hard reject ONLY if: formation energy > 2.5 eV/atom AND bad geometry AND
+    // no prototype support (cage-seeded, known-structure, high-confidence CSP).
     if (!skipXtb) {
       const stabilityCheck = runXTBStabilityCheck(positions, latticeA, jobDir, workerPressure);
-      if (stabilityCheck && !stabilityCheck.stable) {
-        result.error = `xTB stability pre-filter: ${stabilityCheck.basis}`;
-        result.failureStage = "xtb_prefilter";
-        result.rejectionReason = `Unstable: ${stabilityCheck.basis}`;
-        stageFailureCounts.xtb_prefilter++;
-        console.log(`[QE-Worker] ${formula} unstable by xTB pre-filter: ${stabilityCheck.basis}${workerPressure > 0 ? ` @ ${workerPressure} GPa` : ""}`);
-        return result;
+      if (stabilityCheck) {
+        if (!stabilityCheck.stable) {
+          // Check for hard-reject conditions: ALL THREE must be true
+          const hasPrototypeSupport = structureCandidates.some(c =>
+            c.prototype === "literature" ||
+            c.prototype.startsWith("TemplateVCA") ||
+            c.prototype === "known-structure" ||
+            c.source?.includes("cage") ||
+            (c.confidence ?? 0) >= 0.75
+          );
+          const hasH = elements.includes("H");
+          const isHighPressure = workerPressure > 20;
+          const formE = stabilityCheck.formationEnergyEv ?? 0;
+          const isSeverelyUnstable = formE > 2.5;
+
+          if (isSeverelyUnstable && !hasPrototypeSupport && !hasH && !isHighPressure) {
+            // Hard reject: very unstable by xTB, no prototype support, not a hydride, not high-P
+            result.error = `xTB stability pre-filter: ${stabilityCheck.basis}`;
+            result.failureStage = "xtb_prefilter";
+            result.rejectionReason = `Unstable: ${stabilityCheck.basis}`;
+            stageFailureCounts.xtb_prefilter++;
+            console.log(`[QE-Worker] ${formula} REJECTED by xTB pre-filter: ${stabilityCheck.basis} (no prototype support, not hydride, not high-P)`);
+            return result;
+          }
+
+          // Soft penalty: lower confidence on all candidates, but proceed to DFT
+          const penalty = stabilityCheck.confidencePenalty;
+          for (const sc of structureCandidates) {
+            sc.confidence = Math.max(0.05, (sc.confidence ?? 0.5) - penalty);
+          }
+          console.log(`[QE-Worker] ${formula} xTB stability WARNING (proceeding): ${stabilityCheck.basis}${workerPressure > 0 ? ` @ ${workerPressure} GPa` : ""} — confidence penalty=${penalty.toFixed(2)}, hasPrototype=${hasPrototypeSupport}, isHydride=${hasH}`);
+        } else {
+          console.log(`[QE-Worker] ${formula} xTB stability OK: ${stabilityCheck.basis}`);
+        }
       }
     } else {
       console.log(`[QE-Worker] ${formula} skipping xTB stability check (known-structure validated)`);
@@ -4310,6 +4366,7 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
           // The funnel already selected the best — don't throw any away before DFT.
           maxStage1Candidates: structureCandidates.length,
           isMetallic: vegardResult?.isMetallic ?? undefined,
+          screeningTier: tierDecision.tier as "preview" | "standard" | "deep" | "publication",
         });
 
         result.stagedRelaxation = {
@@ -5187,6 +5244,20 @@ ${cellBlockEos}
     }
     // Upgraded later: final_converged after phonon, publication_ready after e-ph
 
+    // --- Quality-weighted adaptive learning signal ---
+    // Record DFT convergence as a stronger signal than funnel survival.
+    // The funnel already recorded funnel_survival (weight 0.1) for all
+    // candidates. Now record dft0_converged (0.5) or dft1_low_enthalpy (1.0)
+    // for the winning prototype, giving the learning system a much stronger
+    // signal about which generators and volumes actually produce DFT-viable structures.
+    if (scfConverged || scfUsable) {
+      const winnerProto = result.prototypeUsed ?? "unknown";
+      const dftWeight = scfConverged
+        ? getSignalWeight("dft0_converged")  // 0.5
+        : getSignalWeight("dft_selected");    // 0.3
+      recordGeneratorOutcome(elements, workerPressure, winnerProto, true, dftWeight);
+    }
+
     if (!scfConverged && !scfUsable) {
       result.failureStage = "scf";
       stageFailureCounts.scf++;
@@ -5242,6 +5313,7 @@ ${cellBlockEos}
               r2Candidates, formula,
               result.scf.totalEnergy / positions.length,
               r2WorkDir,
+              workerPressure,
             );
 
             if (r2Selected.length > 0) {
@@ -5874,10 +5946,23 @@ ${r2Cell}
     const phononPhysicallyStable = phononHasResults
       ? result.phonon!.lowestFrequency > -10.0
       : false; // No phonon data = don't waste compute on DFPT
+
+    // Quality-weighted learning: phonon stability is a strong signal (weight 3.0)
+    if (phononHasResults && phononPhysicallyStable) {
+      const winnerProto = result.prototypeUsed ?? "unknown";
+      recordGeneratorOutcome(elements, workerPressure, winnerProto, true, getSignalWeight("phonon_stable"));
+    }
+
     if (scfUsable && phononHasResults && phononPhysicallyStable && (opts?.ensembleScore ?? 0) > 0.7 && !opts?.skipEph) {
       console.log(`[QE-Worker] ${formula} qualifies for DFPT EPC (ensembleScore=${opts!.ensembleScore!.toFixed(3)}, phononModes=${result.phonon!.frequencies.length}, lowestFreq=${result.phonon!.lowestFrequency.toFixed(1)} cm⁻¹)`);
       try {
         result.dfpt = await runDFPTEPC(formula, elements, counts, jobDir, workerPressure);
+
+        // Quality-weighted learning: DFPT e-ph success is the strongest signal (weight 4.0)
+        if (result.dfpt && (result.dfpt as any).lambda > 0) {
+          const winnerProto = result.prototypeUsed ?? "unknown";
+          recordGeneratorOutcome(elements, workerPressure, winnerProto, true, getSignalWeight("dfpt_good_lambda"));
+        }
       } catch (dfptErr: any) {
         console.log(`[QE-Worker] DFPT EPC failed for ${formula}: ${(dfptErr.message ?? "").slice(-200)}`);
       }

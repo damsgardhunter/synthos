@@ -26,7 +26,7 @@ import { analyzeHydrideChemistry, type HydrideAnalysis } from "./candidate-metad
 import { deduplicateCandidates, clusterCandidates, type StructureCluster } from "./dedup-cluster";
 import { selectForDFT, type DFTSelectionResult } from "./dft-admission";
 import { runChgnetEvaluation, isChgnetAvailable } from "./chgnet-wrapper";
-import { recordVolumeOutcome, recordGeneratorOutcome, logLearningState } from "./adaptive-learning";
+import { recordVolumeOutcome, recordGeneratorOutcome, recordCageSubtypeOutcome, logLearningState, getSignalWeight } from "./adaptive-learning";
 
 // ---------------------------------------------------------------------------
 // Funnel stats (for logging + learning)
@@ -434,14 +434,15 @@ export async function runCandidateFunnel(
     try {
       const maxEval = Math.min(f6Candidates.length, tier === "preview" ? 100 : 300);
 
-      // Scale timeout with number of structures and estimated atom count
-      // Full relaxation: ~2-10s per structure depending on atom count
-      // Base: 5 min + 8s per structure (covers ~50-atom cells with margin)
+      // Scale timeout with number of structures and estimated atom count.
+      // Full relaxation with fmax=0.02 and 100-500 steps takes ~15-30s per
+      // structure for 10-15 atom hydride cells (observed from production logs).
+      // Previous 200ms/atom was too optimistic — actual is ~1-2s per atom.
       const avgAtoms = f6Candidates.reduce((sum, c) => sum + (c.positions?.length ?? 10), 0) / f6Candidates.length;
-      const perStructureMs = Math.max(5000, avgAtoms * 200); // ~200ms per atom for relaxation
+      const perStructureMs = Math.max(10000, avgAtoms * 1500); // ~1.5s per atom for full relaxation
       const timeoutMs = Math.min(
-        900000,  // hard cap: 15 min
-        Math.max(300000, maxEval * perStructureMs + 60000) // base 60s overhead + per-structure
+        1800000, // hard cap: 30 min (full relaxation of 100 structures can take a while)
+        Math.max(600000, maxEval * perStructureMs + 120000) // base 120s overhead + per-structure
       );
 
       const chgnetResult = await runChgnetEvaluation(
@@ -486,12 +487,25 @@ export async function runCandidateFunnel(
   for (const s of f3) {
     const survived = f4set.has(s.candidate);
     const proto = s.candidate.prototype ?? "unknown";
-    recordGeneratorOutcome(elements, pressureGPa, proto, survived);
+    const funnelWeight = getSignalWeight("funnel_survival"); // 0.1 — weak signal
+    recordGeneratorOutcome(elements, pressureGPa, proto, survived, funnelWeight);
 
     // Try to extract volume multiplier from source string
     const volMatch = s.candidate.source?.match(/vol=([0-9.]+)/);
     if (volMatch) {
-      recordVolumeOutcome(elements, pressureGPa, parseFloat(volMatch[1]), survived);
+      recordVolumeOutcome(elements, pressureGPa, parseFloat(volMatch[1]), survived, funnelWeight);
+    }
+
+    // Track cage seeder subtypes separately for per-cage-type learning.
+    // Extract subtype from prototype (cage-wyckoff-{name}) or source string.
+    if (proto.startsWith("cage-wyckoff-") || s.candidate.source?.includes("Cage Wyckoff")) {
+      const source = s.candidate.source ?? "";
+      let cageSubtype = "custom_template";
+      if (source.includes("sodalite") || proto.includes("sodalite")) cageSubtype = "sodalite";
+      else if (source.includes("hex-clathrate") || proto.includes("hex-clathrate")) cageSubtype = "hex_clathrate";
+      else if (source.includes("clathrate") || proto.includes("clathrate")) cageSubtype = "clathrate";
+      else if (source.includes("bcc-hydride") || proto.includes("bcc-hydride")) cageSubtype = "bcc_hydride";
+      recordCageSubtypeOutcome(elements, pressureGPa, cageSubtype, survived);
     }
   }
 
