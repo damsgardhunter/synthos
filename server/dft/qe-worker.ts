@@ -4399,7 +4399,32 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     // IEEE_UNDERFLOW_FLAG because DFPT needs forces < 0.05 Ry/bohr.
     const latticeShiftPct = Math.abs(latticeA - preVcLatticeA) / Math.max(1e-6, preVcLatticeA);
     if (result.vcRelaxed && latticeShiftPct > 0.03 && positions.length > 0) {
-      console.log(`[QE-Worker] Lattice rescaled by ${(latticeShiftPct * 100).toFixed(1)}% (${preVcLatticeA.toFixed(3)} → ${latticeA.toFixed(3)} Å) — running quick fixed-cell relax to fix atomic positions`);
+      // For large lattice rescalings (>15%), Stage 1 positions are useless —
+      // they were optimized at a completely different cell. Use known-structure
+      // positions directly at the literature lattice instead of trying to fix
+      // positions that are 40% wrong.
+      if (latticeShiftPct > 0.15 && knownStruct) {
+        // Known structure: use literature positions directly — they're already
+        // correct for this lattice constant.
+        const litPositions = knownStruct.atoms.map(a => ({
+          element: a.element, x: a.x, y: a.y, z: a.z,
+        }));
+        if (litPositions.length > 0) {
+          positions = litPositions;
+          console.log(`[QE-Worker] Large lattice rescale ${(latticeShiftPct * 100).toFixed(1)}% — using literature Wyckoff positions directly (${litPositions.length} atoms at a=${latticeA.toFixed(3)} Å)`);
+        }
+      } else if (latticeShiftPct > 0.15 && !knownStruct) {
+        // Novel material, no literature: regenerate positions at the target
+        // lattice using prototype/Wyckoff templates. Better than trying to
+        // stretch positions that were optimized 40% smaller.
+        const freshPositions = generateAtomicPositions(elements, counts, formula, latticeA);
+        if (freshPositions.length > 0) {
+          positions = freshPositions;
+          console.log(`[QE-Worker] Large lattice rescale ${(latticeShiftPct * 100).toFixed(1)}% (novel material) — regenerated positions at target lattice a=${latticeA.toFixed(3)} Å`);
+        }
+      }
+
+      console.log(`[QE-Worker] Lattice rescaled by ${(latticeShiftPct * 100).toFixed(1)}% (${preVcLatticeA.toFixed(3)} → ${latticeA.toFixed(3)} Å) — running fixed-cell relax to refine positions`);
       try {
         const relaxPrefix = formula.replace(/[^a-zA-Z0-9]/g, "") + "_fixcell";
         const hasHRelax = elements.includes("H");
@@ -4420,7 +4445,10 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
           atomicPosRelax += `  ${pos.element}  ${pos.x.toFixed(6)}  ${pos.y.toFixed(6)}  ${pos.z.toFixed(6)}\n`;
         }
         const cellBlockRelax = generateCellParameters(latticeA, cOverARelax, 0, bOverARelax, elements, counts);
-        const FIXCELL_RELAX_MAX_SECONDS = 900; // 15 min cap
+        // Scale relax time with lattice shift — bigger shift needs more time
+        const FIXCELL_RELAX_MAX_SECONDS = latticeShiftPct > 0.15 ? 1800 : // 30 min for large shifts
+                                          latticeShiftPct > 0.08 ? 1200 : // 20 min for moderate
+                                          900;                            // 15 min for small
         const relaxInput = `&CONTROL
   calculation = 'relax',
   restart_mode = 'from_scratch',
@@ -4432,7 +4460,7 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
   tstress = .true.,
   forc_conv_thr = 1.0d-3,
   etot_conv_thr = 1.0d-4,
-  nstep = 80,
+  nstep = ${latticeShiftPct > 0.15 ? 200 : latticeShiftPct > 0.08 ? 120 : 80},
   max_seconds = ${FIXCELL_RELAX_MAX_SECONDS},
 /
 &SYSTEM
