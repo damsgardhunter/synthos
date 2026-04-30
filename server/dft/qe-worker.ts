@@ -4397,7 +4397,7 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     }
 
     result.vcRelaxed = false;
-    const preVcLatticeA = latticeA;
+    let preVcLatticeA = latticeA;
 
     // Skip vc-relax for known compounds with literature lattice parameters.
     // vc-relax routinely times out at 90 min for high-pressure hydrides without
@@ -4469,6 +4469,14 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
         positions = generateAtomicPositions(elements, counts, formula, latticeA);
         console.log(`[QE-Worker] Regenerated positions for ${formula} (${positions.length} atoms) at a=${latticeA.toFixed(3)} Å`);
       }
+      // CRITICAL: update preVcLatticeA to the target lattice. The regenerated
+      // positions are already correct for `latticeA` (the literature value), so
+      // iterative rescaling should see 0% shift and skip. Without this, the
+      // rescaling loops from the old supercell lattice (e.g. 8.744 Å) to the
+      // target (5.290 Å), running pointless steps at wrong lattice parameters
+      // where the new positions can't converge ("no positions extracted").
+      preVcLatticeA = latticeA;
+      console.log(`[QE-Worker] Z-mismatch: reset preVcLatticeA to ${latticeA.toFixed(3)} Å (positions already at target lattice, no rescaling needed)`);
     }
 
     // When vc-relax is skipped and the lattice was rescaled significantly
