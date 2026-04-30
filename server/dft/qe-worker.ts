@@ -5479,6 +5479,37 @@ ${r2Cell}
     // here in ~10 min instead of wasting 14.5h on the full pipeline.
     let gammaPhononPassed = true;
     if (scfUsable && !isPartialWalltime && result.scf) {
+      // --- Pre-phonon diagnostics ---
+      // Log the structure going into phonon so we can diagnose crashes.
+      // ph.x reads from .save/ but these are the positions that generated it.
+      const scfForce = result.scf.totalForce ?? null;
+      const scfPressure = result.scf.pressure ?? null;
+      const scfAccuracy = result.scf.lastScfAccuracyRy ?? null;
+      console.log(`[QE-Worker] Pre-phonon state for ${formula}:`);
+      console.log(`[QE-Worker]   SCF: converged=${scfConverged}, accuracy=${scfAccuracy?.toExponential(2) ?? "N/A"} Ry, E=${result.scf.totalEnergy.toFixed(4)} eV, Ef=${result.scf.fermiEnergy ?? "N/A"}`);
+      console.log(`[QE-Worker]   Structure: ${positions.length} atoms, a=${latticeA.toFixed(3)} Å, force=${scfForce?.toFixed(4) ?? "N/A"} Ry/bohr, pressure=${scfPressure?.toFixed(1) ?? "N/A"} kbar`);
+      // Log first few atomic positions for diagnosis
+      const posToLog = Math.min(positions.length, 8);
+      for (let pi = 0; pi < posToLog; pi++) {
+        const p = positions[pi];
+        console.log(`[QE-Worker]   atom[${pi}] ${p.element.padEnd(2)} (${p.x.toFixed(5)}, ${p.y.toFixed(5)}, ${p.z.toFixed(5)})`);
+      }
+      if (positions.length > posToLog) {
+        console.log(`[QE-Worker]   ... and ${positions.length - posToLog} more atoms`);
+      }
+
+      // --- Pre-phonon force gate ---
+      // DFPT requires well-relaxed structures. If residual forces are too high,
+      // ph.x will crash with IEEE_UNDERFLOW_FLAG. Skip gamma phonon and go
+      // straight to full phonon which has its own force tolerance.
+      const FORCE_GATE_THRESHOLD = 0.10; // Ry/bohr — above this, DFPT is likely to crash
+      if (scfForce != null && scfForce > FORCE_GATE_THRESHOLD) {
+        console.log(`[QE-Worker] Pre-phonon force gate: ${formula} residual force ${scfForce.toFixed(4)} Ry/bohr > ${FORCE_GATE_THRESHOLD} — skipping Stage 4 gamma phonon (DFPT crash likely)`);
+        console.log(`[QE-Worker] Gamma phonon SKIPPED for ${formula} due to high forces — proceeding to full phonon (it may also fail, but won't waste Stage 4 budget)`);
+        result.gammaPhononPassed = true; // Let full phonon try anyway
+        // Don't set gammaPhononPassed = false — we want to attempt full phonon
+      } else {
+
       try {
         const qeCallbacks = buildQERunnerCallbacks();
         const hasH = elements.includes("H");
@@ -5514,15 +5545,24 @@ ${r2Cell}
           }
         } else {
           result.gammaPhononPassed = true;
-          console.log(`[QE-Worker] Gamma phonon check PASSED for ${formula} — proceeding to full phonon grid`);
+          const wasSkipped = gammaResult.frequencies?.length === 0 && gammaResult.wallTimeSeconds === 0;
+          if (wasSkipped) {
+            console.log(`[QE-Worker] Gamma phonon check SKIPPED for ${formula} (cost too high) — proceeding to full phonon grid without gamma screening`);
+          } else {
+            console.log(`[QE-Worker] Gamma phonon check PASSED for ${formula} (${gammaResult.frequencies?.length ?? 0} modes, lowest=${gammaResult.frequencies && gammaResult.frequencies.length > 0 ? Math.min(...gammaResult.frequencies).toFixed(1) : "N/A"} cm⁻¹) — proceeding to full phonon grid`);
+          }
         }
       } catch (gammaErr: any) {
         console.log(`[QE-Worker] Gamma phonon check error for ${formula}: ${gammaErr.message?.slice(0, 150)} — proceeding to full phonon anyway`);
         // Don't block on Gamma check errors — fall through to full phonon
       }
+      } // close force-gate else
     }
 
     if (scfUsable && !isPartialWalltime && gammaPhononPassed) {
+      // Log pre-full-phonon state for diagnosis
+      console.log(`[QE-Worker] Pre-full-phonon for ${formula}: ${positions.length} atoms, a=${latticeA.toFixed(3)} Å, force=${result.scf?.totalForce?.toFixed(4) ?? "N/A"} Ry/bohr, pressure=${result.scf?.pressure?.toFixed(1) ?? "N/A"} kbar, metallic=${result.scf?.isMetallic ?? "unknown"}`);
+
       // Phonon budget: scale with atom count × electron weight. Heavy hydrides
       // (K2LaH8, LaH12) have 33+ perturbations × expensive mini-SCFs. The old
       // 4× SCF-time multiplier gave ~9h for K2LaH8 which was borderline —

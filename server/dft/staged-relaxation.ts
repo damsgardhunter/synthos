@@ -902,7 +902,8 @@ export async function runStage4GammaPhonon(opts: Stage4Opts): Promise<StageResul
   const estimatedPhSeconds = totalPhCost * SECONDS_PER_COST_UNIT_PH;
 
   // Add 10 min safety margin, floor at 30 min, cap at 4 hours
-  const phTimeoutS = Math.max(1800, Math.min(estimatedPhSeconds + 600, 14400));
+  // Must be integer — QE's max_seconds requires an integer value.
+  const phTimeoutS = Math.round(Math.max(1800, Math.min(estimatedPhSeconds + 600, 14400)));
   const phTimeoutMs = phTimeoutS * 1000;
 
   // Use EXACTLY the same ph.x input as the production Gamma-only phonon
@@ -935,10 +936,10 @@ export async function runStage4GammaPhonon(opts: Stage4Opts): Promise<StageResul
   // gate for this material. Skip directly to Stage 5 (full phonon) which has its
   // own retry logic and up to 48h budget.
   if (estimatedPhSeconds > 14400) {
-    console.log(`[Staged-Relax] ${formula} Stage 4: SKIPPED — estimated ${(estimatedPhSeconds/3600).toFixed(1)}h exceeds 4h screening budget, deferring to full phonon pipeline (Stage 5)`);
+    console.log(`[Staged-Relax] ${formula} Stage 4: SKIPPED (cost too high) — estimated ${(estimatedPhSeconds/3600).toFixed(1)}h exceeds 4h screening budget, deferring to full phonon pipeline (Stage 5). Note: this is NOT a stability pass — gamma phonon was never run.`);
     return {
       stage: 4,
-      passed: true,  // Pass through so Stage 5 runs
+      passed: true,  // Pass through so Stage 5 runs (not a real phonon pass, just a cost skip)
       positions: opts.positions,
       latticeA: opts.latticeA,
       cellVectors: opts.cellVectors,
