@@ -56,7 +56,7 @@ Before DFT, each admitted candidate gets:
 
 1. **Geometry repair** — iterative push-apart for overlapping atoms
 2. **Wyckoff site snapping** — aligns atoms to nearby high-symmetry positions
-3. **Known structure override** — if `lookupKnownStructure(formula)` matches, use exact literature Wyckoff positions and skip xTB
+3. **Known structure override** — if `lookupKnownStructure(formula)` matches, use exact literature Wyckoff positions and skip xTB. Only experimentally verified structures are in the database — predicted/speculative ternary hydrides (LaH11Li2, YH9Na2, Li2LaH12, LaH12) are NOT included so the pipeline can discover them independently
 
 ---
 

@@ -284,11 +284,12 @@ const KNOWN_STRUCTURES: Record<string, KnownStructure> = {
   "CeH9":  { formula: "CeH9", spaceGroup: "P63/mmc", spaceGroupNumber: 194, latticeType: "hexagonal", latticeA: 4.85, latticeC: 7.52, pressureGPa: 150, atoms: YH9_ATOMS.map(a => ({ ...a, element: a.element === "Y" ? "Ce" : a.element })) },
   "ScH9":  { formula: "ScH9", spaceGroup: "P63/mmc", spaceGroupNumber: 194, latticeType: "hexagonal", latticeA: 4.20, latticeC: 6.51, pressureGPa: 200, atoms: YH9_ATOMS.map(a => ({ ...a, element: a.element === "Y" ? "Sc" : a.element })) },
 
-  // Ternary hydrides
-  "Li2LaH12": { formula: "Li2LaH12", spaceGroup: "Fm-3m", spaceGroupNumber: 225, latticeType: "cubic", latticeA: 5.10, pressureGPa: 175, atoms: Li2LaH12_ATOMS },
-  "LaH11Li2": { formula: "LaH11Li2", spaceGroup: "Fm-3m", spaceGroupNumber: 225, latticeType: "cubic", latticeA: 5.10, pressureGPa: 175, atoms: LaH11Li2_ATOMS },
-  "YH9Na2":  { formula: "YH9Na2", spaceGroup: "P63/mmc", spaceGroupNumber: 194, latticeType: "hexagonal", latticeA: 4.20, latticeC: 6.51, pressureGPa: 200, atoms: YH9Na2_ATOMS },
-  "LaH12":   { formula: "LaH12", spaceGroup: "Fm-3m", spaceGroupNumber: 225, latticeType: "cubic", latticeA: 5.10, pressureGPa: 175, atoms: LaH12_ATOMS },
+  // Ternary/novel hydrides — REMOVED from known-structures.
+  // These are predicted/speculative structures, NOT experimentally verified.
+  // Keeping them here prevents the CSP pipeline from discovering the
+  // actual structure independently. The pipeline should find these on its own
+  // through AIRSS/PyXtal/cage-seeding without being fed guessed positions.
+  // Removed: Li2LaH12, LaH11Li2, YH9Na2, LaH12
 
   // Simple hydrides
   "ScH3":  { formula: "ScH3", spaceGroup: "Fm-3m", spaceGroupNumber: 225, latticeType: "cubic", latticeA: 4.48, pressureGPa: 0, atoms: ScH3_ATOMS },
