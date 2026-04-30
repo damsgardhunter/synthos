@@ -281,12 +281,22 @@ function computeStage1Params(elements: string[], totalAtoms: number, counts?: Re
   const SAFETY_MARGIN_S = 600;
   const timeoutSeconds = estimatedSeconds + SAFETY_MARGIN_S;
 
-  // Floor at 15 min (simple systems), cap at 90 min (avoid hogging the worker)
-  const clampedTimeoutS = Math.max(900, Math.min(timeoutSeconds, 5400));
+  // Floor at 15 min (simple systems).
+  // Cap depends on system complexity:
+  // - Simple non-magnetic: 90 min (5400s)
+  // - Magnetic (nspin=2): 150 min (9000s) — spin-polarized SCF converges
+  //   much slower, especially for pnictides (BaFe2As2, FeSe) where spin
+  //   ordering competes with charge ordering. BaFe2As2 S1 candidate 1
+  //   hit the 90-min cap without producing positions.
+  // - Magnetic + heavy elements: 180 min (10800s)
+  const maxTimeoutS = hasMagnetic
+    ? (heavyCount >= 1 ? 10800 : 9000)
+    : 5400;
+  const clampedTimeoutS = Math.max(900, Math.min(timeoutSeconds, maxTimeoutS));
   const timeoutMs = clampedTimeoutS * 1000;
   const maxSeconds = Math.floor(clampedTimeoutS) - 60; // QE max_seconds slightly under timeout
 
-  console.log(`[Staged-Relax] Cost model: ${totalAtoms} atoms, ${cellElectrons.toFixed(0)} e-, ${nKpoints} kpts, nspin=${nspinFactor} → cost=${costFactor.toFixed(0)}, est=${estimatedSeconds.toFixed(0)}s, timeout=${clampedTimeoutS.toFixed(0)}s`);
+  console.log(`[Staged-Relax] Cost model: ${totalAtoms} atoms, ${cellElectrons.toFixed(0)} e-, ${nKpoints} kpts, nspin=${nspinFactor} → cost=${costFactor.toFixed(0)}, est=${estimatedSeconds.toFixed(0)}s, timeout=${clampedTimeoutS.toFixed(0)}s${hasMagnetic ? " (magnetic)" : ""}`);
 
   return { timeoutMs, ecutwfcScale, kspacingOverride: kspacing, maxSeconds };
 }
