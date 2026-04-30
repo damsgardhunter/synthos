@@ -911,9 +911,11 @@ let lastStaleCleanup = 0;
 // High-priority compounds that must always be at the front of the queue.
 // These are submitted at priority 9999 on startup if not already running/completed.
 const CRITICAL_PRIORITY_FORMULAS: string[] = [
-  // Ternary high-P hydrides (flagship discoveries)
+  // Novel hydrides — CSP must discover structures independently (no known-structures override)
   "Li2LaH12", "LaH11Li2", "LaH12", "YH9Na2",
-  // Binary high-P hydrides (benchmark superconductors)
+  // Predicted hydrides — removed from known-structures, need full CSP discovery
+  "SrH6", "LaH6", "ScH6", "ScH9", "BaH6", "MgH6", "ThH9",
+  // Binary high-P hydrides (benchmark superconductors, experimentally verified)
   "LaH10", "CaH6", "YH6", "H3S", "YH9", "ThH10", "CeH9",
   // Conventional superconductors (validation targets)
   "MgB2", "Nb3Sn", "Nb3Ge", "V3Si",

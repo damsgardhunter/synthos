@@ -269,20 +269,18 @@ const KNOWN_STRUCTURES: Record<string, KnownStructure> = {
   "ThH10": { formula: "ThH10", spaceGroup: "Fm-3m", spaceGroupNumber: 225, latticeType: "cubic", latticeA: 4.79, pressureGPa: 175, atoms: ThH10_ATOMS },
   "CeH10": { formula: "CeH10", spaceGroup: "Fm-3m", spaceGroupNumber: 225, latticeType: "cubic", latticeA: 5.00, pressureGPa: 200, atoms: CeH10_ATOMS },
 
-  // Im-3m sodalite hydrides
-  "CaH6":  { formula: "CaH6", spaceGroup: "Im-3m", spaceGroupNumber: 229, latticeType: "cubic", latticeA: 3.85, pressureGPa: 200, atoms: SODALITE_H6_ATOMS("Ca") },
-  "YH6":   { formula: "YH6", spaceGroup: "Im-3m", spaceGroupNumber: 229, latticeType: "cubic", latticeA: 3.95, pressureGPa: 200, atoms: SODALITE_H6_ATOMS("Y") },
-  "SrH6":  { formula: "SrH6", spaceGroup: "Im-3m", spaceGroupNumber: 229, latticeType: "cubic", latticeA: 4.10, pressureGPa: 200, atoms: SODALITE_H6_ATOMS("Sr") },
-  "LaH6":  { formula: "LaH6", spaceGroup: "Im-3m", spaceGroupNumber: 229, latticeType: "cubic", latticeA: 4.20, pressureGPa: 175, atoms: SODALITE_H6_ATOMS("La") },
-  "ScH6":  { formula: "ScH6", spaceGroup: "Im-3m", spaceGroupNumber: 229, latticeType: "cubic", latticeA: 3.70, pressureGPa: 200, atoms: SODALITE_H6_ATOMS("Sc") },
+  // Im-3m sodalite hydrides — only experimentally verified
+  "CaH6":  { formula: "CaH6", spaceGroup: "Im-3m", spaceGroupNumber: 229, latticeType: "cubic", latticeA: 3.85, pressureGPa: 200, atoms: SODALITE_H6_ATOMS("Ca") },  // Ma et al. 2022
+  "YH6":   { formula: "YH6", spaceGroup: "Im-3m", spaceGroupNumber: 229, latticeType: "cubic", latticeA: 3.95, pressureGPa: 200, atoms: SODALITE_H6_ATOMS("Y") },   // Troyan et al. 2021
+  // Removed: SrH6, LaH6, ScH6 — predicted but not experimentally synthesized. Let CSP discover.
 
   // Im-3m BCC hydrides
   "H3S":   { formula: "H3S", spaceGroup: "Im-3m", spaceGroupNumber: 229, latticeType: "cubic", latticeA: 3.10, pressureGPa: 200, atoms: H3S_ATOMS },
 
   // P63/mmc hexagonal clathrate
   "YH9":   { formula: "YH9", spaceGroup: "P63/mmc", spaceGroupNumber: 194, latticeType: "hexagonal", latticeA: 4.20, latticeC: 6.51, pressureGPa: 200, atoms: YH9_ATOMS },
-  "CeH9":  { formula: "CeH9", spaceGroup: "P63/mmc", spaceGroupNumber: 194, latticeType: "hexagonal", latticeA: 4.85, latticeC: 7.52, pressureGPa: 150, atoms: YH9_ATOMS.map(a => ({ ...a, element: a.element === "Y" ? "Ce" : a.element })) },
-  "ScH9":  { formula: "ScH9", spaceGroup: "P63/mmc", spaceGroupNumber: 194, latticeType: "hexagonal", latticeA: 4.20, latticeC: 6.51, pressureGPa: 200, atoms: YH9_ATOMS.map(a => ({ ...a, element: a.element === "Y" ? "Sc" : a.element })) },
+  "CeH9":  { formula: "CeH9", spaceGroup: "P63/mmc", spaceGroupNumber: 194, latticeType: "hexagonal", latticeA: 4.85, latticeC: 7.52, pressureGPa: 150, atoms: YH9_ATOMS.map(a => ({ ...a, element: a.element === "Y" ? "Ce" : a.element })) },  // Salke et al. 2019
+  // Removed: ScH9 — predicted but not experimentally synthesized. Let CSP discover.
 
   // Ternary/novel hydrides — REMOVED from known-structures.
   // These are predicted/speculative structures, NOT experimentally verified.
@@ -1378,10 +1376,8 @@ const KNOWN_STRUCTURES: Record<string, KnownStructure> = {
     { element: "C", x: 0.3333, y: 0.6667, z: 0.5, wyckoff: "1d" },
   ]},
 
-  // Additional sodalite hydride variants
-  "BaH6":  { formula: "BaH6", spaceGroup: "Im-3m", spaceGroupNumber: 229, latticeType: "cubic", latticeA: 4.20, pressureGPa: 150, atoms: SODALITE_H6_ATOMS("Ba") },
-  "MgH6":  { formula: "MgH6", spaceGroup: "Im-3m", spaceGroupNumber: 229, latticeType: "cubic", latticeA: 3.60, pressureGPa: 300, atoms: SODALITE_H6_ATOMS("Mg") },
-  "ThH9":  { formula: "ThH9", spaceGroup: "P63/mmc", spaceGroupNumber: 194, latticeType: "hexagonal", latticeA: 4.62, latticeC: 7.16, pressureGPa: 175, atoms: YH9_ATOMS.map(a => ({ ...a, element: a.element === "Y" ? "Th" : a.element })) },
+  // Removed: BaH6, MgH6, ThH9 — predicted but not experimentally synthesized.
+  // Let the CSP pipeline discover these structures independently.
 };
 
 // ---------------------------------------------------------------------------
