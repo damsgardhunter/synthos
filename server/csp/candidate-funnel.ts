@@ -437,14 +437,15 @@ export async function runCandidateFunnel(
       const maxEval = Math.min(f6Candidates.length, tier === "preview" ? 50 : tier === "standard" ? 150 : 300);
 
       // Scale timeout with number of structures and estimated atom count.
-      // Full relaxation with fmax=0.02 and 100-500 steps takes ~20-30s per
-      // structure for 10-15 atom hydride cells (observed: 52 structures × 12
-      // atoms took ~1040s = 20s/struct = 1.7s/atom). Use 2.5s/atom with 50%
-      // safety margin to avoid cutting off right at the boundary.
+      // Non-hydrides (V3Si, BaFe2As2) finish in 7-14 min for 50 candidates.
+      // Hydrides are 3-5× slower due to light H atoms needing more relaxation
+      // steps to converge. Use higher cap for hydrides.
+      const hasH = elements.includes("H");
       const avgAtoms = f6Candidates.reduce((sum, c) => sum + (c.positions?.length ?? 10), 0) / f6Candidates.length;
-      const perStructureMs = Math.max(15000, Math.round(avgAtoms * 2500)); // ~2.5s per atom for full relaxation
+      const perStructureMs = Math.max(15000, Math.round(avgAtoms * (hasH ? 4000 : 2500))); // hydrides: 4s/atom, others: 2.5s/atom
+      const hardCapMs = hasH ? 3600000 : 1800000; // hydrides: 60 min, others: 30 min
       const timeoutMs = Math.round(Math.min(
-        1800000, // hard cap: 30 min
+        hardCapMs,
         Math.max(600000, Math.round(maxEval * perStructureMs * 1.5) + 120000) // 50% safety margin + 120s overhead
       ));
 
