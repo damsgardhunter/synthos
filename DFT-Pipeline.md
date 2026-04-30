@@ -96,7 +96,7 @@ Five sequential stages with gating between each:
 
 | Stage | Type | Time | What |
 |-------|------|------|------|
-| **1** | Atomic relax (fixed cell) | 10-15 min x N candidates | Tests all admitted candidates. Keeps top K for Stage 2 (tier-dependent: preview=2, standard=5, deep=10, publication=20). Budget: floor(90min / perCandidateMs), min 2 |
+| **1** | Atomic relax (fixed cell) | 10-15 min x N candidates | Tests all admitted candidates. Ranks by **per-atom energy** (not total energy — prevents Z-mismatch where a Z=4 supercell beats Z=1 on total E but is worse per atom). Keeps top K for Stage 2 (tier-dependent: preview=2, standard=5, deep=10, publication=20). Budget: floor(90min / perCandidateMs), min 2. **Z-mismatch guard**: if the winner has more atoms than the primitive cell expects, regenerates positions from known-structure or generateAtomicPositions |
 | **2** | vc-relax (variable cell) | 30 min x K candidates | Full cell + position optimization on each Stage 1 winner. **Post-DFT dedup**: detects when multiple starting structures collapse to the same DFT minimum (pair-distance fingerprint, 3% tolerance) — skips duplicates to save phonon compute. Picks the lowest-energy unique result. Iterative lattice rescaling if shift >6-10% (max 6% per step). Mini-EOS pressure correction (5 volume points) |
 | **3** | Final SCF | ~15 min | Production-quality electronic structure at relaxed geometry |
 | **4** | Gamma-point DFPT phonon | 30 min | Fast dynamical stability screen. 2-attempt retry. Pass: <=3 small imaginary modes |

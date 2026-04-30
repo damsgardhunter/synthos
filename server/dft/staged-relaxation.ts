@@ -365,10 +365,21 @@ export async function runStagedRelaxation(opts: StagedRelaxationOpts): Promise<S
     };
     const maxStage2Candidates = stage2KeepCount[tier] ?? 2;
 
-    // Sort Stage 1 results by energy (lowest first)
+    // Sort Stage 1 results by PER-ATOM energy (lowest first).
+    // CRITICAL: must use per-atom energy, not total energy!
+    // Different Z values (Z=1 vs Z=4) produce different atom counts.
+    // Total energy scales with atom count, so a Z=4 supercell (12 atoms)
+    // will always have lower total energy than Z=1 (3 atoms) even if the
+    // per-atom energy is worse. This caused MgB2 to pick Z=4 (12 atoms,
+    // a=6.444) then crash when iterative rescaling compressed those 12
+    // atoms into the Z=1 literature cell (a=3.09).
     const passedS1 = stage1Results.filter(r => r.result.passed);
     const allS1Sorted = passedS1.length > 0 ? passedS1 : stage1Results;
-    allS1Sorted.sort((a, b) => a.result.totalEnergy - b.result.totalEnergy);
+    const perAtomEnergy = (r: { result: StageResult; candidate: StructureCandidate }) => {
+      const nAtoms = r.result.positions.length || r.candidate.positions.length || 1;
+      return r.result.totalEnergy / nAtoms;
+    };
+    allS1Sorted.sort((a, b) => perAtomEnergy(a) - perAtomEnergy(b));
 
     if (passedS1.length > 0) {
       const kept = passedS1.slice(0, maxStage2Candidates);
@@ -379,7 +390,8 @@ export async function runStagedRelaxation(opts: StagedRelaxationOpts): Promise<S
       stages.push(best.result);
       console.log(`[Staged-Relax] ${formula} Stage 1: ${passedS1.length} passed, keeping top ${kept.length} for Stage 2 (tier=${tier})`);
       for (let ki = 0; ki < kept.length; ki++) {
-        console.log(`[Staged-Relax]   #${ki + 1}: ${kept[ki].candidate.source} (E=${kept[ki].result.totalEnergy.toFixed(4)} eV)`);
+        const nAtoms = kept[ki].result.positions.length || kept[ki].candidate.positions.length || 1;
+        console.log(`[Staged-Relax]   #${ki + 1}: ${kept[ki].candidate.source} (E=${kept[ki].result.totalEnergy.toFixed(4)} eV, ${nAtoms} atoms, E/atom=${perAtomEnergy(kept[ki]).toFixed(4)} eV)`);
       }
     } else if (stage1Results.length > 0) {
       // No candidate passed — use the one with lowest energy anyway (best effort)
@@ -453,13 +465,15 @@ export async function runStagedRelaxation(opts: StagedRelaxationOpts): Promise<S
             relaxedStructures.push({ positions: s2.positions, latticeA: s2.latticeA, source: s2Cand.candidate.source });
           }
 
-          if (s2.passed && s2.totalEnergy < bestS2Energy) {
-            bestS2Energy = s2.totalEnergy;
+          const s2NAtoms = s2.positions.length || 1;
+          const s2EPerAtom = s2.totalEnergy / s2NAtoms;
+          if (s2.passed && s2EPerAtom < bestS2Energy) {
+            bestS2Energy = s2EPerAtom;
             bestS2Result = s2;
             bestS2Source = s2Cand.candidate.source;
-            console.log(`[Staged-Relax] ${formula} Stage 2 candidate ${s2i + 1}: PASSED (force=${s2.maxForce?.toExponential(2)}, E=${s2.totalEnergy.toFixed(4)} eV, a=${s2.latticeA.toFixed(3)} A, P=${s2.pressure?.toFixed(1)} kbar, wall=${s2.wallTimeSeconds.toFixed(0)}s) — new best`);
+            console.log(`[Staged-Relax] ${formula} Stage 2 candidate ${s2i + 1}: PASSED (force=${s2.maxForce?.toExponential(2)}, E/atom=${s2EPerAtom.toFixed(4)} eV, a=${s2.latticeA.toFixed(3)} A, P=${s2.pressure?.toFixed(1)} kbar, wall=${s2.wallTimeSeconds.toFixed(0)}s) — new best`);
           } else if (s2.passed) {
-            console.log(`[Staged-Relax] ${formula} Stage 2 candidate ${s2i + 1}: PASSED but not lowest E (E=${s2.totalEnergy.toFixed(4)} vs best=${bestS2Energy.toFixed(4)})`);
+            console.log(`[Staged-Relax] ${formula} Stage 2 candidate ${s2i + 1}: PASSED but not lowest E/atom (${s2EPerAtom.toFixed(4)} vs best=${bestS2Energy.toFixed(4)})`);
           } else {
             console.log(`[Staged-Relax] ${formula} Stage 2 candidate ${s2i + 1}: FAILED — ${s2.failReason}`);
             // Track partial result if it's the only one
@@ -485,7 +499,7 @@ export async function runStagedRelaxation(opts: StagedRelaxationOpts): Promise<S
           bestLatticeA = bestS2Result.latticeA;
           bestCellVectors = bestS2Result.cellVectors;
           candidateSource = bestS2Source;
-          console.log(`[Staged-Relax] ${formula} Stage 2: best winner from ${bestS2Source} (E=${bestS2Energy.toFixed(4)} eV, a=${bestLatticeA.toFixed(3)} A)`);
+          console.log(`[Staged-Relax] ${formula} Stage 2: best winner from ${bestS2Source} (E/atom=${bestS2Energy.toFixed(4)} eV, a=${bestLatticeA.toFixed(3)} A)`);
         } else {
           if (bestS2Result.positions.length > 0) bestPositions = bestS2Result.positions;
           if (bestS2Result.latticeA > 0) bestLatticeA = bestS2Result.latticeA;

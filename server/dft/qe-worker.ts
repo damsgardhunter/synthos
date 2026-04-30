@@ -4451,6 +4451,26 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       result.vcRelaxed = true;
     }
 
+    // --- Z-mismatch guard ---
+    // If Stage 1 selected a supercell candidate (e.g. Z=4, 12 atoms) but the
+    // literature lattice is for the primitive cell (e.g. Z=1, 3 atoms), we must
+    // regenerate positions for the correct atom count. Otherwise iterative
+    // rescaling will compress 12 atoms into a cell meant for 3 → QE "too few bands".
+    const expectedAtoms = Object.values(counts).reduce((s, n) => s + Math.round(n), 0);
+    if (positions.length !== expectedAtoms && isKnownCompound) {
+      const Z = Math.round(positions.length / expectedAtoms);
+      console.log(`[QE-Worker] Z-mismatch for ${formula}: Stage 1 winner has ${positions.length} atoms (Z=${Z}) but formula expects ${expectedAtoms} — regenerating primitive cell positions`);
+      // Look up the known structure positions for the primitive cell
+      const ksLookup = lookupKnownStructure(normFormula);
+      if (ksLookup && ksLookup.atoms.length === expectedAtoms) {
+        positions = ksLookup.atoms.map(a => ({ element: a.element, x: a.x, y: a.y, z: a.z }));
+        console.log(`[QE-Worker] Using known-structure positions for ${formula} (${expectedAtoms} atoms, ${ksLookup.spaceGroup})`);
+      } else {
+        positions = generateAtomicPositions(elements, counts, formula, latticeA);
+        console.log(`[QE-Worker] Regenerated positions for ${formula} (${positions.length} atoms) at a=${latticeA.toFixed(3)} Å`);
+      }
+    }
+
     // When vc-relax is skipped and the lattice was rescaled significantly
     // (e.g., from Vegard estimate to literature value), atomic positions are
     // wrong for the new cell. Run a quick fixed-cell relax to bring forces
