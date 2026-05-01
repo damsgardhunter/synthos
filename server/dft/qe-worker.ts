@@ -5483,22 +5483,42 @@ ${cellBlockEos}
         const { computeMiedemaFormationEnergy } = await import("../learning/phase-diagram-engine");
         const miedemaH = computeMiedemaFormationEnergy(formula);
         if (miedemaH != null && isFinite(miedemaH)) {
-          // Convert Miedema formation energy to hull distance estimate.
-          // Miedema gives formation enthalpy in eV/atom relative to elements.
-          // Negative = exothermic (stable), positive = endothermic (unstable).
-          // Use as a rough hull distance proxy (true hull needs all competing phases).
-          const hullDistMeV = miedemaH * 1000; // eV → meV
-          const label: "on_hull" | "near_hull" | "metastable" | "highly_metastable" | "unknown_hull" =
-            hullDistMeV <= 0 ? "on_hull" :
-            hullDistMeV <= 25 ? "near_hull" :
-            hullDistMeV <= 75 ? "metastable" : "highly_metastable";
+          // Miedema gives formation enthalpy relative to ELEMENTS (not the hull).
+          // Negative = exothermic vs elements (likely stable).
+          // Positive = endothermic vs elements (likely unstable).
+          //
+          // This is NOT a true hull distance (which requires all competing phases).
+          // It's a stability indicator: strongly negative means the compound wants
+          // to form, strongly positive means it wants to decompose.
+          //
+          // For hydrides, Miedema hits the -8 eV/atom floor (model not calibrated
+          // for metal-H bonding at extreme pressure). Treat these as "unknown_hull"
+          // rather than reporting bogus numbers.
+          const miedemaReliable = Math.abs(miedemaH) < 5.0; // Miedema floor/ceiling = unreliable
+          const formationMeV = miedemaH * 1000;
 
-          result.hullStability = {
-            hullDistanceMeVAtom: Math.round(hullDistMeV * 10) / 10,
-            label,
-            computedFromDFT: false, // Miedema proxy, not full DFT hull
-          };
-          console.log(`[QE-Worker] Hull stability for ${formula}: ${label} (Miedema ΔH=${hullDistMeV.toFixed(1)} meV/atom, E_DFT/atom=${ePerAtom.toFixed(4)} eV)`);
+          if (miedemaReliable) {
+            // Use formation energy as a proxy for stability tendency:
+            // Very negative (<-500 meV) = strongly wants to form → likely on/near hull
+            // Mildly negative (-500 to 0) = moderately stable
+            // Positive (0 to +200) = mildly unstable → near_hull or metastable
+            // Very positive (>+200) = highly unstable
+            const label: "on_hull" | "near_hull" | "metastable" | "highly_metastable" | "unknown_hull" =
+              formationMeV < -200 ? "on_hull" :
+              formationMeV < 0 ? "near_hull" :
+              formationMeV < 100 ? "metastable" : "highly_metastable";
+
+            result.hullStability = {
+              hullDistanceMeVAtom: Math.round(Math.max(0, formationMeV) * 10) / 10, // only positive values are "above hull"
+              label,
+              computedFromDFT: false,
+            };
+            console.log(`[QE-Worker] Hull stability for ${formula}: ${label} (Miedema ΔHf=${miedemaH.toFixed(3)} eV/atom = ${formationMeV.toFixed(0)} meV/atom, E_DFT/atom=${ePerAtom.toFixed(4)} eV)`);
+          } else {
+            // Miedema hit floor/ceiling — unreliable for this composition (e.g. hydrides)
+            result.hullStability = { hullDistanceMeVAtom: 0, label: "unknown_hull", computedFromDFT: false };
+            console.log(`[QE-Worker] Hull stability for ${formula}: unknown_hull (Miedema=${miedemaH.toFixed(2)} eV/atom — hit model limits, unreliable for this composition)`);
+          }
         } else {
           result.hullStability = { hullDistanceMeVAtom: 0, label: "unknown_hull", computedFromDFT: false };
           console.log(`[QE-Worker] Hull stability for ${formula}: unknown (Miedema not available for this composition)`);
