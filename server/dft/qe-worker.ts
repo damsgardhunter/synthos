@@ -263,6 +263,10 @@ export interface QEDFPTResult {
   wallTimeSeconds: number;
   source: "ph.x-stdout" | "a2F-file" | "none";
   warnings: string[];
+  /** Method provenance for electron-phonon coupling — only "dfpt_eph" is physics-grade. */
+  alpha2FMethod?: "dfpt_eph" | "surrogate_eph" | "heuristic_eph" | "unavailable";
+  /** Method provenance for lambda — only "dfpt_integrated_alpha2F" is physics-grade. */
+  lambdaMethod?: "dfpt_integrated_alpha2F" | "surrogate_alpha2F" | "estimated_from_dos_phonons";
 }
 
 export interface QEFullResult {
@@ -321,6 +325,13 @@ export interface QEFullResult {
   /** Whether the DFT quality gate passed before Tc estimation. */
   qualityGatePassed?: boolean;
   qualityGateReasons?: string[];
+  /** Convex hull stability assessment. */
+  hullStability?: {
+    hullDistanceMeVAtom: number;
+    label: "on_hull" | "near_hull" | "metastable" | "highly_metastable" | "unknown_hull";
+    decompositionProducts?: string[];
+    computedFromDFT: boolean;
+  };
   /** Uncertainty and confidence for all final results. */
   uncertainty?: {
     tcConfidence: "high" | "medium" | "low" | "surrogate";
@@ -3750,6 +3761,16 @@ async function runDFPTEPC(
   const tcBest = Math.max(tcAllenDynes, tcEliashberg);
   console.log(`[QE-Worker] DFPT EPC result for ${formula}: λ=${lambda.toFixed(3)}, ω_log=${omegaLog.toFixed(0)} K, Tc=${tcBest.toFixed(1)} K (source=${source})`);
 
+  // Determine method provenance — only actual DFPT e-ph is physics-grade
+  const alpha2FMethod: "dfpt_eph" | "surrogate_eph" | "heuristic_eph" | "unavailable" =
+    source === "a2F-file" ? "dfpt_eph" :
+    source === "ph.x-stdout" ? "dfpt_eph" : "unavailable";
+  const lambdaMethod: "dfpt_integrated_alpha2F" | "surrogate_alpha2F" | "estimated_from_dos_phonons" =
+    source === "a2F-file" ? "dfpt_integrated_alpha2F" :
+    source === "ph.x-stdout" ? "dfpt_integrated_alpha2F" : "estimated_from_dos_phonons";
+
+  console.log(`[QE-Worker] DFPT method labels for ${formula}: alpha2F=${alpha2FMethod}, lambda=${lambdaMethod}`);
+
   return {
     lambda: Number(lambda.toFixed(4)),
     omegaLog: Number(omegaLog.toFixed(2)),
@@ -3763,6 +3784,8 @@ async function runDFPTEPC(
     wallTimeSeconds: (Date.now() - t0) / 1000,
     source,
     warnings,
+    alpha2FMethod,
+    lambdaMethod,
   };
 }
 
@@ -5326,6 +5349,45 @@ ${cellBlockEos}
     }
     // Upgraded later: final_converged after phonon, publication_ready after e-ph
 
+    // --- Stage 5.5: Convex hull stability assessment ---
+    // After SCF converges, estimate how far this structure is from the
+    // convex hull of competing phases. This answers "is this formula
+    // stable against decomposition at this pressure?"
+    if (scfConverged && result.scf && result.scf.totalEnergy !== 0) {
+      try {
+        const ePerAtom = result.scf.totalEnergy / positions.length;
+        // Use Miedema model for a quick decomposition enthalpy estimate.
+        // Full DFT convex hull requires computing all competing phases
+        // (future work), but Miedema gives a rough formation energy.
+        const { computeMiedemaFormationEnergy } = await import("../learning/phase-diagram-engine");
+        const miedemaH = computeMiedemaFormationEnergy(formula);
+        if (miedemaH != null && isFinite(miedemaH)) {
+          // Convert Miedema formation energy to hull distance estimate.
+          // Miedema gives formation enthalpy in eV/atom relative to elements.
+          // Negative = exothermic (stable), positive = endothermic (unstable).
+          // Use as a rough hull distance proxy (true hull needs all competing phases).
+          const hullDistMeV = miedemaH * 1000; // eV → meV
+          const label: "on_hull" | "near_hull" | "metastable" | "highly_metastable" | "unknown_hull" =
+            hullDistMeV <= 0 ? "on_hull" :
+            hullDistMeV <= 25 ? "near_hull" :
+            hullDistMeV <= 75 ? "metastable" : "highly_metastable";
+
+          result.hullStability = {
+            hullDistanceMeVAtom: Math.round(hullDistMeV * 10) / 10,
+            label,
+            computedFromDFT: false, // Miedema proxy, not full DFT hull
+          };
+          console.log(`[QE-Worker] Hull stability for ${formula}: ${label} (Miedema ΔH=${hullDistMeV.toFixed(1)} meV/atom, E_DFT/atom=${ePerAtom.toFixed(4)} eV)`);
+        } else {
+          result.hullStability = { hullDistanceMeVAtom: 0, label: "unknown_hull", computedFromDFT: false };
+          console.log(`[QE-Worker] Hull stability for ${formula}: unknown (Miedema not available for this composition)`);
+        }
+      } catch (hullErr: any) {
+        result.hullStability = { hullDistanceMeVAtom: 0, label: "unknown_hull", computedFromDFT: false };
+        console.log(`[QE-Worker] Hull stability computation failed for ${formula}: ${hullErr.message?.slice(0, 80)}`);
+      }
+    }
+
     // --- Quality-weighted adaptive learning signal ---
     // Record DFT convergence as a stronger signal than funnel survival.
     // The funnel already recorded funnel_survival (weight 0.1) for all
@@ -6166,6 +6228,102 @@ ${r2Cell}
     console.log(`[QE-Worker] ${formula} uncertainty: Tc=${tcConfidence}, lambda=${lambdaConfidence}, phonon=${phononConfidence}, structure=${structureConfidence}, eph=${ephMethod}, phonon_method=${phononMethod}`);
     console.log(`[QE-Worker] ${formula} Tc uncertainty reason: ${result.uncertainty.tcUncertaintyReason}`);
 
+    // --- Reproducibility bundle for screening_converged+ ---
+    // Note: at this point qualityTier is at most "relaxed" — final_converged/publication_ready
+    // are assigned later based on phonon/DFPT. Save bundle for any non-failed tier.
+    const bundleTier = result.qualityTier ?? "failed";
+    if (bundleTier !== "failed") {
+      try {
+        const bundleDir = path.join(jobDir, "reproducibility_bundle");
+        fs.mkdirSync(bundleDir, { recursive: true });
+
+        fs.writeFileSync(path.join(bundleDir, "quality_report.json"), JSON.stringify({
+          formula, qualityTier: bundleTier,
+          qualityGatePassed: result.qualityGatePassed,
+          qualityGateReasons: result.qualityGateReasons,
+          uncertainty: result.uncertainty,
+          hullStability: result.hullStability,
+          scfConverged: result.scf?.converged,
+          scfAccuracy: result.scf?.lastScfAccuracyRy,
+          residualForce: result.scf?.totalForce,
+          residualPressure: result.scf?.pressure,
+          isMetallic: result.scf?.isMetallic,
+          bandGap: result.scf?.bandGap,
+          phononModes: result.phonon?.frequencies?.length ?? 0,
+          phononStable: result.phonon ? result.phonon.lowestFrequency > -10 : null,
+          hasDFPT: result.dfpt != null,
+          dfptMethodLabels: result.dfpt ? { alpha2F: (result.dfpt as any).alpha2FMethod, lambda: (result.dfpt as any).lambdaMethod } : null,
+          wallTimeTotal: (Date.now() - startTime) / 1000,
+          timestamp: new Date().toISOString(),
+        }, null, 2));
+
+        fs.writeFileSync(path.join(bundleDir, "candidate_provenance.json"), JSON.stringify({
+          formula, prototypeUsed: result.prototypeUsed, provenance: result.provenance,
+          vegardEstimate: result.vegardEstimate,
+          structureCandidatesEvaluated: result.structureCandidatesEvaluated,
+          stagedRelaxation: result.stagedRelaxation,
+          latticeA, pressureGPa: workerPressure, elements, counts, nAtoms: positions.length,
+        }, null, 2));
+
+        // Final structure as POSCAR
+        if (positions.length > 0) {
+          let poscar = `${formula} (${bundleTier})\n1.0\n`;
+          const cOA = estimateCOverA(elements, counts);
+          poscar += `  ${latticeA.toFixed(6)}  0.000000  0.000000\n`;
+          poscar += `  0.000000  ${latticeA.toFixed(6)}  0.000000\n`;
+          poscar += `  0.000000  0.000000  ${(latticeA * cOA).toFixed(6)}\n`;
+          const elOrder = [...new Set(positions.map(p => p.element))].sort();
+          poscar += elOrder.join(" ") + "\n";
+          poscar += elOrder.map(el => positions.filter(p => p.element === el).length).join(" ") + "\n";
+          poscar += "Direct\n";
+          for (const el of elOrder) {
+            for (const p of positions.filter(pp => pp.element === el)) {
+              poscar += `  ${p.x.toFixed(8)}  ${p.y.toFixed(8)}  ${p.z.toFixed(8)}\n`;
+            }
+          }
+          fs.writeFileSync(path.join(bundleDir, "final_structure.poscar"), poscar);
+        }
+        if (result.scf) fs.writeFileSync(path.join(bundleDir, "scf_summary.json"), JSON.stringify({ totalEnergy: result.scf.totalEnergy, fermiEnergy: result.scf.fermiEnergy, totalForce: result.scf.totalForce, pressure: result.scf.pressure, converged: result.scf.converged, isMetallic: result.scf.isMetallic, bandGap: result.scf.bandGap }, null, 2));
+        if (result.dfpt) fs.writeFileSync(path.join(bundleDir, "dfpt_results.json"), JSON.stringify(result.dfpt, null, 2));
+        if (result.phonon) fs.writeFileSync(path.join(bundleDir, "phonon_summary.json"), JSON.stringify({ frequencies: result.phonon.frequencies, lowestFrequency: result.phonon.lowestFrequency, highestFrequency: result.phonon.highestFrequency, imaginaryCount: result.phonon.imaginaryCount, hasImaginary: result.phonon.hasImaginary, converged: result.phonon.converged }, null, 2));
+
+        console.log(`[QE-Worker] Reproducibility bundle saved for ${formula} (tier=${bundleTier}) at ${bundleDir}`);
+      } catch (bundleErr: any) {
+        console.log(`[QE-Worker] Failed to save reproducibility bundle for ${formula}: ${bundleErr.message?.slice(0, 100)}`);
+      }
+    }
+
+    // --- Method-based quality tier caps ---
+    // xTB/surrogate phonons and e-ph cannot reach high quality tiers.
+    // Only full DFPT can be publication_ready.
+    const currentTier = result.qualityTier ?? "failed";
+    const tierRank: Record<string, number> = {
+      failed: 0, partial_screening: 1, screening_converged: 2,
+      relaxed: 3, final_converged: 4, publication_ready: 5,
+    };
+    // Max tier based on phonon method
+    const phononMethodMaxTier: Record<string, string> = {
+      dfpt_full: "publication_ready",
+      dfpt_gamma: "final_converged",
+      finite_displacement: "screening_converged",
+      surrogate: "screening_converged",
+      none: "relaxed",
+    };
+    // Max tier based on e-ph method
+    const ephMethodMaxTier: Record<string, string> = {
+      dfpt: "publication_ready",
+      surrogate: "screening_converged",
+      none: "relaxed",
+    };
+    const phMaxTier = phononMethodMaxTier[phononMethod] ?? "relaxed";
+    const ephMaxTier = ephMethodMaxTier[ephMethod] ?? "relaxed";
+    const effectiveMaxTier = (tierRank[phMaxTier] ?? 0) < (tierRank[ephMaxTier] ?? 0) ? phMaxTier : ephMaxTier;
+
+    if ((tierRank[currentTier] ?? 0) > (tierRank[effectiveMaxTier] ?? 0)) {
+      console.log(`[QE-Worker] Tier cap: ${formula} downgraded from ${currentTier} to ${effectiveMaxTier} (phonon_method=${phononMethod}, eph_method=${ephMethod})`);
+      result.qualityTier = effectiveMaxTier as typeof result.qualityTier;
+    }
+
   } catch (err: any) {
     result.error = err.message;
     console.log(`[QE-Worker] Error for ${formula}: ${err.message}`);
@@ -6184,24 +6342,20 @@ ${r2Cell}
 
       // For failed/rejected: keep error logs for 7 days, delete rest
       // For promising: keep QE inputs/outputs + structures
-      // For now: delete everything except .in/.out/.json files
+      // Delete everything except .in/.out/.json files and reproducibility bundle
       if (fs.existsSync(jobDir)) {
         const files = fs.readdirSync(jobDir);
         for (const f of files) {
+          if (f === "reproducibility_bundle") continue; // Keep bundle
           const fp = path.join(jobDir, f);
           const stat = fs.statSync(fp);
           if (stat.isDirectory()) {
-            // Delete subdirectories (airss/, pyxtal/, stage1_*/)
             try { fs.rmSync(fp, { recursive: true, force: true }); } catch {}
           }
-          // Keep: .in, .out, .json files for debugging
-          // Delete: .wfc, .save, large binary files
           else if (!f.endsWith(".in") && !f.endsWith(".out") && !f.endsWith(".json")) {
             try { fs.unlinkSync(fp); } catch {}
           }
         }
-        // If directory is now empty (or just logs), clean up after 1 hour
-        // (actual deletion deferred to system cron)
       }
     } catch (cleanErr: any) {
       // Don't block on cleanup failure

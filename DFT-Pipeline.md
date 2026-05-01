@@ -181,6 +181,37 @@ Two paths depending on available compute:
 
 ---
 
+## Stage 5.5: Convex Hull Stability Assessment
+
+After SCF converges, the pipeline estimates thermodynamic stability:
+
+- Uses Miedema model for quick decomposition enthalpy estimate
+- Labels each structure:
+  - **on_hull**: formation enthalpy <= 0 meV/atom (thermodynamically stable)
+  - **near_hull**: 0-25 meV/atom above hull (synthesizable under pressure)
+  - **metastable**: 25-75 meV/atom (may be kinetically stabilized)
+  - **highly_metastable**: >75 meV/atom (unlikely to be synthesizable)
+  - **unknown_hull**: Miedema not available for this composition
+
+Active learning prioritizes: high Tc + phonon stable + metallic + near/on hull — not just high Tc.
+
+---
+
+## Reproducibility Bundles
+
+For every candidate reaching `screening_converged` or higher, a `reproducibility_bundle/` directory is saved containing:
+
+- `quality_report.json` — quality tier, gate results, uncertainty, convergence state
+- `candidate_provenance.json` — generator, prototype, Vegard estimate, staged relaxation history
+- `final_structure.poscar` — relaxed structure in VASP POSCAR format
+- `scf_summary.json` — energy, Fermi level, forces, pressure, metallicity
+- `phonon_summary.json` — frequencies, stability, imaginary modes
+- `dfpt_results.json` — lambda, omega_log, Tc, alpha2F method labels
+
+This bundle survives the cleanup step (QE scratch is deleted, but the bundle is preserved).
+
+---
+
 ## DFT Quality Gate (before Stage 9)
 
 Before electron-phonon coupling and Tc estimation, a quality gate prevents unstable or poorly relaxed structures from getting impressive-looking Tc numbers. ALL conditions must pass:
@@ -201,7 +232,34 @@ If the gate fails, DFPT e-ph is skipped and any Tc estimate is labeled as "surro
 
 **File**: `server/physics/eliashberg-pipeline.ts`
 
-Only runs if the quality gate passes AND the structure is phonon-stable:
+Only runs if the quality gate passes AND the structure is phonon-stable.
+
+### Method Provenance Labels
+
+Every e-ph result carries explicit method labels — only `dfpt_eph` is physics-grade:
+
+| Field | Values | Credibility |
+|-------|--------|-------------|
+| `alpha2FMethod` | `dfpt_eph` / `surrogate_eph` / `heuristic_eph` / `unavailable` | Only `dfpt_eph` is physics-grade |
+| `lambdaMethod` | `dfpt_integrated_alpha2F` / `surrogate_alpha2F` / `estimated_from_dos_phonons` | Only `dfpt_integrated_alpha2F` is physics-grade |
+
+### Method-Based Quality Tier Caps
+
+Quality tier is capped based on the weakest method used:
+
+| Phonon method | Max tier |
+|---------------|----------|
+| DFPT full q-grid | publication_ready |
+| DFPT gamma-only | final_converged |
+| xTB finite displacement | screening_converged |
+| ML surrogate | screening_converged |
+
+| E-ph method | Max tier |
+|-------------|----------|
+| DFPT e-ph | publication_ready |
+| Surrogate | screening_converged |
+
+A candidate computed with DFPT gamma phonons + surrogate lambda can never exceed `screening_converged`, regardless of how good the SCF looks.
 
 1. **alpha2F(omega) spectrum** — combines electronic DOS, phonon spectrum, and electron-phonon matrix elements into the spectral function
 2. **lambda = integral of alpha2F(omega)/omega** — dimensionless coupling strength (typical: 0.3-2.0 for superconductors)
