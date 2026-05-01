@@ -378,18 +378,28 @@ export async function runStagedRelaxation(opts: StagedRelaxationOpts): Promise<S
     };
     const atomCap = maxAtomsForS1[tier] ?? 30;
 
-    let candidatesToTest = candidates.slice(0, maxS1).filter(c => {
+    // First pass: take the top maxS1 candidates that fit under the atom cap.
+    // If an oversized candidate is skipped, backfill from the remaining pool
+    // so we still test the same number of candidates.
+    const candidatesToTest: StructureCandidate[] = [];
+    let skipped = 0;
+    for (const c of candidates) {
+      if (candidatesToTest.length >= maxS1) break;
       if (c.positions.length > atomCap) {
-        console.log(`[Staged-Relax] ${formula} skipping candidate: ${c.positions.length} atoms > ${atomCap} atom cap (${c.source}, a=${c.latticeA.toFixed(3)} A) — supercell too large for Stage 1`);
-        return false;
+        skipped++;
+        console.log(`[Staged-Relax] ${formula} skipping candidate: ${c.positions.length} atoms > ${atomCap} cap (${c.source}) — backfilling from next`);
+        continue;
       }
-      return true;
-    });
+      candidatesToTest.push(c);
+    }
     // If all candidates were filtered, use the smallest one anyway
     if (candidatesToTest.length === 0 && candidates.length > 0) {
       const smallest = [...candidates].sort((a, b) => a.positions.length - b.positions.length)[0];
       candidatesToTest.push(smallest);
       console.log(`[Staged-Relax] ${formula} all candidates exceeded atom cap — using smallest (${smallest.positions.length} atoms, ${smallest.source})`);
+    }
+    if (skipped > 0) {
+      console.log(`[Staged-Relax] ${formula} atom cap: skipped ${skipped} oversized, backfilled to ${candidatesToTest.length} candidates`);
     }
     console.log(`[Staged-Relax] ${formula} Stage 1/5 (atomic relax): testing ${candidatesToTest.length} candidates (atom cap=${atomCap})`);
 
