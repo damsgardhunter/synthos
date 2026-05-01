@@ -3298,14 +3298,18 @@ function generateVCRelaxInput(
   const hasMagneticEl = elements.some(el => el in MAGNETIC_ELEMENTS);
   const vcRelaxDegauss = hasMagneticEl ? 0.02 : 0.015;
 
-  // vc-relax has its own tighter wall-time cap. Empirically any vc-relax
-  // that hasn't converged in 30 min on worker2 won't converge at all —
-  // BFGS oscillates indefinitely on stiff cells (all-TM intermetallics,
-  // high-P hydrides, spin-polarised heavy-element systems). Cap at 30
-  // min; SCF will proceed from the unrelaxed xTB geometry if vc-relax
-  // didn't finish. Floor at 600s so trivially-simple cells still get
-  // a chance.
-  const VC_RELAX_MAX_SECONDS = Math.max(600, Math.min(QE_MAX_SECONDS, 1800));
+  // vc-relax wall-time cap — scaled by system complexity.
+  // Novel high-P hydrides and magnetic systems need much more time than
+  // ambient intermetallics. LaH11Li2 at 173 GPa failed at 30 min — BFGS
+  // needs many more ionic steps to explore the energy landscape at extreme
+  // pressure with 14 atoms and light H.
+  const hasHVcr = elements.includes("H");
+  const hasMagVcr = elements.some(el => el in MAGNETIC_ELEMENTS);
+  const isHighPHydride = hasHVcr && pressureGPa >= 50 && totalAtoms >= 7;
+  const vcRelaxMaxSeconds = isHighPHydride ? 5400    // 90 min for high-P hydrides
+    : hasMagVcr ? 3600                                // 60 min for magnetic systems
+    : Math.max(600, Math.min(QE_MAX_SECONDS, 1800));  // 30 min default
+  const VC_RELAX_MAX_SECONDS = vcRelaxMaxSeconds;
   return `&CONTROL
   calculation = 'vc-relax',
   restart_mode = 'from_scratch',
@@ -4781,10 +4785,13 @@ ${cellBlockEos}
       const vcRelaxFile = path.join(jobDir, "vc_relax.in");
       fs.writeFileSync(vcRelaxFile, vcRelaxInput);
 
-      // Match the input-file's VC_RELAX_MAX_SECONDS (30 min) + 60s grace.
-      // Prevents the outer QE_TIMEOUT_MS (90 min) from holding the worker
-      // slot open waiting for a vc-relax that's already exited.
-      const vcRelaxKillMs = 1800 * 1000 + 60_000;
+      // Match the input-file's VC_RELAX_MAX_SECONDS + 60s grace.
+      // Scaled by system: 90 min for high-P hydrides, 60 min magnetic, 30 min default.
+      const hasHVcRelax = elements.includes("H");
+      const isHighPHVcRelax = hasHVcRelax && workerPressure >= 50 && positions.length >= 7;
+      const hasMagVcRelax = elements.some(el => el in MAGNETIC_ELEMENTS);
+      const vcRelaxMaxSec = isHighPHVcRelax ? 5400 : hasMagVcRelax ? 3600 : 1800;
+      const vcRelaxKillMs = vcRelaxMaxSec * 1000 + 60_000;
       const vcResult = await runQECommand(
         path.posix.join(getQEBinDir(), "pw.x"),
         vcRelaxFile,
