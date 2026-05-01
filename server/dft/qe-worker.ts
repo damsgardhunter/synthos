@@ -6266,27 +6266,39 @@ ${r2Cell}
 
     // --- DFT Quality Gate before Tc estimation ---
     // Prevents unstable or poorly relaxed structures from getting
-    // impressive-looking Tc numbers. Require multiple conditions.
+    // impressive-looking Tc numbers. Force thresholds are tiered:
+    //   screening: force < 0.10 (rough structure, surrogate Tc only)
+    //   DFPT e-ph: force < 0.03 (physics-grade e-ph requires equilibrium)
+    //   publication: force < 0.01 (fully relaxed)
     const phononHasResults = result.phonon != null && result.phonon.frequencies.length > 0;
     const phononPhysicallyStable = phononHasResults
       ? result.phonon!.lowestFrequency > -10.0
       : false;
-    const scfForceOk = result.scf?.totalForce != null ? result.scf.totalForce < 0.5 : true;
+    const residualForce = result.scf?.totalForce ?? null;
+    const scfForceOkScreening = residualForce != null ? residualForce < 0.10 : true;
+    const scfForceOkDFPT = residualForce != null ? residualForce < 0.03 : true;
+    const scfForceOkPublication = residualForce != null ? residualForce < 0.01 : true;
     const scfPressureOk = result.scf?.pressure != null ? Math.abs(result.scf.pressure) < 50 : true;
     const isMetallicForTc = result.scf?.isMetallic ?? false;
 
-    const qualityGatePass = scfConverged && scfForceOk && scfPressureOk && isMetallicForTc && phononPhysicallyStable;
+    // Basic quality gate (allows surrogate Tc)
+    const qualityGatePass = scfConverged && scfForceOkScreening && scfPressureOk && isMetallicForTc && phononPhysicallyStable;
+    // DFPT gate (allows physics-grade e-ph — tighter force)
+    const dfptGatePass = qualityGatePass && scfForceOkDFPT;
     const qualityGateReason: string[] = [];
     if (!scfConverged) qualityGateReason.push("SCF not converged");
-    if (!scfForceOk) qualityGateReason.push(`force ${result.scf?.totalForce?.toFixed(3)} > 0.5 Ry/bohr`);
+    if (!scfForceOkScreening) qualityGateReason.push(`force ${residualForce?.toFixed(3)} > 0.10 Ry/bohr (screening threshold)`);
+    else if (!scfForceOkDFPT) qualityGateReason.push(`force ${residualForce?.toFixed(3)} > 0.03 Ry/bohr (DFPT threshold — surrogate Tc only)`);
     if (!scfPressureOk) qualityGateReason.push(`pressure ${result.scf?.pressure?.toFixed(1)} kbar > ±50`);
     if (!isMetallicForTc) qualityGateReason.push("not metallic");
     if (!phononPhysicallyStable) qualityGateReason.push(phononHasResults ? "imaginary phonon modes" : "no phonon data");
 
-    if (qualityGatePass) {
-      console.log(`[QE-Worker] Quality gate PASSED for ${formula}: SCF converged, metallic, force=${result.scf?.totalForce?.toFixed(4) ?? "N/A"}, pressure=${result.scf?.pressure?.toFixed(1) ?? "N/A"} kbar, phonon stable (${result.phonon!.frequencies.length} modes)`);
+    if (dfptGatePass) {
+      console.log(`[QE-Worker] Quality gate PASSED (DFPT-ready) for ${formula}: force=${residualForce?.toFixed(4) ?? "N/A"} < 0.03, pressure=${result.scf?.pressure?.toFixed(1) ?? "N/A"} kbar, phonon stable (${result.phonon!.frequencies.length} modes)`);
+    } else if (qualityGatePass) {
+      console.log(`[QE-Worker] Quality gate PASSED (screening only) for ${formula}: force=${residualForce?.toFixed(4) ?? "N/A"} (> 0.03, below DFPT threshold) — surrogate Tc allowed, DFPT skipped`);
     } else {
-      console.log(`[QE-Worker] Quality gate FAILED for ${formula}: ${qualityGateReason.join(", ")} — Tc will be labeled as uncertain/surrogate`);
+      console.log(`[QE-Worker] Quality gate FAILED for ${formula}: ${qualityGateReason.join(", ")} — Tc will be labeled as surrogate`);
     }
 
     // Quality-weighted learning: phonon stability is a strong signal (weight 3.0)
@@ -6295,8 +6307,10 @@ ${r2Cell}
       recordGeneratorOutcome(elements, workerPressure, winnerProto, true, getSignalWeight("phonon_stable"));
     }
 
-    // DFPT electron-phonon coupling — requires quality gate pass + high ensemble score.
-    if (scfUsable && qualityGatePass && (opts?.ensembleScore ?? 0) > 0.7 && !opts?.skipEph) {
+    // DFPT electron-phonon coupling — requires DFPT gate (force < 0.03) + high ensemble score.
+    // If force is between 0.03-0.10, screening passes but DFPT is skipped (force too high
+    // for reliable e-ph matrix elements).
+    if (scfUsable && dfptGatePass && (opts?.ensembleScore ?? 0) > 0.7 && !opts?.skipEph) {
       console.log(`[QE-Worker] ${formula} qualifies for DFPT EPC (ensembleScore=${opts!.ensembleScore!.toFixed(3)}, phononModes=${result.phonon!.frequencies.length}, lowestFreq=${result.phonon!.lowestFrequency.toFixed(1)} cm⁻¹)`);
       try {
         result.dfpt = await runDFPTEPC(formula, elements, counts, jobDir, workerPressure);
@@ -6325,7 +6339,7 @@ ${r2Cell}
     const hasGammaOnly = phononHasResults && result.phonon!.frequencies.length < 10 && result.phonon!.frequencies.length > 0;
 
     const tcConfidence: "high" | "medium" | "low" | "surrogate" =
-      hasDFPT && qualityGatePass ? "high" :
+      hasDFPT && dfptGatePass ? "high" :
       hasFullPhonon && qualityGatePass ? "medium" :
       scfConverged && isMetallicForTc ? "low" : "surrogate";
 
@@ -6339,7 +6353,7 @@ ${r2Cell}
       phononHasResults ? "low" : "none";
 
     const structureConfidence: "high" | "medium" | "low" =
-      result.vcRelaxed && scfForceOk && scfPressureOk ? "high" :
+      result.vcRelaxed && scfForceOkDFPT && scfPressureOk ? "high" :
       scfConverged ? "medium" : "low";
 
     const ephMethod: "dfpt" | "surrogate" | "none" =
@@ -6357,7 +6371,7 @@ ${r2Cell}
     else tcReasons.push("no phonon data");
     if (scfConverged) tcReasons.push("SCF converged");
     else tcReasons.push("SCF partial/failed");
-    if (!scfForceOk) tcReasons.push(`high force (${result.scf?.totalForce?.toFixed(3)})`);
+    if (!scfForceOkScreening) tcReasons.push(`high force (${result.scf?.totalForce?.toFixed(3)} > 0.10)`);
     if (!scfPressureOk) tcReasons.push(`high pressure (${result.scf?.pressure?.toFixed(1)} kbar)`);
 
     result.uncertainty = {

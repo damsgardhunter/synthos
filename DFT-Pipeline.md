@@ -219,12 +219,41 @@ Before electron-phonon coupling and Tc estimation, a quality gate prevents unsta
 | Check | Threshold | Why |
 |-------|-----------|-----|
 | SCF converged | true | Partial convergence = unreliable electronic structure |
-| Residual force | < 0.5 Ry/bohr | High forces = structure not at equilibrium |
+| Residual force (screening) | < 0.10 Ry/bohr | Allows surrogate Tc only |
+| Residual force (DFPT) | < 0.03 Ry/bohr | Required for physics-grade e-ph coupling |
+| Residual force (publication) | < 0.01 Ry/bohr | Required for publication_ready tier |
 | Residual pressure | < +/- 50 kbar | Large pressure mismatch = wrong cell volume |
 | Metallic | true | Non-metals cannot be BCS superconductors |
 | Phonon stable | no large imaginary modes | Dynamically unstable = structure doesn't exist |
 
-If the gate fails, DFPT e-ph is skipped and any Tc estimate is labeled as "surrogate" confidence with the failure reasons logged.
+Two gates:
+- **Screening gate** (force < 0.10): allows surrogate Tc, learning score computation
+- **DFPT gate** (force < 0.03): required for actual electron-phonon coupling calculation
+
+If the screening gate fails, Tc is labeled "surrogate". If DFPT gate fails but screening passes, surrogate Tc is computed but DFPT is skipped.
+
+### Result Validation
+
+Before saving to database, `validateResultConsistency()` checks for contradictions:
+- Quality tier cannot exceed phonon/eph method caps
+- High confidence requires DFPT e-ph + full phonons
+- publication_ready requires force < 0.01 + reproducibility bundle
+- Surrogate Tc cannot be labeled as physics-grade
+
+### Multi-Objective Learning Score
+
+The learning engine trains on a conservative score, NOT raw max(Tc):
+
+```
+learning_score =
+  0.35 × conservative_Tc_score (confidence-weighted)
++ 0.25 × phonon_stability_score
++ 0.20 × hull_stability_score
++ 0.10 × metallicity_score
++ 0.10 × novelty_score
+```
+
+This prevents the model from chasing flashy low-confidence Tc estimates.
 
 ---
 

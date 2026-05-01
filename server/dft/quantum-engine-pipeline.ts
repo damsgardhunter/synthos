@@ -114,6 +114,24 @@ export interface QuantumEngineDatasetEntry {
     nestingScore: number;
     vhsCount: number;
   };
+  // --- Extended Tc/method fields (replaces training on tcBest alone) ---
+  /** Conservative Tc used for learning (accounts for stability + confidence) */
+  tcConservative?: number;
+  /** Upper bound Tc (optimistic, for ranking only) */
+  tcUpperBound?: number;
+  /** Tc method provenance */
+  tcMethod?: "dfpt_ad" | "dfpt_eliashberg" | "surrogate" | "none";
+  lambdaMethod?: "dfpt_integrated_alpha2F" | "surrogate_alpha2F" | "estimated_from_dos_phonons" | "none";
+  phononMethod?: "dfpt_full" | "dfpt_gamma" | "finite_displacement" | "surrogate" | "none";
+  tcConfidence?: "high" | "medium" | "low" | "surrogate";
+  /** Multi-objective learning score (used instead of raw Tc for model training) */
+  learningScore?: number;
+  /** Quality tier from DFT pipeline */
+  qualityTier?: string;
+  /** Hull stability label */
+  hullLabel?: string;
+  /** Residual force at SCF (Ry/bohr) */
+  residualForce?: number;
 }
 
 export interface QuantumEngineResult {
@@ -218,6 +236,87 @@ function ensureCacheLoaded(): Promise<void> {
     }
   })();
   return cacheLoadPromise;
+}
+
+/**
+ * Compute multi-objective learning score for model training.
+ * Replaces training on raw max(Tc) which chases flashy low-confidence estimates.
+ *
+ * learning_score =
+ *   0.35 × conservative_Tc_score
+ * + 0.25 × phonon_stability_score
+ * + 0.20 × hull_stability_score
+ * + 0.10 × metallicity_score
+ * + 0.10 × novelty_score
+ */
+function computeLearningScore(entry: QuantumEngineDatasetEntry): number {
+  // Conservative Tc: penalize low-confidence estimates
+  const confidenceMultiplier = entry.tcConfidence === "high" ? 1.0 :
+    entry.tcConfidence === "medium" ? 0.7 :
+    entry.tcConfidence === "low" ? 0.4 : 0.15; // surrogate
+  const tcNorm = Math.min(1.0, (entry.tc * confidenceMultiplier) / 300);
+
+  // Phonon stability: 1.0 if stable, 0.5 if partial, 0 if unstable/none
+  const phononScore = entry.isPhononStable ? 1.0 :
+    (entry.phononMethod === "dfpt_gamma" || entry.phononMethod === "dfpt_full") ? 0.5 : 0;
+
+  // Hull stability: on_hull=1.0, near_hull=0.8, metastable=0.4, unknown=0.3
+  const hullScore = entry.hullLabel === "on_hull" ? 1.0 :
+    entry.hullLabel === "near_hull" ? 0.8 :
+    entry.hullLabel === "metastable" ? 0.4 :
+    entry.hullLabel === "highly_metastable" ? 0.1 : 0.3; // unknown
+
+  // Metallicity: required for superconductivity
+  const metalScore = entry.isMetallic ? 1.0 : 0.0;
+
+  // Novelty: prefer diverse compositions (not just repeated known compounds)
+  const noveltyScore = entry.tier === "full-dft" ? 0.8 :
+    entry.tier === "xtb" ? 0.5 : 0.3;
+
+  const score = 0.35 * tcNorm + 0.25 * phononScore + 0.20 * hullScore + 0.10 * metalScore + 0.10 * noveltyScore;
+  return Math.round(score * 1000) / 1000;
+}
+
+/**
+ * Validate result consistency before saving to database.
+ * Ensures no contradictory states (e.g. publication_ready with surrogate phonons).
+ */
+function validateResultConsistency(entry: QuantumEngineDatasetEntry): string[] {
+  const issues: string[] = [];
+
+  // Quality tier cannot exceed method caps
+  if (entry.qualityTier === "publication_ready") {
+    if (entry.phononMethod !== "dfpt_full") issues.push(`publication_ready requires dfpt_full phonon, got ${entry.phononMethod}`);
+    if (entry.lambdaMethod !== "dfpt_integrated_alpha2F") issues.push(`publication_ready requires dfpt lambda, got ${entry.lambdaMethod}`);
+    if (entry.tcConfidence !== "high") issues.push(`publication_ready requires high Tc confidence, got ${entry.tcConfidence}`);
+  }
+
+  // High confidence requires DFPT
+  if (entry.tcConfidence === "high") {
+    if (entry.lambdaMethod !== "dfpt_integrated_alpha2F") issues.push(`high Tc confidence requires DFPT lambda, got ${entry.lambdaMethod}`);
+    if (entry.phononMethod !== "dfpt_full") issues.push(`high Tc confidence requires full DFPT phonon, got ${entry.phononMethod}`);
+  }
+
+  // Surrogate Tc cannot be high confidence
+  if (entry.tcMethod === "surrogate" && entry.tcConfidence === "high") {
+    issues.push("surrogate Tc method cannot have high confidence");
+  }
+
+  // Metallic required for meaningful Tc
+  if (entry.tc > 0 && !entry.isMetallic) {
+    issues.push(`Tc=${entry.tc}K but material is not metallic`);
+  }
+
+  // Force threshold by tier
+  if (entry.residualForce != null) {
+    if (entry.qualityTier === "publication_ready" && entry.residualForce > 0.01) {
+      issues.push(`publication_ready requires force < 0.01, got ${entry.residualForce.toFixed(4)}`);
+    } else if (entry.qualityTier === "final_converged" && entry.residualForce > 0.03) {
+      issues.push(`final_converged requires force < 0.03, got ${entry.residualForce.toFixed(4)}`);
+    }
+  }
+
+  return issues;
 }
 
 async function appendToDataset(entry: QuantumEngineDatasetEntry): Promise<void> {
@@ -593,6 +692,20 @@ export async function runQuantumEnginePipeline(
     };
   }
 
+  // Determine method/confidence from DFT result
+  const dftUncertainty = dftResult?.uncertainty;
+  const tcConfidence = (dftUncertainty?.tcConfidence ?? "surrogate") as "high" | "medium" | "low" | "surrogate";
+  const lambdaMethodLabel = dftUncertainty?.ephMethod === "dfpt" ? "dfpt_integrated_alpha2F" as const : "surrogate_alpha2F" as const;
+  const phononMethodLabel = (dftUncertainty?.phononMethod ?? "none") as QuantumEngineDatasetEntry["phononMethod"];
+  const tcMethodLabel = eliashbergResult ? (dftUncertainty?.ephMethod === "dfpt" ? "dfpt_eliashberg" : "surrogate") as const : "none" as const;
+  const hullLabel = dftResult?.hullStability?.label ?? "unknown_hull";
+  const residualForce = dftResult?.scf?.totalForce ?? null;
+  const qualityTier = dftResult?.qualityTier ?? "failed";
+
+  // Conservative Tc: penalize based on force and confidence
+  const forceGateForTc = residualForce != null && residualForce < 0.10; // Must have reasonable forces
+  const tcConservative = forceGateForTc ? tc * (tcConfidence === "high" ? 1.0 : tcConfidence === "medium" ? 0.7 : 0.3) : 0;
+
   const entry: QuantumEngineDatasetEntry = {
     material: formula,
     pressure: pressureGpa,
@@ -626,7 +739,33 @@ export async function runQuantumEnginePipeline(
       nestingScore: dosAnalysis.nestingScore,
       vhsCount: dosAnalysis.vanHoveSingularities.length,
     } : undefined,
+    // Extended fields
+    tcConservative,
+    tcUpperBound: tc,
+    tcMethod: tcMethodLabel,
+    lambdaMethod: lambdaMethodLabel,
+    phononMethod: phononMethodLabel,
+    tcConfidence,
+    qualityTier,
+    hullLabel,
+    residualForce: residualForce ?? undefined,
   };
+
+  // Compute learning score (multi-objective, not just max Tc)
+  entry.learningScore = computeLearningScore(entry);
+
+  // Validate consistency before saving
+  const validationIssues = validateResultConsistency(entry);
+  if (validationIssues.length > 0) {
+    console.log(`[QE-Pipeline] Validation issues for ${formula}: ${validationIssues.join("; ")}`);
+    // Downgrade tier if validation fails
+    if (entry.qualityTier === "publication_ready" && validationIssues.some(i => i.includes("publication_ready"))) {
+      entry.qualityTier = "final_converged";
+      console.log(`[QE-Pipeline] Downgraded ${formula} from publication_ready to final_converged due to validation`);
+    }
+  }
+
+  console.log(`[QE-Pipeline] ${formula}: learningScore=${entry.learningScore.toFixed(3)}, tcConservative=${tcConservative.toFixed(1)}K, tc=${tc.toFixed(1)}K, confidence=${tcConfidence}, method=${tcMethodLabel}, hull=${hullLabel}`);
 
   await appendToDataset(entry);
 
