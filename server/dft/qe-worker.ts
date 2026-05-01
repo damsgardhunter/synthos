@@ -3282,6 +3282,7 @@ function generateVCRelaxInput(
   latticeA: number,
   positions: Array<{ element: string; x: number; y: number; z: number }>,
   pressureGPa: number = 0,
+  opts?: { phase?: "damped" | "bfgs" },
 ): string {
   const totalAtoms = positions.length;
   const nTypes = elements.length;
@@ -3330,23 +3331,36 @@ function generateVCRelaxInput(
     : hasMagVcr ? 3600                                // 60 min for magnetic systems
     : Math.max(600, Math.min(QE_MAX_SECONDS, 1800));  // 30 min default
   const VC_RELAX_MAX_SECONDS = vcRelaxMaxSeconds;
-  // Tuned vc-relax parameters for different system types:
-  // - High-P hydrides: local-TF mixing (converges much better for metals at
-  //   extreme pressure), more ionic steps, looser force threshold for first pass
-  // - Magnetic systems: lower mixing_beta for spin stability
-  // - Default: standard BFGS
-  const vcMixingMode = isHighPHydride ? "local-TF" : "plain";
+  // Tuned vc-relax parameters for different system types
+  const vcMixingMode = isHighPHydride ? "local-TF" : hasMagVcr ? "local-TF" : "plain";
   const vcMixingBeta = isHighPHydride ? 0.2 : hasMagVcr ? 0.2 : 0.3;
-  const vcNstep = isHighPHydride ? 400 : 250;
-  const vcForcConvThr = isHighPHydride ? "5.0d-3" : "1.0d-3"; // Looser for first pass on novel materials
-  const vcConvThr = isHighPHydride ? "1.0d-5" : "1.0d-4"; // Tighter SCF for better forces
+  const vcConvThr = isHighPHydride ? "1.0d-5" : "1.0d-4";
+
+  // 2-PHASE vc-relax strategy:
+  // Phase 1 (damped dynamics): robust basin-finding, never diverges.
+  //   Atoms follow forces with friction — always makes progress downhill.
+  //   200 steps, loose force threshold. Finds the right basin.
+  // Phase 2 (BFGS): fast convergence from the damped result.
+  //   Starts from Phase 1 geometry which is already near a minimum.
+  //   250 steps, tight force threshold. Tightens to publication quality.
+  //
+  // If phase='damped' (Phase 1): use damp/damp-w with loose thresholds
+  // If phase='bfgs' (Phase 2): use bfgs/bfgs with tight thresholds
+  const phase = opts?.phase ?? "damped"; // Default to Phase 1 for all materials
+  const isDamped = phase === "damped";
+
+  const vcNstep = isDamped ? 200 : 250;
+  const vcForcConvThr = isDamped ? "5.0d-3" : "1.0d-3";
+  const ionDynamics = isDamped ? "damp" : "bfgs";
+  const cellDynamics = isDamped ? "damp-w" : "bfgs";
+  const vcDiskIo = isDamped ? "low" : "medium"; // Phase 2 saves .save for phonon
 
   return `&CONTROL
   calculation = 'vc-relax',
   restart_mode = 'from_scratch',
   prefix = '${prefix}',
   outdir = './tmp',
-  disk_io = 'low',
+  disk_io = '${vcDiskIo}',
   pseudo_dir = '${QE_PSEUDO_DIR_INPUT}',
   tprnfor = .true.,
   tstress = .true.,
@@ -3376,10 +3390,10 @@ ${magLines}/
   scf_must_converge = .false.,
 /
 &IONS
-  ion_dynamics = 'bfgs',
+  ion_dynamics = '${ionDynamics}',
 /
 &CELL
-  cell_dynamics = 'bfgs',
+  cell_dynamics = '${cellDynamics}',
   press = ${(pressureGPa * 10.0).toFixed(4)},
   press_conv_thr = ${pressureGPa > 50 ? 1.0 : 0.5},
 /
@@ -4823,32 +4837,85 @@ ${cellBlockEos}
       if (result.vcRelaxed) {
         // Already set from verified-compound shortcut, skip the actual run
       } else {
-      console.log(`[QE-Worker] Starting vc-relax for ${formula} (lattice=${latticeA.toFixed(2)} A, ${positions.length} atoms${workerPressure > 0 ? `, P=${workerPressure} GPa (${(workerPressure * 10).toFixed(0)} kbar)` : ""})`);
-      const vcRelaxInput = generateVCRelaxInput(formula, elements, counts, latticeA, positions, workerPressure);
-      const vcRelaxFile = path.join(jobDir, "vc_relax.in");
-      fs.writeFileSync(vcRelaxFile, vcRelaxInput);
-
-      // Match the input-file's VC_RELAX_MAX_SECONDS + 60s grace.
-      // Scaled by system: 90 min for high-P hydrides, 60 min magnetic, 30 min default.
+      // --- 2-PHASE vc-relax: Damped Dynamics (Phase 1) → BFGS (Phase 2) ---
+      // Phase 1: Damped dynamics finds the basin (robust, never diverges)
+      // Phase 2: BFGS tightens from the damped result (fast convergence)
       const hasHVcRelax = elements.includes("H");
       const isHighPHVcRelax = hasHVcRelax && workerPressure >= 50 && positions.length >= 7;
       const hasMagVcRelax = elements.some(el => el in MAGNETIC_ELEMENTS);
       const vcRelaxMaxSec = isHighPHVcRelax ? 5400 : hasMagVcRelax ? 3600 : 1800;
       const vcRelaxKillMs = vcRelaxMaxSec * 1000 + 60_000;
-      const vcResult = await runQECommand(
-        path.posix.join(getQEBinDir(), "pw.x"),
-        vcRelaxFile,
-        jobDir,
-        vcRelaxKillMs,
+
+      console.log(`[QE-Worker] 2-phase vc-relax for ${formula} (lattice=${latticeA.toFixed(2)} A, ${positions.length} atoms${workerPressure > 0 ? `, P=${workerPressure} GPa` : ""}, timeout=${vcRelaxMaxSec}s)`);
+
+      // === PHASE 1: Damped dynamics — find the basin ===
+      console.log(`[QE-Worker] Phase 1 (damped dynamics): finding basin for ${formula}`);
+      const phase1Input = generateVCRelaxInput(formula, elements, counts, latticeA, positions, workerPressure, { phase: "damped" });
+      const phase1File = path.join(jobDir, "vc_relax_phase1.in");
+      fs.writeFileSync(phase1File, phase1Input);
+
+      const phase1Result = await runQECommand(
+        path.posix.join(getQEBinDir(), "pw.x"), phase1File, jobDir, vcRelaxKillMs,
       );
+      fs.writeFileSync(path.join(jobDir, "vc_relax_phase1.out"), phase1Result.stdout);
+      const phase1Parsed = parseVCRelaxOutput(phase1Result.stdout);
 
-      fs.writeFileSync(path.join(jobDir, "vc_relax.out"), vcResult.stdout);
-      const vcParsed = parseVCRelaxOutput(vcResult.stdout);
+      // --- Phase 1 diagnostic logging ---
+      let phase1Positions = positions;
+      let phase1LatticeA = latticeA;
+      if (phase1Parsed.finalPositions && phase1Parsed.finalPositions.length > 0) {
+        phase1Positions = phase1Parsed.finalPositions;
+        phase1LatticeA = phase1Parsed.finalLatticeAng ?? latticeA;
+        // Compute max force from phase 1 output
+        const p1ForceMatch = phase1Result.stdout.match(/Total force\s*=\s*([\d.]+)/g);
+        const p1LastForce = p1ForceMatch ? p1ForceMatch[p1ForceMatch.length - 1].match(/([\d.]+)$/)?.[1] : null;
+        const p1PressMatch = phase1Result.stdout.match(/P=\s*([-\d.]+)/g);
+        const p1LastPress = p1PressMatch ? p1PressMatch[p1PressMatch.length - 1].match(/([-\d.]+)$/)?.[1] : null;
+        console.log(`[QE-Worker] Phase 1 DONE for ${formula}: a=${phase1LatticeA.toFixed(3)} Å, E=${phase1Parsed.totalEnergy.toFixed(4)} eV, force=${p1LastForce ?? "N/A"} Ry/bohr, P=${p1LastPress ?? "N/A"} kbar, wall=${phase1Parsed.wallTimeSeconds.toFixed(0)}s`);
+        // Log first few positions for diagnosis
+        for (let pi = 0; pi < Math.min(4, phase1Positions.length); pi++) {
+          const p = phase1Positions[pi];
+          console.log(`[QE-Worker]   Phase 1 atom[${pi}] ${p.element.padEnd(2)} (${p.x.toFixed(5)}, ${p.y.toFixed(5)}, ${p.z.toFixed(5)})`);
+        }
+        if (phase1Positions.length > 4) console.log(`[QE-Worker]   ... and ${phase1Positions.length - 4} more`);
+      } else {
+        console.log(`[QE-Worker] Phase 1 produced no positions for ${formula} (exit=${phase1Result.exitCode}) — Phase 2 will use original geometry`);
+        if (phase1Result.exitCode !== 0) {
+          console.log(`[QE-Worker] Phase 1 stdout tail: ${phase1Result.stdout.slice(-300)}`);
+        }
+      }
 
-      // Log the actual QE error from stdout (not the MPI_ABORT boilerplate in stderr)
-      if (vcResult.exitCode !== 0) {
-        const vcErrTail = vcResult.stdout.slice(-400);
-        console.log(`[QE-Worker] vc-relax exit=${vcResult.exitCode} for ${formula}: ${vcErrTail.slice(-200)}`);
+      cleanQETmpDir(path.join(jobDir, "tmp"));
+
+      // === PHASE 2: BFGS from damped result — tighten convergence ===
+      console.log(`[QE-Worker] Phase 2 (BFGS): tightening from Phase 1 result for ${formula} (a=${phase1LatticeA.toFixed(3)} Å)`);
+      const phase2Input = generateVCRelaxInput(formula, elements, counts, phase1LatticeA, phase1Positions, workerPressure, { phase: "bfgs" });
+      const phase2File = path.join(jobDir, "vc_relax_phase2.in");
+      fs.writeFileSync(phase2File, phase2Input);
+
+      const phase2Result = await runQECommand(
+        path.posix.join(getQEBinDir(), "pw.x"), phase2File, jobDir, vcRelaxKillMs,
+      );
+      fs.writeFileSync(path.join(jobDir, "vc_relax_phase2.out"), phase2Result.stdout);
+      const vcParsed = parseVCRelaxOutput(phase2Result.stdout);
+
+      // --- Phase 2 diagnostic logging ---
+      if (vcParsed.finalPositions && vcParsed.finalPositions.length > 0) {
+        const p2ForceMatch = phase2Result.stdout.match(/Total force\s*=\s*([\d.]+)/g);
+        const p2LastForce = p2ForceMatch ? p2ForceMatch[p2ForceMatch.length - 1].match(/([\d.]+)$/)?.[1] : null;
+        const p2PressMatch = phase2Result.stdout.match(/P=\s*([-\d.]+)/g);
+        const p2LastPress = p2PressMatch ? p2PressMatch[p2PressMatch.length - 1].match(/([-\d.]+)$/)?.[1] : null;
+        console.log(`[QE-Worker] Phase 2 DONE for ${formula}: a=${(vcParsed.finalLatticeAng ?? phase1LatticeA).toFixed(3)} Å, E=${vcParsed.totalEnergy.toFixed(4)} eV, force=${p2LastForce ?? "N/A"} Ry/bohr, P=${p2LastPress ?? "N/A"} kbar, wall=${vcParsed.wallTimeSeconds.toFixed(0)}s, converged=${vcParsed.converged}`);
+        for (let pi = 0; pi < Math.min(4, vcParsed.finalPositions.length); pi++) {
+          const p = vcParsed.finalPositions[pi];
+          console.log(`[QE-Worker]   Phase 2 atom[${pi}] ${p.element.padEnd(2)} (${p.x.toFixed(5)}, ${p.y.toFixed(5)}, ${p.z.toFixed(5)})`);
+        }
+        if (vcParsed.finalPositions.length > 4) console.log(`[QE-Worker]   ... and ${vcParsed.finalPositions.length - 4} more`);
+      }
+
+      // Use Phase 2 result if available, otherwise Phase 1
+      if (phase2Result.exitCode !== 0 && !vcParsed.finalPositions) {
+        console.log(`[QE-Worker] Phase 2 exit=${phase2Result.exitCode} for ${formula}: ${phase2Result.stdout.slice(-200)}`);
       }
       if (vcParsed.finalPositions && vcParsed.finalPositions.length > 0) {
         positions = vcParsed.finalPositions;
@@ -4856,12 +4923,18 @@ ${cellBlockEos}
         if (vcParsed.finalLatticeAng && vcParsed.finalLatticeAng > 0.5) {
           latticeA = vcParsed.finalLatticeAng;
           result.relaxedLatticeA = latticeA;
-          console.log(`[QE-Worker] vc-relax updated lattice for ${formula}: ${latticeA.toFixed(3)} A`);
         }
-        console.log(`[QE-Worker] vc-relax ${vcParsed.converged ? "converged" : "partial"} for ${formula}: ${positions.length} atoms, E=${vcParsed.totalEnergy.toFixed(4)} eV, wall=${vcParsed.wallTimeSeconds.toFixed(0)}s`);
+        console.log(`[QE-Worker] vc-relax 2-phase ${vcParsed.converged ? "CONVERGED" : "partial"} for ${formula}: a=${latticeA.toFixed(3)} A, ${positions.length} atoms, E=${vcParsed.totalEnergy.toFixed(4)} eV`);
+      } else if (phase1Parsed.finalPositions && phase1Parsed.finalPositions.length > 0) {
+        // Phase 2 failed but Phase 1 produced something — use Phase 1
+        positions = phase1Positions;
+        latticeA = phase1LatticeA;
+        result.vcRelaxed = true;
+        result.relaxedLatticeA = latticeA;
+        console.log(`[QE-Worker] Phase 2 failed, using Phase 1 geometry for ${formula}: a=${latticeA.toFixed(3)} A, E=${phase1Parsed.totalEnergy.toFixed(4)} eV`);
       } else {
-        console.log(`[QE-Worker] vc-relax produced no usable positions for ${formula} (exit=${vcResult.exitCode}), proceeding with original geometry`);
-        const vcDiagTail = vcResult.stdout.slice(-1000);
+        console.log(`[QE-Worker] vc-relax 2-phase produced no usable positions for ${formula} (Phase 1 exit=${phase1Result.exitCode}, Phase 2 exit=${phase2Result.exitCode}), proceeding with original geometry`);
+        const vcDiagTail = phase2Result.stdout.slice(-1000);
         console.log(`[QE-Worker] vc-relax stdout tail for ${formula}:\n${vcDiagTail}`);
 
         // --- Multi-start retry for novel high-P hydrides ---
