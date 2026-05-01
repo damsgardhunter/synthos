@@ -366,8 +366,32 @@ export async function runStagedRelaxation(opts: StagedRelaxationOpts): Promise<S
     // === STAGE 1: Atomic relax (fixed cell) ===
     const stage1Results: Array<{ result: StageResult; candidate: StructureCandidate }> = [];
 
-    const candidatesToTest = candidates.slice(0, maxS1);
-    console.log(`[Staged-Relax] ${formula} Stage 1/5 (atomic relax): testing ${candidatesToTest.length} candidates`);
+    // Atom-count cap: reject supercells that are too large for Stage 1.
+    // A Z=4 supercell (60 atoms) gives the same physics as Z=1 (15 atoms)
+    // at 4× the cost. Li2LaH12 Z=4 estimated 12+ hours for Stage 1.
+    const tier = opts.screeningTier ?? "preview";
+    const maxAtomsForS1: Record<string, number> = {
+      preview: 30,
+      standard: 40,
+      deep: 50,
+      publication: 60,
+    };
+    const atomCap = maxAtomsForS1[tier] ?? 30;
+
+    let candidatesToTest = candidates.slice(0, maxS1).filter(c => {
+      if (c.positions.length > atomCap) {
+        console.log(`[Staged-Relax] ${formula} skipping candidate: ${c.positions.length} atoms > ${atomCap} atom cap (${c.source}, a=${c.latticeA.toFixed(3)} A) — supercell too large for Stage 1`);
+        return false;
+      }
+      return true;
+    });
+    // If all candidates were filtered, use the smallest one anyway
+    if (candidatesToTest.length === 0 && candidates.length > 0) {
+      const smallest = [...candidates].sort((a, b) => a.positions.length - b.positions.length)[0];
+      candidatesToTest.push(smallest);
+      console.log(`[Staged-Relax] ${formula} all candidates exceeded atom cap — using smallest (${smallest.positions.length} atoms, ${smallest.source})`);
+    }
+    console.log(`[Staged-Relax] ${formula} Stage 1/5 (atomic relax): testing ${candidatesToTest.length} candidates (atom cap=${atomCap})`);
 
     for (let ci = 0; ci < candidatesToTest.length; ci++) {
       const cand = candidatesToTest[ci];
@@ -393,7 +417,7 @@ export async function runStagedRelaxation(opts: StagedRelaxationOpts): Promise<S
     // Different structures can respond differently to vc-relax, pressure
     // correction, or symmetry lowering — picking only 1 too early loses
     // structures that may become better after cell optimization.
-    const tier = opts.screeningTier ?? "preview";
+    // tier already declared above for atom cap
     const stage2KeepCount: Record<string, number> = {
       preview: 2,
       standard: 5,
