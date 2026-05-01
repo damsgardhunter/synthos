@@ -4567,9 +4567,109 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       if (stageLatticeShift > 0.05) {
         const ksLookup = lookupKnownStructure(normFormula);
         if (ksLookup) {
-          console.log(`[QE-Worker] Lattice-mismatch guard for ${formula}: Stage 1 positions at a=${preVcLatticeA.toFixed(3)} Å but literature is a=${latticeA.toFixed(3)} Å (${(stageLatticeShift * 100).toFixed(1)}% shift) — using known-structure positions instead`);
+          console.log(`[QE-Worker] Lattice-mismatch guard for ${formula}: Stage 1 positions at a=${preVcLatticeA.toFixed(3)} Å but literature is a=${latticeA.toFixed(3)} Å (${(stageLatticeShift * 100).toFixed(1)}% shift) — using known-structure positions + quick relax`);
           positions = ksLookup.atoms.map(a => ({ element: a.element, x: a.x, y: a.y, z: a.z }));
-          preVcLatticeA = latticeA; // Positions are now at target lattice, skip rescaling
+          preVcLatticeA = latticeA;
+
+          // Quick fixed-cell relax at the target lattice to bring forces down.
+          // Ideal Wyckoff positions are crystallographically correct but haven't
+          // been DFT-relaxed with these pseudopotentials. Without this step,
+          // SCF runs with high residual forces (0.3+ Ry/bohr) and phonon crashes.
+          try {
+            const guardPrefix = formula.replace(/[^a-zA-Z0-9]/g, "") + "_guardrelax";
+            const guardHasH = elements.includes("H");
+            const guardEcutwfc = Math.max(computeEcutwfc(elements, 0, 80, 45), guardHasH ? 80 : 50);
+            const guardEcutrho = guardEcutwfc * ecutrhoMultiplier(elements);
+            const guardCOverA = estimateCOverA(elements, counts);
+            const guardBOverA = estimateBOverA(elements, counts);
+            const guardHasMag = mayHaveMagneticMoment(elements);
+            const guardNspin = guardHasMag ? 2 : 1;
+            const guardMagLines = guardHasMag ? generateMagnetizationLines(elements, counts, isAFMCandidate(elements, counts), !elements.some(el => el in MAGNETIC_ELEMENTS)) : "";
+            let guardSpecies = "";
+            for (const el of elements) {
+              guardSpecies += `  ${el}  ${getAtomicMass(el).toFixed(3)}  ${resolvePPFilename(el)}\n`;
+            }
+            let guardPos = "";
+            for (const p of positions) {
+              guardPos += `  ${p.element}  ${p.x.toFixed(6)}  ${p.y.toFixed(6)}  ${p.z.toFixed(6)}\n`;
+            }
+            const guardKpts = autoKPoints(latticeA, guardCOverA, guardBOverA, undefined, 0.50, { stage: "relax", totalAtoms: positions.length }).trim();
+            const guardCell = generateCellParameters(latticeA, guardCOverA, 0, guardBOverA, elements, counts);
+            const guardInput = `&CONTROL
+  calculation = 'relax',
+  restart_mode = 'from_scratch',
+  prefix = '${guardPrefix}',
+  outdir = './tmp',
+  disk_io = 'low',
+  pseudo_dir = '${QE_PSEUDO_DIR_INPUT}',
+  tprnfor = .true.,
+  forc_conv_thr = 1.0d-3,
+  nstep = 100,
+  max_seconds = 1200,
+/
+&SYSTEM
+  ibrav = 0,
+  nat = ${positions.length},
+  ntyp = ${elements.length},
+  ecutwfc = ${guardEcutwfc},
+  ecutrho = ${guardEcutrho},
+  input_dft = 'PBE',
+  occupations = 'smearing',
+  smearing = 'mv',
+  degauss = 0.015,
+  nspin = ${guardNspin},
+${guardMagLines}/
+&ELECTRONS
+  electron_maxstep = 200,
+  conv_thr = 1.0d-6,
+  mixing_beta = 0.3,
+  mixing_mode = 'local-TF',
+/
+&IONS
+  ion_dynamics = 'bfgs',
+/
+ATOMIC_SPECIES
+${guardSpecies}
+ATOMIC_POSITIONS {crystal}
+${guardPos}
+K_POINTS {automatic}
+${guardKpts}
+
+${guardCell}
+`;
+            const guardFile = path.join(jobDir, "guard_relax.in");
+            fs.writeFileSync(guardFile, guardInput);
+            console.log(`[QE-Worker] Running quick relax after lattice-mismatch guard for ${formula} (a=${latticeA.toFixed(3)} Å, ${positions.length} atoms, 20 min max)`);
+            const guardResult = await runQECommand(
+              path.posix.join(getQEBinDir(), "pw.x"), guardFile, jobDir, 1260000, // 21 min
+            );
+            fs.writeFileSync(path.join(jobDir, "guard_relax.out"), guardResult.stdout);
+
+            // Parse relaxed positions
+            const guardPosBlocks = guardResult.stdout.match(/ATOMIC_POSITIONS\s*[{(]?\s*(?:crystal|angstrom|bohr|alat)?\s*[})]?\s*\n([\s\S]*?)(?=\n\s*(?:CELL_PARAMETERS|K_POINTS|End final|End of|ATOMIC_SPECIES|\n\s*\n)|$)/gi);
+            if (guardPosBlocks && guardPosBlocks.length > 0) {
+              const lastBlock = guardPosBlocks[guardPosBlocks.length - 1];
+              const lines = lastBlock.split("\n").filter(l => l.trim().length > 0 && !l.match(/ATOMIC_POSITIONS/i));
+              const relaxedPositions: typeof positions = [];
+              for (const line of lines) {
+                const parts = line.trim().split(/\s+/);
+                if (parts.length >= 4) {
+                  relaxedPositions.push({ element: parts[0], x: parseFloat(parts[1]), y: parseFloat(parts[2]), z: parseFloat(parts[3]) });
+                }
+              }
+              if (relaxedPositions.length === positions.length) {
+                positions = relaxedPositions;
+                const forceMatch = guardResult.stdout.match(/Total force\s*=\s*([\d.]+)/g);
+                const lastForce = forceMatch ? forceMatch[forceMatch.length - 1].match(/([\d.]+)$/)?.[1] : null;
+                console.log(`[QE-Worker] Guard relax done for ${formula}: force=${lastForce ?? "N/A"} Ry/bohr (${relaxedPositions.length} atoms relaxed)`);
+              }
+            }
+            // Clean guard relax tmp
+            const guardSaveDir = path.join(jobDir, "tmp", `${guardPrefix}.save`);
+            try { if (fs.existsSync(guardSaveDir)) fs.rmSync(guardSaveDir, { recursive: true, force: true }); } catch {}
+          } catch (guardErr: any) {
+            console.log(`[QE-Worker] Guard relax failed for ${formula}: ${guardErr.message?.slice(0, 100)} — proceeding with ideal Wyckoff positions`);
+          }
         }
       }
     }
