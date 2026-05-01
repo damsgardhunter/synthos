@@ -443,7 +443,7 @@ export async function runCandidateFunnel(
       const hasH = elements.includes("H");
       const avgAtoms = f6Candidates.reduce((sum, c) => sum + (c.positions?.length ?? 10), 0) / f6Candidates.length;
       const perStructureMs = Math.max(15000, Math.round(avgAtoms * (hasH ? 4000 : 2500))); // hydrides: 4s/atom, others: 2.5s/atom
-      const hardCapMs = hasH ? 4500000 : 1800000; // hydrides: 75 min, others: 30 min
+      const hardCapMs = hasH ? 4500000 : 2700000; // hydrides: 75 min, others: 45 min
       const timeoutMs = Math.round(Math.min(
         hardCapMs,
         Math.max(600000, Math.round(maxEval * perStructureMs * 1.5) + 120000) // 50% safety margin + 120s overhead
