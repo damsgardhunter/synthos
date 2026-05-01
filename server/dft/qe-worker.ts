@@ -3323,10 +3323,6 @@ function generateVCRelaxInput(
   const vcRelaxDegauss = hasMagneticEl ? 0.02 : 0.015;
 
   // vc-relax wall-time cap — scaled by system complexity.
-  // Novel high-P hydrides and magnetic systems need much more time than
-  // ambient intermetallics. LaH11Li2 at 173 GPa failed at 30 min — BFGS
-  // needs many more ionic steps to explore the energy landscape at extreme
-  // pressure with 14 atoms and light H.
   const hasHVcr = elements.includes("H");
   const hasMagVcr = elements.some(el => el in MAGNETIC_ELEMENTS);
   const isHighPHydride = hasHVcr && pressureGPa >= 50 && totalAtoms >= 7;
@@ -3334,6 +3330,17 @@ function generateVCRelaxInput(
     : hasMagVcr ? 3600                                // 60 min for magnetic systems
     : Math.max(600, Math.min(QE_MAX_SECONDS, 1800));  // 30 min default
   const VC_RELAX_MAX_SECONDS = vcRelaxMaxSeconds;
+  // Tuned vc-relax parameters for different system types:
+  // - High-P hydrides: local-TF mixing (converges much better for metals at
+  //   extreme pressure), more ionic steps, looser force threshold for first pass
+  // - Magnetic systems: lower mixing_beta for spin stability
+  // - Default: standard BFGS
+  const vcMixingMode = isHighPHydride ? "local-TF" : "plain";
+  const vcMixingBeta = isHighPHydride ? 0.2 : hasMagVcr ? 0.2 : 0.3;
+  const vcNstep = isHighPHydride ? 400 : 250;
+  const vcForcConvThr = isHighPHydride ? "5.0d-3" : "1.0d-3"; // Looser for first pass on novel materials
+  const vcConvThr = isHighPHydride ? "1.0d-5" : "1.0d-4"; // Tighter SCF for better forces
+
   return `&CONTROL
   calculation = 'vc-relax',
   restart_mode = 'from_scratch',
@@ -3343,9 +3350,9 @@ function generateVCRelaxInput(
   pseudo_dir = '${QE_PSEUDO_DIR_INPUT}',
   tprnfor = .true.,
   tstress = .true.,
-  forc_conv_thr = 1.0d-3,
+  forc_conv_thr = ${vcForcConvThr},
   etot_conv_thr = 1.0d-4,
-  nstep = 250,
+  nstep = ${vcNstep},
   max_seconds = ${VC_RELAX_MAX_SECONDS},
 /
 &SYSTEM
@@ -3362,9 +3369,9 @@ function generateVCRelaxInput(
 ${magLines}/
 &ELECTRONS
   electron_maxstep = 300,
-  conv_thr = 1.0d-4,
-  mixing_beta = 0.3,
-  mixing_mode = 'plain',
+  conv_thr = ${vcConvThr},
+  mixing_beta = ${vcMixingBeta},
+  mixing_mode = '${vcMixingMode}',
   diagonalization = 'david',
   scf_must_converge = .false.,
 /
@@ -4854,9 +4861,50 @@ ${cellBlockEos}
         console.log(`[QE-Worker] vc-relax ${vcParsed.converged ? "converged" : "partial"} for ${formula}: ${positions.length} atoms, E=${vcParsed.totalEnergy.toFixed(4)} eV, wall=${vcParsed.wallTimeSeconds.toFixed(0)}s`);
       } else {
         console.log(`[QE-Worker] vc-relax produced no usable positions for ${formula} (exit=${vcResult.exitCode}), proceeding with original geometry`);
-        // Dump last 1000 chars of stdout so we can see whether QE wrote a final geometry block
         const vcDiagTail = vcResult.stdout.slice(-1000);
         console.log(`[QE-Worker] vc-relax stdout tail for ${formula}:\n${vcDiagTail}`);
+
+        // --- Multi-start retry for novel high-P hydrides ---
+        // If vc-relax failed, try again from a different starting structure.
+        // Different starting points can land in different energy basins.
+        // Use the original funnel-selected structureCandidates (already in scope).
+        const isNovelHighPH = elements.includes("H") && workerPressure >= 50 && !isKnownCompound;
+        if (isNovelHighPH && structureCandidates.length > 1) {
+          // Find a cage-seeded or parent-seeded candidate that's different from what we tried
+          const retryCand = structureCandidates.find(c =>
+            c.source !== result.stagedRelaxation?.stages[0]?.failReason &&
+            (c.prototype.startsWith("cage-wyckoff-") || c.prototype.startsWith("parent-seed-") || c.prototype.startsWith("TemplateVCA"))
+          ) ?? structureCandidates.find(c => c.latticeA !== latticeA);
+
+          if (retryCand) {
+            console.log(`[QE-Worker] vc-relax retry for ${formula}: trying ${retryCand.prototype} (a=${retryCand.latticeA.toFixed(3)} A, ${retryCand.positions.length} atoms)`);
+            cleanQETmpDir(path.join(jobDir, "tmp"));
+            try {
+              const retryInput = generateVCRelaxInput(formula, elements, counts, retryCand.latticeA, retryCand.positions, workerPressure);
+              const retryFile = path.join(jobDir, "vc_relax_retry.in");
+              fs.writeFileSync(retryFile, retryInput);
+              const retryResult = await runQECommand(
+                path.posix.join(getQEBinDir(), "pw.x"), retryFile, jobDir,
+                vcRelaxMaxSec * 1000 + 60_000,
+              );
+              fs.writeFileSync(path.join(jobDir, "vc_relax_retry.out"), retryResult.stdout);
+              const retryParsed = parseVCRelaxOutput(retryResult.stdout);
+              if (retryParsed.finalPositions && retryParsed.finalPositions.length > 0) {
+                positions = retryParsed.finalPositions;
+                result.vcRelaxed = true;
+                if (retryParsed.finalLatticeAng && retryParsed.finalLatticeAng > 0.5) {
+                  latticeA = retryParsed.finalLatticeAng;
+                  result.relaxedLatticeA = latticeA;
+                }
+                console.log(`[QE-Worker] vc-relax RETRY succeeded for ${formula}: a=${latticeA.toFixed(3)} A, E=${retryParsed.totalEnergy.toFixed(4)} eV from ${retryCand.prototype}`);
+              } else {
+                console.log(`[QE-Worker] vc-relax RETRY also failed for ${formula} — using original geometry`);
+              }
+            } catch (retryErr: any) {
+              console.log(`[QE-Worker] vc-relax RETRY error for ${formula}: ${retryErr.message?.slice(0, 100)}`);
+            }
+          }
+        }
       }
 
       cleanQETmpDir(path.join(jobDir, "tmp"));
