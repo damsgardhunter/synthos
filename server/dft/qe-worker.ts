@@ -5571,7 +5571,11 @@ ${r2Cell}
                     }
                   }
                 }
-                cleanQETmpDir(path.join(jobDir, "tmp"));
+                // Clean only Round 2 .save — do NOT clean Round 1 .save
+                // (phonon and bands need it). cleanQETmpDir deletes ALL .save dirs.
+                const r2SaveDir = path.join(jobDir, "tmp", `${r2Prefix}.save`);
+                try { if (fs.existsSync(r2SaveDir)) fs.rmSync(r2SaveDir, { recursive: true, force: true }); } catch {}
+                console.log(`[QE-Worker] Round 2 cleanup: removed ${r2Prefix}.save, preserved Round 1 .save for phonon/bands`);
               } catch (r2DftErr: any) {
                 console.log(`[QE-Worker] Round 2 DFT failed: ${r2DftErr.message?.slice(0, 100)} — keeping Round 1`);
               }
