@@ -318,6 +318,19 @@ export interface QEFullResult {
     dft0Rank?: number;
     selectionCategory?: string;
   };
+  /** Whether the DFT quality gate passed before Tc estimation. */
+  qualityGatePassed?: boolean;
+  qualityGateReasons?: string[];
+  /** Uncertainty and confidence for all final results. */
+  uncertainty?: {
+    tcConfidence: "high" | "medium" | "low" | "surrogate";
+    tcUncertaintyReason: string;
+    lambdaConfidence: "high" | "medium" | "low" | "surrogate";
+    phononConfidence: "high" | "medium" | "low" | "none";
+    structureConfidence: "high" | "medium" | "low";
+    ephMethod: "dfpt" | "surrogate" | "none";
+    phononMethod: "dfpt_full" | "dfpt_gamma" | "finite_displacement" | "surrogate" | "none";
+  };
 }
 
 const HASH_CACHE_MAX = 2000;
@@ -6044,17 +6057,30 @@ ${r2Cell}
       }
     }
 
-    // DFPT electron-phonon coupling — run only for top-scoring candidates
-    // (ensembleScore > 0.7) because ph.x with electron_phonon adds significant
-    // wall time. Phonon stability is pre-checked: if the fast phonon step above
-    // found imaginary modes beyond threshold, skip DFPT to avoid wasting compute.
-    // DFPT gate: require phonon to have ACTUAL frequencies (not just lowestFrequency > -10).
-    // When phonon has 0 modes (timeout/crash), lowestFrequency=0 which passes the old
-    // check, causing DFPT to waste 2-8 hours on a system with no phonon data.
+    // --- DFT Quality Gate before Tc estimation ---
+    // Prevents unstable or poorly relaxed structures from getting
+    // impressive-looking Tc numbers. Require multiple conditions.
     const phononHasResults = result.phonon != null && result.phonon.frequencies.length > 0;
     const phononPhysicallyStable = phononHasResults
       ? result.phonon!.lowestFrequency > -10.0
-      : false; // No phonon data = don't waste compute on DFPT
+      : false;
+    const scfForceOk = result.scf?.totalForce != null ? result.scf.totalForce < 0.5 : true;
+    const scfPressureOk = result.scf?.pressure != null ? Math.abs(result.scf.pressure) < 50 : true;
+    const isMetallicForTc = result.scf?.isMetallic ?? false;
+
+    const qualityGatePass = scfConverged && scfForceOk && scfPressureOk && isMetallicForTc && phononPhysicallyStable;
+    const qualityGateReason: string[] = [];
+    if (!scfConverged) qualityGateReason.push("SCF not converged");
+    if (!scfForceOk) qualityGateReason.push(`force ${result.scf?.totalForce?.toFixed(3)} > 0.5 Ry/bohr`);
+    if (!scfPressureOk) qualityGateReason.push(`pressure ${result.scf?.pressure?.toFixed(1)} kbar > ±50`);
+    if (!isMetallicForTc) qualityGateReason.push("not metallic");
+    if (!phononPhysicallyStable) qualityGateReason.push(phononHasResults ? "imaginary phonon modes" : "no phonon data");
+
+    if (qualityGatePass) {
+      console.log(`[QE-Worker] Quality gate PASSED for ${formula}: SCF converged, metallic, force=${result.scf?.totalForce?.toFixed(4) ?? "N/A"}, pressure=${result.scf?.pressure?.toFixed(1) ?? "N/A"} kbar, phonon stable (${result.phonon!.frequencies.length} modes)`);
+    } else {
+      console.log(`[QE-Worker] Quality gate FAILED for ${formula}: ${qualityGateReason.join(", ")} — Tc will be labeled as uncertain/surrogate`);
+    }
 
     // Quality-weighted learning: phonon stability is a strong signal (weight 3.0)
     if (phononHasResults && phononPhysicallyStable) {
@@ -6062,7 +6088,8 @@ ${r2Cell}
       recordGeneratorOutcome(elements, workerPressure, winnerProto, true, getSignalWeight("phonon_stable"));
     }
 
-    if (scfUsable && phononHasResults && phononPhysicallyStable && (opts?.ensembleScore ?? 0) > 0.7 && !opts?.skipEph) {
+    // DFPT electron-phonon coupling — requires quality gate pass + high ensemble score.
+    if (scfUsable && qualityGatePass && (opts?.ensembleScore ?? 0) > 0.7 && !opts?.skipEph) {
       console.log(`[QE-Worker] ${formula} qualifies for DFPT EPC (ensembleScore=${opts!.ensembleScore!.toFixed(3)}, phononModes=${result.phonon!.frequencies.length}, lowestFreq=${result.phonon!.lowestFrequency.toFixed(1)} cm⁻¹)`);
       try {
         result.dfpt = await runDFPTEPC(formula, elements, counts, jobDir, workerPressure);
@@ -6080,6 +6107,65 @@ ${r2Cell}
     } else if (!phononHasResults && (opts?.ensembleScore ?? 0) > 0.7) {
       console.log(`[QE-Worker] ${formula} DFPT EPC skipped — phonon produced 0 modes (timeout/crash), no data to build on`);
     }
+
+    // --- Populate quality gate and uncertainty fields ---
+    result.qualityGatePassed = qualityGatePass;
+    result.qualityGateReasons = qualityGateReason;
+
+    // Determine uncertainty/confidence for each result dimension
+    const hasDFPT = result.dfpt != null && (result.dfpt as any).lambda > 0;
+    const hasFullPhonon = phononHasResults && result.phonon!.frequencies.length >= 10;
+    const hasGammaOnly = phononHasResults && result.phonon!.frequencies.length < 10 && result.phonon!.frequencies.length > 0;
+
+    const tcConfidence: "high" | "medium" | "low" | "surrogate" =
+      hasDFPT && qualityGatePass ? "high" :
+      hasFullPhonon && qualityGatePass ? "medium" :
+      scfConverged && isMetallicForTc ? "low" : "surrogate";
+
+    const lambdaConfidence: "high" | "medium" | "low" | "surrogate" =
+      hasDFPT ? "high" :
+      hasFullPhonon ? "medium" : "surrogate";
+
+    const phononConfidence: "high" | "medium" | "low" | "none" =
+      hasFullPhonon && phononPhysicallyStable ? "high" :
+      hasGammaOnly ? "medium" :
+      phononHasResults ? "low" : "none";
+
+    const structureConfidence: "high" | "medium" | "low" =
+      result.vcRelaxed && scfForceOk && scfPressureOk ? "high" :
+      scfConverged ? "medium" : "low";
+
+    const ephMethod: "dfpt" | "surrogate" | "none" =
+      hasDFPT ? "dfpt" : "surrogate";
+
+    const phononMethod: "dfpt_full" | "dfpt_gamma" | "finite_displacement" | "surrogate" | "none" =
+      hasFullPhonon ? "dfpt_full" :
+      hasGammaOnly ? "dfpt_gamma" : "none";
+
+    const tcReasons: string[] = [];
+    if (hasDFPT) tcReasons.push("DFPT e-ph coupling");
+    else tcReasons.push("surrogate lambda");
+    if (hasFullPhonon) tcReasons.push("full DFPT phonons");
+    else if (hasGammaOnly) tcReasons.push("gamma-only phonons");
+    else tcReasons.push("no phonon data");
+    if (scfConverged) tcReasons.push("SCF converged");
+    else tcReasons.push("SCF partial/failed");
+    if (!scfForceOk) tcReasons.push(`high force (${result.scf?.totalForce?.toFixed(3)})`);
+    if (!scfPressureOk) tcReasons.push(`high pressure (${result.scf?.pressure?.toFixed(1)} kbar)`);
+
+    result.uncertainty = {
+      tcConfidence,
+      tcUncertaintyReason: tcReasons.join(" + "),
+      lambdaConfidence,
+      phononConfidence,
+      structureConfidence,
+      ephMethod,
+      phononMethod,
+    };
+
+    console.log(`[QE-Worker] ${formula} uncertainty: Tc=${tcConfidence}, lambda=${lambdaConfidence}, phonon=${phononConfidence}, structure=${structureConfidence}, eph=${ephMethod}, phonon_method=${phononMethod}`);
+    console.log(`[QE-Worker] ${formula} Tc uncertainty reason: ${result.uncertainty.tcUncertaintyReason}`);
+
   } catch (err: any) {
     result.error = err.message;
     console.log(`[QE-Worker] Error for ${formula}: ${err.message}`);

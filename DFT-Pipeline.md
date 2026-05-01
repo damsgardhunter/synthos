@@ -97,7 +97,7 @@ Five sequential stages with gating between each:
 | Stage | Type | Time | What |
 |-------|------|------|------|
 | **1** | Atomic relax (fixed cell) | 10-15 min x N candidates | Tests all admitted candidates. Ranks by **per-atom energy** (not total energy — prevents Z-mismatch where a Z=4 supercell beats Z=1 on total E but is worse per atom). Keeps top K for Stage 2 (tier-dependent: preview=2, standard=5, deep=10, publication=20). Budget: floor(90min / perCandidateMs), min 2. **Z-mismatch guard**: if the winner has more atoms than the primitive cell expects, regenerates positions from known-structure or generateAtomicPositions |
-| **2** | vc-relax (variable cell) | 30 min x K candidates | Full cell + position optimization on each Stage 1 winner. **Post-DFT dedup**: detects when multiple starting structures collapse to the same DFT minimum (pair-distance fingerprint, 3% tolerance) — skips duplicates to save phonon compute. Picks the lowest-energy unique result. Iterative lattice rescaling if shift >6-10% (max 6% per step). Mini-EOS pressure correction (5 volume points) |
+| **2** | vc-relax (variable cell) | 30-90 min x K candidates | Full cell + position optimization on each Stage 1 winner. **Post-DFT dedup**: detects when multiple starting structures collapse to the same DFT minimum (pair-distance fingerprint, 3% tolerance). **Keeps multiple unique winners** (not just lowest energy) — returns all passing results ranked by per-atom energy for multi-objective scoring. The lowest-energy may not be the best superconductor if another has better phonon stability, higher DOS(Ef), or better H network. vc-relax timeout: 30 min (default), 60 min (magnetic), 90 min (high-P hydrides). Iterative lattice rescaling if shift >6-10% (max 6% per step). Mini-EOS pressure correction (5 volume points) |
 | **3** | Final SCF | ~15 min | Production-quality electronic structure at relaxed geometry |
 | **4** | Gamma-point DFPT phonon | 30 min | Fast dynamical stability screen. 2-attempt retry. Pass: <=3 small imaginary modes. **Pre-phonon diagnostics**: logs atomic positions, SCF convergence, forces, pressure before ph.x. **Force gate**: skips gamma phonon if residual force > 0.10 Ry/bohr (DFPT crash likely). If cost estimate > 4h, skips gamma and defers to full phonon (Stage 5) |
 | **5** | Full DFPT phonon grid | up to 48h | Complete phonon dispersion on high-symmetry q-path |
@@ -181,11 +181,27 @@ Two paths depending on available compute:
 
 ---
 
+## DFT Quality Gate (before Stage 9)
+
+Before electron-phonon coupling and Tc estimation, a quality gate prevents unstable or poorly relaxed structures from getting impressive-looking Tc numbers. ALL conditions must pass:
+
+| Check | Threshold | Why |
+|-------|-----------|-----|
+| SCF converged | true | Partial convergence = unreliable electronic structure |
+| Residual force | < 0.5 Ry/bohr | High forces = structure not at equilibrium |
+| Residual pressure | < +/- 50 kbar | Large pressure mismatch = wrong cell volume |
+| Metallic | true | Non-metals cannot be BCS superconductors |
+| Phonon stable | no large imaginary modes | Dynamically unstable = structure doesn't exist |
+
+If the gate fails, DFPT e-ph is skipped and any Tc estimate is labeled as "surrogate" confidence with the failure reasons logged.
+
+---
+
 ## Stage 9: Electron-Phonon Coupling & Eliashberg -> Tc
 
 **File**: `server/physics/eliashberg-pipeline.ts`
 
-Only runs if the structure is phonon-stable (no large imaginary modes):
+Only runs if the quality gate passes AND the structure is phonon-stable:
 
 1. **alpha2F(omega) spectrum** — combines electronic DOS, phonon spectrum, and electron-phonon matrix elements into the spectral function
 2. **lambda = integral of alpha2F(omega)/omega** — dimensionless coupling strength (typical: 0.3-2.0 for superconductors)
@@ -246,6 +262,29 @@ Learning updates are weighted by the quality of the signal that produced them, p
 | DFPT e-ph good lambda | 4.0 | Electron-phonon coupling yields finite lambda |
 
 A funnel survival (cheap) contributes 0.1 to the generator's success tally, while a DFPT-validated phonon-stable candidate contributes 3.0 — so one strong result outweighs 30 funnel passes.
+
+---
+
+## Uncertainty & Confidence Fields
+
+Every final result carries uncertainty metadata so consumers (UI, database, ML models) know how trustworthy each number is:
+
+| Field | Values | Meaning |
+|-------|--------|---------|
+| `tcConfidence` | high / medium / low / surrogate | How reliable is the Tc estimate? |
+| `lambdaConfidence` | high / medium / low / surrogate | How reliable is lambda (e-ph coupling)? |
+| `phononConfidence` | high / medium / low / none | How reliable is the phonon spectrum? |
+| `structureConfidence` | high / medium / low | How well-relaxed is the crystal structure? |
+| `ephMethod` | dfpt / surrogate / none | Source of electron-phonon coupling |
+| `phononMethod` | dfpt_full / dfpt_gamma / finite_displacement / surrogate / none | Source of phonon data |
+| `tcUncertaintyReason` | free text | Full explanation: "DFPT e-ph + full DFPT phonons + SCF converged" |
+
+**Confidence definitions:**
+
+- **high**: DFPT e-ph coupling + full phonon grid + quality gate passed. Example: `Tc_DFPT_AD = 185 K, confidence: high`
+- **medium**: Full phonons but surrogate lambda, or DFPT with partial convergence. Example: `Tc = 220 K, confidence: medium, reason: surrogate lambda + full DFPT phonons`
+- **low**: SCF converged and metallic but limited phonon data. Example: `Tc = 150 K, confidence: low, reason: gamma-only phonons`
+- **surrogate**: Non-metallic, SCF failed, or no phonon data. Example: `Tc = 280 K, confidence: surrogate, reason: surrogate lambda + no phonon data + SCF partial`
 
 ---
 

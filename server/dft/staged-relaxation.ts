@@ -36,6 +36,19 @@ export interface StageResult {
   scfConverged?: boolean;
 }
 
+/** A single Stage 2 winner with its geometry and metadata. */
+export interface Stage2Winner {
+  positions: Array<{ element: string; x: number; y: number; z: number }>;
+  latticeA: number;
+  cellVectors?: number[][];
+  totalEnergy: number;
+  energyPerAtom: number;
+  maxForce?: number;
+  pressure?: number;
+  source: string;
+  passed: boolean;
+}
+
 export interface StagedRelaxationResult {
   stages: StageResult[];
   finalStage: number;
@@ -47,6 +60,9 @@ export interface StagedRelaxationResult {
   candidateSource: string;
   vegardConfidence?: number;
   isMetallic?: boolean;
+  /** All unique Stage 2 winners, ranked by per-atom energy. The caller can
+   *  use multi-objective scoring to pick beyond just the lowest energy. */
+  stage2Winners?: Stage2Winner[];
 }
 
 /** Callback interface so this module doesn't depend on qe-worker internals. */
@@ -334,6 +350,7 @@ export async function runStagedRelaxation(opts: StagedRelaxationOpts): Promise<S
   let bestCellVectors: number[][] | undefined;
   let candidateSource = candidates[0]?.source ?? "unknown";
   let isMetallic = opts.isMetallic;
+  const allS2Winners: Stage2Winner[] = [];
 
   // --- Skip Stages 1-2 for known compounds ---
   if (opts.skipRelaxation) {
@@ -444,6 +461,9 @@ export async function runStagedRelaxation(opts: StagedRelaxationOpts): Promise<S
       let bestS2Energy = Infinity;
       let bestS2Result: StageResult | null = null;
       let bestS2Source = candidateSource;
+      // Collect ALL unique Stage 2 winners (not just the best).
+      // The caller can use multi-objective scoring to pick beyond just lowest energy.
+      // (declared in outer scope so it's accessible in the return)
       // Post-DFT dedup: track relaxed structures to detect when multiple
       // starting points collapse to the same DFT minimum. Saves phonon compute.
       const relaxedStructures: Array<{ positions: Array<{ element: string; x: number; y: number; z: number }>; latticeA: number; source: string }> = [];
@@ -480,6 +500,22 @@ export async function runStagedRelaxation(opts: StagedRelaxationOpts): Promise<S
 
           const s2NAtoms = s2.positions.length || 1;
           const s2EPerAtom = s2.totalEnergy / s2NAtoms;
+
+          // Collect all passing unique results for multi-objective ranking
+          if (s2.passed && s2.positions.length > 0) {
+            allS2Winners.push({
+              positions: s2.positions,
+              latticeA: s2.latticeA,
+              cellVectors: s2.cellVectors,
+              totalEnergy: s2.totalEnergy,
+              energyPerAtom: s2EPerAtom,
+              maxForce: s2.maxForce,
+              pressure: s2.pressure,
+              source: s2Cand.candidate.source,
+              passed: true,
+            });
+          }
+
           if (s2.passed && s2EPerAtom < bestS2Energy) {
             bestS2Energy = s2EPerAtom;
             bestS2Result = s2;
@@ -513,6 +549,13 @@ export async function runStagedRelaxation(opts: StagedRelaxationOpts): Promise<S
           bestCellVectors = bestS2Result.cellVectors;
           candidateSource = bestS2Source;
           console.log(`[Staged-Relax] ${formula} Stage 2: best winner from ${bestS2Source} (E/atom=${bestS2Energy.toFixed(4)} eV, a=${bestLatticeA.toFixed(3)} A)`);
+          if (allS2Winners.length > 1) {
+            console.log(`[Staged-Relax] ${formula} Stage 2: ${allS2Winners.length} unique winners available for multi-objective ranking:`);
+            for (let wi = 0; wi < allS2Winners.length; wi++) {
+              const w = allS2Winners[wi];
+              console.log(`[Staged-Relax]   S2 winner #${wi + 1}: ${w.source} (E/atom=${w.energyPerAtom.toFixed(4)} eV, a=${w.latticeA.toFixed(3)} A, force=${w.maxForce?.toExponential(2) ?? "N/A"}, P=${w.pressure?.toFixed(1) ?? "N/A"} kbar)`);
+            }
+          }
         } else {
           if (bestS2Result.positions.length > 0) bestPositions = bestS2Result.positions;
           if (bestS2Result.latticeA > 0) bestLatticeA = bestS2Result.latticeA;
@@ -531,6 +574,11 @@ export async function runStagedRelaxation(opts: StagedRelaxationOpts): Promise<S
 
   const totalWallTime = (Date.now() - startTime) / 1000;
 
+  // Sort Stage 2 winners by per-atom energy for the caller
+  const sortedWinners = allS2Winners.length > 0
+    ? allS2Winners.sort((a, b) => a.energyPerAtom - b.energyPerAtom)
+    : undefined;
+
   return {
     stages,
     finalStage: stages.length > 0 ? stages[stages.length - 1].stage : 0,
@@ -541,6 +589,7 @@ export async function runStagedRelaxation(opts: StagedRelaxationOpts): Promise<S
     totalWallTime,
     candidateSource,
     isMetallic,
+    stage2Winners: sortedWinners,
   };
 }
 
