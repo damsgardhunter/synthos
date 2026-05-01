@@ -311,7 +311,14 @@ function computeStage1Params(elements: string[], totalAtoms: number, counts?: Re
     ? (heavyCount >= 1 ? 10800 : 9000)
     : isHighPressureHydride ? 9000
     : 5400;
-  const clampedTimeoutS = Math.max(900, Math.min(timeoutSeconds, maxTimeoutS));
+  // FLOOR by system type — the cost model underestimates for magnetic systems
+  // because spin-polarized SCF on Fe/Mn/Cr is intrinsically much harder than
+  // the atom-count-based model predicts. FeSe (4 atoms) and LiFeAs (3 atoms)
+  // were getting 35-51 min but need 90+ min for spin to converge.
+  const minTimeoutS = hasMagnetic ? 5400      // 90 min minimum for ANY magnetic system
+    : isHighPressureHydride ? 5400             // 90 min minimum for high-P hydrides
+    : 900;                                     // 15 min minimum default
+  const clampedTimeoutS = Math.max(minTimeoutS, Math.min(timeoutSeconds, maxTimeoutS));
   const timeoutMs = clampedTimeoutS * 1000;
   const maxSeconds = Math.floor(clampedTimeoutS) - 60; // QE max_seconds slightly under timeout
 
