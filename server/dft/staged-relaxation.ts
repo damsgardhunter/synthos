@@ -1025,8 +1025,9 @@ export async function runStage4GammaPhonon(opts: Stage4Opts): Promise<StageResul
   prefix = '${prefix}',
   outdir = './tmp',
   fildyn = '${prefix}.dyn',
-  tr2_ph = 1.0d-12,
-  alpha_mix(1) = 0.3,
+  tr2_ph = 1.0d-10,
+  alpha_mix(1) = 0.5,
+  reduce_io = .true.,
   ldisp = .false.,
   max_seconds = ${phTimeoutS - 60},
 /
@@ -1077,8 +1078,8 @@ export async function runStage4GammaPhonon(opts: Stage4Opts): Promise<StageResul
 
     // On crash: loosen convergence (production retry behavior)
     // On timeout (no crash): use recover=.true. to resume from checkpoint
-    const retryTr2 = prevCrashed ? "1.0d-10" : "1.0d-12";
-    const retryAlpha = prevCrashed ? 0.1 : 0.3;
+    const retryTr2 = prevCrashed ? "1.0d-8" : "1.0d-10";  // Loosen further on crash
+    const retryAlpha = prevCrashed ? 0.1 : 0.5;
     const recoverLine = (prevTimedOut || prevExternalKill) && !prevCrashed ? "  recover = .true.,\n" : "";
 
     const attemptInput = `Gamma-only phonon calculation
@@ -1088,6 +1089,7 @@ export async function runStage4GammaPhonon(opts: Stage4Opts): Promise<StageResul
   fildyn = '${prefix}.dyn',
   tr2_ph = ${retryTr2},
   alpha_mix(1) = ${retryAlpha},
+  reduce_io = .true.,
   ldisp = .false.,
   max_seconds = ${phTimeoutS - 60},
 ${recoverLine}/
