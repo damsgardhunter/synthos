@@ -84,12 +84,19 @@ export function toWslPath(winPath: string): string {
  * via QE_MPI_ARGS. The #1 throughput win for pw.x on a multi-core VM —
  * typically 4-8× faster for 5-15 atom SCF on 4-8 ranks.
  */
-function getMpiWrapper(): { cmd: string; args: string[] } | null {
+function getMpiWrapper(): { cmd: string; args: string[]; qeArgs: string[] } | null {
   const ranks = parseInt(process.env.QE_MPI_RANKS ?? "", 10);
   if (!Number.isFinite(ranks) || ranks < 2) return null;
   const cmd = process.env.QE_MPI_WRAPPER || "mpirun";
   const extra = (process.env.QE_MPI_ARGS || "").split(/\s+/).filter(Boolean);
-  return { cmd, args: ["-np", String(ranks), ...extra] };
+  // QE-specific args go AFTER the binary (e.g. -nk 5 for k-point pooling)
+  // QE_NPOOL sets -nk which splits k-points across MPI groups for ~2-4× speedup
+  const npool = parseInt(process.env.QE_NPOOL ?? "", 10);
+  const qeArgs: string[] = [];
+  if (Number.isFinite(npool) && npool >= 2) {
+    qeArgs.push("-nk", String(npool));
+  }
+  return { cmd, args: ["-np", String(ranks), ...extra], qeArgs };
 }
 
 export function spawnQE(
@@ -101,20 +108,24 @@ export function spawnQE(
     if (options.wslInputFile) {
       // Use bash -c with file redirection to bypass WSL stdin-pipe unreliability
       const mpiPrefix = mpi ? `${mpi.cmd} ${mpi.args.map(a => `'${a}'`).join(" ")} ` : "";
-      const cmd = `${mpiPrefix}'${binary}' < '${options.wslInputFile}'`;
+      const qeSuffix = mpi?.qeArgs.length ? ` ${mpi.qeArgs.join(" ")}` : "";
+      const cmd = `${mpiPrefix}'${binary}'${qeSuffix} < '${options.wslInputFile}'`;
       return nodeSpawn("wsl.exe", ["-d", "Ubuntu", "--", "bash", "-c", cmd], {
         cwd: options.cwd,
         stdio: ["ignore", "pipe", "pipe"],
       });
     }
-    const innerArgs = mpi ? [mpi.cmd, ...mpi.args, binary] : [binary];
+    const qeArgs = mpi?.qeArgs ?? [];
+    const innerArgs = mpi ? [mpi.cmd, ...mpi.args, binary, ...qeArgs] : [binary];
     return nodeSpawn("wsl.exe", ["-d", "Ubuntu", "--", ...innerArgs], {
       cwd: options.cwd,
       stdio: options.stdio as any,
     });
   }
   if (mpi) {
-    return nodeSpawn(mpi.cmd, [...mpi.args, binary], { cwd: options.cwd, stdio: options.stdio as any });
+    // mpirun args go before binary, QE args (-nk, -npool) go after
+    // Result: mpirun -np 10 --allow-run-as-root pw.x -nk 5
+    return nodeSpawn(mpi.cmd, [...mpi.args, binary, ...mpi.qeArgs], { cwd: options.cwd, stdio: options.stdio as any });
   }
   return nodeSpawn(binary, { cwd: options.cwd, stdio: options.stdio as any });
 }
