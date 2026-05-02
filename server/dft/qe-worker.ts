@@ -4378,10 +4378,11 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     if (structureCandidates.length > 0) {
       // Run staged relaxation (Stage 1 + Stage 2) on structure candidates
       const qeCallbacks = buildQERunnerCallbacks();
-      // Only skip vc-relax in staged relaxation for known compounds or TSC/all-TM.
-      // Novel high-P hydrides NEED vc-relax to discover the correct lattice.
+      // Don't skip vc-relax for known compounds — literature lattice may not
+      // match these pseudopotentials exactly. LaH10 had 17 imaginary phonon modes
+      // because the cell was wrong (P=-7.7 kbar). Let DFT find the right cell.
+      // Only skip for TSC (nspin=2 oscillation) and all-TM intermetallics (BFGS crash).
       const skipVcRelax = (
-        (workerPressure >= 100 && elements.includes("H") && elements.length >= 2 && isKnownCompound) ||
         !!opts?.forceSpin ||
         (elements.length >= 3 && elements.every(el => TRANSITION_METALS.has(el)))
       );
@@ -4435,7 +4436,7 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
           pressureGPa: workerPressure,
           jobDir,
           callbacks: qeCallbacks,
-          skipVcRelax: skipVcRelax || isKnownCompound,  // Known compounds: skip vc-relax (lattice is correct) but still run Stage 1 (positions need fixing)
+          skipVcRelax,  // Only TSC and all-TM skip vc-relax. Known compounds run vc-relax from literature lattice.
           skipRelaxation: false,
           // Test ALL admitted candidates from F8, not just top 3.
           // The funnel already selected the best — don't throw any away before DFT.
@@ -4474,33 +4475,20 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     result.vcRelaxed = false;
     let preVcLatticeA = latticeA;
 
-    // Skip vc-relax for known compounds with literature lattice parameters.
-    // vc-relax routinely times out at 90 min for high-pressure hydrides without
-    // converging — wasting compute on geometries we already know experimentally.
-    // Override latticeA with the literature value and proceed straight to SCF.
+    // Use literature lattice as STARTING POINT for vc-relax, not as final.
+    // The literature value gives a good initial guess, but DFT with these
+    // specific pseudopotentials may have a slightly different equilibrium.
+    // LaH10 had P=-7.7 kbar and 17 imaginary modes when vc-relax was skipped.
     if (VERIFIED_LATTICE_A[normFormula]) {
       const litA = VERIFIED_LATTICE_A[normFormula];
-      console.log(`[QE-Worker] Skipping vc-relax for ${formula} — using literature lattice a=${litA} Å (saves ~90 min wall time)`);
+      console.log(`[QE-Worker] Using literature lattice a=${litA} Å as starting point for ${formula} (vc-relax will refine)`);
       latticeA = litA;
-      result.relaxedLatticeA = latticeA;
-      result.vcRelaxed = true;
+      // Do NOT set result.vcRelaxed = true — let vc-relax run
     }
 
-    // Skip vc-relax for high-pressure hydrides ONLY if we have a literature
-    // lattice to fall back on. For novel materials without a known structure,
-    // vc-relax is the ONLY path to the correct lattice — we must run it even
-    // though it's slow and may not converge. The mini-EOS correction will
-    // help refine the pressure match afterward.
+    // Log vc-relax intent for all materials
     if (!result.vcRelaxed && workerPressure >= 100 && elements.includes("H") && elements.length >= 2) {
-      if (isKnownCompound) {
-        // Known compound: safe to skip vc-relax (literature lattice available)
-        console.log(`[QE-Worker] Skipping vc-relax for ${formula} — known high-P hydride with literature lattice (saves ~90 min)`);
-        result.vcRelaxed = true;
-      } else {
-        // Novel compound: MUST run vc-relax to discover the correct lattice.
-        // Pipeline can't rely on known-structures for novel materials.
-        console.log(`[QE-Worker] Running vc-relax for ${formula} — novel high-P hydride (P=${workerPressure} GPa), no literature lattice available, vc-relax needed to find correct cell`);
-      }
+      console.log(`[QE-Worker] Running vc-relax for ${formula} — high-P hydride (P=${workerPressure} GPa), vc-relax needed to find correct cell${isKnownCompound ? " (starting from literature lattice)" : ""}`);
     }
 
     // Skip vc-relax for TSC candidates. With forceSpin=true we emit
