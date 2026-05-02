@@ -21,7 +21,7 @@ Five generators run in parallel to create a diverse pool of crystal structure ca
 1. **Vegard/VCA** — interpolates lattice + positions from binary endpoint structures (AFLOW/MP/known-structures)
 2. **AIRSS** (`server/csp/airss-wrapper.ts`) — fully random cells via `buildcell`, pressure-aware MINSEP, Z-sweeps (Z=1,2,3,4,6,8), volume ensemble from Birch-Murnaghan
 3. **PyXtal** (`server/csp/pyxtal-wrapper.ts`) — Wyckoff-aware random generation respecting space group symmetry, tiered SG sampling (40% high-sym / 30% med / 20% low / 10% P1)
-4. **Cage Seeder** (`server/csp/cage-seeder.ts`) — for hydrides: places H on cage-forming Wyckoff orbits (sodalite, clathrate, hex-clathrate, bcc-hydride) from 141 tagged prototype templates
+4. **Cage Seeder** (`server/csp/cage-seeder.ts`) — for hydrides: 20-30 candidates (was 10) at 3-5 pressure-compressed volumes each. Proper ternary A/M site placement: guest metals (Li, Na, K) go to interstitial "A" sites, host metals (La, Y, Ca) go to cage-center "M" sites. Uses Wyckoff orbits from 141 tagged prototype templates (sodalite, clathrate, hex-clathrate, bcc-hydride)
 5. **Mutations** (`server/csp/structure-mutator.ts`) — 8 mutation types on top-3 candidates: lattice strain +/-10%, volume compress/expand, H shuffle, symmetry break, Wyckoff perturbation
 
 Budget is tier-dependent (preview: ~85 candidates, deep: ~10K AIRSS + 1K PyXtal). Tier assignment is automatic based on composition: known compounds get preview, ternary high-P hydrides get deep, binary high-P get standard.
