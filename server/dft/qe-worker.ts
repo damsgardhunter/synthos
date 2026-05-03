@@ -3460,7 +3460,7 @@ function parseVCRelaxOutput(stdout: string): VCRelaxResult {
   }
 
   // Match the LAST CELL_PARAMETERS block (damped dynamics outputs many)
-  const cellMatches = [...stdout.matchAll(/CELL_PARAMETERS\s*\(([^)]*)\)\s*\n([\s\S]*?)(?=\n\s*\n|\nATOMIC|\nEnd|\n\s*Writing|\n\s*PWSCF|$)/g)];
+  const cellMatches = [...stdout.matchAll(/CELL_PARAMETERS\s*[{(]\s*([^})]*)\s*[})]\s*\n([\s\S]*?)(?=\n\s*\n|\nATOMIC|\nEnd|\n\s*Writing|\n\s*PWSCF|\n\s*NEW-OLD|$)/g)];
   const cellLines = cellMatches.length > 0 ? cellMatches[cellMatches.length - 1] : null;
   if (cellLines) {
     const unit = cellLines[1].toLowerCase();
@@ -3526,7 +3526,8 @@ function parseVCRelaxOutput(stdout: string): VCRelaxResult {
   // completes without the usual trailing blank line / "End final coordinates"
   // marker. Also handles damped dynamics output where positions are followed
   // by "Writing config" or "total cpu time" lines.
-  const posBlocks = [...stdout.matchAll(/ATOMIC_POSITIONS\s*\{?\s*(\w+)\s*\}?\s*\n([\s\S]*?)(?=\n\s*\n|\nEnd|\nCELL_PARAMETERS|\n\s*Writing|\n\s*PWSCF\b|\n\s*init_run\b|\n\s*electrons\b|\n\s*BFGS\b|\n\s*JOB DONE|\n\s*%%%%%%%%%%|\n\s*Error in routine|\n\s*total cpu time|\n\s*General routines|\n\s*Parallel routines|\n\s*number of|\n\s*convergence has|$)/g)];
+  // Match ATOMIC_POSITIONS with any bracket style: {crystal}, (crystal), or just crystal
+  const posBlocks = [...stdout.matchAll(/ATOMIC_POSITIONS\s*[{(]?\s*(\w+)\s*[})]?\s*\n([\s\S]*?)(?=\n\s*\n|\nEnd|\nCELL_PARAMETERS|\n\s*Writing|\n\s*PWSCF\b|\n\s*init_run\b|\n\s*electrons\b|\n\s*BFGS\b|\n\s*JOB DONE|\n\s*%%%%%%%%%%|\n\s*Error in routine|\n\s*total cpu time|\n\s*General routines|\n\s*Parallel routines|\n\s*number of|\n\s*convergence has|\n\s*NEW-OLD|$)/g)];
   if (posBlocks.length > 0) {
     const lastBlock = posBlocks[posBlocks.length - 1];
     const coordType = lastBlock[1].toLowerCase();
@@ -4982,6 +4983,12 @@ ${cellBlockEos}
         const hasAP = phase1Result.stdout.includes("ATOMIC_POSITIONS");
         const hasCP = phase1Result.stdout.includes("CELL_PARAMETERS");
         console.log(`[QE-Worker] Phase 1 parse diagnostic: hasATOMIC_POSITIONS=${hasAP}, hasCELL_PARAMETERS=${hasCP}, stdout_len=${phase1Result.stdout.length}`);
+        if (hasAP) {
+          // Show the format of the ATOMIC_POSITIONS line so we can debug the regex
+          const apIdx = phase1Result.stdout.lastIndexOf("ATOMIC_POSITIONS");
+          const apSnippet = phase1Result.stdout.slice(apIdx, apIdx + 200);
+          console.log(`[QE-Worker] Phase 1 last ATOMIC_POSITIONS snippet: "${apSnippet.split("\n").slice(0, 4).join(" | ")}"`);
+        }
         if (phase1Result.exitCode !== 0 || !hasAP) {
           console.log(`[QE-Worker] Phase 1 stdout tail: ${phase1Result.stdout.slice(-300)}`);
         }
