@@ -3436,6 +3436,14 @@ function parseVCRelaxOutput(stdout: string): VCRelaxResult {
   if (stdout.includes("Final enthalpy")) {
     result.converged = true;
   }
+  // Damped dynamics doesn't print "bfgs converged" — check if it reached
+  // low forces instead (the damped run just stops at nstep/max_seconds)
+  if (stdout.includes("cell_dynamics = 'damp-w'") || stdout.includes("ion_dynamics  = 'damp'") || stdout.includes("ion_dynamics = 'damp'")) {
+    // For damped dynamics, "convergence" means it completed without crashing
+    if (stdout.includes("JOB DONE") && !stdout.includes("Error in routine")) {
+      result.converged = true; // damped ran to completion = usable geometry
+    }
+  }
 
   const energyMatch = stdout.match(/!\s+total energy\s+=\s+([-\d.]+)\s+Ry/);
   if (energyMatch) {
@@ -3451,7 +3459,9 @@ function parseVCRelaxOutput(stdout: string): VCRelaxResult {
     }
   }
 
-  const cellLines = stdout.match(/CELL_PARAMETERS\s*\(([^)]*)\)\s*\n([\s\S]*?)(?=\n\s*\n|\nATOMIC)/);
+  // Match the LAST CELL_PARAMETERS block (damped dynamics outputs many)
+  const cellMatches = [...stdout.matchAll(/CELL_PARAMETERS\s*\(([^)]*)\)\s*\n([\s\S]*?)(?=\n\s*\n|\nATOMIC|\nEnd|\n\s*Writing|\n\s*PWSCF|$)/g)];
+  const cellLines = cellMatches.length > 0 ? cellMatches[cellMatches.length - 1] : null;
   if (cellLines) {
     const unit = cellLines[1].toLowerCase();
     const vectors: number[][] = [];
@@ -3512,11 +3522,11 @@ function parseVCRelaxOutput(stdout: string): VCRelaxResult {
   }
 
   // Match ATOMIC_POSITIONS blocks — terminator set expanded so we still
-  // capture the last geometry when vc-relax crashes without the usual
-  // trailing blank line / "End final coordinates" marker. Observed in
-  // exit=2 cases where timing banner ("PWSCF : ... WALL", "init_run :")
-  // immediately follows the positions block.
-  const posBlocks = [...stdout.matchAll(/ATOMIC_POSITIONS\s*\{?\s*(\w+)\s*\}?\s*\n([\s\S]*?)(?=\n\s*\n|\nEnd|\nCELL|\n\s*Writing|\n\s*PWSCF\b|\n\s*init_run\b|\n\s*electrons\b|\n\s*BFGS\b|\n\s*JOB DONE|\n\s*%%%%%%%%%%|\n\s*Error in routine|$)/g)];
+  // capture the last geometry when vc-relax crashes or damped dynamics
+  // completes without the usual trailing blank line / "End final coordinates"
+  // marker. Also handles damped dynamics output where positions are followed
+  // by "Writing config" or "total cpu time" lines.
+  const posBlocks = [...stdout.matchAll(/ATOMIC_POSITIONS\s*\{?\s*(\w+)\s*\}?\s*\n([\s\S]*?)(?=\n\s*\n|\nEnd|\nCELL_PARAMETERS|\n\s*Writing|\n\s*PWSCF\b|\n\s*init_run\b|\n\s*electrons\b|\n\s*BFGS\b|\n\s*JOB DONE|\n\s*%%%%%%%%%%|\n\s*Error in routine|\n\s*total cpu time|\n\s*General routines|\n\s*Parallel routines|\n\s*number of|\n\s*convergence has|$)/g)];
   if (posBlocks.length > 0) {
     const lastBlock = posBlocks[posBlocks.length - 1];
     const coordType = lastBlock[1].toLowerCase();
@@ -4968,7 +4978,11 @@ ${cellBlockEos}
         if (phase1Positions.length > 4) console.log(`[QE-Worker]   ... and ${phase1Positions.length - 4} more`);
       } else {
         console.log(`[QE-Worker] Phase 1 produced no positions for ${formula} (exit=${phase1Result.exitCode}) — Phase 2 will use original geometry`);
-        if (phase1Result.exitCode !== 0) {
+        // Diagnostic: check if output has ATOMIC_POSITIONS but parser missed them
+        const hasAP = phase1Result.stdout.includes("ATOMIC_POSITIONS");
+        const hasCP = phase1Result.stdout.includes("CELL_PARAMETERS");
+        console.log(`[QE-Worker] Phase 1 parse diagnostic: hasATOMIC_POSITIONS=${hasAP}, hasCELL_PARAMETERS=${hasCP}, stdout_len=${phase1Result.stdout.length}`);
+        if (phase1Result.exitCode !== 0 || !hasAP) {
           console.log(`[QE-Worker] Phase 1 stdout tail: ${phase1Result.stdout.slice(-300)}`);
         }
       }
