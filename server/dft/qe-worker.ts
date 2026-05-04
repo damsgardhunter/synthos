@@ -4486,20 +4486,13 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     result.vcRelaxed = false;
     let preVcLatticeA = latticeA;
 
-    // Use literature lattice as STARTING POINT for vc-relax, not as final.
-    // The literature value gives a good initial guess, but DFT with these
-    // specific pseudopotentials may have a slightly different equilibrium.
-    // LaH10 had P=-7.7 kbar and 17 imaginary modes when vc-relax was skipped.
-    if (VERIFIED_LATTICE_A[normFormula]) {
-      const litA = VERIFIED_LATTICE_A[normFormula];
-      console.log(`[QE-Worker] Using literature lattice a=${litA} Å as starting point for ${formula} (vc-relax will refine)`);
-      latticeA = litA;
-      // Do NOT set result.vcRelaxed = true — let vc-relax run
-    }
-
-    // Log vc-relax intent for all materials
-    if (!result.vcRelaxed && workerPressure >= 100 && elements.includes("H") && elements.length >= 2) {
-      console.log(`[QE-Worker] Running vc-relax for ${formula} — high-P hydride (P=${workerPressure} GPa), vc-relax needed to find correct cell${isKnownCompound ? " (starting from literature lattice)" : ""}`);
+    // NO literature lattice override. The pipeline must find the correct
+    // lattice on its own through vc-relax. Literature values are for different
+    // experimental conditions and pseudopotentials — forcing them causes
+    // CaH6 to collapse to a=2.8 (should be ~3.5-4.0) and YH6 to a=2.9.
+    // The Stage 1 winner's lattice is our best starting point for vc-relax.
+    if (!result.vcRelaxed) {
+      console.log(`[QE-Worker] vc-relax will find correct cell for ${formula} (starting from Stage 1 lattice a=${latticeA.toFixed(3)} Å${workerPressure > 0 ? `, P=${workerPressure} GPa` : ""})`);
     }
 
     // Skip vc-relax for TSC candidates. With forceSpin=true we emit
@@ -4553,20 +4546,16 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       console.log(`[QE-Worker] Z-mismatch: reset preVcLatticeA to ${latticeA.toFixed(3)} Å (positions already at target lattice, no rescaling needed)`);
     }
 
-    // --- Lattice-mismatch guard for known compounds ---
-    // If the Stage 1 winner's lattice is significantly different from the
-    // literature lattice, the Stage 1 positions (optimized at a different
-    // lattice) are wrong for the target cell. Use the known-structure
-    // positions directly — they're already correct for the literature lattice.
-    // LaH11Li2 hit force=1.56 Ry/bohr because Stage 1 positions (a=4.747)
-    // were used at a=5.100 — a 7.4% mismatch that iterative rescaling
-    // couldn't fix in one step.
-    if (isKnownCompound && VERIFIED_LATTICE_A[normFormula]) {
-      const stageLatticeShift = Math.abs(latticeA - preVcLatticeA) / Math.max(1e-6, preVcLatticeA);
+    // No lattice-mismatch guard — removed. The pipeline must find the correct
+    // structure through vc-relax from Stage 1 positions. Literature positions
+    // and lattice constants are wrong for our pseudopotentials and caused
+    // CaH6, YH6, LaH10 to collapse to the wrong basin.
+    if (false) { // DISABLED — keeping code for reference
+      const stageLatticeShift = 0;
       if (stageLatticeShift > 0.05) {
-        const ksLookup = lookupKnownStructure(normFormula);
+        const ksLookup: any = null;
         if (ksLookup) {
-          console.log(`[QE-Worker] Lattice-mismatch guard for ${formula}: Stage 1 positions at a=${preVcLatticeA.toFixed(3)} Å but literature is a=${latticeA.toFixed(3)} Å (${(stageLatticeShift * 100).toFixed(1)}% shift) — using known-structure positions + quick relax`);
+          console.log(`DISABLED`);
           positions = ksLookup.atoms.map(a => ({ element: a.element, x: a.x, y: a.y, z: a.z }));
           preVcLatticeA = latticeA;
 

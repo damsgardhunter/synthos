@@ -1141,6 +1141,35 @@ ${recoverLine}/
     // Parse phonon frequencies from output
     frequencies = parseGammaPhononFrequencies(result.stdout);
 
+    // If ph.x completed (exit=0) but no frequencies parsed, try reading
+    // the .dyn file directly. QE 7.x gamma-only writes the dynamical matrix
+    // to a file; the frequencies are in the file header.
+    if (frequencies.length === 0 && result.exitCode === 0) {
+      try {
+        const dynFile = path.join(opts.jobDir, `${prefix}.dyn`);
+        if (fs.existsSync(dynFile)) {
+          const dynContent = fs.readFileSync(dynFile, "utf-8");
+          console.log(`[Staged-Relax] ${formula} Stage 4: ph.x wrote .dyn (${dynContent.length} bytes) but no freqs in stdout — parsing .dyn directly`);
+          // Try to parse frequencies from .dyn file
+          // Format: "     omega(  1) =     X.XXXXXX [THz] =     Y.YYYYYY [cm-1]"
+          // or the frequencies at the bottom of the file
+          const dynFreqs = parseGammaPhononFrequencies(dynContent);
+          if (dynFreqs.length > 0) {
+            frequencies = dynFreqs;
+            console.log(`[Staged-Relax] ${formula} Stage 4: parsed ${dynFreqs.length} frequencies from .dyn file`);
+          } else {
+            // Try extracting eigenvalues from dynamical matrix
+            // Format: "     freq (    1) =       1.234567 [THz] =      41.234567 [cm-1]"
+            // Show first few lines for debug
+            const firstLines = dynContent.split("\n").slice(0, 10).join(" | ");
+            console.log(`[Staged-Relax] ${formula} Stage 4: .dyn file first lines: ${firstLines}`);
+          }
+        }
+      } catch (dynErr: any) {
+        console.log(`[Staged-Relax] ${formula} Stage 4: .dyn file read failed: ${dynErr.message?.slice(0, 80)}`);
+      }
+    }
+
     if (frequencies.length > 0) {
       console.log(`[Staged-Relax] ${formula} Stage 4 attempt ${attempt + 1}: SUCCESS — parsed ${frequencies.length} frequencies, range [${Math.min(...frequencies).toFixed(1)}, ${Math.max(...frequencies).toFixed(1)}] cm-1`);
       break; // Success — stop retrying
