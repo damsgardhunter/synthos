@@ -4561,7 +4561,7 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     // LaH11Li2 hit force=1.56 Ry/bohr because Stage 1 positions (a=4.747)
     // were used at a=5.100 — a 7.4% mismatch that iterative rescaling
     // couldn't fix in one step.
-    if (isKnownCompound && result.vcRelaxed) {
+    if (isKnownCompound && VERIFIED_LATTICE_A[normFormula]) {
       const stageLatticeShift = Math.abs(latticeA - preVcLatticeA) / Math.max(1e-6, preVcLatticeA);
       if (stageLatticeShift > 0.05) {
         const ksLookup = lookupKnownStructure(normFormula);
