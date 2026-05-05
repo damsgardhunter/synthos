@@ -5011,20 +5011,49 @@ ${cellBlockEos}
         if (vcParsed.finalPositions.length > 4) console.log(`[QE-Worker]   ... and ${vcParsed.finalPositions.length - 4} more`);
       }
 
-      // Use Phase 2 result if available, otherwise Phase 1
+      // Pick the BETTER result between Phase 1 and Phase 2.
+      // Phase 2 BFGS can sometimes make things WORSE (ScH6: Phase 1 force=0.001
+      // → Phase 2 force=0.098 because BFGS changed the cell and destabilized positions).
+      // Compare forces and pick the one with lower residual force.
       if (phase2Result.exitCode !== 0 && !vcParsed.finalPositions) {
         console.log(`[QE-Worker] Phase 2 exit=${phase2Result.exitCode} for ${formula}: ${phase2Result.stdout.slice(-200)}`);
       }
-      if (vcParsed.finalPositions && vcParsed.finalPositions.length > 0) {
-        positions = vcParsed.finalPositions;
+
+      const p1HasPositions = phase1Parsed.finalPositions && phase1Parsed.finalPositions.length > 0;
+      const p2HasPositions = vcParsed.finalPositions && vcParsed.finalPositions.length > 0;
+
+      // Extract forces for comparison
+      const p1ForceStr = phase1Result.stdout.match(/Total force\s*=\s*([\d.]+)/g);
+      const p1Force = p1ForceStr ? parseFloat(p1ForceStr[p1ForceStr.length - 1].match(/([\d.]+)$/)?.[1] ?? "999") : 999;
+      const p2ForceStr = phase2Result.stdout.match(/Total force\s*=\s*([\d.]+)/g);
+      const p2Force = p2ForceStr ? parseFloat(p2ForceStr[p2ForceStr.length - 1].match(/([\d.]+)$/)?.[1] ?? "999") : 999;
+
+      // Pick the phase with lower force
+      const usePhase1 = p1HasPositions && (!p2HasPositions || p1Force < p2Force);
+
+      if (usePhase1 && p1HasPositions) {
+        positions = phase1Positions;
+        latticeA = phase1LatticeA;
+        result.vcRelaxed = true;
+        result.relaxedLatticeA = latticeA;
+        if (p2HasPositions) {
+          console.log(`[QE-Worker] Phase 1 had LOWER force (${p1Force.toFixed(4)}) than Phase 2 (${p2Force.toFixed(4)}) — using Phase 1 geometry for ${formula}: a=${latticeA.toFixed(3)} A`);
+        } else {
+          console.log(`[QE-Worker] Phase 2 produced no positions, using Phase 1 for ${formula}: a=${latticeA.toFixed(3)} A, force=${p1Force.toFixed(4)}`);
+        }
+      } else if (p2HasPositions) {
+        positions = vcParsed.finalPositions!;
         result.vcRelaxed = true;
         if (vcParsed.finalLatticeAng && vcParsed.finalLatticeAng > 0.5) {
           latticeA = vcParsed.finalLatticeAng;
           result.relaxedLatticeA = latticeA;
         }
-        console.log(`[QE-Worker] vc-relax 2-phase ${vcParsed.converged ? "CONVERGED" : "partial"} for ${formula}: a=${latticeA.toFixed(3)} A, ${positions.length} atoms, E=${vcParsed.totalEnergy.toFixed(4)} eV`);
-      } else if (phase1Parsed.finalPositions && phase1Parsed.finalPositions.length > 0) {
-        // Phase 2 failed but Phase 1 produced something — use Phase 1
+        if (p1HasPositions) {
+          console.log(`[QE-Worker] Phase 2 had LOWER force (${p2Force.toFixed(4)}) than Phase 1 (${p1Force.toFixed(4)}) — using Phase 2 for ${formula}: a=${latticeA.toFixed(3)} A`);
+        } else {
+          console.log(`[QE-Worker] vc-relax 2-phase ${vcParsed.converged ? "CONVERGED" : "partial"} for ${formula}: a=${latticeA.toFixed(3)} A, ${positions.length} atoms, E=${vcParsed.totalEnergy.toFixed(4)} eV`);
+        }
+      } else if (p1HasPositions) {
         positions = phase1Positions;
         latticeA = phase1LatticeA;
         result.vcRelaxed = true;
