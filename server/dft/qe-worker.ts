@@ -5114,6 +5114,124 @@ ${cellBlockEos}
       cleanQETmpDir(path.join(jobDir, "tmp"));
     }
 
+    // --- Phase 3: Tight fixed-cell relaxation ---
+    // vc-relax uses loose SCF convergence (conv_thr=1e-5, scf_must_converge=.false.)
+    // so the forces it reports are from a poorly converged electronic structure.
+    // vc-relax says force=0.001 but production SCF (conv_thr=1e-7) sees force=0.25.
+    // Fix: run a proper fixed-cell relax at the vc-relax cell with tight convergence
+    // to get the atomic positions right BEFORE the production SCF.
+    if (result.vcRelaxed && positions.length > 0) {
+      try {
+        const p3Prefix = formula.replace(/[^a-zA-Z0-9]/g, "") + "_p3relax";
+        const p3HasH = elements.includes("H");
+        const p3Ecutwfc = Math.max(computeEcutwfc(elements, 0, 80, 45), p3HasH ? 80 : 50);
+        const p3Ecutrho = p3Ecutwfc * ecutrhoMultiplier(elements);
+        const p3COverA = estimateCOverA(elements, counts);
+        const p3BOverA = estimateBOverA(elements, counts);
+        const p3HasMag = mayHaveMagneticMoment(elements);
+        const p3Nspin = p3HasMag ? 2 : 1;
+        const p3MagLines = p3HasMag ? generateMagnetizationLines(elements, counts, isAFMCandidate(elements, counts), !elements.some(el => el in MAGNETIC_ELEMENTS)) : "";
+        const p3Nbnd = computeNbnd(elements, counts, p3Nspin, positions);
+        let p3Species = "";
+        for (const el of elements) {
+          p3Species += `  ${el}  ${getAtomicMass(el).toFixed(3)}  ${resolvePPFilename(el)}\n`;
+        }
+        let p3Pos = "";
+        for (const p of positions) {
+          p3Pos += `  ${p.element}  ${p.x.toFixed(6)}  ${p.y.toFixed(6)}  ${p.z.toFixed(6)}\n`;
+        }
+        const p3Kpts = autoKPoints(latticeA, p3COverA, p3BOverA, undefined, 0.40, { stage: "relax", totalAtoms: positions.length }).trim();
+        const p3Cell = generateCellParameters(latticeA, p3COverA, 0, p3BOverA, elements, counts);
+        const p3MaxSec = Math.min(3600, Math.max(900, positions.length * 200)); // 15-60 min based on atom count
+
+        const p3Input = `&CONTROL
+  calculation = 'relax',
+  restart_mode = 'from_scratch',
+  prefix = '${p3Prefix}',
+  outdir = './tmp',
+  disk_io = 'low',
+  pseudo_dir = '${QE_PSEUDO_DIR_INPUT}',
+  tprnfor = .true.,
+  tstress = .true.,
+  forc_conv_thr = 1.0d-3,
+  etot_conv_thr = 1.0d-5,
+  nstep = 200,
+  max_seconds = ${p3MaxSec},
+/
+&SYSTEM
+  ibrav = 0,
+  nat = ${positions.length},
+  ntyp = ${elements.length},
+  ecutwfc = ${p3Ecutwfc},
+  ecutrho = ${p3Ecutrho},
+  nbnd = ${p3Nbnd},
+  input_dft = 'PBE',
+  occupations = 'smearing',
+  smearing = 'mv',
+  degauss = 0.015,
+  nspin = ${p3Nspin},
+${p3MagLines}/
+&ELECTRONS
+  electron_maxstep = 200,
+  conv_thr = 1.0d-7,
+  mixing_beta = 0.3,
+  mixing_mode = 'local-TF',
+  diagonalization = 'david',
+/
+&IONS
+  ion_dynamics = 'bfgs',
+/
+ATOMIC_SPECIES
+${p3Species}
+ATOMIC_POSITIONS {crystal}
+${p3Pos}
+K_POINTS {automatic}
+${p3Kpts}
+
+${p3Cell}
+`;
+        const p3File = path.join(jobDir, "phase3_relax.in");
+        fs.writeFileSync(p3File, p3Input);
+        console.log(`[QE-Worker] Phase 3 (tight relax): refining positions at vc-relax cell for ${formula} (a=${latticeA.toFixed(3)} Å, ${positions.length} atoms, conv_thr=1e-7, max=${p3MaxSec}s)`);
+
+        const p3Result = await runQECommand(
+          path.posix.join(getQEBinDir(), "pw.x"), p3File, jobDir, (p3MaxSec + 120) * 1000,
+        );
+        fs.writeFileSync(path.join(jobDir, "phase3_relax.out"), p3Result.stdout);
+
+        // Parse relaxed positions
+        const p3PosBlocks = [...p3Result.stdout.matchAll(/ATOMIC_POSITIONS\s*[{(]?\s*(\w+)\s*[})]?\s*\n([\s\S]*?)(?=\n\s*\n|\nEnd|\nCELL_PARAMETERS|\n\s*Writing|\n\s*PWSCF\b|\n\s*init_run\b|\n\s*electrons\b|\n\s*BFGS\b|\n\s*JOB DONE|\n\s*%%%%%%%%%%|\n\s*Error in routine|\n\s*total cpu time|\n\s*General routines|\n\s*Parallel routines|\n\s*NEW-OLD|$)/g)];
+        if (p3PosBlocks.length > 0) {
+          const lastBlock = p3PosBlocks[p3PosBlocks.length - 1];
+          const coordType = lastBlock[1].toLowerCase();
+          const lines = lastBlock[2].trim().split("\n").filter((l: string) => l.trim().length > 0);
+          const p3Positions: typeof positions = [];
+          for (const line of lines) {
+            const parts = line.trim().split(/\s+/);
+            if (parts.length >= 4 && parts[0].match(/^[A-Z][a-z]?$/)) {
+              p3Positions.push({ element: parts[0], x: parseFloat(parts[1]), y: parseFloat(parts[2]), z: parseFloat(parts[3]) });
+            }
+          }
+          if (p3Positions.length === positions.length) {
+            const p3ForceMatch = p3Result.stdout.match(/Total force\s*=\s*([\d.]+)/g);
+            const p3Force = p3ForceMatch ? parseFloat(p3ForceMatch[p3ForceMatch.length - 1].match(/([\d.]+)$/)?.[1] ?? "999") : null;
+            positions = p3Positions;
+            console.log(`[QE-Worker] Phase 3 DONE for ${formula}: force=${p3Force?.toFixed(4) ?? "N/A"} Ry/bohr (${p3Positions.length} atoms refined at a=${latticeA.toFixed(3)} Å)`);
+          } else {
+            console.log(`[QE-Worker] Phase 3 position count mismatch: expected ${positions.length}, got ${p3Positions.length} — keeping vc-relax positions`);
+          }
+        } else {
+          console.log(`[QE-Worker] Phase 3 produced no positions for ${formula} (exit=${p3Result.exitCode}) — keeping vc-relax positions`);
+        }
+
+        // Clean Phase 3 .save
+        const p3SaveDir = path.join(jobDir, "tmp", `${p3Prefix}.save`);
+        try { if (fs.existsSync(p3SaveDir)) fs.rmSync(p3SaveDir, { recursive: true, force: true }); } catch {}
+      } catch (p3Err: any) {
+        console.log(`[QE-Worker] Phase 3 relax failed for ${formula}: ${p3Err.message?.slice(0, 100)} — keeping vc-relax positions`);
+      }
+    }
+
     result.kPoints = autoKPoints(latticeA, cOverA, bOverAFull, undefined, DEFAULT_KSPACING, { stage: "scf", isMetallic: vegardResult?.isMetallic ?? undefined, totalAtoms: positions.length }).trim();
     if (Math.abs(latticeA - preVcLatticeA) > 0.01) {
       console.log(`[QE-Worker] K-points recomputed for ${formula} after vc-relax lattice change (${preVcLatticeA.toFixed(3)} -> ${latticeA.toFixed(3)} A): ${result.kPoints}`);
