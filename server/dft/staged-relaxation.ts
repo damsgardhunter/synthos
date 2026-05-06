@@ -69,6 +69,8 @@ export interface StagedRelaxationResult {
 export interface QERunnerCallbacks {
   runPwx(inputFile: string, workDir: string, timeoutMs: number): Promise<{ stdout: string; stderr: string; exitCode: number }>;
   runPhx(inputFile: string, workDir: string, timeoutMs: number): Promise<{ stdout: string; stderr: string; exitCode: number }>;
+  /** Run any QE binary (dynmat.x, q2r.x, etc.) by name */
+  runQEBinary?(binaryName: string, inputFile: string, workDir: string, timeoutMs: number): Promise<{ stdout: string; stderr: string; exitCode: number }>;
   getQEBinDir(): string;
   getPseudoDir(): string;
   getPseudoDirInput(): string;  // WSL-compatible path
@@ -1141,32 +1143,62 @@ ${recoverLine}/
     // Parse phonon frequencies from output
     frequencies = parseGammaPhononFrequencies(result.stdout);
 
-    // If ph.x completed (exit=0) but no frequencies parsed, try reading
-    // the .dyn file directly. QE 7.x gamma-only writes the dynamical matrix
-    // to a file; the frequencies are in the file header.
+    // If ph.x completed (exit=0) but no frequencies parsed, run dynmat.x
+    // to diagonalize the dynamical matrix and extract frequencies.
+    // QE 7.x gamma-only writes the raw matrix to .dyn; dynmat.x post-processes
+    // it to get eigenvalues (frequencies).
     if (frequencies.length === 0 && result.exitCode === 0) {
       try {
         const dynFile = path.join(opts.jobDir, `${prefix}.dyn`);
         if (fs.existsSync(dynFile)) {
-          const dynContent = fs.readFileSync(dynFile, "utf-8");
-          console.log(`[Staged-Relax] ${formula} Stage 4: ph.x wrote .dyn (${dynContent.length} bytes) but no freqs in stdout — parsing .dyn directly`);
-          // Try to parse frequencies from .dyn file
-          // Format: "     omega(  1) =     X.XXXXXX [THz] =     Y.YYYYYY [cm-1]"
-          // or the frequencies at the bottom of the file
-          const dynFreqs = parseGammaPhononFrequencies(dynContent);
-          if (dynFreqs.length > 0) {
-            frequencies = dynFreqs;
-            console.log(`[Staged-Relax] ${formula} Stage 4: parsed ${dynFreqs.length} frequencies from .dyn file`);
+          console.log(`[Staged-Relax] ${formula} Stage 4: ph.x wrote .dyn but no freqs in stdout — running dynmat.x`);
+
+          // Write dynmat.x input
+          const dynmatInput = `&INPUT\n  fildyn = '${prefix}.dyn',\n  asr = 'simple'\n/\n`;
+          const dynmatFile = path.join(opts.jobDir, "dynmat_gamma.in");
+          fs.writeFileSync(dynmatFile, dynmatInput);
+
+          // Run dynmat.x
+          if (opts.callbacks.runQEBinary) {
+            const dynmatResult = await opts.callbacks.runQEBinary("dynmat.x", dynmatFile, opts.jobDir, 60000);
+            fs.writeFileSync(path.join(opts.jobDir, "dynmat_gamma.out"), dynmatResult.stdout);
+
+            if (dynmatResult.exitCode === 0) {
+              // Parse frequencies from dynmat.x output
+              // Format: "# mode   [cm-1]   [THz]  IR\n   1   123.45   3.678   0.123"
+              const dynmatFreqs = parseGammaPhononFrequencies(dynmatResult.stdout);
+              if (dynmatFreqs.length > 0) {
+                frequencies = dynmatFreqs;
+                console.log(`[Staged-Relax] ${formula} Stage 4: dynmat.x extracted ${dynmatFreqs.length} frequencies from .dyn`);
+              } else {
+                // Try tabular format: "   1   123.45   3.678   0.123"
+                let inTable = false;
+                for (const line of dynmatResult.stdout.split("\n")) {
+                  if (line.match(/#\s*mode\s+\[cm-1\]/i)) { inTable = true; continue; }
+                  if (inTable) {
+                    const parts = line.trim().split(/\s+/);
+                    if (parts.length >= 2 && !isNaN(parseFloat(parts[1]))) {
+                      frequencies.push(parseFloat(parts[1]));
+                    } else if (parts.length < 2 || line.trim() === "") {
+                      break;
+                    }
+                  }
+                }
+                if (frequencies.length > 0) {
+                  console.log(`[Staged-Relax] ${formula} Stage 4: dynmat.x tabular parse got ${frequencies.length} frequencies`);
+                } else {
+                  console.log(`[Staged-Relax] ${formula} Stage 4: dynmat.x ran but couldn't parse frequencies. Output tail: ${dynmatResult.stdout.slice(-300)}`);
+                }
+              }
+            } else {
+              console.log(`[Staged-Relax] ${formula} Stage 4: dynmat.x exit=${dynmatResult.exitCode}: ${dynmatResult.stderr.slice(-200)}`);
+            }
           } else {
-            // Try extracting eigenvalues from dynamical matrix
-            // Format: "     freq (    1) =       1.234567 [THz] =      41.234567 [cm-1]"
-            // Show first few lines for debug
-            const firstLines = dynContent.split("\n").slice(0, 10).join(" | ");
-            console.log(`[Staged-Relax] ${formula} Stage 4: .dyn file first lines: ${firstLines}`);
+            console.log(`[Staged-Relax] ${formula} Stage 4: dynmat.x not available (runQEBinary callback missing)`);
           }
         }
       } catch (dynErr: any) {
-        console.log(`[Staged-Relax] ${formula} Stage 4: .dyn file read failed: ${dynErr.message?.slice(0, 80)}`);
+        console.log(`[Staged-Relax] ${formula} Stage 4: dynmat.x failed: ${dynErr.message?.slice(0, 100)}`);
       }
     }
 

@@ -3828,6 +3828,8 @@ function buildQERunnerCallbacks(): QERunnerCallbacks {
       runQECommand(path.posix.join(getQEBinDir(), "pw.x"), inputFile, workDir, timeoutMs),
     runPhx: (inputFile, workDir, timeoutMs) =>
       runQECommand(path.posix.join(getQEBinDir(), "ph.x"), inputFile, workDir, timeoutMs),
+    runQEBinary: (binaryName, inputFile, workDir, timeoutMs) =>
+      runQECommand(path.posix.join(getQEBinDir(), binaryName), inputFile, workDir, timeoutMs),
     getQEBinDir,
     getPseudoDir: () => QE_PSEUDO_DIR,
     getPseudoDirInput: () => QE_PSEUDO_DIR_INPUT,
