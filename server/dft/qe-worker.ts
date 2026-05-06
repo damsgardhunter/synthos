@@ -3282,7 +3282,6 @@ function generateVCRelaxInput(
   latticeA: number,
   positions: Array<{ element: string; x: number; y: number; z: number }>,
   pressureGPa: number = 0,
-  opts?: { phase?: "damped" | "bfgs" },
 ): string {
   const totalAtoms = positions.length;
   const nTypes = elements.length;
@@ -3331,42 +3330,35 @@ function generateVCRelaxInput(
     : hasMagVcr ? 3600                                // 60 min for magnetic systems
     : Math.max(600, Math.min(QE_MAX_SECONDS, 1800));  // 30 min default
   const VC_RELAX_MAX_SECONDS = vcRelaxMaxSeconds;
-  // Tuned vc-relax parameters for different system types
+  // UNIFIED vc-relax: damped dynamics with TIGHT SCF convergence.
+  // Cell and positions converge TOGETHER in a single calculation.
+  // No separate phases — forces are accurate at every step because
+  // conv_thr=1e-7 matches production SCF. No force gap.
+  //
+  // Previous 3-phase approach had:
+  //   Phase 1 (loose SCF) → Phase 2 (loose SCF, changed cell) → Phase 3 (tight SCF, fixed cell)
+  //   Result: force gap from 0.001 → 0.25 between phases
+  //
+  // Now: single damped dynamics with tight SCF
+  //   ion_dynamics='damp' — never diverges, always makes progress
+  //   cell_dynamics='damp-w' — cell adjusts gradually with positions
+  //   conv_thr=1e-7 — production-quality forces at every ionic step
+  //   400 nstep — enough for convergence (slower per step, but accurate)
   const vcMixingMode = isHighPHydride ? "local-TF" : hasMagVcr ? "local-TF" : "plain";
   const vcMixingBeta = isHighPHydride ? 0.2 : hasMagVcr ? 0.2 : 0.3;
-  const vcConvThr = isHighPHydride ? "1.0d-5" : "1.0d-4";
-
-  // 2-PHASE vc-relax strategy:
-  // Phase 1 (damped dynamics): robust basin-finding, never diverges.
-  //   Atoms follow forces with friction — always makes progress downhill.
-  //   200 steps, loose force threshold. Finds the right basin.
-  // Phase 2 (BFGS): fast convergence from the damped result.
-  //   Starts from Phase 1 geometry which is already near a minimum.
-  //   250 steps, tight force threshold. Tightens to publication quality.
-  //
-  // If phase='damped' (Phase 1): use damp/damp-w with loose thresholds
-  // If phase='bfgs' (Phase 2): use bfgs/bfgs with tight thresholds
-  const phase = opts?.phase ?? "damped"; // Default to Phase 1 for all materials
-  const isDamped = phase === "damped";
-
-  const vcNstep = isDamped ? 200 : 250;
-  const vcForcConvThr = isDamped ? "5.0d-3" : "1.0d-3";
-  const ionDynamics = isDamped ? "damp" : "bfgs";
-  const cellDynamics = isDamped ? "damp-w" : "bfgs";
-  const vcDiskIo = isDamped ? "low" : "medium"; // Phase 2 saves .save for phonon
 
   return `&CONTROL
   calculation = 'vc-relax',
   restart_mode = 'from_scratch',
   prefix = '${prefix}',
   outdir = './tmp',
-  disk_io = '${vcDiskIo}',
+  disk_io = 'low',
   pseudo_dir = '${QE_PSEUDO_DIR_INPUT}',
   tprnfor = .true.,
   tstress = .true.,
-  forc_conv_thr = ${vcForcConvThr},
-  etot_conv_thr = 1.0d-4,
-  nstep = ${vcNstep},
+  forc_conv_thr = 1.0d-3,
+  etot_conv_thr = 1.0d-5,
+  nstep = 400,
   max_seconds = ${VC_RELAX_MAX_SECONDS},
 /
 &SYSTEM
@@ -3383,17 +3375,16 @@ function generateVCRelaxInput(
 ${magLines}/
 &ELECTRONS
   electron_maxstep = 300,
-  conv_thr = ${vcConvThr},
+  conv_thr = 1.0d-7,
   mixing_beta = ${vcMixingBeta},
   mixing_mode = '${vcMixingMode}',
   diagonalization = 'david',
-  scf_must_converge = .false.,
 /
 &IONS
-  ion_dynamics = '${ionDynamics}',
+  ion_dynamics = 'damp',
 /
 &CELL
-  cell_dynamics = '${cellDynamics}',
+  cell_dynamics = 'damp-w',
   press = ${(pressureGPa * 10.0).toFixed(4)},
   press_conv_thr = ${pressureGPa > 50 ? 1.0 : 0.5},
 /
@@ -4936,134 +4927,61 @@ ${cellBlockEos}
       const vcRelaxMaxSec = isHighPHVcRelax ? 5400 : hasMagVcRelax ? 3600 : 1800;
       const vcRelaxKillMs = vcRelaxMaxSec * 1000 + 60_000;
 
-      console.log(`[QE-Worker] 2-phase vc-relax for ${formula} (lattice=${latticeA.toFixed(2)} A, ${positions.length} atoms${workerPressure > 0 ? `, P=${workerPressure} GPa` : ""}, timeout=${vcRelaxMaxSec}s)`);
+      // === UNIFIED vc-relax: damped dynamics with tight SCF ===
+      // Cell and positions converge TOGETHER. No separate phases, no force gap.
+      // conv_thr=1e-7 ensures forces are production-quality at every ionic step.
+      console.log(`[QE-Worker] Unified vc-relax for ${formula} (lattice=${latticeA.toFixed(2)} A, ${positions.length} atoms${workerPressure > 0 ? `, P=${workerPressure} GPa` : ""}, damped+tight, timeout=${vcRelaxMaxSec}s)`);
 
-      // === PHASE 1: Damped dynamics — find the basin ===
-      console.log(`[QE-Worker] Phase 1 (damped dynamics): finding basin for ${formula}`);
-      const phase1Input = generateVCRelaxInput(formula, elements, counts, latticeA, positions, workerPressure, { phase: "damped" });
-      const phase1File = path.join(jobDir, "vc_relax_phase1.in");
-      fs.writeFileSync(phase1File, phase1Input);
+      const vcInput = generateVCRelaxInput(formula, elements, counts, latticeA, positions, workerPressure);
+      const vcFile = path.join(jobDir, "vc_relax.in");
+      fs.writeFileSync(vcFile, vcInput);
 
-      const phase1Result = await runQECommand(
-        path.posix.join(getQEBinDir(), "pw.x"), phase1File, jobDir, vcRelaxKillMs,
+      const vcResult = await runQECommand(
+        path.posix.join(getQEBinDir(), "pw.x"), vcFile, jobDir, vcRelaxKillMs,
       );
-      fs.writeFileSync(path.join(jobDir, "vc_relax_phase1.out"), phase1Result.stdout);
-      const phase1Parsed = parseVCRelaxOutput(phase1Result.stdout);
+      fs.writeFileSync(path.join(jobDir, "vc_relax.out"), vcResult.stdout);
+      const vcParsed = parseVCRelaxOutput(vcResult.stdout);
 
-      // --- Phase 1 diagnostic logging ---
-      let phase1Positions = positions;
-      let phase1LatticeA = latticeA;
-      if (phase1Parsed.finalPositions && phase1Parsed.finalPositions.length > 0) {
-        phase1Positions = phase1Parsed.finalPositions;
-        phase1LatticeA = phase1Parsed.finalLatticeAng ?? latticeA;
-        // Compute max force from phase 1 output
-        const p1ForceMatch = phase1Result.stdout.match(/Total force\s*=\s*([\d.]+)/g);
-        const p1LastForce = p1ForceMatch ? p1ForceMatch[p1ForceMatch.length - 1].match(/([\d.]+)$/)?.[1] : null;
-        const p1PressMatch = phase1Result.stdout.match(/P=\s*([-\d.]+)/g);
-        const p1LastPress = p1PressMatch ? p1PressMatch[p1PressMatch.length - 1].match(/([-\d.]+)$/)?.[1] : null;
-        console.log(`[QE-Worker] Phase 1 DONE for ${formula}: a=${phase1LatticeA.toFixed(3)} Å, E=${phase1Parsed.totalEnergy.toFixed(4)} eV, force=${p1LastForce ?? "N/A"} Ry/bohr, P=${p1LastPress ?? "N/A"} kbar, wall=${phase1Parsed.wallTimeSeconds.toFixed(0)}s`);
-        // Log first few positions for diagnosis
-        for (let pi = 0; pi < Math.min(4, phase1Positions.length); pi++) {
-          const p = phase1Positions[pi];
-          console.log(`[QE-Worker]   Phase 1 atom[${pi}] ${p.element.padEnd(2)} (${p.x.toFixed(5)}, ${p.y.toFixed(5)}, ${p.z.toFixed(5)})`);
-        }
-        if (phase1Positions.length > 4) console.log(`[QE-Worker]   ... and ${phase1Positions.length - 4} more`);
-      } else {
-        console.log(`[QE-Worker] Phase 1 produced no positions for ${formula} (exit=${phase1Result.exitCode}) — Phase 2 will use original geometry`);
-        // Diagnostic: check if output has ATOMIC_POSITIONS but parser missed them
-        const hasAP = phase1Result.stdout.includes("ATOMIC_POSITIONS");
-        const hasCP = phase1Result.stdout.includes("CELL_PARAMETERS");
-        console.log(`[QE-Worker] Phase 1 parse diagnostic: hasATOMIC_POSITIONS=${hasAP}, hasCELL_PARAMETERS=${hasCP}, stdout_len=${phase1Result.stdout.length}`);
-        if (hasAP) {
-          // Show the format of the ATOMIC_POSITIONS line so we can debug the regex
-          const apIdx = phase1Result.stdout.lastIndexOf("ATOMIC_POSITIONS");
-          const apSnippet = phase1Result.stdout.slice(apIdx, apIdx + 200);
-          console.log(`[QE-Worker] Phase 1 last ATOMIC_POSITIONS snippet: "${apSnippet.split("\n").slice(0, 4).join(" | ")}"`);
-        }
-        if (phase1Result.exitCode !== 0 || !hasAP) {
-          console.log(`[QE-Worker] Phase 1 stdout tail: ${phase1Result.stdout.slice(-300)}`);
-        }
-      }
-
-      cleanQETmpDir(path.join(jobDir, "tmp"));
-
-      // === PHASE 2: BFGS from damped result — tighten convergence ===
-      console.log(`[QE-Worker] Phase 2 (BFGS): tightening from Phase 1 result for ${formula} (a=${phase1LatticeA.toFixed(3)} Å)`);
-      const phase2Input = generateVCRelaxInput(formula, elements, counts, phase1LatticeA, phase1Positions, workerPressure, { phase: "bfgs" });
-      const phase2File = path.join(jobDir, "vc_relax_phase2.in");
-      fs.writeFileSync(phase2File, phase2Input);
-
-      const phase2Result = await runQECommand(
-        path.posix.join(getQEBinDir(), "pw.x"), phase2File, jobDir, vcRelaxKillMs,
-      );
-      fs.writeFileSync(path.join(jobDir, "vc_relax_phase2.out"), phase2Result.stdout);
-      const vcParsed = parseVCRelaxOutput(phase2Result.stdout);
-
-      // --- Phase 2 diagnostic logging ---
+      // --- Diagnostic logging ---
       if (vcParsed.finalPositions && vcParsed.finalPositions.length > 0) {
-        const p2ForceMatch = phase2Result.stdout.match(/Total force\s*=\s*([\d.]+)/g);
-        const p2LastForce = p2ForceMatch ? p2ForceMatch[p2ForceMatch.length - 1].match(/([\d.]+)$/)?.[1] : null;
-        const p2PressMatch = phase2Result.stdout.match(/P=\s*([-\d.]+)/g);
-        const p2LastPress = p2PressMatch ? p2PressMatch[p2PressMatch.length - 1].match(/([-\d.]+)$/)?.[1] : null;
-        console.log(`[QE-Worker] Phase 2 DONE for ${formula}: a=${(vcParsed.finalLatticeAng ?? phase1LatticeA).toFixed(3)} Å, E=${vcParsed.totalEnergy.toFixed(4)} eV, force=${p2LastForce ?? "N/A"} Ry/bohr, P=${p2LastPress ?? "N/A"} kbar, wall=${vcParsed.wallTimeSeconds.toFixed(0)}s, converged=${vcParsed.converged}`);
+        const forceMatch = vcResult.stdout.match(/Total force\s*=\s*([\d.]+)/g);
+        const lastForce = forceMatch ? forceMatch[forceMatch.length - 1].match(/([\d.]+)$/)?.[1] : null;
+        const pressMatch = vcResult.stdout.match(/P=\s*([-\d.]+)/g);
+        const lastPress = pressMatch ? pressMatch[pressMatch.length - 1].match(/([-\d.]+)$/)?.[1] : null;
+        const vcLattice = vcParsed.finalLatticeAng ?? latticeA;
+        console.log(`[QE-Worker] vc-relax DONE for ${formula}: a=${vcLattice.toFixed(3)} Å, E=${vcParsed.totalEnergy.toFixed(4)} eV, force=${lastForce ?? "N/A"} Ry/bohr, P=${lastPress ?? "N/A"} kbar, wall=${vcParsed.wallTimeSeconds.toFixed(0)}s, converged=${vcParsed.converged}`);
         for (let pi = 0; pi < Math.min(4, vcParsed.finalPositions.length); pi++) {
           const p = vcParsed.finalPositions[pi];
-          console.log(`[QE-Worker]   Phase 2 atom[${pi}] ${p.element.padEnd(2)} (${p.x.toFixed(5)}, ${p.y.toFixed(5)}, ${p.z.toFixed(5)})`);
+          console.log(`[QE-Worker]   atom[${pi}] ${p.element.padEnd(2)} (${p.x.toFixed(5)}, ${p.y.toFixed(5)}, ${p.z.toFixed(5)})`);
         }
         if (vcParsed.finalPositions.length > 4) console.log(`[QE-Worker]   ... and ${vcParsed.finalPositions.length - 4} more`);
-      }
-
-      // Pick the BETTER result between Phase 1 and Phase 2.
-      // Phase 2 BFGS can sometimes make things WORSE (ScH6: Phase 1 force=0.001
-      // → Phase 2 force=0.098 because BFGS changed the cell and destabilized positions).
-      // Compare forces and pick the one with lower residual force.
-      if (phase2Result.exitCode !== 0 && !vcParsed.finalPositions) {
-        console.log(`[QE-Worker] Phase 2 exit=${phase2Result.exitCode} for ${formula}: ${phase2Result.stdout.slice(-200)}`);
-      }
-
-      const p1HasPositions = phase1Parsed.finalPositions && phase1Parsed.finalPositions.length > 0;
-      const p2HasPositions = vcParsed.finalPositions && vcParsed.finalPositions.length > 0;
-
-      // Extract forces for comparison
-      const p1ForceStr = phase1Result.stdout.match(/Total force\s*=\s*([\d.]+)/g);
-      const p1Force = p1ForceStr ? parseFloat(p1ForceStr[p1ForceStr.length - 1].match(/([\d.]+)$/)?.[1] ?? "999") : 999;
-      const p2ForceStr = phase2Result.stdout.match(/Total force\s*=\s*([\d.]+)/g);
-      const p2Force = p2ForceStr ? parseFloat(p2ForceStr[p2ForceStr.length - 1].match(/([\d.]+)$/)?.[1] ?? "999") : 999;
-
-      // Pick the phase with lower force
-      const usePhase1 = p1HasPositions && (!p2HasPositions || p1Force < p2Force);
-
-      if (usePhase1 && p1HasPositions) {
-        positions = phase1Positions;
-        latticeA = phase1LatticeA;
-        result.vcRelaxed = true;
-        result.relaxedLatticeA = latticeA;
-        if (p2HasPositions) {
-          console.log(`[QE-Worker] Phase 1 had LOWER force (${p1Force.toFixed(4)}) than Phase 2 (${p2Force.toFixed(4)}) — using Phase 1 geometry for ${formula}: a=${latticeA.toFixed(3)} A`);
-        } else {
-          console.log(`[QE-Worker] Phase 2 produced no positions, using Phase 1 for ${formula}: a=${latticeA.toFixed(3)} A, force=${p1Force.toFixed(4)}`);
+      } else {
+        console.log(`[QE-Worker] vc-relax produced no positions for ${formula} (exit=${vcResult.exitCode})`);
+        const hasAP = vcResult.stdout.includes("ATOMIC_POSITIONS");
+        const hasCP = vcResult.stdout.includes("CELL_PARAMETERS");
+        console.log(`[QE-Worker] vc-relax parse diagnostic: hasATOMIC_POSITIONS=${hasAP}, hasCELL_PARAMETERS=${hasCP}, stdout_len=${vcResult.stdout.length}`);
+        if (hasAP) {
+          const apIdx = vcResult.stdout.lastIndexOf("ATOMIC_POSITIONS");
+          const apSnippet = vcResult.stdout.slice(apIdx, apIdx + 200);
+          console.log(`[QE-Worker] Last ATOMIC_POSITIONS snippet: "${apSnippet.split("\n").slice(0, 4).join(" | ")}"`);
         }
-      } else if (p2HasPositions) {
-        positions = vcParsed.finalPositions!;
+        console.log(`[QE-Worker] vc-relax stdout tail: ${vcResult.stdout.slice(-300)}`);
+      }
+
+      // Use vc-relax result
+      if (vcParsed.finalPositions && vcParsed.finalPositions.length > 0) {
+        positions = vcParsed.finalPositions;
         result.vcRelaxed = true;
         if (vcParsed.finalLatticeAng && vcParsed.finalLatticeAng > 0.5) {
           latticeA = vcParsed.finalLatticeAng;
           result.relaxedLatticeA = latticeA;
         }
-        if (p1HasPositions) {
-          console.log(`[QE-Worker] Phase 2 had LOWER force (${p2Force.toFixed(4)}) than Phase 1 (${p1Force.toFixed(4)}) — using Phase 2 for ${formula}: a=${latticeA.toFixed(3)} A`);
-        } else {
-          console.log(`[QE-Worker] vc-relax 2-phase ${vcParsed.converged ? "CONVERGED" : "partial"} for ${formula}: a=${latticeA.toFixed(3)} A, ${positions.length} atoms, E=${vcParsed.totalEnergy.toFixed(4)} eV`);
-        }
-      } else if (p1HasPositions) {
-        positions = phase1Positions;
-        latticeA = phase1LatticeA;
-        result.vcRelaxed = true;
-        result.relaxedLatticeA = latticeA;
-        console.log(`[QE-Worker] Phase 2 failed, using Phase 1 geometry for ${formula}: a=${latticeA.toFixed(3)} A, E=${phase1Parsed.totalEnergy.toFixed(4)} eV`);
+        console.log(`[QE-Worker] vc-relax ${vcParsed.converged ? "CONVERGED" : "partial"} for ${formula}: a=${latticeA.toFixed(3)} A, ${positions.length} atoms`);
+      } else if (vcResult.exitCode !== 0) {
+        console.log(`[QE-Worker] vc-relax failed for ${formula} — proceeding with original geometry`);
       } else {
-        console.log(`[QE-Worker] vc-relax 2-phase produced no usable positions for ${formula} (Phase 1 exit=${phase1Result.exitCode}, Phase 2 exit=${phase2Result.exitCode}), proceeding with original geometry`);
-        const vcDiagTail = phase2Result.stdout.slice(-1000);
+        console.log(`[QE-Worker] vc-relax produced no usable positions for ${formula} (exit=${vcResult.exitCode}), proceeding with original geometry`);
+        const vcDiagTail = vcResult.stdout.slice(-1000);
         console.log(`[QE-Worker] vc-relax stdout tail for ${formula}:\n${vcDiagTail}`);
 
         // --- Multi-start retry for novel high-P hydrides ---
@@ -5116,13 +5034,9 @@ ${cellBlockEos}
       cleanQETmpDir(path.join(jobDir, "tmp"));
     }
 
-    // --- Phase 3: Tight fixed-cell relaxation ---
-    // vc-relax uses loose SCF convergence (conv_thr=1e-5, scf_must_converge=.false.)
-    // so the forces it reports are from a poorly converged electronic structure.
-    // vc-relax says force=0.001 but production SCF (conv_thr=1e-7) sees force=0.25.
-    // Fix: run a proper fixed-cell relax at the vc-relax cell with tight convergence
-    // to get the atomic positions right BEFORE the production SCF.
-    if (result.vcRelaxed && positions.length > 0) {
+    // Phase 3 removed — unified vc-relax already uses conv_thr=1e-7 (tight SCF)
+    // so forces during optimization match production SCF. No force gap.
+    if (false && result.vcRelaxed && positions.length > 0) {
       try {
         const p3Prefix = formula.replace(/[^a-zA-Z0-9]/g, "") + "_p3relax";
         const p3HasH = elements.includes("H");
