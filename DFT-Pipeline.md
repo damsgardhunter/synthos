@@ -1,6 +1,6 @@
 # Quantum Alchemy Engine — Full DFT Pipeline
 
-End-to-end superconductor discovery pipeline from candidate generation through phonon calculation and Tc prediction.
+End-to-end superconductor discovery pipeline from candidate generation through phonon calculation and Tc prediction. The system discovers crystal structures independently — no literature lattice overrides, no forced positions.
 
 ---
 
@@ -8,7 +8,7 @@ End-to-end superconductor discovery pipeline from candidate generation through p
 
 **File**: `server/learning/engine.ts`
 
-The active learning loop selects which formulas to investigate — prioritizing high-entropy compositions, known superconductor families, and materials the ML model thinks are promising. It calls `runQuantumEnginePipeline()` for each formula.
+The active learning loop selects which formulas to investigate — prioritizing high-entropy compositions, known superconductor families, and materials the ML model thinks are promising. Uses a multi-objective learning score (not raw max Tc) that weights stability, phonon quality, and metallicity alongside Tc predictions.
 
 ---
 
@@ -21,10 +21,10 @@ Five generators run in parallel to create a diverse pool of crystal structure ca
 1. **Vegard/VCA** — interpolates lattice + positions from binary endpoint structures (AFLOW/MP/known-structures)
 2. **AIRSS** (`server/csp/airss-wrapper.ts`) — fully random cells via `buildcell`, pressure-aware MINSEP, Z-sweeps (Z=1,2,3,4,6,8), volume ensemble from Birch-Murnaghan
 3. **PyXtal** (`server/csp/pyxtal-wrapper.ts`) — Wyckoff-aware random generation respecting space group symmetry, tiered SG sampling (40% high-sym / 30% med / 20% low / 10% P1)
-4. **Cage Seeder** (`server/csp/cage-seeder.ts`) — for hydrides: 20-30 candidates (was 10) at 3-5 pressure-compressed volumes each. Proper ternary A/M site placement: guest metals (Li, Na, K) go to interstitial "A" sites, host metals (La, Y, Ca) go to cage-center "M" sites. Uses Wyckoff orbits from 141 tagged prototype templates (sodalite, clathrate, hex-clathrate, bcc-hydride)
+4. **Cage Seeder** (`server/csp/cage-seeder.ts`) — for hydrides: 20-30 candidates at 3-5 pressure-compressed volumes each. Proper ternary A/M site placement: guest metals (Li, Na, K) go to interstitial "A" sites, host metals (La, Y, Ca) go to cage-center "M" sites. Uses Wyckoff orbits from 141 tagged prototype templates (sodalite, clathrate, hex-clathrate, bcc-hydride)
 5. **Mutations** (`server/csp/structure-mutator.ts`) — 8 mutation types on top-3 candidates: lattice strain +/-10%, volume compress/expand, H shuffle, symmetry break, Wyckoff perturbation
 
-Budget is tier-dependent (preview: ~85 candidates, deep: ~10K AIRSS + 1K PyXtal). Tier assignment is automatic based on composition: known compounds get preview, ternary high-P hydrides get deep, binary high-P get standard.
+Budget is tier-dependent (preview: ~85 candidates, deep: ~10K AIRSS + 1K PyXtal). Atom count cap per candidate: preview 30, standard 40, deep 50, publication 60. Oversized candidates are backfilled from the next best.
 
 ---
 
@@ -42,9 +42,9 @@ Strict multi-stage filter reducing ~85+ raw candidates to 3-5 DFT-worthy structu
 | **F3** | Hydride scoring | H-network type scoring (clathrate cage 0.95 -> H2 molecular 0.20), M-H coordination bonus |
 | **F4** | Dedup | Cheap fingerprint (composition + volume + pair histogram, cosine < 0.08) |
 | **F5** | Fast scoring | Weighted composite: 25% geometry + 20% hydride + 15% source confidence + 15% volume prior + 10% symmetry + 10% diversity + 5% prototype |
-| **F6** | CHGNet MLIP | Full relaxation of all candidates (scaled steps: min(500, n_atoms x 10), fmax=0.02 eV/A). Ranks by relaxed energy. Updates candidate lattice with CHGNet-relaxed geometry, but preserves the raw CSP lattice (`preMLIPLatticeA/B/C`). **Drift gate**: if CHGNet volume change > 30% or lattice collapses, the raw CSP geometry is kept instead (MLIP can collapse high-P hydride cages). Tracks `mlipVolumeChangePct` and `mlipDriftRejected` per candidate |
-| **F7** | Clustering | Extended fingerprint clustering (50 sorted pair distances) to group structurally similar candidates |
-| **F8** | DFT admission | Score: 30% confidence + 25% CHGNet energy rank + 15% diversity + 10% hydride + 10% source diversity + 5% novelty + 5% exploration. Tier-based budget (preview 3-8, deep 50-120) |
+| **F6** | CHGNet MLIP | Full relaxation of all candidates. Drift gate: if volume change > 30% or lattice collapses, raw CSP geometry is preserved |
+| **F7** | Clustering | Extended fingerprint clustering (50 sorted pair distances) |
+| **F8** | DFT admission | Tier-based budget (preview 3-8, deep 50-120) |
 
 ---
 
@@ -56,193 +56,125 @@ Before DFT, each admitted candidate gets:
 
 1. **Geometry repair** — iterative push-apart for overlapping atoms
 2. **Wyckoff site snapping** — aligns atoms to nearby high-symmetry positions
-3. **Known structure override** — if `lookupKnownStructure(formula)` matches, use exact literature Wyckoff positions and skip xTB. Only experimentally verified structures are in the database — predicted/speculative ternary hydrides (LaH11Li2, YH9Na2, Li2LaH12, LaH12) are NOT included so the pipeline can discover them independently
+3. **Z-mismatch guard** — if candidate has more atoms than the primitive cell expects, regenerates positions
+4. **xTB pre-relaxation** (optional) — semiempirical optimization, skipped for high-P hydrides
+
+No literature lattice overrides. The pipeline discovers the correct lattice independently.
 
 ---
 
-## Stage 4: xTB Pre-Relaxation (Optional)
+## Stage 4: Staged DFT Relaxation
 
-**File**: `server/dft/qe-dft-engine.ts`
+**File**: `server/dft/staged-relaxation.ts` + `server/dft/qe-worker.ts`
 
-Semiempirical geometry optimization (~30 min). Skipped for:
+### Stage 1: Fixed-Cell Atomic Relax
 
-- Known structures with validated Wyckoff positions
-- High-pressure hydrides (>50 GPa — xTB not parameterized for extreme pressure)
-- Constrained mode available for moderate-pressure hydrides (spring constant scales with P)
+Tests all admitted candidates. Ranks by **per-atom energy**. Keeps top K for Stage 2 (preview=2, standard=5, deep=10).
 
-### xTB Stability Check (Soft Penalty)
+### Stage 2: Staged vc-relax (BFGS, inside staged-relaxation)
 
-xTB formation energy is used as a **soft confidence penalty**, not a hard rejection. xTB is unreliable for high-pressure hydrides and unusual compositions, so it should not kill DFT-worthy candidates:
+Quick BFGS vc-relax to screen candidates. Post-DFT dedup detects when multiple structures collapse to the same minimum.
 
-- < 1.0 eV/atom above refs: stable, no penalty
-- 1.0-2.0 eV/atom: mildly unstable, 15% confidence penalty
-- 2.0-2.5 eV/atom: unstable, 30% confidence penalty
-- > 2.5 eV/atom: very unstable, 50% confidence penalty
+### Unified vc-relax (damped dynamics with tight SCF)
 
-**Hard reject only if ALL THREE conditions are met:**
-1. Formation energy > 2.5 eV/atom
-2. No prototype support (no cage-seeded, known-structure, or high-confidence CSP candidates)
-3. Not a hydride AND not high-pressure (> 20 GPa)
+**The core structure optimization.** Single calculation where cell and positions converge together:
 
-This means cage-seeded hydrides, known structures, and high-pressure materials always proceed to DFT regardless of xTB opinion.
+- `ion_dynamics = 'damp'` — damped dynamics, never diverges
+- `cell_dynamics = 'damp-w'` — Wentzcovitch cell dynamics
+- `conv_thr = 1e-7` — production-quality forces at EVERY ionic step
+- `nstep = 400` — enough steps for convergence
+- No separate phases — forces during optimization ARE the true forces
 
----
+This eliminates the "force gap" where old loose-SCF vc-relax reported force=0.001 but production SCF saw force=0.25. Now what you see is what you get.
 
-## Stage 5: Staged DFT Relaxation
+Timeout: 30 min (default), 60 min (magnetic), 90 min (high-P hydrides).
 
-**File**: `server/dft/staged-relaxation.ts`
+### SCF Skip
 
-Five sequential stages with gating between each:
-
-| Stage | Type | Time | What |
-|-------|------|------|------|
-| **1** | Atomic relax (fixed cell) | 10-15 min x N candidates | Tests all admitted candidates. Ranks by **per-atom energy** (not total energy — prevents Z-mismatch where a Z=4 supercell beats Z=1 on total E but is worse per atom). Keeps top K for Stage 2 (tier-dependent: preview=2, standard=5, deep=10, publication=20). Budget: floor(90min / perCandidateMs), min 2. **Z-mismatch guard**: if the winner has more atoms than the primitive cell expects, regenerates positions from known-structure or generateAtomicPositions |
-| **2** | vc-relax (variable cell) | 30-90 min x K candidates | Full cell + position optimization using **2-phase approach**: Phase 1 (damped dynamics, 200 steps) finds the basin without diverging, Phase 2 (BFGS, 250 steps) tightens from Phase 1 result. Comprehensive logging after each phase shows positions, forces, lattice, energy. **Multi-start retry**: if both phases fail, retries from a cage-seeded or parent-seeded candidate. **Post-DFT dedup**: detects when multiple starting structures collapse to the same DFT minimum (pair-distance fingerprint, 3% tolerance). **Keeps multiple unique winners** (not just lowest energy) — returns all passing results ranked by per-atom energy for multi-objective scoring. The lowest-energy may not be the best superconductor if another has better phonon stability, higher DOS(Ef), or better H network. vc-relax timeout: 30 min (default), 60 min (magnetic), 90 min (high-P hydrides). Iterative lattice rescaling if shift >6-10% (max 6% per step). Mini-EOS pressure correction (5 volume points) |
-| **3** | Final SCF | ~15 min | Production-quality electronic structure at relaxed geometry |
-| **4** | Gamma-point DFPT phonon | 30 min | Fast dynamical stability screen. 2-attempt retry. Pass: <=3 small imaginary modes. **Pre-phonon diagnostics**: logs atomic positions, SCF convergence, forces, pressure before ph.x. **Force gate**: skips gamma phonon if residual force > 0.10 Ry/bohr (DFPT crash likely). If cost estimate > 4h, skips gamma and defers to full phonon (Stage 5) |
-| **5** | Full DFPT phonon grid | up to 48h | Complete phonon dispersion on high-symmetry q-path |
-
-Between stages: charge contamination control (force clean on attempt 4+), quality tier assignment (failed -> partial -> screening_converged -> relaxed -> final_converged -> publication_ready).
-
-### Lattice Rescaling Detail
-
-When the target lattice differs significantly from the initial guess, the pipeline uses iterative rescaling rather than a single large jump:
-
-- **0-10% shift**: single step, 15 min relax
-- **10-20% shift**: 2 steps of ~6% each
-- **20-30% shift**: 3 steps of ~6% each
-- **30-40% shift**: 4 steps of ~6% each
-- **40-50% shift**: 5 steps of ~6% each, more time per step
-
-Each step runs a fixed-cell relax at the intermediate lattice before proceeding to the next.
-
-### Mini-EOS Pressure Correction
-
-After vc-relax, the pipeline runs 5 SCF calculations at volumes around the relaxed cell (+/-2%, +/-5%) to fit a Birch-Murnaghan equation of state. This determines the true equilibrium volume at the target pressure, correcting for any pressure mismatch.
+The unified vc-relax uses `disk_io='medium'` and `conv_thr=1e-7`, so its final SCF IS production quality. SCF results are parsed directly from vc-relax output — no separate SCF step needed. Falls back to separate SCF only if vc-relax didn't converge.
 
 ---
 
-## Stage 6: Round 2 Iterative Search
+## Stage 5: Gamma-Point Phonon + Soft Mode Following
 
-**File**: `server/csp/iterative-search.ts`
+### Gamma Phonon
 
-If Stage 5 SCF converged, the DFT winner seeds a focused Round 2 search:
+Fast dynamical stability screen. Uses `dynmat.x` post-processing to extract frequencies from `.dyn` file when `ph.x` doesn't print them to stdout.
 
-- **30 aggressive mutations** of the DFT winner (larger perturbations than Round 1)
-- **6 volume scans** around DFT lattice (+/-2%, +/-5%, +/-8%)
-- **4 pressure scans** (P +/-20%, P +/-50%) if high-pressure material
-- **5 symmetry-lowering distortions** (force P1, perturb lattice angles)
+### Pre-Phonon Force Gate
 
-Screened through CHGNet using **enthalpy** (H = E + PV), not just energy — critical for high-pressure materials. Selection uses meV/atom thresholds instead of percentages:
+- force < 0.10 Ry/bohr: screening gate, allows surrogate Tc
+- force < 0.03 Ry/bohr: DFPT gate, allows physics-grade e-ph coupling
 
-- **Promoted** (>= 10 meV/atom enthalpy improvement): top 3 advance
-- **Mild improvement** (5-10 meV/atom): top 2 kept if structurally diverse
-- **Exploration** (worse enthalpy but novel): 1 candidate kept if cage-type, pressure-scan, or symmetry-lowered source
+### Soft Mode Following
 
-If no candidates beat the threshold, top 3 are sent anyway for exploration.
+When gamma phonon finds imaginary modes (freq < -50 cm-1), the structure WANTS to distort along those directions. Instead of giving up:
 
----
+1. Parse eigenvectors from `dynmat.x` output for the most negative mode
+2. Displace atoms along that eigenvector (0.05 Å amplitude)
+3. Re-run unified vc-relax from the displaced structure
+4. If converged, allow full phonon grid on the new structure
 
-## Stage 7: Band Structure
-
-**File**: `server/dft/qe-worker.ts`
-
-Post-relaxation electronic structure analysis:
-
-- SCF at relaxed geometry -> high-symmetry k-path band calculation
-- Extracts: DOS at Fermi level, flat band score, van Hove singularity count, band crossings
-- Workspace isolation (copies `.save/` directory to avoid corrupting relaxation data)
+This turns imaginary modes from failure signals into search directions — guiding the structure toward the actual stable phase.
 
 ---
 
-## Stage 8: Phonon Calculation
+## Stage 6: Full Phonon Grid
 
-**File**: `server/dft/phonon-calculator.ts`
+QE `ph.x` on q-grid → phonon dispersion + DOS. Up to 48h budget.
 
-Two paths depending on available compute:
-
-### Path A: DFPT (from Stage 5, steps 4-5)
-- QE `ph.x` on q-grid -> phonon dispersion + DOS
-- Full dynamical matrix at each q-point
-- Most accurate, but expensive (hours to days)
-
-### Path B: Finite Displacement (fallback)
-- Force-constant matrix via xTB Hessian
-- Builds dynamical matrix from Hessian -> eigenvalues -> frequencies
-- Acoustic sum rule (ASR) correction applied
-- Faster but less accurate
-
-### Output
-- Frequencies at each q-point
-- Phonon dispersion along high-symmetry path
-- Phonon DOS
-- omega_log (log-average frequency — key input for Tc)
-- Stability assessment: imaginary mode count, artifact detection (modes below -2000 cm-1 flagged as xTB force-constant blow-up)
+Output: frequencies, dispersion, phonon DOS, omega_log, stability assessment.
 
 ---
 
-## Stage 5.5: Convex Hull Stability Assessment
+## Stage 7: Round 2 Iterative Search
 
-After SCF converges, the pipeline estimates thermodynamic stability:
-
-- Uses Miedema model for quick decomposition enthalpy estimate
-- Labels each structure:
-  - **on_hull**: formation enthalpy <= 0 meV/atom (thermodynamically stable)
-  - **near_hull**: 0-25 meV/atom above hull (synthesizable under pressure)
-  - **metastable**: 25-75 meV/atom (may be kinetically stabilized)
-  - **highly_metastable**: >75 meV/atom (unlikely to be synthesizable)
-  - **unknown_hull**: Miedema not available for this composition
-
-Active learning prioritizes: high Tc + phonon stable + metallic + near/on hull — not just high Tc.
+If SCF converged, the DFT winner seeds 45 focused candidates (30 mutations, 6 volume scans, 4 pressure scans, 5 distortions). Screened through CHGNet using enthalpy (H=E+PV) with meV/atom thresholds.
 
 ---
 
-## Reproducibility Bundles
+## Stage 8: Band Structure
 
-For every candidate reaching `screening_converged` or higher, a `reproducibility_bundle/` directory is saved containing:
-
-- `quality_report.json` — quality tier, gate results, uncertainty, convergence state
-- `candidate_provenance.json` — generator, prototype, Vegard estimate, staged relaxation history
-- `final_structure.poscar` — relaxed structure in VASP POSCAR format
-- `scf_summary.json` — energy, Fermi level, forces, pressure, metallicity
-- `phonon_summary.json` — frequencies, stability, imaginary modes
-- `dfpt_results.json` — lambda, omega_log, Tc, alpha2F method labels
-
-This bundle survives the cleanup step (QE scratch is deleted, but the bundle is preserved).
+Post-relaxation electronic structure: SCF → high-symmetry k-path → band crossings, DOS at Fermi level, flat band score. Workspace isolation (copies `.save/`).
 
 ---
 
-## DFT Quality Gate (before Stage 9)
+## DFT Quality Gate (before e-ph/Tc)
 
-Before electron-phonon coupling and Tc estimation, a quality gate prevents unstable or poorly relaxed structures from getting impressive-looking Tc numbers. ALL conditions must pass:
+| Check | Screening threshold | DFPT threshold |
+|-------|--------------------|----|
+| SCF converged | true | true |
+| Residual force | < 0.10 Ry/bohr | < 0.03 Ry/bohr |
+| Residual pressure | < +/- 50 kbar | < +/- 50 kbar |
+| Metallic | true | true |
+| Phonon stable | no large imaginary modes | no large imaginary modes |
 
-| Check | Threshold | Why |
-|-------|-----------|-----|
-| SCF converged | true | Partial convergence = unreliable electronic structure |
-| Residual force (screening) | < 0.10 Ry/bohr | Allows surrogate Tc only |
-| Residual force (DFPT) | < 0.03 Ry/bohr | Required for physics-grade e-ph coupling |
-| Residual force (publication) | < 0.01 Ry/bohr | Required for publication_ready tier |
-| Residual pressure | < +/- 50 kbar | Large pressure mismatch = wrong cell volume |
-| Metallic | true | Non-metals cannot be BCS superconductors |
-| Phonon stable | no large imaginary modes | Dynamically unstable = structure doesn't exist |
+### Method-Based Quality Tier Caps
 
-Two gates:
-- **Screening gate** (force < 0.10): allows surrogate Tc, learning score computation
-- **DFPT gate** (force < 0.03): required for actual electron-phonon coupling calculation
+| Phonon method | Max tier |
+|---------------|----------|
+| DFPT full q-grid | publication_ready |
+| DFPT gamma-only | final_converged |
+| xTB finite displacement | screening_converged |
 
-If the screening gate fails, Tc is labeled "surrogate". If DFPT gate fails but screening passes, surrogate Tc is computed but DFPT is skipped.
+---
 
-### Result Validation
+## Stage 9: Electron-Phonon Coupling & Eliashberg → Tc
 
-Before saving to database, `validateResultConsistency()` checks for contradictions:
-- Quality tier cannot exceed phonon/eph method caps
-- High confidence requires DFPT e-ph + full phonons
-- publication_ready requires force < 0.01 + reproducibility bundle
-- Surrogate Tc cannot be labeled as physics-grade
+Only runs if DFPT quality gate passes. Method labels on every result:
+
+- `alpha2FMethod`: dfpt_eph / surrogate_eph / unavailable
+- `lambdaMethod`: dfpt_integrated_alpha2F / surrogate_alpha2F / estimated_from_dos_phonons
+
+Only `dfpt_eph` is physics-grade.
+
+---
+
+## Stage 10: Results → Database → Next Iteration
+
+Extended dataset fields: tcConservative, tcUpperBound, tcMethod, lambdaMethod, phononMethod, tcConfidence, learningScore, qualityTier, hullLabel, residualForce.
 
 ### Multi-Objective Learning Score
-
-The learning engine trains on a conservative score, NOT raw max(Tc):
 
 ```
 learning_score =
@@ -253,153 +185,33 @@ learning_score =
 + 0.10 × novelty_score
 ```
 
-This prevents the model from chasing flashy low-confidence Tc estimates.
+### Result Validation
+
+`validateResultConsistency()` before DB save checks for contradictions (tier vs method caps, force thresholds, confidence consistency).
 
 ---
 
-## Stage 9: Electron-Phonon Coupling & Eliashberg -> Tc
+## Uncertainty & Confidence
 
-**File**: `server/physics/eliashberg-pipeline.ts`
-
-Only runs if the quality gate passes AND the structure is phonon-stable.
-
-### Method Provenance Labels
-
-Every e-ph result carries explicit method labels — only `dfpt_eph` is physics-grade:
-
-| Field | Values | Credibility |
-|-------|--------|-------------|
-| `alpha2FMethod` | `dfpt_eph` / `surrogate_eph` / `heuristic_eph` / `unavailable` | Only `dfpt_eph` is physics-grade |
-| `lambdaMethod` | `dfpt_integrated_alpha2F` / `surrogate_alpha2F` / `estimated_from_dos_phonons` | Only `dfpt_integrated_alpha2F` is physics-grade |
-
-### Method-Based Quality Tier Caps
-
-Quality tier is capped based on the weakest method used:
-
-| Phonon method | Max tier |
-|---------------|----------|
-| DFPT full q-grid | publication_ready |
-| DFPT gamma-only | final_converged |
-| xTB finite displacement | screening_converged |
-| ML surrogate | screening_converged |
-
-| E-ph method | Max tier |
-|-------------|----------|
-| DFPT e-ph | publication_ready |
-| Surrogate | screening_converged |
-
-A candidate computed with DFPT gamma phonons + surrogate lambda can never exceed `screening_converged`, regardless of how good the SCF looks.
-
-1. **alpha2F(omega) spectrum** — combines electronic DOS, phonon spectrum, and electron-phonon matrix elements into the spectral function
-2. **lambda = integral of alpha2F(omega)/omega** — dimensionless coupling strength (typical: 0.3-2.0 for superconductors)
-3. **Allen-Dynes Tc**: `Tc = (omega_log / 1.2) * exp(-1.04 * (1 + lambda) / (lambda - mu_star * (1 + 0.62 * lambda)))`
-4. **Eliashberg Tc**: self-consistent linearized gap equation solution (gives higher Tc than Allen-Dynes for strong coupling lambda > 1.0)
-5. **Diagnostics**:
-   - Gap ratio: 2*Delta(0) / kB*Tc (weak-coupling: 3.53, strong: > 4.0)
-   - Isotope effect alpha = -d(ln Tc) / d(ln M)
-   - Strong coupling flag (lambda > 0.7)
-   - Mode-resolved lambda contributions (which phonon branches drive superconductivity)
+Every result carries: tcConfidence (high/medium/low/surrogate), lambdaConfidence, phononConfidence, structureConfidence, ephMethod, phononMethod, tcUncertaintyReason.
 
 ---
 
-## Stage 10: Results -> Database -> Next Iteration
+## Reproducibility Bundles
 
-**File**: `server/dft/quantum-engine-pipeline.ts`
-
-Results recorded to `quantumEngineDataset` table:
-
-- Material formula and pressure
-- lambda (electron-phonon coupling)
-- omega_log (log-average phonon frequency)
-- Tc (best of Allen-Dynes and Eliashberg)
-- DOS at Fermi level
-- Phonon spectrum and alpha2F summary
-- Formation energy, band gap, metallicity
-- SCF convergence status
-- Confidence tier (full-dft / xtb / surrogate)
-- Wall time
-
-The learning engine uses these results to update its ML models (gradient boost, lambda regressor) and select the next batch of formulas — closing the active learning loop.
+For every non-failed candidate: quality_report.json, candidate_provenance.json, final_structure.poscar, scf_summary.json, phonon_summary.json, dfpt_results.json.
 
 ---
 
 ## Adaptive Learning
 
-**File**: `server/csp/adaptive-learning.ts`
-
-The pipeline tracks which generators and volume multipliers produce successful candidates:
-
-- **Per-family volume learning**: tracks which volume multipliers pass the funnel for each element combination and pressure bin. Bayesian smoothing prevents overfitting.
-- **Per-generator weighting**: tracks success rates of AIRSS vs PyXtal vs VCA vs cage seeder vs mutations. Future runs bias generation budgets toward historically successful methods.
-- **Cage seeder subtype tracking**: tracks individual cage geometries (sodalite, clathrate, hex_clathrate, bcc_hydride, custom_template) separately so the system learns e.g. "for rare-earth hydrides at 150-250 GPa, sodalite seeds survive best."
-- **Persisted to `learning-store.json`** across restarts.
-
-### Quality-Weighted Learning Signals
-
-Learning updates are weighted by the quality of the signal that produced them, preventing over-learning from cheap surrogate results:
-
-| Signal | Weight | When recorded |
-|--------|--------|---------------|
-| Survived F4 dedup (funnel) | 0.1 | Candidate passes dedup in funnel |
-| Selected for DFT (F8) | 0.3 | Candidate admitted by DFT admission |
-| DFT-0 converged | 0.5 | SCF converges on this candidate's structure |
-| DFT-1 low enthalpy | 1.0 | (future: near convex hull) |
-| DFT-2 near hull | 2.0 | (future: thermodynamic stability) |
-| Phonon stable | 3.0 | No large imaginary modes in phonon spectrum |
-| DFPT e-ph good lambda | 4.0 | Electron-phonon coupling yields finite lambda |
-
-A funnel survival (cheap) contributes 0.1 to the generator's success tally, while a DFPT-validated phonon-stable candidate contributes 3.0 — so one strong result outweighs 30 funnel passes.
+Per-family volume learning, per-generator weighting, cage seeder subtype tracking (sodalite/clathrate/hex/bcc). Quality-weighted signals: funnel survival (0.1) → DFT converged (0.5) → phonon stable (3.0) → DFPT e-ph (4.0).
 
 ---
 
-## Uncertainty & Confidence Fields
+## Infrastructure
 
-Every final result carries uncertainty metadata so consumers (UI, database, ML models) know how trustworthy each number is:
-
-| Field | Values | Meaning |
-|-------|--------|---------|
-| `tcConfidence` | high / medium / low / surrogate | How reliable is the Tc estimate? |
-| `lambdaConfidence` | high / medium / low / surrogate | How reliable is lambda (e-ph coupling)? |
-| `phononConfidence` | high / medium / low / none | How reliable is the phonon spectrum? |
-| `structureConfidence` | high / medium / low | How well-relaxed is the crystal structure? |
-| `ephMethod` | dfpt / surrogate / none | Source of electron-phonon coupling |
-| `phononMethod` | dfpt_full / dfpt_gamma / finite_displacement / surrogate / none | Source of phonon data |
-| `tcUncertaintyReason` | free text | Full explanation: "DFPT e-ph + full DFPT phonons + SCF converged" |
-
-**Confidence definitions:**
-
-- **high**: DFPT e-ph coupling + full phonon grid + quality gate passed. Example: `Tc_DFPT_AD = 185 K, confidence: high`
-- **medium**: Full phonons but surrogate lambda, or DFPT with partial convergence. Example: `Tc = 220 K, confidence: medium, reason: surrogate lambda + full DFPT phonons`
-- **low**: SCF converged and metallic but limited phonon data. Example: `Tc = 150 K, confidence: low, reason: gamma-only phonons`
-- **surrogate**: Non-metallic, SCF failed, or no phonon data. Example: `Tc = 280 K, confidence: surrogate, reason: surrogate lambda + no phonon data + SCF partial`
-
----
-
-## Quality Tiers
-
-Each candidate progresses through quality tiers as it passes successive stages:
-
-```
-failed -> partial_screening -> screening_converged -> relaxed -> final_converged -> publication_ready
-```
-
-Tier determines what downstream analysis is attempted (e.g., publication_ready gets full phonon grid, screening_converged only gets gamma-point phonon).
-
----
-
-## Key Physics Pathways
-
-**Path A: Full DFT** (high-confidence, known compounds)
-```
-Formula -> Vegard/CSP (~30 min) -> xTB pre-relax (~30 min) -> Staged relaxation (1-3h) -> DFPT phonon (4-6h) -> Eliashberg (seconds) -> Tc
-```
-
-**Path B: xTB + Surrogate** (screening, high pressure, large cells)
-```
-Formula -> xTB relax (~30 min) -> Surrogate electronic + phonon (~1s) -> Eliashberg -> Tc estimate (lower confidence)
-```
-
-**Path C: Pure Surrogate** (fast screening, QE unavailable)
-```
-Formula -> ML electronic structure -> ML phonon -> Eliashberg -> Tc screening only
-```
+- **Old worker**: e2-standard-8 (8 vCPUs, 32 GB), QE_MPI_RANKS=3
+- **New worker**: c2-standard-30 (30 vCPUs, 120 GB), QE_MPI_RANKS=6, QE_NPOOL=3
+- Both pull from shared Neon DB job queue
+- 2 GCP VMs processing materials in parallel
