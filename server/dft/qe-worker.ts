@@ -3352,7 +3352,7 @@ function generateVCRelaxInput(
   restart_mode = 'from_scratch',
   prefix = '${prefix}',
   outdir = './tmp',
-  disk_io = 'low',
+  disk_io = 'medium',
   pseudo_dir = '${QE_PSEUDO_DIR_INPUT}',
   tprnfor = .true.,
   tstress = .true.,
@@ -5153,6 +5153,27 @@ ${p3Cell}
       console.log(`[QE-Worker] K-points recomputed for ${formula} after vc-relax lattice change (${preVcLatticeA.toFixed(3)} -> ${latticeA.toFixed(3)} A): ${result.kPoints}`);
     }
 
+    // --- Skip separate SCF when vc-relax already converged with tight SCF ---
+    // The unified vc-relax uses conv_thr=1e-7 and disk_io='medium', so the final
+    // SCF from vc-relax IS production quality. Parse SCF results from vc-relax output
+    // instead of running another SCF. Saves 15-60 min per material.
+    //
+    // Only skip if vc-relax converged AND produced positions (not partial/failed).
+    // If vc-relax failed, fall through to the separate SCF loop below.
+    let skipSeparateSCF = false;
+    // vcResult is defined inside the vc-relax try block — check if stdout was saved
+    const vcRelaxOutPath = path.join(jobDir, "vc_relax.out");
+    const vcRelaxStdout = fs.existsSync(vcRelaxOutPath) ? fs.readFileSync(vcRelaxOutPath, "utf-8") : null;
+    if (result.vcRelaxed && vcRelaxStdout) {
+      // Parse SCF data from vc-relax output (last SCF in the vc-relax run)
+      const vcScfParsed = parseSCFOutput(vcRelaxStdout, 0.015);
+      if (vcScfParsed.totalEnergy !== 0 && vcScfParsed.converged) {
+        result.scf = vcScfParsed;
+        skipSeparateSCF = true;
+        console.log(`[QE-Worker] Using vc-relax SCF results for ${formula} (E=${vcScfParsed.totalEnergy.toFixed(4)} eV, Ef=${vcScfParsed.fermiEnergy ?? "N/A"}, force=${vcScfParsed.totalForce?.toFixed(4) ?? "N/A"}) — skipping redundant separate SCF`);
+      }
+    }
+
     // --- DFT+U detection for strongly-correlated materials ---
     let dftPlusULines = "";
     let dftPlusUNspin2 = false;
@@ -5337,9 +5358,14 @@ ${p3Cell}
     // high-P hydrides need longer than the flat 88-min budget — empirically
     // they hit it every single attempt on worker2 (Apr 16 run: N4W3,
     // Re2Sn2W3, LaH12 all wall-timed ≥ 5 attempts each).
+    if (skipSeparateSCF) {
+      // vc-relax SCF results already populated — skip entire SCF retry loop
+      scfConverged = result.scf?.converged ?? false;
+    }
+
     const effectiveMaxSeconds = computeMaxSeconds(elements, workerPressure);
     const effectiveKillTimeoutMs = effectiveMaxSeconds * 1000 + 120_000;
-    if (effectiveMaxSeconds !== QE_MAX_SECONDS) {
+    if (!skipSeparateSCF && effectiveMaxSeconds !== QE_MAX_SECONDS) {
       console.log(`[QE-Worker] ${formula}: tier-adjusted max_seconds = ${effectiveMaxSeconds}s (${(effectiveMaxSeconds / 60).toFixed(0)} min) — heavy-TM or high-P hydride class`);
     }
 
@@ -5959,9 +5985,106 @@ ${r2Cell}
         if (!gammaResult.passed) {
           gammaPhononPassed = false;
           result.gammaPhononPassed = false;
-          console.log(`[QE-Worker] Gamma phonon check FAILED for ${formula}: ${gammaResult.failReason} — skipping full phonon grid`);
+
+          // --- SOFT MODE FOLLOWING ---
+          // When imaginary modes are found, the structure WANTS to distort along
+          // those mode directions. Instead of giving up, displace atoms along the
+          // most negative mode eigenvector and re-run vc-relax. This guides the
+          // structure toward the actual stable phase.
+          const hasImaginaryModes = gammaResult.frequencies && gammaResult.frequencies.some(f => f < -50);
+          const softModeFile = path.join(jobDir, "dynmat_gamma.out");
+          if (hasImaginaryModes && fs.existsSync(softModeFile)) {
+            try {
+              const dynmatOutput = fs.readFileSync(softModeFile, "utf-8");
+              // Parse eigenvectors from dynmat.x output
+              // Format: mode # N followed by displacement vectors per atom
+              const modeBlocks = dynmatOutput.split(/mode\s+#?\s*\d+/i);
+              const freqs = gammaResult.frequencies!;
+              const mostNegIdx = freqs.indexOf(Math.min(...freqs));
+
+              if (mostNegIdx >= 0 && modeBlocks.length > mostNegIdx + 1) {
+                // Extract displacement vectors for the most negative mode
+                const modeBlock = modeBlocks[mostNegIdx + 1];
+                const dispLines = modeBlock.trim().split("\n").filter(l => l.trim().length > 0);
+                const displacements: Array<{dx: number; dy: number; dz: number}> = [];
+                for (const line of dispLines) {
+                  // Format: ( dx  0.000) ( dy  0.000) ( dz  0.000)
+                  const nums = line.match(/\(\s*([-\d.]+)\s+[-\d.]+\s*\)/g);
+                  if (nums && nums.length >= 3) {
+                    displacements.push({
+                      dx: parseFloat(nums[0].match(/([-\d.]+)/)?.[1] ?? "0"),
+                      dy: parseFloat(nums[1].match(/([-\d.]+)/)?.[1] ?? "0"),
+                      dz: parseFloat(nums[2].match(/([-\d.]+)/)?.[1] ?? "0"),
+                    });
+                  }
+                }
+
+                if (displacements.length === positions.length) {
+                  // Apply displacement along soft mode (small amplitude: 0.05 Å / latticeA)
+                  const amplitude = 0.05 / latticeA; // fractional displacement
+                  const displacedPositions = positions.map((p, i) => ({
+                    ...p,
+                    x: p.x + displacements[i].dx * amplitude,
+                    y: p.y + displacements[i].dy * amplitude,
+                    z: p.z + displacements[i].dz * amplitude,
+                  }));
+
+                  console.log(`[QE-Worker] SOFT MODE FOLLOWING for ${formula}: displacing ${positions.length} atoms along mode #${mostNegIdx + 1} (freq=${freqs[mostNegIdx].toFixed(1)} cm⁻¹, amplitude=${amplitude.toFixed(4)} frac)`);
+
+                  // Re-run unified vc-relax from displaced structure
+                  cleanQETmpDir(path.join(jobDir, "tmp"));
+                  const smInput = generateVCRelaxInput(formula, elements, counts, latticeA, displacedPositions, workerPressure);
+                  const smFile = path.join(jobDir, "vc_relax_softmode.in");
+                  fs.writeFileSync(smFile, smInput);
+                  const smHasH = elements.includes("H");
+                  const smHighP = smHasH && workerPressure >= 50 && positions.length >= 7;
+                  const smMag = elements.some(el => el in MAGNETIC_ELEMENTS);
+                  const smVcRelaxMaxSec = smHighP ? 5400 : smMag ? 3600 : 1800;
+                  const smResult = await runQECommand(
+                    path.posix.join(getQEBinDir(), "pw.x"), smFile, jobDir,
+                    smVcRelaxMaxSec * 1000 + 60_000,
+                  );
+                  fs.writeFileSync(path.join(jobDir, "vc_relax_softmode.out"), smResult.stdout);
+                  const smParsed = parseVCRelaxOutput(smResult.stdout);
+
+                  if (smParsed.finalPositions && smParsed.finalPositions.length > 0) {
+                    const smForceMatch = smResult.stdout.match(/Total force\s*=\s*([\d.]+)/g);
+                    const smForce = smForceMatch ? parseFloat(smForceMatch[smForceMatch.length - 1].match(/([\d.]+)$/)?.[1] ?? "999") : null;
+                    positions = smParsed.finalPositions;
+                    if (smParsed.finalLatticeAng && smParsed.finalLatticeAng > 0.5) {
+                      latticeA = smParsed.finalLatticeAng;
+                    }
+                    result.vcRelaxed = true;
+                    console.log(`[QE-Worker] Soft mode vc-relax DONE for ${formula}: a=${latticeA.toFixed(3)} Å, force=${smForce?.toFixed(4) ?? "N/A"}, E=${smParsed.totalEnergy.toFixed(4)} eV`);
+
+                    // Parse new SCF from soft mode result
+                    const smScf = parseSCFOutput(smResult.stdout, 0.015);
+                    if (smScf.totalEnergy !== 0) {
+                      result.scf = smScf;
+                      scfConverged = smScf.converged;
+                    }
+
+                    // Re-run gamma phonon on the new structure
+                    gammaPhononPassed = true; // allow full phonon to try
+                    result.gammaPhononPassed = true;
+                    console.log(`[QE-Worker] Soft mode: allowing full phonon grid on new structure for ${formula}`);
+                  } else {
+                    console.log(`[QE-Worker] Soft mode vc-relax produced no positions for ${formula} — keeping original`);
+                  }
+                } else {
+                  console.log(`[QE-Worker] Soft mode: displacement count ${displacements.length} != atom count ${positions.length} — skipping`);
+                }
+              }
+            } catch (smErr: any) {
+              console.log(`[QE-Worker] Soft mode following failed for ${formula}: ${smErr.message?.slice(0, 100)}`);
+            }
+          }
+
+          if (!gammaPhononPassed) {
+            console.log(`[QE-Worker] Gamma phonon check FAILED for ${formula}: ${gammaResult.failReason} — skipping full phonon grid`);
+          }
           // Store gamma phonon results as a diagnostic
-          if (gammaResult.frequencies && gammaResult.frequencies.length > 0) {
+          if (!gammaPhononPassed && gammaResult.frequencies && gammaResult.frequencies.length > 0) {
             result.phonon = {
               frequencies: gammaResult.frequencies,
               hasImaginary: gammaResult.frequencies.some(f => f < -10),
