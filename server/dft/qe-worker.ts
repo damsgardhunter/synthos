@@ -2627,11 +2627,13 @@ function parseSCFOutput(stdout: string, degaussRy: number = 0.005): QESCFResult 
     error: null,
   };
 
-  const convergenceMatch = stdout.match(/convergence has been achieved in\s+(\d+)\s+iterations/);
-  if (convergenceMatch) {
+  // Use LAST convergence line — in vc-relax, each ionic step has its own SCF.
+  // We want the final ionic step's convergence status.
+  const convergenceMatches = [...stdout.matchAll(/convergence has been achieved in\s+(\d+)\s+iterations/g)];
+  if (convergenceMatches.length > 0) {
     result.converged = true;
     result.convergenceQuality = "strict";
-    result.nscfIterations = parseInt(convergenceMatch[1]);
+    result.nscfIterations = parseInt(convergenceMatches[convergenceMatches.length - 1][1]);
   }
 
   const iterMatches = Array.from(stdout.matchAll(/estimated scf accuracy\s+<\s+([\d.Ee+-]+)\s+Ry/g));
@@ -2645,11 +2647,13 @@ function parseSCFOutput(stdout: string, degaussRy: number = 0.005): QESCFResult 
     }
   }
 
-  const energyMatch = stdout.match(/!\s+total energy\s+=\s+([-\d.]+)\s+Ry/);
-  if (energyMatch) {
-    result.totalEnergy = parseFloat(energyMatch[1]) * RY_TO_EV;
+  // Use LAST "! total energy" — in vc-relax output there are many ionic steps,
+  // each with its own "! total energy". We want the final converged value.
+  const energyMatches = [...stdout.matchAll(/!\s+total energy\s+=\s+([-\d.]+)\s+Ry/g)];
+  if (energyMatches.length > 0) {
+    result.totalEnergy = parseFloat(energyMatches[energyMatches.length - 1][1]) * RY_TO_EV;
   }
-  if (!energyMatch) {
+  if (energyMatches.length === 0) {
     const energyLines = [...stdout.matchAll(/total energy\s+=\s+([-\d.]+)\s+Ry/g)];
     if (energyLines.length > 0) {
       result.totalEnergy = parseFloat(energyLines[energyLines.length - 1][1]) * RY_TO_EV;
@@ -2660,13 +2664,17 @@ function parseSCFOutput(stdout: string, degaussRy: number = 0.005): QESCFResult 
   const nAtoms = natMatch ? parseInt(natMatch[1]) : 1;
   result.totalEnergyPerAtom = result.totalEnergy / nAtoms;
 
-  const fermiMatch = stdout.match(/the Fermi energy is\s+([-\d.]+)\s+ev/i);
-  if (fermiMatch) {
-    result.fermiEnergy = parseFloat(fermiMatch[1]);
+  // Use LAST Fermi energy — changes between ionic steps in vc-relax.
+  const fermiMatches = [...stdout.matchAll(/the Fermi energy is\s+([-\d.]+)\s+ev/gi)];
+  if (fermiMatches.length > 0) {
+    result.fermiEnergy = parseFloat(fermiMatches[fermiMatches.length - 1][1]);
   }
 
-  const gapMatch = stdout.match(/band gap\s*=\s*([\d.]+)\s+eV/i) ||
-                   stdout.match(/highest occupied.*lowest unoccupied.*\n.*\s+([\d.]+)\s+([\d.]+)/);
+  // Use LAST band gap — changes between ionic steps in vc-relax.
+  const gapMatches = [...stdout.matchAll(/band gap\s*=\s*([\d.]+)\s+eV/gi)];
+  const holoMatches = [...stdout.matchAll(/highest occupied.*lowest unoccupied.*\n.*\s+([\d.]+)\s+([\d.]+)/g)];
+  const gapMatch = gapMatches.length > 0 ? gapMatches[gapMatches.length - 1] :
+                   holoMatches.length > 0 ? holoMatches[holoMatches.length - 1] : null;
   if (gapMatch) {
     if (gapMatch[2]) {
       result.bandGap = parseFloat(gapMatch[2]) - parseFloat(gapMatch[1]);
@@ -2678,18 +2686,24 @@ function parseSCFOutput(stdout: string, degaussRy: number = 0.005): QESCFResult 
     result.isMetallic = result.bandGap < metallicThreshold;
   }
 
-  const forceMatch = stdout.match(/Total force\s+=\s+([\d.]+)/);
-  if (forceMatch) {
-    result.totalForce = parseFloat(forceMatch[1]);
+  // Use LAST "Total force" — in vc-relax output there's one per ionic step.
+  // .match() returns the FIRST which is the worst unconverged starting force.
+  const forceMatches = [...stdout.matchAll(/Total force\s+=\s+([\d.]+)/g)];
+  if (forceMatches.length > 0) {
+    result.totalForce = parseFloat(forceMatches[forceMatches.length - 1][1]);
   }
 
-  const pressureMatch = stdout.match(/P=\s+([-\d.]+)/);
-  if (pressureMatch) {
-    result.pressure = parseFloat(pressureMatch[1]) / 10;
+  // Use LAST pressure — same reason as force.
+  const pressureMatches = [...stdout.matchAll(/P=\s+([-\d.]+)/g)];
+  if (pressureMatches.length > 0) {
+    result.pressure = parseFloat(pressureMatches[pressureMatches.length - 1][1]) / 10;
   }
 
-  const wallMatch = stdout.match(/WALL\s*:\s*(\d+)h?\s*(\d+)m\s*([\d.]+)s/) ||
-                    stdout.match(/WALL\s*:\s*([\d.]+)s/);
+  // Use LAST WALL time — the final "PWSCF : ... WALL" line is the total.
+  const wallMatches = [...stdout.matchAll(/WALL\s*:\s*(\d+)h?\s*(\d+)m\s*([\d.]+)s/g)];
+  const wallMatchesSec = [...stdout.matchAll(/WALL\s*:\s*([\d.]+)s\b/g)];
+  const wallMatch = wallMatches.length > 0 ? wallMatches[wallMatches.length - 1] :
+                    wallMatchesSec.length > 0 ? wallMatchesSec[wallMatchesSec.length - 1] : null;
   if (wallMatch) {
     if (wallMatch[3]) {
       result.wallTimeSeconds = parseInt(wallMatch[1]) * 3600 + parseInt(wallMatch[2]) * 60 + parseFloat(wallMatch[3]);
@@ -2698,9 +2712,10 @@ function parseSCFOutput(stdout: string, degaussRy: number = 0.005): QESCFResult 
     }
   }
 
-  const magMatch = stdout.match(/total magnetization\s+=\s+([-\d.]+)/);
-  if (magMatch) {
-    result.magnetization = parseFloat(magMatch[1]);
+  // Use LAST magnetization — changes between ionic steps in vc-relax.
+  const magMatches = [...stdout.matchAll(/total magnetization\s+=\s+([-\d.]+)/g)];
+  if (magMatches.length > 0) {
+    result.magnetization = parseFloat(magMatches[magMatches.length - 1][1]);
   }
 
   return result;
