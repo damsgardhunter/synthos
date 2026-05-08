@@ -5083,7 +5083,7 @@ ${cellBlockEos}
     // publication threshold or no improvement is made.
     if (result.vcRelaxed && positions.length > 0) {
       const PUB_FORCE_THR = 0.001; // publication-ready threshold (Ry/bohr)
-      const MAX_REFINE_PASSES = 5; // safety cap — don't loop forever
+      const MAX_REFINE_PASSES = 6; // safety cap — don't loop forever
 
       // Parse initial force and pressure from run 1
       const vcOutPath = path.join(jobDir, "vc_relax.out");
