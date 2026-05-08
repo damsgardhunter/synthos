@@ -5085,19 +5085,30 @@ ${cellBlockEos}
       const PUB_FORCE_THR = 0.001; // publication-ready threshold (Ry/bohr)
       const MAX_REFINE_PASSES = 4; // safety cap — don't loop forever
 
-      // Parse initial force from run 1
+      // Parse initial force and pressure from run 1
       const vcOutPath = path.join(jobDir, "vc_relax.out");
       const vcOut = fs.existsSync(vcOutPath) ? fs.readFileSync(vcOutPath, "utf-8") : "";
       const initForceMatches = [...vcOut.matchAll(/Total force\s*=\s*([\d.]+)/g)];
       let currentForce = initForceMatches.length > 0
         ? parseFloat(initForceMatches[initForceMatches.length - 1][1])
         : 999;
+      const initPressMatches = [...vcOut.matchAll(/P=\s*([-\d.]+)/g)];
+      let currentPressure = initPressMatches.length > 0
+        ? parseFloat(initPressMatches[initPressMatches.length - 1][1])
+        : null;
 
       let refinePass = 0;
+      let totalRefineWallSec = 0;
+      const startingForce = currentForce;
+
+      if (currentForce <= PUB_FORCE_THR) {
+        console.log(`[QE-Worker] Refinement not needed for ${formula}: run 1 force=${currentForce.toFixed(6)} already ≤ ${PUB_FORCE_THR} (publication-ready)`);
+      }
+
       while (currentForce > PUB_FORCE_THR && refinePass < MAX_REFINE_PASSES) {
         refinePass++;
         try {
-          console.log(`[QE-Worker] Refinement pass ${refinePass}/${MAX_REFINE_PASSES} for ${formula}: force=${currentForce.toFixed(4)} > ${PUB_FORCE_THR} — restarting from current geometry with zeroed velocities`);
+          console.log(`[QE-Worker] Refinement pass ${refinePass}/${MAX_REFINE_PASSES} for ${formula}: force=${currentForce.toFixed(6)} > ${PUB_FORCE_THR}, P=${currentPressure?.toFixed(1) ?? "N/A"} kbar — restarting with zeroed velocities`);
 
           cleanQETmpScratch(path.join(jobDir, "tmp"));
 
@@ -5112,7 +5123,7 @@ ${cellBlockEos}
           const refineMaxSec = isHighPHRefine ? 3600 : hasMagRefine ? 2400 : 1200;
           const refineKillMs = refineMaxSec * 1000 + 60_000;
 
-          console.log(`[QE-Worker] Refinement pass ${refinePass} for ${formula} (a=${latticeA.toFixed(2)} A, ${positions.length} atoms, timeout=${refineMaxSec}s)`);
+          console.log(`[QE-Worker] Refinement pass ${refinePass} starting for ${formula} (a=${latticeA.toFixed(3)} A, ${positions.length} atoms, timeout=${refineMaxSec}s)`);
 
           const refineResult = await runQECommand(
             path.posix.join(getQEBinDir(), "pw.x"), refineFile, jobDir, refineKillMs,
@@ -5125,6 +5136,16 @@ ${cellBlockEos}
             const refForce = refForceMatches.length > 0
               ? parseFloat(refForceMatches[refForceMatches.length - 1][1])
               : 999;
+            const refPressMatches = [...refineResult.stdout.matchAll(/P=\s*([-\d.]+)/g)];
+            const refPressure = refPressMatches.length > 0
+              ? parseFloat(refPressMatches[refPressMatches.length - 1][1])
+              : null;
+            const refLattice = refineParsed.finalLatticeAng ?? latticeA;
+            const refWall = refineParsed.wallTimeSeconds;
+            totalRefineWallSec += refWall;
+
+            // Count ionic steps from output
+            const ionicSteps = [...refineResult.stdout.matchAll(/Total force\s*=\s*([\d.]+)/g)].length;
 
             if (refForce < currentForce) {
               positions = refineParsed.finalPositions;
@@ -5132,26 +5153,41 @@ ${cellBlockEos}
                 latticeA = refineParsed.finalLatticeAng;
                 result.relaxedLatticeA = latticeA;
               }
-              console.log(`[QE-Worker] Refinement pass ${refinePass} IMPROVED ${formula}: force ${currentForce.toFixed(4)} → ${refForce.toFixed(4)} Ry/bohr, a=${latticeA.toFixed(3)} Å`);
+              console.log(`[QE-Worker] Refinement pass ${refinePass} DONE for ${formula}: force ${currentForce.toFixed(6)} → ${refForce.toFixed(6)} Ry/bohr, a=${refLattice.toFixed(3)} Å, P=${refPressure?.toFixed(1) ?? "N/A"} kbar, wall=${refWall.toFixed(0)}s, steps=${ionicSteps}, converged=${refineParsed.converged}`);
+              // Log positions for the first few atoms
+              for (let pi = 0; pi < Math.min(4, refineParsed.finalPositions.length); pi++) {
+                const p = refineParsed.finalPositions[pi];
+                console.log(`[QE-Worker]   refine${refinePass} atom[${pi}] ${p.element.padEnd(2)} (${p.x.toFixed(5)}, ${p.y.toFixed(5)}, ${p.z.toFixed(5)})`);
+              }
+              if (refineParsed.finalPositions.length > 4) console.log(`[QE-Worker]   ... and ${refineParsed.finalPositions.length - 4} more`);
               currentForce = refForce;
+              currentPressure = refPressure;
             } else {
-              console.log(`[QE-Worker] Refinement pass ${refinePass} no improvement for ${formula}: force ${currentForce.toFixed(4)} → ${refForce.toFixed(4)} — stopping refinement`);
+              console.log(`[QE-Worker] Refinement pass ${refinePass} no improvement for ${formula}: force ${currentForce.toFixed(6)} → ${refForce.toFixed(6)} Ry/bohr (wall=${refWall.toFixed(0)}s, steps=${ionicSteps}) — stopping refinement`);
+              totalRefineWallSec += refWall;
               break;
             }
           } else {
             console.log(`[QE-Worker] Refinement pass ${refinePass} produced no positions for ${formula} (exit=${refineResult.exitCode}) — stopping refinement`);
+            const refStdoutTail = refineResult.stdout.slice(-300);
+            console.log(`[QE-Worker] Refinement pass ${refinePass} stdout tail: ${refStdoutTail}`);
             break;
           }
         } catch (refErr: any) {
-          console.log(`[QE-Worker] Refinement pass ${refinePass} failed for ${formula}: ${refErr.message?.slice(0, 100)} — stopping refinement`);
+          console.log(`[QE-Worker] Refinement pass ${refinePass} failed for ${formula}: ${refErr.message?.slice(0, 200)} — stopping refinement`);
           break;
         }
       }
 
-      if (currentForce <= PUB_FORCE_THR) {
-        console.log(`[QE-Worker] Refinement COMPLETE for ${formula}: force=${currentForce.toFixed(4)} ≤ ${PUB_FORCE_THR} (publication-ready) after ${refinePass} pass${refinePass > 1 ? "es" : ""}`);
-      } else if (refinePass >= MAX_REFINE_PASSES) {
-        console.log(`[QE-Worker] Refinement hit max passes for ${formula}: force=${currentForce.toFixed(4)} after ${refinePass} passes — proceeding with best result`);
+      if (refinePass > 0) {
+        const forceReduction = startingForce > 0 ? ((1 - currentForce / startingForce) * 100).toFixed(1) : "N/A";
+        if (currentForce <= PUB_FORCE_THR) {
+          console.log(`[QE-Worker] Refinement COMPLETE for ${formula}: force=${currentForce.toFixed(6)} ≤ ${PUB_FORCE_THR} (publication-ready) after ${refinePass} pass${refinePass > 1 ? "es" : ""}, total wall=${totalRefineWallSec.toFixed(0)}s (${(totalRefineWallSec / 60).toFixed(1)} min), force reduced ${forceReduction}%`);
+        } else if (refinePass >= MAX_REFINE_PASSES) {
+          console.log(`[QE-Worker] Refinement hit max passes for ${formula}: force=${currentForce.toFixed(6)} (started at ${startingForce.toFixed(6)}) after ${refinePass} passes, total wall=${totalRefineWallSec.toFixed(0)}s (${(totalRefineWallSec / 60).toFixed(1)} min), force reduced ${forceReduction}% — proceeding with best result`);
+        } else {
+          console.log(`[QE-Worker] Refinement stopped for ${formula}: force=${currentForce.toFixed(6)} (started at ${startingForce.toFixed(6)}) after ${refinePass} pass${refinePass > 1 ? "es" : ""}, total wall=${totalRefineWallSec.toFixed(0)}s (${(totalRefineWallSec / 60).toFixed(1)} min), force reduced ${forceReduction}%`);
+        }
       }
     }
 
