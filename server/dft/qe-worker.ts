@@ -5077,117 +5077,81 @@ ${cellBlockEos}
       cleanQETmpDir(path.join(jobDir, "tmp"));
     }
 
-    // Phase 3 removed — unified vc-relax already uses conv_thr=1e-7 (tight SCF)
-    // so forces during optimization match production SCF. No force gap.
-    if (false && result.vcRelaxed && positions.length > 0) {
-      try {
-        const p3Prefix = formula.replace(/[^a-zA-Z0-9]/g, "") + "_p3relax";
-        const p3HasH = elements.includes("H");
-        const p3Ecutwfc = Math.max(computeEcutwfc(elements, 0, 80, 45), p3HasH ? 80 : 50);
-        const p3Ecutrho = p3Ecutwfc * ecutrhoMultiplier(elements);
-        const p3COverA = estimateCOverA(elements, counts);
-        const p3BOverA = estimateBOverA(elements, counts);
-        const p3HasMag = mayHaveMagneticMoment(elements);
-        const p3Nspin = p3HasMag ? 2 : 1;
-        const p3MagLines = p3HasMag ? generateMagnetizationLines(elements, counts, isAFMCandidate(elements, counts), !elements.some(el => el in MAGNETIC_ELEMENTS)) : "";
-        const p3Nbnd = computeNbnd(elements, counts, p3Nspin, positions);
-        let p3Species = "";
-        for (const el of elements) {
-          p3Species += `  ${el}  ${getAtomicMass(el).toFixed(3)}  ${resolvePPFilename(el)}\n`;
-        }
-        let p3Pos = "";
-        for (const p of positions) {
-          p3Pos += `  ${p.element}  ${p.x.toFixed(6)}  ${p.y.toFixed(6)}  ${p.z.toFixed(6)}\n`;
-        }
-        const p3Kpts = autoKPoints(latticeA, p3COverA, p3BOverA, undefined, 0.40, { stage: "relax", totalAtoms: positions.length }).trim();
-        const p3Cell = generateCellParameters(latticeA, p3COverA, 0, p3BOverA, elements, counts);
-        const p3MaxSec = Math.min(3600, Math.max(900, positions.length * 200)); // 15-60 min based on atom count
+    // === Refinement vc-relax loop: keep restarting until force is publication-ready ===
+    // Each pass restarts from the previous pass's final geometry with zeroed velocities,
+    // eliminating oscillation and converging tighter. Stops when force drops below
+    // publication threshold or no improvement is made.
+    if (result.vcRelaxed && positions.length > 0) {
+      const PUB_FORCE_THR = 0.001; // publication-ready threshold (Ry/bohr)
+      const MAX_REFINE_PASSES = 4; // safety cap — don't loop forever
 
-        const p3Input = `&CONTROL
-  calculation = 'relax',
-  restart_mode = 'from_scratch',
-  prefix = '${p3Prefix}',
-  outdir = './tmp',
-  disk_io = 'low',
-  pseudo_dir = '${QE_PSEUDO_DIR_INPUT}',
-  tprnfor = .true.,
-  tstress = .true.,
-  forc_conv_thr = 1.0d-3,
-  etot_conv_thr = 1.0d-5,
-  nstep = 200,
-  max_seconds = ${p3MaxSec},
-/
-&SYSTEM
-  ibrav = 0,
-  nat = ${positions.length},
-  ntyp = ${elements.length},
-  ecutwfc = ${p3Ecutwfc},
-  ecutrho = ${p3Ecutrho},
-  nbnd = ${p3Nbnd},
-  input_dft = 'PBE',
-  occupations = 'smearing',
-  smearing = 'mv',
-  degauss = 0.015,
-  nspin = ${p3Nspin},
-${p3MagLines}/
-&ELECTRONS
-  electron_maxstep = 200,
-  conv_thr = 1.0d-7,
-  mixing_beta = 0.3,
-  mixing_mode = 'local-TF',
-  diagonalization = 'david',
-/
-&IONS
-  ion_dynamics = 'bfgs',
-/
-ATOMIC_SPECIES
-${p3Species}
-ATOMIC_POSITIONS {crystal}
-${p3Pos}
-K_POINTS {automatic}
-${p3Kpts}
+      // Parse initial force from run 1
+      const vcOutPath = path.join(jobDir, "vc_relax.out");
+      const vcOut = fs.existsSync(vcOutPath) ? fs.readFileSync(vcOutPath, "utf-8") : "";
+      const initForceMatches = [...vcOut.matchAll(/Total force\s*=\s*([\d.]+)/g)];
+      let currentForce = initForceMatches.length > 0
+        ? parseFloat(initForceMatches[initForceMatches.length - 1][1])
+        : 999;
 
-${p3Cell}
-`;
-        const p3File = path.join(jobDir, "phase3_relax.in");
-        fs.writeFileSync(p3File, p3Input);
-        console.log(`[QE-Worker] Phase 3 (tight relax): refining positions at vc-relax cell for ${formula} (a=${latticeA.toFixed(3)} Å, ${positions.length} atoms, conv_thr=1e-7, max=${p3MaxSec}s)`);
+      let refinePass = 0;
+      while (currentForce > PUB_FORCE_THR && refinePass < MAX_REFINE_PASSES) {
+        refinePass++;
+        try {
+          console.log(`[QE-Worker] Refinement pass ${refinePass}/${MAX_REFINE_PASSES} for ${formula}: force=${currentForce.toFixed(4)} > ${PUB_FORCE_THR} — restarting from current geometry with zeroed velocities`);
 
-        const p3Result = await runQECommand(
-          path.posix.join(getQEBinDir(), "pw.x"), p3File, jobDir, (p3MaxSec + 120) * 1000,
-        );
-        fs.writeFileSync(path.join(jobDir, "phase3_relax.out"), p3Result.stdout);
+          cleanQETmpScratch(path.join(jobDir, "tmp"));
 
-        // Parse relaxed positions
-        const p3PosBlocks = [...p3Result.stdout.matchAll(/ATOMIC_POSITIONS\s*[{(]?\s*(\w+)\s*[})]?\s*\n([\s\S]*?)(?=\n\s*\n|\nEnd|\nCELL_PARAMETERS|\n\s*Writing|\n\s*PWSCF\b|\n\s*init_run\b|\n\s*electrons\b|\n\s*BFGS\b|\n\s*JOB DONE|\n\s*%%%%%%%%%%|\n\s*Error in routine|\n\s*total cpu time|\n\s*General routines|\n\s*Parallel routines|\n\s*NEW-OLD|$)/g)];
-        if (p3PosBlocks.length > 0) {
-          const lastBlock = p3PosBlocks[p3PosBlocks.length - 1];
-          const coordType = lastBlock[1].toLowerCase();
-          const lines = lastBlock[2].trim().split("\n").filter((l: string) => l.trim().length > 0);
-          const p3Positions: typeof positions = [];
-          for (const line of lines) {
-            const parts = line.trim().split(/\s+/);
-            if (parts.length >= 4 && parts[0].match(/^[A-Z][a-z]?$/)) {
-              p3Positions.push({ element: parts[0], x: parseFloat(parts[1]), y: parseFloat(parts[2]), z: parseFloat(parts[3]) });
+          const refineInput = generateVCRelaxInput(formula, elements, counts, latticeA, positions, workerPressure);
+          const refineFile = path.join(jobDir, `vc_relax_refine${refinePass}.in`);
+          fs.writeFileSync(refineFile, refineInput);
+
+          const hasHRefine = elements.includes("H");
+          const hasMagRefine = elements.some(el => el in MAGNETIC_ELEMENTS);
+          const isHighPHRefine = hasHRefine && workerPressure >= 50 && positions.length >= 7;
+          // Shorter timeout per pass — starting close to minimum each time
+          const refineMaxSec = isHighPHRefine ? 3600 : hasMagRefine ? 2400 : 1200;
+          const refineKillMs = refineMaxSec * 1000 + 60_000;
+
+          console.log(`[QE-Worker] Refinement pass ${refinePass} for ${formula} (a=${latticeA.toFixed(2)} A, ${positions.length} atoms, timeout=${refineMaxSec}s)`);
+
+          const refineResult = await runQECommand(
+            path.posix.join(getQEBinDir(), "pw.x"), refineFile, jobDir, refineKillMs,
+          );
+          fs.writeFileSync(path.join(jobDir, `vc_relax_refine${refinePass}.out`), refineResult.stdout);
+          const refineParsed = parseVCRelaxOutput(refineResult.stdout);
+
+          if (refineParsed.finalPositions && refineParsed.finalPositions.length > 0) {
+            const refForceMatches = [...refineResult.stdout.matchAll(/Total force\s*=\s*([\d.]+)/g)];
+            const refForce = refForceMatches.length > 0
+              ? parseFloat(refForceMatches[refForceMatches.length - 1][1])
+              : 999;
+
+            if (refForce < currentForce) {
+              positions = refineParsed.finalPositions;
+              if (refineParsed.finalLatticeAng && refineParsed.finalLatticeAng > 0.5) {
+                latticeA = refineParsed.finalLatticeAng;
+                result.relaxedLatticeA = latticeA;
+              }
+              console.log(`[QE-Worker] Refinement pass ${refinePass} IMPROVED ${formula}: force ${currentForce.toFixed(4)} → ${refForce.toFixed(4)} Ry/bohr, a=${latticeA.toFixed(3)} Å`);
+              currentForce = refForce;
+            } else {
+              console.log(`[QE-Worker] Refinement pass ${refinePass} no improvement for ${formula}: force ${currentForce.toFixed(4)} → ${refForce.toFixed(4)} — stopping refinement`);
+              break;
             }
-          }
-          if (p3Positions.length === positions.length) {
-            const p3ForceMatch = p3Result.stdout.match(/Total force\s*=\s*([\d.]+)/g);
-            const p3Force = p3ForceMatch ? parseFloat(p3ForceMatch[p3ForceMatch.length - 1].match(/([\d.]+)$/)?.[1] ?? "999") : null;
-            positions = p3Positions;
-            console.log(`[QE-Worker] Phase 3 DONE for ${formula}: force=${p3Force?.toFixed(4) ?? "N/A"} Ry/bohr (${p3Positions.length} atoms refined at a=${latticeA.toFixed(3)} Å)`);
           } else {
-            console.log(`[QE-Worker] Phase 3 position count mismatch: expected ${positions.length}, got ${p3Positions.length} — keeping vc-relax positions`);
+            console.log(`[QE-Worker] Refinement pass ${refinePass} produced no positions for ${formula} (exit=${refineResult.exitCode}) — stopping refinement`);
+            break;
           }
-        } else {
-          console.log(`[QE-Worker] Phase 3 produced no positions for ${formula} (exit=${p3Result.exitCode}) — keeping vc-relax positions`);
+        } catch (refErr: any) {
+          console.log(`[QE-Worker] Refinement pass ${refinePass} failed for ${formula}: ${refErr.message?.slice(0, 100)} — stopping refinement`);
+          break;
         }
+      }
 
-        // Clean Phase 3 .save
-        const p3SaveDir = path.join(jobDir, "tmp", `${p3Prefix}.save`);
-        try { if (fs.existsSync(p3SaveDir)) fs.rmSync(p3SaveDir, { recursive: true, force: true }); } catch {}
-      } catch (p3Err: any) {
-        console.log(`[QE-Worker] Phase 3 relax failed for ${formula}: ${p3Err.message?.slice(0, 100)} — keeping vc-relax positions`);
+      if (currentForce <= PUB_FORCE_THR) {
+        console.log(`[QE-Worker] Refinement COMPLETE for ${formula}: force=${currentForce.toFixed(4)} ≤ ${PUB_FORCE_THR} (publication-ready) after ${refinePass} pass${refinePass > 1 ? "es" : ""}`);
+      } else if (refinePass >= MAX_REFINE_PASSES) {
+        console.log(`[QE-Worker] Refinement hit max passes for ${formula}: force=${currentForce.toFixed(4)} after ${refinePass} passes — proceeding with best result`);
       }
     }
 
