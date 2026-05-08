@@ -1005,6 +1005,32 @@ function cleanQETmpDir(tmpDir: string): void {
   } catch {}
 }
 
+/**
+ * Light cleanup: remove scratch files (.wfc, .mix, .restart_xml) but PRESERVE
+ * .save/ directories. Use this after vc-relax when SCF skip is active — ph.x
+ * and bands both need the .save/ wavefunctions that disk_io='medium' wrote.
+ */
+function cleanQETmpScratch(tmpDir: string): void {
+  if (!fs.existsSync(tmpDir)) return;
+  try {
+    const entries = fs.readdirSync(tmpDir);
+    for (const entry of entries) {
+      const fullPath = path.join(tmpDir, entry);
+      try {
+        if (
+          entry.endsWith(".xml") ||
+          entry.endsWith(".restart_xml") ||
+          /\.(wfc|mix)\d*(_new)?$/.test(entry)
+        ) {
+          fs.unlinkSync(fullPath);
+        } else if (entry.endsWith(".save_tmp")) {
+          fs.rmSync(fullPath, { recursive: true, force: true });
+        }
+      } catch {}
+    }
+  } catch {}
+}
+
 // Remove jobDirs left behind by previous crashed server runs. Called once at startup.
 function cleanStaleQEJobDirs(): void {
   if (!fs.existsSync(QE_WORK_DIR)) return;
@@ -5027,10 +5053,12 @@ ${cellBlockEos}
         }
       }
 
-      cleanQETmpDir(path.join(jobDir, "tmp"));
+      // Preserve .save/ — ph.x and bands need it. Only clean scratch files.
+      cleanQETmpScratch(path.join(jobDir, "tmp"));
       } // close: if (result.vcRelaxed) {} else { ... vc-relax run ... }
     } catch (vcErr: any) {
       console.log(`[QE-Worker] vc-relax failed for ${formula}: ${(vcErr.message || "").slice(-200)}, proceeding with original geometry`);
+      // vc-relax failed — full cleanup is fine, SCF will recreate .save
       cleanQETmpDir(path.join(jobDir, "tmp"));
     }
 
