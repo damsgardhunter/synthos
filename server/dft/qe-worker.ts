@@ -3323,6 +3323,7 @@ function generateVCRelaxInput(
   latticeA: number,
   positions: Array<{ element: string; x: number; y: number; z: number }>,
   pressureGPa: number = 0,
+  nstepOverride?: number,
 ): string {
   const totalAtoms = positions.length;
   const nTypes = elements.length;
@@ -3399,7 +3400,7 @@ function generateVCRelaxInput(
   tstress = .true.,
   forc_conv_thr = 1.0d-3,
   etot_conv_thr = 1.0d-5,
-  nstep = 400,
+  nstep = ${nstepOverride ?? 400},
   max_seconds = ${VC_RELAX_MAX_SECONDS},
 /
 &SYSTEM
@@ -5112,7 +5113,14 @@ ${cellBlockEos}
 
           cleanQETmpScratch(path.join(jobDir, "tmp"));
 
-          const refineInput = generateVCRelaxInput(formula, elements, counts, latticeA, positions, workerPressure);
+          // Variable nstep: 400, 300, 300, 150, 150, 400
+          // First pass gets full 400, middle passes get shorter (already close),
+          // last pass gets 400 again for one final big push if still not converged
+          const refineNstep = refinePass === 1 ? 400
+            : refinePass <= 3 ? 300
+            : refinePass <= 5 ? 150
+            : 400;
+          const refineInput = generateVCRelaxInput(formula, elements, counts, latticeA, positions, workerPressure, refineNstep);
           const refineFile = path.join(jobDir, `vc_relax_refine${refinePass}.in`);
           fs.writeFileSync(refineFile, refineInput);
 
@@ -5123,7 +5131,7 @@ ${cellBlockEos}
           const refineMaxSec = isHighPHRefine ? 3600 : hasMagRefine ? 2400 : 1200;
           const refineKillMs = refineMaxSec * 1000 + 60_000;
 
-          console.log(`[QE-Worker] Refinement pass ${refinePass} starting for ${formula} (a=${latticeA.toFixed(3)} A, ${positions.length} atoms, timeout=${refineMaxSec}s)`);
+          console.log(`[QE-Worker] Refinement pass ${refinePass} starting for ${formula} (a=${latticeA.toFixed(3)} A, ${positions.length} atoms, nstep=${refineNstep}, timeout=${refineMaxSec}s)`);
 
           const refineResult = await runQECommand(
             path.posix.join(getQEBinDir(), "pw.x"), refineFile, jobDir, refineKillMs,
