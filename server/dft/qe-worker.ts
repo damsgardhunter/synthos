@@ -2535,29 +2535,49 @@ function generateHydrideCagePositions(
   return positions;
 }
 
-function autoPhononQGrid(elements: string[], totalAtoms?: number): [number, number, number] {
-  // Screening-quality q-grid. Cost scales as n_atoms × n_q × 3*n_atoms
-  // perturbations. Each perturbation is a mini-SCF, and heavy elements
-  // make each one 3-10× more expensive than light elements.
+function autoPhononQGrid(elements: string[], totalAtoms?: number, residualForce?: number): [number, number, number] {
+  // Tiered q-grid based on structure quality (residual force) and system size.
+  // Cost scales as n_atoms × n_q × 3*n_atoms perturbations per q-point.
   //
-  // Scale the grid with atom count AND element weight:
-  //   ≤ 4 atoms, all light:  2×2×2 (8 q-points, manageable)
-  //   5-8 atoms, all light:  2×2×2 (still OK)
-  //   5-8 atoms, any heavy:  1×1×1 (Gamma-only — Bi2CuSe3 7 atoms 2×2×2
-  //     ran ~16h before wall-time kill; C3SnW4 8 atoms similar)
-  //   9+ atoms:              1×1×1 (always Gamma-only)
+  // Quality tiers:
+  //   Publication (force < 0.001): 4×4×4 or higher — proper alpha2F and lambda
+  //   DFPT-quality (force < 0.03):  3×3×3 or 4×4×4 — real phonon DOS for Tc
+  //   Screening (force >= 0.03):    1×1×1 or 2×2×2 — just checking stability
   //
-  // Gamma-only is enough for screening: detects imaginary modes at the
-  // zone center, which catches the most common instabilities.
+  // Scaled down for large/heavy systems to keep wall time feasible.
   const nAtoms = totalAtoms ?? 6;
+  const hasHeavy = elements.some(el => HEAVY_ELEMENTS.has(el));
+  const force = residualForce ?? 999;
+
+  // Publication-ready: force < 0.001
+  if (force < 0.001) {
+    if (nAtoms <= 4 && !hasHeavy) return [6, 6, 6];   // small+light: dense grid
+    if (nAtoms <= 4) return [4, 4, 4];                  // small+heavy
+    if (nAtoms <= 8 && !hasHeavy) return [4, 4, 4];    // medium+light
+    if (nAtoms <= 8) return [3, 3, 3];                  // medium+heavy
+    if (nAtoms <= 15) return [3, 3, 3];                 // large
+    return [2, 2, 2];                                    // very large (16+)
+  }
+
+  // DFPT-quality: force < 0.03
+  if (force < 0.03) {
+    if (nAtoms <= 4 && !hasHeavy) return [4, 4, 4];
+    if (nAtoms <= 4) return [3, 3, 3];
+    if (nAtoms <= 8 && !hasHeavy) return [3, 3, 3];
+    if (nAtoms <= 8) return [2, 2, 2];
+    if (nAtoms <= 15) return [2, 2, 2];
+    return [1, 1, 1];
+  }
+
+  // Screening: force >= 0.03
   if (nAtoms >= 9) return [1, 1, 1];
-  if (nAtoms >= 5 && elements.some(el => HEAVY_ELEMENTS.has(el))) return [1, 1, 1];
+  if (nAtoms >= 5 && hasHeavy) return [1, 1, 1];
   return [2, 2, 2];
 }
 
-function generatePhononInput(formula: string, elements: string[] = [], totalAtoms: number = 6, opts?: { maxSeconds?: number; recover?: boolean; tr2Ph?: string; alphaMix?: number }): string {
+function generatePhononInput(formula: string, elements: string[] = [], totalAtoms: number = 6, opts?: { maxSeconds?: number; recover?: boolean; tr2Ph?: string; alphaMix?: number; residualForce?: number }): string {
   const prefix = formula.replace(/[^a-zA-Z0-9]/g, "");
-  const [nq1, nq2, nq3] = autoPhononQGrid(elements, totalAtoms);
+  const [nq1, nq2, nq3] = autoPhononQGrid(elements, totalAtoms, opts?.residualForce);
   // tr2_ph=1.0d-10: screening threshold — saves 30-50% iterations vs 1e-12
   // without changing screening-level Tc estimates. 1e-12 is only needed for
   // publication-quality phonon DOS.
@@ -2569,8 +2589,13 @@ function generatePhononInput(formula: string, elements: string[] = [], totalAtom
   // IO-bound systems. Does not affect results.
   const recoverLine = opts?.recover ? `  recover = .true.,\n` : "";
   const maxSecLine = opts?.maxSeconds ? `  max_seconds = ${opts.maxSeconds},\n` : "";
-  const tr2Ph = opts?.tr2Ph ?? "1.0d-10";
+  // Tier tr2_ph by structure quality — publication structures get tighter convergence
+  const force = opts?.residualForce ?? 999;
+  const defaultTr2Ph = force < 0.001 ? "1.0d-14" : force < 0.03 ? "1.0d-12" : "1.0d-10";
+  const tr2Ph = opts?.tr2Ph ?? defaultTr2Ph;
   const alphaMix = opts?.alphaMix ?? 0.5;
+  const qualityTier = force < 0.001 ? "publication" : force < 0.03 ? "DFPT" : "screening";
+  console.log(`[QE-Worker] Phonon q-grid: ${nq1}×${nq2}×${nq3} (${qualityTier} tier, force=${force < 100 ? force.toFixed(4) : "N/A"}, tr2_ph=${tr2Ph}, alpha_mix=${alphaMix})`);
   //
   // Gamma-only (1×1×1): use ldisp=.false. so ph.x prints omega(N) = X [THz]
   // = Y [cm-1] directly to stdout, which parsePhononOutput already handles.
@@ -6177,16 +6202,22 @@ ${r2Cell}
       // systems need disproportionately more time.
       const nAtoms = positions.length;
       const heavyCount = elements.filter(el => HEAVY_ELEMENTS.has(el)).length;
-      // Base: 6× SCF time. Scale up for heavy/large systems.
+      const phForce = result.scf?.totalForce ?? 999;
+      const [phNq1] = autoPhononQGrid(elements, nAtoms, phForce);
+      const qGridPoints = phNq1 ** 3; // assumes cubic q-grid
+      // Base: 6× SCF time. Scale up for heavy/large systems and denser q-grids.
       let phMultiplier = 6;
       if (nAtoms >= 8) phMultiplier = 8;
       if (nAtoms >= 12) phMultiplier = 10;
       if (heavyCount >= 2) phMultiplier = Math.max(phMultiplier, 10);
+      // Scale by q-grid: 2×2×2=8 qpts is baseline, 4×4×4=64 is 8× more work
+      if (qGridPoints > 8) phMultiplier = Math.ceil(phMultiplier * (qGridPoints / 8));
       const MAX_PHONON_TIMEOUT_MS = 48 * 3600 * 1000; // 48 hours absolute cap
       const phKillTimeoutMs = Math.min(effectiveKillTimeoutMs * phMultiplier, MAX_PHONON_TIMEOUT_MS);
       // max_seconds for ph.x: 120s before the kill timeout so QE can checkpoint
       // cleanly and write recover data for the next attempt.
       const phMaxSeconds = Math.floor(phKillTimeoutMs / 1000) - 120;
+      console.log(`[QE-Worker] Phonon budget for ${formula}: ${phNq1}×${phNq1}×${phNq1} q-grid (${qGridPoints} q-points), multiplier=${phMultiplier}×, timeout=${(phKillTimeoutMs / 3600_000).toFixed(1)}h, force=${phForce < 100 ? phForce.toFixed(4) : "N/A"}`);
 
       // First attempt: no recover (fresh start).
       // If ph.x times out, retry once with recover=.true. to resume from checkpoint.
@@ -6205,6 +6236,7 @@ ${r2Cell}
         const phInput = generatePhononInput(formula, elements, positions.length, {
           maxSeconds: phMaxSeconds,
           recover: isRetry && !prevCrashed,
+          residualForce: result.scf?.totalForce ?? undefined,
           ...(prevCrashed ? { tr2Ph: "1.0d-10", alphaMix: 0.1 } : {}),
         });
         const phInputFile = path.join(jobDir, "ph.in");
@@ -6284,7 +6316,7 @@ ${r2Cell}
         // frequencies directly from the .dyn1 file instead — it contains
         // the dynamical matrix eigenvalues in cm⁻¹ after "freq (" or
         // "omega(" lines.
-        const [pnq1, pnq2, pnq3] = autoPhononQGrid(elements, positions.length);
+        const [pnq1, pnq2, pnq3] = autoPhononQGrid(elements, positions.length, result.scf?.totalForce ?? undefined);
         if (pnq1 === 1 && pnq2 === 1 && pnq3 === 1) {
           // ldisp=.false. writes {prefix}.dyn; ldisp=.true. writes {prefix}.dyn1.
           // Check both so this fallback works regardless of which mode was used.
