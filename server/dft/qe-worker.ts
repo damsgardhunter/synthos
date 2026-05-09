@@ -911,10 +911,10 @@ const SEMICORE_REQUIRED: Set<string> = new Set([
 // either (a) QE is rebuilt with a higher lmaxx, or (b) scalar-relativistic
 // PPs with lmax<=2 are installed for each.
 const LMAXX_INCOMPATIBLE: Set<string> = new Set([
-  // Lanthanides with 4f projectors
-  "Ce", "Pr", "Nd", "Pm", "Sm", "Eu", "Gd", "Tb", "Dy", "Ho", "Er", "Tm",
-  // Actinides with 5f projectors
-  "Th", "Pa", "U", "Np", "Pu", "Am",
+  // Lanthanides with 4f projectors — Ce removed (lmaxx=6 on both workers)
+  "Pr", "Nd", "Pm", "Sm", "Eu", "Gd", "Tb", "Dy", "Ho", "Er", "Tm",
+  // Actinides with 5f projectors — Th removed (lmaxx=6 on both workers)
+  "Pa", "U", "Np", "Pu", "Am",
 ]);
 
 // Elements whose PP fetch has failed in this process lifetime. Populated by
