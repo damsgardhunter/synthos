@@ -1031,6 +1031,75 @@ function cleanQETmpScratch(tmpDir: string): void {
   } catch {}
 }
 
+// === DFT Structure Cache ===
+// Saves best DFT-optimized structures per formula so future runs start from
+// the previous best geometry instead of from scratch. Dramatically speeds up
+// convergence for difficult materials like high-P hydrides.
+
+const DFT_STRUCTURE_CACHE_DIR = path.join(QE_WORK_DIR, "structure_cache");
+
+interface CachedStructure {
+  formula: string;
+  latticeA: number;
+  positions: Array<{ element: string; x: number; y: number; z: number }>;
+  force: number;
+  pressure: number | null;
+  energy: number;
+  timestamp: number;
+  source: string;
+}
+
+function saveDFTStructureCache(
+  formula: string,
+  latticeA: number,
+  positions: Array<{ element: string; x: number; y: number; z: number }>,
+  force: number,
+  pressure: number | null,
+  energy: number,
+): void {
+  try {
+    if (!fs.existsSync(DFT_STRUCTURE_CACHE_DIR)) {
+      fs.mkdirSync(DFT_STRUCTURE_CACHE_DIR, { recursive: true });
+    }
+    const cacheFile = path.join(DFT_STRUCTURE_CACHE_DIR, `${formula}.json`);
+
+    // Only overwrite if the new structure is better (lower force)
+    if (fs.existsSync(cacheFile)) {
+      try {
+        const existing: CachedStructure = JSON.parse(fs.readFileSync(cacheFile, "utf-8"));
+        if (existing.force <= force) {
+          console.log(`[DFT-Cache] ${formula}: cached structure already has force=${existing.force.toFixed(6)} ≤ ${force.toFixed(6)} — keeping cached`);
+          return;
+        }
+      } catch {}
+    }
+
+    const cached: CachedStructure = {
+      formula, latticeA, positions, force,
+      pressure, energy, timestamp: Date.now(),
+      source: `DFT-cached (force=${force.toFixed(6)}, a=${latticeA.toFixed(3)})`,
+    };
+    fs.writeFileSync(cacheFile, JSON.stringify(cached, null, 2));
+    console.log(`[DFT-Cache] Saved ${formula}: a=${latticeA.toFixed(3)} Å, ${positions.length} atoms, force=${force.toFixed(6)}, E=${energy.toFixed(4)} eV`);
+  } catch (err: any) {
+    console.log(`[DFT-Cache] Failed to save ${formula}: ${err.message?.slice(0, 100)}`);
+  }
+}
+
+function loadDFTStructureCache(formula: string): CachedStructure | null {
+  try {
+    const cacheFile = path.join(DFT_STRUCTURE_CACHE_DIR, `${formula}.json`);
+    if (!fs.existsSync(cacheFile)) return null;
+    const cached: CachedStructure = JSON.parse(fs.readFileSync(cacheFile, "utf-8"));
+    // Validate basic structure
+    if (!cached.positions || cached.positions.length === 0 || !cached.latticeA || cached.latticeA <= 0) return null;
+    console.log(`[DFT-Cache] Loaded ${formula}: a=${cached.latticeA.toFixed(3)} Å, ${cached.positions.length} atoms, force=${cached.force.toFixed(6)}, age=${((Date.now() - cached.timestamp) / 3600_000).toFixed(1)}h`);
+    return cached;
+  } catch {
+    return null;
+  }
+}
+
 // Remove jobDirs left behind by previous crashed server runs. Called once at startup.
 function cleanStaleQEJobDirs(): void {
   if (!fs.existsSync(QE_WORK_DIR)) return;
@@ -4185,6 +4254,25 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       }
     }
 
+    // --- Inject DFT-cached structure from previous runs ---
+    // If this formula was optimized before, inject the best known DFT structure
+    // as a high-confidence candidate. This gives the pipeline a massive head start
+    // instead of rediscovering the same geometry from scratch.
+    const cachedStructure = loadDFTStructureCache(formula);
+    if (cachedStructure) {
+      structureCandidates.push({
+        latticeA: cachedStructure.latticeA,
+        positions: cachedStructure.positions,
+        prototype: "DFT-cached",
+        crystalSystem: "unknown",
+        spaceGroup: "",
+        source: cachedStructure.source,
+        confidence: 0.99, // highest confidence — this is a DFT-optimized structure
+        isMetallic: null,
+      });
+      console.log(`[QE-Worker] Injected DFT-cached structure for ${formula}: a=${cachedStructure.latticeA.toFixed(3)} Å, ${cachedStructure.positions.length} atoms, force=${cachedStructure.force.toFixed(6)} (total now: ${structureCandidates.length})`);
+    }
+
     // --- Candidate stats logging ---
     try {
       logCandidateStats(structureCandidates as any, formula);
@@ -5222,6 +5310,26 @@ ${cellBlockEos}
           console.log(`[QE-Worker] Refinement stopped for ${formula}: force=${currentForce.toFixed(6)} (started at ${startingForce.toFixed(6)}) after ${refinePass} pass${refinePass > 1 ? "es" : ""}, total wall=${totalRefineWallSec.toFixed(0)}s (${(totalRefineWallSec / 60).toFixed(1)} min), force reduced ${forceReduction}%`);
         }
       }
+    }
+
+    // --- Cache best DFT structure for future runs ---
+    if (result.vcRelaxed && positions.length > 0) {
+      const cacheForceMatches = [...(fs.existsSync(path.join(jobDir, "vc_relax.out"))
+        ? fs.readFileSync(path.join(jobDir, "vc_relax.out"), "utf-8") : "")
+        .matchAll(/Total force\s*=\s*([\d.]+)/g)];
+      // Check refinement outputs too for the best force
+      let bestCacheForce = cacheForceMatches.length > 0
+        ? parseFloat(cacheForceMatches[cacheForceMatches.length - 1][1]) : 999;
+      for (let ri = 1; ri <= 6; ri++) {
+        const refOut = path.join(jobDir, `vc_relax_refine${ri}.out`);
+        if (!fs.existsSync(refOut)) break;
+        const refMatches = [...fs.readFileSync(refOut, "utf-8").matchAll(/Total force\s*=\s*([\d.]+)/g)];
+        if (refMatches.length > 0) {
+          const refF = parseFloat(refMatches[refMatches.length - 1][1]);
+          if (refF < bestCacheForce) bestCacheForce = refF;
+        }
+      }
+      saveDFTStructureCache(formula, latticeA, positions, bestCacheForce, null, result.scf?.totalEnergy ?? 0);
     }
 
     result.kPoints = autoKPoints(latticeA, cOverA, bOverAFull, undefined, DEFAULT_KSPACING, { stage: "scf", isMetallic: vegardResult?.isMetallic ?? undefined, totalAtoms: positions.length }).trim();
