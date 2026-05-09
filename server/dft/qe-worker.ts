@@ -1618,10 +1618,10 @@ function autoKPoints(
   const isLayered = dimensionality === "quasi-2D" || dimensionality === "2D";
   const layeredBoost = isLayered ? 1.5 : 1.0;
   const effCOverA = cOverA ?? 1.0;
-  const ka = Math.max(minK, Math.ceil(densityFactor / latticeA));
+  const ka = Math.max(Math.ceil(minK), Math.ceil(densityFactor / latticeA));
   const kb = ka;
   const baseKc = Math.ceil(densityFactor / (latticeA * effCOverA));
-  const kc = Math.max(minK, isLayered ? Math.ceil(baseKc * layeredBoost) : baseKc);
+  const kc = Math.max(Math.ceil(minK), isLayered ? Math.ceil(baseKc * layeredBoost) : baseKc);
   return `  ${ka} ${kb} ${kc}  0 0 0`;
 }
 
