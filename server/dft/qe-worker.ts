@@ -1008,7 +1008,7 @@ function cleanQETmpDir(tmpDir: string): void {
 /**
  * Light cleanup: remove scratch files (.wfc, .mix, .restart_xml) but PRESERVE
  * .save/ directories. Use this after vc-relax when SCF skip is active — ph.x
- * and bands both need the .save/ wavefunctions that disk_io='medium' wrote.
+ * and bands both need the .save/ wavefunctions that disk_io='high' wrote.
  */
 function cleanQETmpScratch(tmpDir: string): void {
   if (!fs.existsSync(tmpDir)) return;
@@ -3300,7 +3300,7 @@ function generateSCFInputWithParams(
   restart_mode = '${restartMode}',
   prefix = '${formula.replace(/[^a-zA-Z0-9]/g, "")}',
   outdir = './tmp',
-  disk_io = 'medium',
+  disk_io = 'high',
   pseudo_dir = '${QE_PSEUDO_DIR_INPUT}',
   tprnfor = .true.,
   tstress = .true.,
@@ -3419,7 +3419,7 @@ function generateVCRelaxInput(
   restart_mode = 'from_scratch',
   prefix = '${prefix}',
   outdir = './tmp',
-  disk_io = 'medium',
+  disk_io = 'high',
   pseudo_dir = '${QE_PSEUDO_DIR_INPUT}',
   tprnfor = .true.,
   tstress = .true.,
@@ -5230,7 +5230,7 @@ ${cellBlockEos}
     }
 
     // --- Skip separate SCF when vc-relax already converged with tight SCF ---
-    // The unified vc-relax uses conv_thr=1e-7 and disk_io='medium', so the final
+    // The unified vc-relax uses conv_thr=1e-7 and disk_io='high', so the final
     // SCF from vc-relax IS production quality. Parse SCF results from vc-relax output
     // instead of running another SCF. Saves 15-60 min per material.
     //
