@@ -3462,7 +3462,7 @@ function generateVCRelaxInput(
   const hasHVcr = elements.includes("H");
   const hasMagVcr = elements.some(el => el in MAGNETIC_ELEMENTS);
   const isHighPHydride = hasHVcr && pressureGPa >= 50 && totalAtoms >= 7;
-  const vcRelaxMaxSeconds = isHighPHydride ? 9000    // 2.5h for high-P hydrides
+  const vcRelaxMaxSeconds = isHighPHydride ? 10800   // 3h for high-P hydrides
     : hasMagVcr ? 3600                                // 60 min for magnetic systems
     : Math.max(600, Math.min(QE_MAX_SECONDS, 1800));  // 30 min default
   const VC_RELAX_MAX_SECONDS = vcRelaxMaxSeconds;
@@ -5079,7 +5079,7 @@ ${cellBlockEos}
       const hasHVcRelax = elements.includes("H");
       const isHighPHVcRelax = hasHVcRelax && workerPressure >= 50 && positions.length >= 7;
       const hasMagVcRelax = elements.some(el => el in MAGNETIC_ELEMENTS);
-      const vcRelaxMaxSec = isHighPHVcRelax ? 9000 : hasMagVcRelax ? 3600 : 1800; // 2.5h for high-P hydrides
+      const vcRelaxMaxSec = isHighPHVcRelax ? 10800 : hasMagVcRelax ? 3600 : 1800; // 3h for high-P hydrides
       const vcRelaxKillMs = vcRelaxMaxSec * 1000 + 60_000;
 
       // === UNIFIED vc-relax: damped dynamics with tight SCF ===
@@ -5241,7 +5241,7 @@ ${cellBlockEos}
           const hasMagRefine = elements.some(el => el in MAGNETIC_ELEMENTS);
           const isHighPHRefine = hasHRefine && workerPressure >= 50 && positions.length >= 7;
           // Shorter timeout per pass — starting close to minimum each time
-          const refineMaxSec = isHighPHRefine ? 7200 : hasMagRefine ? 2400 : 1200; // 2h per pass for high-P hydrides
+          const refineMaxSec = isHighPHRefine ? 9000 : hasMagRefine ? 2400 : 1200; // 2.5h per pass for high-P hydrides
           const refineKillMs = refineMaxSec * 1000 + 60_000;
 
           console.log(`[QE-Worker] Refinement pass ${refinePass} starting for ${formula} (a=${latticeA.toFixed(3)} A, ${positions.length} atoms, nstep=${refineNstep}, timeout=${refineMaxSec}s)`);
