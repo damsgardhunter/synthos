@@ -71,9 +71,9 @@ function resolveQEBinDir(): string {
     // Try Nix store (glob-based — hash changes per QE version/rebuild), then apt/conda/custom installs.
     const candidates = [
       ...findNixQEBins(),
-      // System package managers (apt, yum, dnf)
-      "/usr/bin",
+      // Prefer /usr/local/bin (manual installs, lmaxx=6 rebuild) over /usr/bin (apt default)
       "/usr/local/bin",
+      "/usr/bin",
       // Conda/mamba installs (root or user)
       "/opt/conda/bin",
       "/opt/miniconda3/bin",
