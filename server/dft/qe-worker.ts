@@ -28,6 +28,17 @@ import {
 } from "../learning/physics-engine";
 import { generateStructureCandidates, vegardEstimate, type StructureCandidate, type VegardEstimate } from "./vegard-lattice";
 import { runEPWPipeline, type EPWResult } from "./epw-pipeline";
+import { checkSSCHAEligibility, runSSCHAPipeline, type SSCHAResult } from "./sscha-pipeline";
+import { runACBN0Pipeline, type ACBN0Result } from "./acbn0-pipeline";
+import { analyzeSOCRequirement, type SOCAnalysis } from "./soc-handler";
+import {
+  classifyMagneticLandscape,
+  shouldSearchMagneticGS,
+  selectMagneticGroundState,
+  parseMagnetizationFromOutput,
+  type MagneticGroundStateResult,
+  type MagneticTrialResult,
+} from "./magnetic-ground-state";
 import { lookupKnownStructure, getKnownStructureFormulas } from "../learning/known-structures";
 import { airssEngine } from "../csp/airss-wrapper";
 import { pyxtalEngine } from "../csp/pyxtal-wrapper";
@@ -278,6 +289,8 @@ export interface QEFullResult {
   bandStructure: DFTBandStructureResult | null;
   dfpt?: QEDFPTResult;
   epw?: import("./epw-pipeline").EPWResult;
+  sscha?: import("./sscha-pipeline").SSCHAResult;
+  acbn0?: import("./acbn0-pipeline").ACBN0Result;
   wallTimeTotal: number;
   error: string | null;
   retryCount?: number;
@@ -344,6 +357,10 @@ export interface QEFullResult {
     ephMethod: "dfpt" | "surrogate" | "none";
     phononMethod: "dfpt_full" | "dfpt_gamma" | "finite_displacement" | "surrogate" | "none";
   };
+  /** Spin-orbit coupling analysis for this material. */
+  socAnalysis?: SOCAnalysis;
+  /** Magnetic ground-state search results (FM/AFM/NM comparison). */
+  magneticGroundState?: MagneticGroundStateResult;
 }
 
 const HASH_CACHE_MAX = 2000;
@@ -3343,7 +3360,7 @@ function generateSCFInputWithParams(
   counts: Record<string, number>,
   latticeA: number,
   positions: Array<{ element: string; x: number; y: number; z: number }>,
-  params: { mixingBeta: number; maxSteps: number; diag: string; smearing?: string; degauss?: number; ecutwfcBoost?: number; convThr?: string; forcConvThr?: string; etotConvThr?: string; dftPlusULines?: string; dftPlusUNspin2?: boolean; mixingMode?: string; mixingNdim?: number; startingwfc?: string; startingpot?: string; diagoThrInit?: string; restartFromScratch?: boolean; maxSecondsOverride?: number },
+  params: { mixingBeta: number; maxSteps: number; diag: string; smearing?: string; degauss?: number; ecutwfcBoost?: number; convThr?: string; forcConvThr?: string; etotConvThr?: string; dftPlusULines?: string; dftPlusUNspin2?: boolean; mixingMode?: string; mixingNdim?: number; startingwfc?: string; startingpot?: string; diagoThrInit?: string; restartFromScratch?: boolean; maxSecondsOverride?: number; socFlags?: string; forceNspin?: 1 | 2; forceMagBlock?: string },
 ): string {
   const totalAtoms = positions.length;
   const nTypes = elements.length;
@@ -3388,14 +3405,22 @@ function generateSCFInputWithParams(
   // they show non-zero magnetization in the output but never converge SCF.
   const hasMagEl = elements.some(el => el in MAGNETIC_ELEMENTS);
   const broadMagnetic = mayHaveMagneticMoment(elements);
-  const useNspin2 = (params.dftPlusUNspin2 ?? false) || broadMagnetic;
+  // SOC non-collinear overrides nspin: when noncolin=.true., QE ignores nspin
+  // and uses 4-component spinors internally. We still emit nspin=1 in the input
+  // because QE requires it to be absent or 1 when noncolin is set.
+  const hasSOC = !!(params.socFlags);
+  const useNspin2 = !hasSOC && ((params.dftPlusUNspin2 ?? false) || (params.forceNspin === 2) || broadMagnetic);
   // When DFT+U nspin2 is set, starting_magnetization is already embedded in dftPlusULines
-  const magBlock = (params.dftPlusUNspin2 ?? false)
-    ? ""
-    : (broadMagnetic ? generateMagnetizationLines(elements, counts, isAFMCandidate(elements, counts), !hasMagEl) : "");
+  // When forceMagBlock is provided (from magnetic ground-state search), use it directly
+  const magBlock = params.forceMagBlock
+    ? params.forceMagBlock
+    : (params.dftPlusUNspin2 ?? false)
+      ? ""
+      : (broadMagnetic ? generateMagnetizationLines(elements, counts, isAFMCandidate(elements, counts), !hasMagEl) : "");
   const hubbardBlock = params.dftPlusULines ?? "";
+  const socBlock = params.socFlags ?? "";
 
-  const nspinOut = useNspin2 ? 2 : 1;
+  const nspinOut = hasSOC ? 1 : (useNspin2 ? 2 : (params.forceNspin ?? 1));
   const nbnd = computeNbnd(elements, counts, nspinOut, positions);
   // restart_mode='restart' on retry attempts 2+ preserves the partial SCF
   // charge density from the previous wall-time-killed attempt instead of
@@ -3428,7 +3453,7 @@ function generateSCFInputWithParams(
   smearing = '${smearing}',
   degauss = ${degauss},
   nspin = ${nspinOut},
-${magBlock}${hubbardBlock}/
+${socBlock}${magBlock}${hubbardBlock}/
 &ELECTRONS
   electron_maxstep = ${params.maxSteps},
   conv_thr = ${convThr},
@@ -3457,6 +3482,7 @@ function generateVCRelaxInput(
   positions: Array<{ element: string; x: number; y: number; z: number }>,
   pressureGPa: number = 0,
   nstepOverride?: number,
+  opts?: { socFlags?: string; forceNspin?: 1 | 2; forceMagBlock?: string },
 ): string {
   const totalAtoms = positions.length;
   const nTypes = elements.length;
@@ -3470,9 +3496,13 @@ function generateVCRelaxInput(
 
   const hasMagnetic = elements.some(el => el in MAGNETIC_ELEMENTS);
   const broadMagnetic = mayHaveMagneticMoment(elements);
-  const nspin = broadMagnetic ? 2 : 1;
+  const hasSOCVcr = !!(opts?.socFlags);
+  const nspin = hasSOCVcr ? 1 : (opts?.forceNspin ?? (broadMagnetic ? 2 : 1));
   let magLines = "";
-  if (broadMagnetic) {
+  const socLinesVcr = opts?.socFlags ?? "";
+  if (opts?.forceMagBlock) {
+    magLines = opts.forceMagBlock;
+  } else if (broadMagnetic) {
     magLines = generateMagnetizationLines(elements, counts, isAFMCandidate(elements, counts), !hasMagnetic);
   }
 
@@ -3547,7 +3577,7 @@ function generateVCRelaxInput(
   smearing = 'mv',
   degauss = ${vcRelaxDegauss},
   nspin = ${nspin},
-${magLines}/
+${socLinesVcr}${magLines}/
 &ELECTRONS
   electron_maxstep = 300,
   conv_thr = 1.0d-7,
@@ -4109,6 +4139,23 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
 
     result.ppValidated = true;
     const workerPressure = result.estimatedPressureGPa ?? 0;
+
+    // --- SOC analysis: determine if spin-orbit coupling is needed ---
+    const socAnalysis = analyzeSOCRequirement(elements, counts, workerPressure);
+    result.socAnalysis = socAnalysis;
+    if (socAnalysis.needsSOC) {
+      console.log(`[QE-Worker] SOC analysis for ${formula}: ${socAnalysis.enableFullSOC ? "FULL SOC" : "scalar-rel"} ` +
+        `(max SOC=${socAnalysis.maxSOCEnergy.toFixed(2)} eV, elements: ${socAnalysis.socElements.map(e => e.element).join(",")})`);
+    }
+
+    // --- Magnetic ground-state search decision ---
+    const magSearchDecision = shouldSearchMagneticGS(elements, counts);
+    if (magSearchDecision.shouldSearch) {
+      console.log(`[QE-Worker] Magnetic ground-state search warranted for ${formula}: ${magSearchDecision.reason}`);
+      // The actual search (multiple SCF trials) happens during Stage 1 relaxation
+      // where we can compare energies from different magnetic orderings.
+      // classifyMagneticLandscape() provides the trial configs.
+    }
 
     // --- Vegard's law enhanced lattice estimation ---
     // Try Vegard interpolation from AFLOW/MP binary endpoints for a better
@@ -5108,6 +5155,74 @@ ${cellBlockEos}
       }
     }
 
+    // --- Magnetic ground-state search (FM/AFM/NM energy comparison) ---
+    // Runs short SCF trials with different spin orderings BEFORE the expensive
+    // vc-relax, so phonons are computed on the correct magnetic state.
+    if (magSearchDecision.shouldSearch && !result.vcRelaxed) {
+      const magConfigs = classifyMagneticLandscape(elements, counts);
+      if (magConfigs.length >= 2) {
+        console.log(`[QE-Worker] Running magnetic ground-state search for ${formula}: ${magConfigs.length} orderings (${magConfigs.map(c => c.ordering).join(", ")})`);
+        const magTrials: MagneticTrialResult[] = [];
+
+        for (const config of magConfigs) {
+          const magStartTime = Date.now();
+          try {
+            const magInput = generateSCFInputWithParams(formula, elements, counts, latticeA, positions, {
+              mixingBeta: 0.3,
+              maxSteps: 80, // short trial — just enough to converge energy
+              diag: "david",
+              smearing: "mv",
+              degauss: 0.02,
+              convThr: "1.0d-5",
+              forceNspin: config.nspin === 1 ? 1 : 2,
+              forceMagBlock: config.magnetizationBlock,
+              maxSecondsOverride: 600, // 10 min cap per trial
+            });
+            const magFile = path.join(jobDir, `mag_trial_${config.ordering}.in`);
+            fs.writeFileSync(magFile, magInput);
+
+            const magResult = await runQECommand(
+              path.posix.join(getQEBinDir(), "pw.x"), magFile, jobDir, 660_000,
+            );
+            fs.writeFileSync(path.join(jobDir, `mag_trial_${config.ordering}.out`), magResult.stdout);
+            const magSCF = parseSCFOutput(magResult.stdout, 0.02);
+            const magMoments = parseMagnetizationFromOutput(magResult.stdout);
+
+            magTrials.push({
+              ordering: config.ordering,
+              totalEnergy: magSCF.converged ? magSCF.totalEnergy : null,
+              totalMagnetization: magMoments.totalMagnetization,
+              absoluteMagnetization: magMoments.absoluteMagnetization,
+              converged: magSCF.converged,
+              wallTimeMs: Date.now() - magStartTime,
+            });
+
+            console.log(`[QE-Worker] Mag trial ${config.ordering}: E=${magSCF.totalEnergy?.toFixed(6) ?? "N/A"} Ry, ` +
+              `M=${magMoments.totalMagnetization?.toFixed(2) ?? "N/A"} mu_B, ` +
+              `${magSCF.converged ? "converged" : "FAILED"} (${Date.now() - magStartTime}ms)`);
+          } catch (magErr: any) {
+            magTrials.push({
+              ordering: config.ordering,
+              totalEnergy: null,
+              totalMagnetization: null,
+              absoluteMagnetization: null,
+              converged: false,
+              wallTimeMs: Date.now() - magStartTime,
+            });
+            console.log(`[QE-Worker] Mag trial ${config.ordering} failed: ${magErr.message?.slice(0, 100)}`);
+          }
+          // Clean tmp between trials to avoid charge contamination
+          cleanQETmpDir(path.join(jobDir, "tmp"));
+        }
+
+        const magGS = selectMagneticGroundState(magTrials, magConfigs, positions.length);
+        result.magneticGroundState = magGS;
+        console.log(`[QE-Worker] Magnetic ground state for ${formula}: ${magGS.groundState} ` +
+          `(gap=${(magGS.energyGapPerAtom * 13605.7).toFixed(1)} meV/atom, ` +
+          `${magGS.wellSeparated ? "well-separated" : "nearly degenerate"})`);
+      }
+    }
+
     try {
       if (result.vcRelaxed) {
         // Already set from verified-compound shortcut, skip the actual run
@@ -5126,7 +5241,11 @@ ${cellBlockEos}
       // conv_thr=1e-7 ensures forces are production-quality at every ionic step.
       console.log(`[QE-Worker] Unified vc-relax for ${formula} (lattice=${latticeA.toFixed(2)} A, ${positions.length} atoms${workerPressure > 0 ? `, P=${workerPressure} GPa` : ""}, damped+tight, timeout=${vcRelaxMaxSec}s)`);
 
-      const vcInput = generateVCRelaxInput(formula, elements, counts, latticeA, positions, workerPressure);
+      const vcInput = generateVCRelaxInput(formula, elements, counts, latticeA, positions, workerPressure, undefined, {
+        socFlags: socAnalysis?.enableFullSOC ? socAnalysis.qeSystemFlags : undefined,
+        forceNspin: result.magneticGroundState?.winningNspin,
+        forceMagBlock: result.magneticGroundState?.winningMagBlock || undefined,
+      });
       const vcFile = path.join(jobDir, "vc_relax.in");
       fs.writeFileSync(vcFile, vcInput);
 
@@ -5633,6 +5752,9 @@ ${cellBlockEos}
         maxSecondsOverride: effectiveMaxSeconds - 120,
         dftPlusULines: dftPlusULines || undefined,
         dftPlusUNspin2: dftPlusUNspin2 || undefined,
+        socFlags: socAnalysis?.enableFullSOC ? socAnalysis.qeSystemFlags : undefined,
+        forceNspin: result.magneticGroundState?.winningNspin,
+        forceMagBlock: result.magneticGroundState?.winningMagBlock || undefined,
       });
       const scfInputFile = path.join(jobDir, `scf_attempt${attempt}.in`);
       fs.writeFileSync(scfInputFile, scfInput);
@@ -6898,6 +7020,71 @@ ${r2Cell}
       }
     } else if (publicationForce && !phononPhysicallyStable) {
       console.log(`[QE-Worker] ${formula} has publication-ready force but unstable phonons — EPW skipped`);
+    }
+
+    // --- SSCHA Anharmonic Phonon Corrections ---
+    // Only for publication-ready hydrides where anharmonicity is significant.
+    if (publicationForce && phononPhysicallyStable && checkSSCHAEligibility({
+      formula, elements, counts, residualForce: residualForce ?? 999, pressure: workerPressure,
+    })) {
+      try {
+        console.log(`[QE-Worker] ${formula} qualifies for SSCHA anharmonic corrections`);
+        const harmonicLambda = result.epw?.lambda ?? (result.dfpt as any)?.lambda ?? null;
+        const harmonicOmegaLog = result.epw?.omegaLog ?? result.phonon?.omegaLog ?? null;
+        const prefix = formula.replace(/[^a-zA-Z0-9]/g, "");
+        result.sscha = await runSSCHAPipeline(
+          formula, elements, counts, positions, latticeA, jobDir, workerPressure,
+          harmonicLambda, harmonicOmegaLog,
+          {
+            ecutwfc: computeEcutwfc(elements, 0, 80, 45),
+            ecutrho: computeEcutwfc(elements, 0, 80, 45) * ecutrhoMultiplier(elements),
+            pseudoDir: QE_PSEUDO_DIR_INPUT,
+            prefix,
+            temperature: 300,
+            nConfigs: 50, // start conservative
+          },
+        );
+        if (result.sscha?.converged) {
+          console.log(`[QE-Worker] SSCHA complete for ${formula}: ω_log=${result.sscha.omegaLogAnharmonic.toFixed(1)} meV (anharmonic), Tc=${result.sscha.tcCorrected?.toFixed(1) ?? "N/A"} K, ${result.sscha.iterations} iterations`);
+        } else {
+          console.log(`[QE-Worker] SSCHA did not converge for ${formula} — using harmonic results`);
+        }
+      } catch (sschaErr: any) {
+        console.log(`[QE-Worker] SSCHA failed for ${formula}: ${(sschaErr.message ?? "").slice(0, 200)}`);
+      }
+    }
+
+    // --- ACBN0 First-Principles μ* ---
+    // For publication-ready materials, compute μ* from electronic structure
+    // instead of using the conventional fixed 0.10-0.13.
+    if (publicationForce && scfUsable && dfptGatePass && result.scf?.fermiEnergy != null) {
+      try {
+        console.log(`[QE-Worker] ${formula} qualifies for ACBN0 first-principles μ*`);
+        const acbn0Prefix = formula.replace(/[^a-zA-Z0-9]/g, "");
+        const acbn0COverA = estimateCOverA(elements, counts);
+        const acbn0BOverA = estimateBOverA(elements, counts);
+        result.acbn0 = await runACBN0Pipeline(
+          formula, elements, counts, positions, latticeA, jobDir, workerPressure,
+          {
+            ecutwfc: computeEcutwfc(elements, 0, 80, 45),
+            ecutrho: computeEcutwfc(elements, 0, 80, 45) * ecutrhoMultiplier(elements),
+            pseudoDir: QE_PSEUDO_DIR_INPUT,
+            prefix: acbn0Prefix,
+            debyeFrequencyMeV: result.phonon?.omegaLog ?? undefined,
+            cellParameters: generateCellParameters(latticeA, acbn0COverA, 0, acbn0BOverA, elements, counts),
+          },
+          {
+            runQEBinary: (binary, inputFile, cwd, timeoutMs) => runQECommand(binary, inputFile, cwd, timeoutMs),
+            getPseudoDirInput: () => QE_PSEUDO_DIR_INPUT,
+            resolvePPFilename,
+          },
+        );
+        if (result.acbn0?.converged) {
+          console.log(`[QE-Worker] ACBN0 complete for ${formula}: μ*=${result.acbn0.muStar.toFixed(4)} (conventional=${result.acbn0.muStarConventional?.toFixed(4) ?? "N/A"}, deviation=${((result.acbn0.muStar - (result.acbn0.muStarConventional ?? 0.1)) * 100).toFixed(1)}%)`);
+        }
+      } catch (acbn0Err: any) {
+        console.log(`[QE-Worker] ACBN0 failed for ${formula}: ${(acbn0Err.message ?? "").slice(0, 200)}`);
+      }
     }
 
     // --- Populate quality gate and uncertainty fields ---
