@@ -913,10 +913,11 @@ const SEMICORE_REQUIRED: Set<string> = new Set([
 // either (a) QE is rebuilt with a higher lmaxx, or (b) scalar-relativistic
 // PPs with lmax<=2 are installed for each.
 const LMAXX_INCOMPATIBLE: Set<string> = new Set([
-  // Lanthanides with 4f projectors — Ce removed (lmaxx=6 on both workers)
-  "Pr", "Nd", "Pm", "Sm", "Eu", "Gd", "Tb", "Dy", "Ho", "Er", "Tm",
-  // Actinides with 5f projectors — Th removed (lmaxx=6 on both workers)
-  "Pa", "U", "Np", "Pu", "Am",
+  // Most lanthanides and actinides now supported via:
+  //   1. lmaxx=6 rebuild on both workers (handles PAW f-projectors)
+  //   2. Pseudo-DOJO ONCVPSP scalar-relativistic PPs (no lmaxx issue)
+  // Only block elements with no available PP from any source:
+  "Pu", "Am",  // no reliable PPs from any source
 ]);
 
 // Elements whose PP fetch has failed in this process lifetime. Populated by
@@ -1145,9 +1146,10 @@ cleanupPseudoDir();
 cleanStaleQEJobDirs();
 
 // GitHub pslibrary is the primary source — the QE website is often unreliable/down.
-// QE website kept as fallback only.
-// GBRV (Garrity-Bennett-Rabe-Vanderbilt) ultrasoft PPs from Rutgers as tertiary source.
+// Pseudo-DOJO NC PPs as secondary — validated for DFPT, covers lanthanides/actinides.
+// QE website kept as fallback. GBRV ultrasoft PPs from Rutgers as last resort.
 const GH_BASE = "https://raw.githubusercontent.com/dalcorso/pslibrary/master/pbe/PSEUDOPOTENTIALS";
+const DOJO_BASE = "https://raw.githubusercontent.com/pseudo-dojo/pseudo-dojo/master/pseudo_dojo/pseudos/ONCVPSP-PBE-SR-PDv0.4";
 const QE_BASE = "https://pseudopotentials.quantum-espresso.org/upf_files";
 const GBRV_BASE = "https://www.physics.rutgers.edu/gbrv/pbe";
 
@@ -1263,6 +1265,41 @@ const PP_GBRV_URLS: Record<string, string> = {
   Er: `${GBRV_BASE}/er_pbe_v1.uspp.F.UPF`,
   Tm: `${GBRV_BASE}/tm_pbe_v1.uspp.F.UPF`,
   Lu: `${GBRV_BASE}/lu_pbe_v1.uspp.F.UPF`,
+};
+
+// Pseudo-DOJO norm-conserving PPs — DFPT-validated, scalar-relativistic.
+// These work with lmaxx=6 and cover lanthanides/actinides that PAW PPs struggle with.
+// ONCVPSP (Optimized Norm-Conserving Vanderbilt) — good for phonon/EPW calculations.
+const PP_DOJO_URLS: Record<string, string> = {
+  // Lanthanides (scalar-relativistic — no lmaxx issue)
+  Pr: `${DOJO_BASE}/Pr/Pr-sp.upf`,
+  Nd: `${DOJO_BASE}/Nd/Nd-sp.upf`,
+  Pm: `${DOJO_BASE}/Pm/Pm-sp.upf`,
+  Sm: `${DOJO_BASE}/Sm/Sm-sp.upf`,
+  Eu: `${DOJO_BASE}/Eu/Eu-sp.upf`,
+  Gd: `${DOJO_BASE}/Gd/Gd-sp.upf`,
+  Tb: `${DOJO_BASE}/Tb/Tb-sp.upf`,
+  Dy: `${DOJO_BASE}/Dy/Dy-sp.upf`,
+  Ho: `${DOJO_BASE}/Ho/Ho-sp.upf`,
+  Er: `${DOJO_BASE}/Er/Er-sp.upf`,
+  Tm: `${DOJO_BASE}/Tm/Tm-sp.upf`,
+  // Actinides
+  Pa: `${DOJO_BASE}/Pa/Pa-sp.upf`,
+  U:  `${DOJO_BASE}/U/U-sp.upf`,
+  Np: `${DOJO_BASE}/Np/Np-sp.upf`,
+  // Also good for elements where PAW PPs have convergence issues
+  La: `${DOJO_BASE}/La/La-sp.upf`,
+  Ce: `${DOJO_BASE}/Ce/Ce-sp.upf`,
+  Th: `${DOJO_BASE}/Th/Th-sp.upf`,
+  Y:  `${DOJO_BASE}/Y/Y-sp.upf`,
+  Sc: `${DOJO_BASE}/Sc/Sc-sp.upf`,
+  Ti: `${DOJO_BASE}/Ti/Ti-sp.upf`,
+  Zr: `${DOJO_BASE}/Zr/Zr-sp.upf`,
+  Hf: `${DOJO_BASE}/Hf/Hf-sp.upf`,
+  Nb: `${DOJO_BASE}/Nb/Nb-sp.upf`,
+  Mo: `${DOJO_BASE}/Mo/Mo-sp.upf`,
+  Ta: `${DOJO_BASE}/Ta/Ta-sp.upf`,
+  W:  `${DOJO_BASE}/W/W-sp.upf`,
 };
 
 // QE website as fallback (often unreliable)
@@ -1469,10 +1506,10 @@ async function ensurePseudopotential(element: string): Promise<string> {
       }
     }
 
-    const urls = [PP_DOWNLOAD_URLS[element], PP_FALLBACK_URLS[element], PP_GBRV_URLS[element]].filter(Boolean);
+    const urls = [PP_DOWNLOAD_URLS[element], PP_DOJO_URLS[element], PP_FALLBACK_URLS[element], PP_GBRV_URLS[element]].filter(Boolean);
     for (const url of urls) {
       try {
-        const mirror = url!.includes("github") ? "pslibrary" : url!.includes("rutgers") ? "GBRV" : "QE";
+        const mirror = url!.includes("pseudo-dojo") ? "PseudoDojo" : url!.includes("dalcorso") ? "pslibrary" : url!.includes("rutgers") ? "GBRV" : "QE";
         console.log(`[QE-Worker] Downloading PP for ${element} from ${mirror}...`);
         if (!await downloadPPToTemp(url!, tmpFile)) {
           console.log(`[QE-Worker] Download from ${mirror} failed for ${element} (${url})`);
