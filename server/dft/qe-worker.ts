@@ -3498,7 +3498,7 @@ function generateVCRelaxInput(
   positions: Array<{ element: string; x: number; y: number; z: number }>,
   pressureGPa: number = 0,
   nstepOverride?: number,
-  opts?: { socFlags?: string; forceNspin?: 1 | 2; forceMagBlock?: string; hubbardBlock?: string },
+  opts?: { socFlags?: string; forceNspin?: 1 | 2; forceMagBlock?: string; hubbardBlock?: string; pressurePriority?: boolean },
 ): string {
   const totalAtoms = positions.length;
   const nTypes = elements.length;
@@ -3577,7 +3577,7 @@ function generateVCRelaxInput(
   pseudo_dir = '${QE_PSEUDO_DIR_INPUT}',
   tprnfor = .true.,
   tstress = .true.,
-  forc_conv_thr = 1.0d-3,
+  forc_conv_thr = ${opts?.pressurePriority ? "1.0d-5" : "1.0d-3"},
   etot_conv_thr = 1.0d-5,
   nstep = ${nstepOverride ?? (isHighPHydride ? 600 : 400)},
   max_seconds = ${VC_RELAX_MAX_SECONDS},
@@ -3607,7 +3607,7 @@ ${socLinesVcr}${magLines}${opts?.hubbardBlock ?? ""}/
 &CELL
   cell_dynamics = 'damp-w',
   press = ${(pressureGPa * 10.0).toFixed(4)},
-  press_conv_thr = ${pressureGPa > 50 ? 1.0 : 0.5},
+  press_conv_thr = ${opts?.pressurePriority ? 0.1 : (pressureGPa > 50 ? 1.0 : 0.5)},
 /
 ATOMIC_SPECIES
 ${atomicSpecies}
@@ -5494,16 +5494,29 @@ ${cellBlockEos}
       while ((currentForce > PUB_FORCE_THR || (currentPressure != null && Math.abs(currentPressure - pressTarget) > PRESSURE_THR)) && refinePass < MAX_REFINE_PASSES) {
         refinePass++;
         try {
-          console.log(`[QE-Worker] Refinement pass ${refinePass}/${MAX_REFINE_PASSES} for ${formula}: force=${currentForce.toFixed(6)} > ${PUB_FORCE_THR}, P=${currentPressure?.toFixed(1) ?? "N/A"} kbar — restarting with zeroed velocities`);
+          // Determine if this is a pressure-priority pass: force is already good,
+          // only the cell volume needs to equilibrate. In this mode we tell QE to
+          // use ultra-tight forc_conv_thr so ions are "done" on step 1 and the
+          // remaining nstep budget goes purely to cell dynamics (damp-w).
+          const pressResidualNow = currentPressure != null ? Math.abs(currentPressure - pressTarget) : 0;
+          const isPressurePriority = currentForce <= PUB_FORCE_THR && pressResidualNow > PRESSURE_THR;
+
+          if (isPressurePriority) {
+            console.log(`[QE-Worker] Refinement pass ${refinePass}/${MAX_REFINE_PASSES} for ${formula}: PRESSURE-PRIORITY mode — force=${currentForce.toFixed(6)} OK, P_residual=${pressResidualNow.toFixed(1)} kbar > ${PRESSURE_THR} — cell volume needs equilibration`);
+          } else {
+            console.log(`[QE-Worker] Refinement pass ${refinePass}/${MAX_REFINE_PASSES} for ${formula}: force=${currentForce.toFixed(6)}${currentForce > PUB_FORCE_THR ? " > " + PUB_FORCE_THR : ""}, P=${currentPressure?.toFixed(1) ?? "N/A"} kbar — restarting with zeroed velocities`);
+          }
 
           cleanQETmpScratch(path.join(jobDir, "tmp"));
 
           // Adaptive nstep based on convergence rate from previous pass.
-          // If the previous pass made good progress per step, keep it going.
-          // If it stalled (tiny improvement over many steps), cut steps short.
-          // First pass always gets 400. Last pass (6) gets 400 for a final push.
+          // Pressure-priority passes get fewer steps (cell converges fast when
+          // ions are already at equilibrium) but enough for volume to adjust.
           let refineNstep: number;
-          if (refinePass === 1 || refinePass >= MAX_REFINE_PASSES) {
+          if (isPressurePriority) {
+            // Cell-only relaxation: 150-250 steps is usually enough
+            refineNstep = 200;
+          } else if (refinePass === 1 || refinePass >= MAX_REFINE_PASSES) {
             refineNstep = 400; // first and last pass: full budget
           } else if (prevSteps > 0 && prevForceReductionPerStep > 0) {
             // Estimate how many steps to reach target from current force
@@ -5514,7 +5527,17 @@ ${cellBlockEos}
           } else {
             refineNstep = 300; // fallback if no convergence data
           }
-          const refineInput = generateVCRelaxInput(formula, elements, counts, latticeA, positions, workerPressure, refineNstep);
+
+          // In pressure-priority mode, use ultra-tight forc_conv_thr (1e-5 Ry/bohr)
+          // so QE treats ions as converged immediately and spends all steps on cell.
+          // Also tighten press_conv_thr to drive cell convergence harder.
+          const refineInput = generateVCRelaxInput(formula, elements, counts, latticeA, positions, workerPressure, refineNstep, {
+            socFlags: socAnalysis?.enableFullSOC ? socAnalysis.qeSystemFlags : undefined,
+            forceNspin: result.magneticGroundState?.winningNspin,
+            forceMagBlock: result.magneticGroundState?.winningMagBlock || undefined,
+            hubbardBlock: hubbardResult?.applyToVCRelax ? hubbardResult.qeSystemBlock : undefined,
+            pressurePriority: isPressurePriority,
+          });
           const refineFile = path.join(jobDir, `vc_relax_refine${refinePass}.in`);
           fs.writeFileSync(refineFile, refineInput);
 
@@ -5549,13 +5572,24 @@ ${cellBlockEos}
             // Count ionic steps from output
             const ionicSteps = [...refineResult.stdout.matchAll(/Total force\s*=\s*([\d.]+)/g)].length;
 
-            if (refForce < currentForce) {
+            // Accept the pass if force improved OR pressure improved (pressure-priority mode)
+            const refPressResidual = refPressure != null ? Math.abs(refPressure - pressTarget) : 999;
+            const prevPressResidual = currentPressure != null ? Math.abs(currentPressure - pressTarget) : 999;
+            const forceImproved = refForce < currentForce;
+            const pressureImproved = refPressResidual < prevPressResidual - 1.0; // at least 1 kbar improvement
+            // In pressure-priority mode: accept if pressure improved AND force didn't
+            // degrade past the publication threshold (allow minor force fluctuation)
+            const forceStillOk = refForce <= PUB_FORCE_THR * 1.5; // allow 50% slack
+            const madeProgress = forceImproved || (isPressurePriority && pressureImproved && forceStillOk);
+
+            if (madeProgress) {
               positions = refineParsed.finalPositions;
               if (refineParsed.finalLatticeAng && refineParsed.finalLatticeAng > 0.5) {
                 latticeA = refineParsed.finalLatticeAng;
                 result.relaxedLatticeA = latticeA;
               }
-              console.log(`[QE-Worker] Refinement pass ${refinePass} DONE for ${formula}: force ${currentForce.toFixed(6)} → ${refForce.toFixed(6)} Ry/bohr, a=${refLattice.toFixed(3)} Å, P=${refPressure?.toFixed(1) ?? "N/A"} kbar, wall=${refWall.toFixed(0)}s, steps=${ionicSteps}, converged=${refineParsed.converged}`);
+              const pLabel = isPressurePriority ? `, P_residual=${refPressResidual.toFixed(1)}→${prevPressResidual.toFixed(1)} kbar` : "";
+              console.log(`[QE-Worker] Refinement pass ${refinePass} DONE for ${formula}: force ${currentForce.toFixed(6)} → ${refForce.toFixed(6)} Ry/bohr, a=${refLattice.toFixed(3)} Å, P=${refPressure?.toFixed(1) ?? "N/A"} kbar${pLabel}, wall=${refWall.toFixed(0)}s, steps=${ionicSteps}, converged=${refineParsed.converged}`);
               // Log positions for the first few atoms
               for (let pi = 0; pi < Math.min(4, refineParsed.finalPositions.length); pi++) {
                 const p = refineParsed.finalPositions[pi];
@@ -5570,7 +5604,7 @@ ${cellBlockEos}
               currentForce = refForce;
               currentPressure = refPressure;
             } else {
-              console.log(`[QE-Worker] Refinement pass ${refinePass} no improvement for ${formula}: force ${currentForce.toFixed(6)} → ${refForce.toFixed(6)} Ry/bohr (wall=${refWall.toFixed(0)}s, steps=${ionicSteps}) — stopping refinement`);
+              console.log(`[QE-Worker] Refinement pass ${refinePass} no improvement for ${formula}: force ${currentForce.toFixed(6)} → ${refForce.toFixed(6)}, P_residual=${refPressResidual.toFixed(1)} kbar (wall=${refWall.toFixed(0)}s, steps=${ionicSteps}) — stopping refinement`);
               totalRefineWallSec += refWall;
               break;
             }
