@@ -382,6 +382,54 @@ async function seedBenchmarkCandidates() {
   if (seeded > 0) console.log(`[Engine] Seeded ${seeded} benchmark superhydrides as candidates`);
 }
 
+/**
+ * Queue critical materials at highest priority (99) on restart.
+ * These are known superconductors that need full pipeline validation
+ * (publication-ready force + phonon + EPW) plus novel candidates
+ * that were in-progress when the worker restarted.
+ */
+const CRITICAL_QUEUE_FORMULAS: { formula: string; pressure: number }[] = [
+  // Known high-Tc superconductors — need full DFT validation
+  { formula: "H3S", pressure: 200 },
+  { formula: "LaH10", pressure: 170 },
+  { formula: "CaH6", pressure: 200 },
+  { formula: "YH6", pressure: 200 },
+  { formula: "YH9", pressure: 200 },
+  { formula: "MgH6", pressure: 140 },
+  { formula: "ScH9", pressure: 200 },
+  { formula: "ThH10", pressure: 174 },
+  { formula: "CeH9", pressure: 150 },
+  // Ternary hydrides — novel candidates
+  { formula: "Li2LaH12", pressure: 200 },
+  { formula: "YH9Na2", pressure: 160 },
+  { formula: "LaBeH8", pressure: 50 },
+  { formula: "Li2MgH16", pressure: 250 },
+  { formula: "CaBeH8", pressure: 100 },
+  // Non-hydride known superconductors for DFT+U validation
+  { formula: "MgB2", pressure: 0 },
+  { formula: "Nb3Sn", pressure: 0 },
+  { formula: "NbN", pressure: 0 },
+  { formula: "FeSe", pressure: 0 },
+];
+
+let _criticalQueued = false;
+async function queueCriticalFormulas() {
+  if (_criticalQueued) return;
+  _criticalQueued = true;
+  let queued = 0;
+  for (const { formula, pressure } of CRITICAL_QUEUE_FORMULAS) {
+    try {
+      const job = await submitDFTJob(formula, null, 99, "scf", true, pressure > 0 ? pressure : undefined);
+      if (job) {
+        queued++;
+      }
+    } catch {}
+  }
+  if (queued > 0) {
+    console.log(`[Engine] Queued ${queued} critical-priority formulas for DFT (priority=99)`);
+  }
+}
+
 type HydrideClass = "none" | "hydrogen-doped" | "hydride" | "superhydride";
 
 function classifyHydride(formula: string): HydrideClass {
@@ -6271,15 +6319,25 @@ async function runAutonomousFastPath() {
       try {
         let campaigns = getAllActiveCampaigns();
         if (campaigns.length === 0) {
-          const campaign = createCampaign(`fastpath-200K-${Date.now()}`, {
-            targetTc: 200,
+          // Create TWO campaigns: one ambient (conventional SC) and one high-pressure (hydrides)
+          const campaign = createCampaign(`fastpath-250K-hydride-${Date.now()}`, {
+            targetTc: 250,
+            maxPressure: 300,
+            minLambda: 1.5,
+            maxHullDistance: 1.0,
+            metallicRequired: true,
+            phononStable: true,
+            preferredElements: ["La", "Y", "Ca", "Sr", "Sc", "Mg", "Ba", "Be", "H", "Li"],
+          }, 200);
+          createCampaign(`fastpath-100K-ambient-${Date.now()}`, {
+            targetTc: 100,
             maxPressure: 50,
             minLambda: 0.5,
             maxHullDistance: 0.3,
             metallicRequired: true,
             phononStable: true,
-            preferredElements: ["Nb", "Ti", "B", "C", "N", "La", "Y", "H"],
-          }, 200);
+            preferredElements: ["Nb", "Ti", "B", "C", "N", "V", "Mo", "W"],
+          }, 100);
           try {
             await storage.insertInverseDesignCampaign({
               id: campaign.id,
@@ -8053,6 +8111,7 @@ async function runLearningCycle() {
   const _rssMB  = Math.round(_heapAtCycleStart.rss      / 1024 / 1024);
   console.log(`[Engine] Cycle #${cycleCount} START at T+${Math.round((Date.now() - _engineStartMs) / 1000)}s  heap=${_heapMB}MB rss=${_rssMB}MB`);
   await seedBenchmarkCandidates();
+  await queueCriticalFormulas();
 
   // Every 10 cycles: prune 30% of the screened set to allow re-evaluation
   // of previously screened formulas with updated physics. Without this,
@@ -10329,11 +10388,12 @@ export async function startEngine() {
         if (scCount >= 20) {
           const topCandidates = await storage.getSuperconductorCandidatesByTc(5);
           const currentBestTc = topCandidates[0]?.predictedTc ?? 100;
-          const campaign200 = createCampaign(`auto-200K-${Date.now()}`, { targetTc: 200, maxPressure: 50, minLambda: 0.5, maxHullDistance: 0.3, metallicRequired: true, phononStable: true, preferredElements: ["Nb", "Ti", "B", "C", "N"] }, 200);
-          await storage.insertInverseDesignCampaign({ id: campaign200.id, targetTc: 200, targetPressure: 0, status: "active", cyclesRun: 0, bestTcAchieved: 0, bestDistance: 1, candidatesGenerated: 0, candidatesPassedPipeline: 0, learningState: {} as any, convergenceHistory: [], topCandidates: [] });
-          const targetHighTc = Math.max(300, Math.round(currentBestTc * 1.5));
-          const campaign300 = createCampaign(`auto-${targetHighTc}K-${Date.now()}`, { targetTc: targetHighTc, maxPressure: 50, minLambda: 1.0, maxHullDistance: 0.5, metallicRequired: true, phononStable: true, preferredElements: ["La", "Y", "H", "Ca", "B"] }, 200);
-          await storage.insertInverseDesignCampaign({ id: campaign300.id, targetTc: targetHighTc, targetPressure: 0, status: "active", cyclesRun: 0, bestTcAchieved: 0, bestDistance: 1, candidatesGenerated: 0, candidatesPassedPipeline: 0, learningState: {} as any, convergenceHistory: [], topCandidates: [] });
+          // High-pressure hydride campaign — the proven path to highest Tc
+          const campaignHydride = createCampaign(`auto-250K-hydride-${Date.now()}`, { targetTc: 250, maxPressure: 300, minLambda: 1.5, maxHullDistance: 1.0, metallicRequired: true, phononStable: true, preferredElements: ["La", "Y", "Ca", "Sr", "Sc", "Ba", "Mg", "Be", "H", "Li"] }, 200);
+          await storage.insertInverseDesignCampaign({ id: campaignHydride.id, targetTc: 250, targetPressure: 200, status: "active", cyclesRun: 0, bestTcAchieved: 0, bestDistance: 1, candidatesGenerated: 0, candidatesPassedPipeline: 0, learningState: {} as any, convergenceHistory: [], topCandidates: [] });
+          // Ambient conventional SC campaign
+          const campaign100 = createCampaign(`auto-100K-ambient-${Date.now()}`, { targetTc: 100, maxPressure: 50, minLambda: 0.7, maxHullDistance: 0.3, metallicRequired: true, phononStable: true, preferredElements: ["Nb", "Ti", "V", "B", "C", "N", "Mo", "W"] }, 100);
+          await storage.insertInverseDesignCampaign({ id: campaign100.id, targetTc: 100, targetPressure: 0, status: "active", cyclesRun: 0, bestTcAchieved: 0, bestDistance: 1, candidatesGenerated: 0, candidatesPassedPipeline: 0, learningState: {} as any, convergenceHistory: [], topCandidates: [] });
           emit("log", { phase: "inverse-optimizer", event: "Auto-created inverse design campaigns", detail: `Created campaigns targeting 200K and ${targetHighTc}K`, dataSource: "Inverse Optimizer" });
         }
       }
