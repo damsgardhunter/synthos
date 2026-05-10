@@ -3376,7 +3376,7 @@ function generateSCFInputWithParams(
   counts: Record<string, number>,
   latticeA: number,
   positions: Array<{ element: string; x: number; y: number; z: number }>,
-  params: { mixingBeta: number; maxSteps: number; diag: string; smearing?: string; degauss?: number; ecutwfcBoost?: number; convThr?: string; forcConvThr?: string; etotConvThr?: string; dftPlusULines?: string; dftPlusUNspin2?: boolean; mixingMode?: string; mixingNdim?: number; startingwfc?: string; startingpot?: string; diagoThrInit?: string; restartFromScratch?: boolean; maxSecondsOverride?: number; socFlags?: string; forceNspin?: 1 | 2; forceMagBlock?: string; forceNoncolin?: boolean },
+  params: { mixingBeta: number; maxSteps: number; diag: string; smearing?: string; degauss?: number; ecutwfcBoost?: number; convThr?: string; forcConvThr?: string; etotConvThr?: string; dftPlusULines?: string; dftPlusUNspin2?: boolean; mixingMode?: string; mixingNdim?: number; startingwfc?: string; startingpot?: string; diagoThrInit?: string; restartFromScratch?: boolean; maxSecondsOverride?: number; socFlags?: string; forceNspin?: 1 | 2; forceMagBlock?: string; forceNoncolin?: boolean; hubbardCard?: string },
 ): string {
   const totalAtoms = positions.length;
   const nTypes = elements.length;
@@ -3487,7 +3487,7 @@ ${params.startingwfc ? `  startingwfc = '${params.startingwfc}',\n` : ""}${param
 /
 ATOMIC_SPECIES
 ${atomicSpecies}
-ATOMIC_POSITIONS {crystal}
+${params.hubbardCard ?? ""}ATOMIC_POSITIONS {crystal}
 ${atomicPositions}
 K_POINTS {automatic}
 ${autoKPoints(latticeA, cOverA2, bOverA2, undefined, DEFAULT_KSPACING, { stage: "scf", totalAtoms: positions.length })}
@@ -3503,7 +3503,7 @@ function generateVCRelaxInput(
   positions: Array<{ element: string; x: number; y: number; z: number }>,
   pressureGPa: number = 0,
   nstepOverride?: number,
-  opts?: { socFlags?: string; forceNspin?: 1 | 2; forceMagBlock?: string; hubbardBlock?: string; pressurePriority?: boolean },
+  opts?: { socFlags?: string; forceNspin?: 1 | 2; forceMagBlock?: string; hubbardBlock?: string; hubbardCard?: string; pressurePriority?: boolean },
 ): string {
   const totalAtoms = positions.length;
   const nTypes = elements.length;
@@ -3601,7 +3601,7 @@ function generateVCRelaxInput(
   smearing = 'mv',
   degauss = ${vcRelaxDegauss},
   nspin = ${nspin},
-${socLinesVcr}${magLines}${opts?.hubbardBlock ?? ""}/
+${socLinesVcr}${magLines}/
 &ELECTRONS
   electron_maxstep = 300,
   conv_thr = 1.0d-7,
@@ -3619,7 +3619,7 @@ ${socLinesVcr}${magLines}${opts?.hubbardBlock ?? ""}/
 /
 ATOMIC_SPECIES
 ${atomicSpecies}
-ATOMIC_POSITIONS {crystal}
+${opts?.hubbardCard ?? ""}ATOMIC_POSITIONS {crystal}
 ${atomicPositions}
 K_POINTS {automatic}
 ${autoKPoints(latticeA, cOverA, bOverAVcr, undefined, DEFAULT_KSPACING, { stage: "vc-relax", totalAtoms })}
@@ -5309,7 +5309,7 @@ ${cellBlockEos}
         socFlags: socAnalysis?.enableFullSOC ? socAnalysis.qeSystemFlags : undefined,
         forceNspin: result.magneticGroundState?.winningNspin,
         forceMagBlock: result.magneticGroundState?.winningMagBlock || undefined,
-        hubbardBlock: hubbardResult?.applyToVCRelax ? hubbardResult.qeSystemBlock : undefined,
+        hubbardCard: hubbardResult?.applyToVCRelax ? hubbardResult.qeHubbardCard : undefined,
       });
       const vcFile = path.join(jobDir, "vc_relax.in");
       fs.writeFileSync(vcFile, vcInput);
@@ -5507,7 +5507,7 @@ ${cellBlockEos}
             socFlags: socAnalysis?.enableFullSOC ? socAnalysis.qeSystemFlags : undefined,
             forceNspin: result.magneticGroundState?.winningNspin,
             forceMagBlock: result.magneticGroundState?.winningMagBlock || undefined,
-            hubbardBlock: hubbardResult?.applyToVCRelax ? hubbardResult.qeSystemBlock : undefined,
+            hubbardCard: hubbardResult?.applyToVCRelax ? hubbardResult.qeHubbardCard : undefined,
             pressurePriority: isPressurePriority,
           });
           const refineFile = path.join(jobDir, `vc_relax_refine${refinePass}.in`);
@@ -5658,10 +5658,13 @@ ${cellBlockEos}
     }
 
     // --- DFT+U for correlated materials (uses Hubbard workflow from earlier analysis) ---
+    // QE ≥7.1: Hubbard params go in a HUBBARD card after ATOMIC_SPECIES,
+    // NOT in &SYSTEM (old lda_plus_u syntax removed in v7.1).
+    // dftPlusULines only carries magnetization seeds for &SYSTEM.
     let dftPlusULines = "";
     let dftPlusUNspin2 = false;
+    const scfHubbardCard = hubbardResult?.applyDFTplusU ? hubbardResult.qeHubbardCard : "";
     if (hubbardResult?.applyDFTplusU) {
-      dftPlusULines = hubbardResult.qeSystemBlock;
       // For magnetic correlated materials (cuprates, pnictides), force nspin=2
       const isMagCorrMat = hubbardResult.materialPatterns.some(p =>
         p.includes("cuprate") || p.includes("Fe-pnictide"));
@@ -5862,6 +5865,7 @@ ${cellBlockEos}
         maxSecondsOverride: effectiveMaxSeconds - 120,
         dftPlusULines: dftPlusULines || undefined,
         dftPlusUNspin2: dftPlusUNspin2 || undefined,
+        hubbardCard: scfHubbardCard || undefined,
         socFlags: socAnalysis?.enableFullSOC ? socAnalysis.qeSystemFlags : undefined,
         forceNspin: result.magneticGroundState?.winningNspin,
         forceMagBlock: result.magneticGroundState?.winningMagBlock || undefined,

@@ -61,7 +61,13 @@ export interface HubbardWorkflowResult {
   applyDFTplusU: boolean;
   /** Per-site Hubbard configurations */
   sites: HubbardSiteConfig[];
-  /** QE input block for &SYSTEM (lda_plus_u, Hubbard_U lines) */
+  /**
+   * QE ≥7.1 HUBBARD card block — goes AFTER ATOMIC_SPECIES, not in &SYSTEM.
+   * Old syntax (lda_plus_u in &SYSTEM) is rejected by QE 7.1+.
+   * New syntax uses: HUBBARD (ortho-atomic) / U Element-manifold value
+   */
+  qeHubbardCard: string;
+  /** @deprecated kept empty for compatibility — Hubbard params now go in qeHubbardCard */
   qeSystemBlock: string;
   /** Correlation regime from analysis */
   correlationRegime: string;
@@ -509,23 +515,31 @@ export function analyzeHubbardWorkflow(
     );
   }
 
-  // Build QE input block
-  let qeBlock = "";
+  // Build QE ≥7.1 HUBBARD card block (goes after ATOMIC_SPECIES, NOT in &SYSTEM).
+  // Old syntax (lda_plus_u, Hubbard_U in &SYSTEM) was removed in QE 7.1.
+  // New syntax: separate HUBBARD card with projector type + per-element U/J lines.
+  //
+  // Format:
+  //   HUBBARD (ortho-atomic)
+  //   U Cu-3d 5.0
+  //   J Cu-3d 0.98
+  let qeHubbardCard = "";
+  const qeBlock = ""; // empty — no Hubbard params in &SYSTEM for QE ≥7.1
   if (applyDFTplusU) {
-    qeBlock += "  lda_plus_u = .true.,\n";
-    qeBlock += `  lda_plus_u_kind = ${hubbardKind},\n`;
+    const projector = hubbardKind === 1 ? "ortho-atomic" : "ortho-atomic";
+    qeHubbardCard += `HUBBARD (${projector})\n`;
     for (const site of sites) {
-      if (site.uEffective > 0) {
-        qeBlock += `  Hubbard_U(${site.speciesIndex}) = ${site.uEffective.toFixed(1)},\n`;
+      if (site.uEffective > 0 && site.orbitalManifold !== "none") {
+        qeHubbardCard += `U ${site.element}-${site.orbitalManifold} ${site.uEffective.toFixed(1)}\n`;
         if (hubbardKind === 1 && site.hunds > 0) {
-          qeBlock += `  Hubbard_J(1,${site.speciesIndex}) = ${site.hunds.toFixed(2)},\n`;
+          qeHubbardCard += `J ${site.element}-${site.orbitalManifold} ${site.hunds.toFixed(2)}\n`;
         }
       }
     }
     const kindLabel = hubbardKind === 0 ? "Dudarev" : "Liechtenstein";
     notes.push(
-      `DFT+U enabled (${kindLabel}, kind=${hubbardKind}): ${correlatedSiteCount} correlated site(s), ` +
-      `regime=${correlationRegime}. ` +
+      `DFT+U enabled (${kindLabel}): ${correlatedSiteCount} correlated site(s), ` +
+      `regime=${correlationRegime}. QE ≥7.1 HUBBARD card syntax. ` +
       `Ref: ${hubbardKind === 0 ? "Dudarev et al., PRB 57, 1505 (1998)" : "Liechtenstein et al., PRB 52, R5467 (1995)"}.`
     );
   }
@@ -551,7 +565,8 @@ export function analyzeHubbardWorkflow(
   return {
     applyDFTplusU,
     sites,
-    qeSystemBlock: qeBlock,
+    qeHubbardCard,
+    qeSystemBlock: qeBlock, // empty for QE ≥7.1
     correlationRegime,
     materialPatterns,
     notes,
