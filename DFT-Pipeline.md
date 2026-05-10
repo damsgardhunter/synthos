@@ -64,6 +64,128 @@ No literature lattice overrides. The pipeline discovers the correct lattice inde
 
 ---
 
+## Stage 3a: Spin-Orbit Coupling (SOC) Analysis
+
+**File**: `server/dft/soc-handler.ts`
+
+For heavy-element candidates (5d metals, 6p metals, lanthanides, actinides), non-relativistic DFT gets band ordering wrong — SOC splits degenerate states, reshapes the Fermi surface, and changes N(E_F). This propagates directly into λ and μ*.
+
+### SOC Decision Tree
+
+1. Any 6p element (Tl, Pb, Bi) or actinide (Th, U) → **full SOC** (noncolin + lspinorb)
+2. Multiple 5d elements with SOC > 0.3 eV → **full SOC**
+3. Single lanthanide with SOC < 0.2 eV → **scalar-relativistic** (standard PP sufficient)
+4. Only 4d/5p elements → **scalar-relativistic**
+
+### QE Flags When Full SOC Enabled
+
+```
+noncolin = .true.
+lspinorb = .true.
+```
+
+nspin is ignored (QE uses 4-component spinors). Starting magnetization uses angle1/angle2 format. Computational cost ~2.5× scalar-relativistic.
+
+### SOC Energy Scales
+
+| Group | Elements | SOC (eV) | Priority |
+|-------|----------|----------|----------|
+| 6p metals | Tl, Pb, Bi | 1.0–2.0 | Critical |
+| Actinides | Th, U | 0.8–1.2 | Critical |
+| 5d metals | Hf–Au | 0.3–1.0 | Recommended |
+| Lanthanides | La–Lu | 0.1–0.35 | Optional |
+| 4d metals | Nb–Cd | 0.05–0.15 | Optional |
+
+Ref: Dal Corso, CMS 95, 337 (2014); MacDonald et al., J. Phys. F 10, 2005 (1980).
+
+---
+
+## Stage 3b: Magnetic Ground-State Search
+
+**File**: `server/dft/magnetic-ground-state.ts`
+
+Before phonon calculations, the pipeline determines the correct magnetic ordering by running short SCF trials with different spin configurations. Running phonons on the wrong magnetic state produces frequencies that look fine but correspond to a metastable state.
+
+### When Search Is Triggered
+
+| Pattern | Orderings Tested | Rationale |
+|---------|-----------------|-----------|
+| Fe + As/P/Se/Te | NM, FM, AFM-stripe, AFM-checkerboard | Fe-pnictide: stripe vs checkerboard competition |
+| Cu + O | NM, FM, AFM-layered | Cuprate: Neel order in CuO₂ planes |
+| Mn/Cr + O | NM, FM, AFM-checkerboard, AFM-alternating | Complex magnetic landscapes |
+| Ni + O | NM, FM, AFM-checkerboard | Nickelate magnetic ordering |
+| 2+ strong magnetic species | NM, FM, AFM-alternating, ferrimagnetic | Competing exchange interactions |
+| 1 magnetic + anion mediator | NM, FM, AFM-alternating | Superexchange may favor AFM |
+
+### Search Protocol
+
+1. Run short SCF (80 steps, conv_thr=1e-5, 10 min cap) for each magnetic ordering
+2. Compare total energies — lowest wins
+3. Parse total and absolute magnetization from QE output
+4. If energy gap > 1 mRy/atom (~14 meV/atom): well-separated, high confidence
+5. If nearly degenerate: warn that phonons may be sensitive to ordering
+
+### Result Propagation
+
+The winning magnetic state's nspin and starting_magnetization block are passed to all subsequent calculations (vc-relax, SCF, phonons). This ensures phonons are computed on the true magnetic ground state.
+
+Ref: Mazin et al., PRL 101, 057003 (2008); Johannes & Mazin, PRB 79, 220510 (2009).
+
+---
+
+## Stage 3c: DFT+U Hubbard Workflow for Correlated Systems
+
+**File**: `server/dft/hubbard-workflow.ts`
+
+Plain GGA (PBE) gives qualitatively wrong electronic structure for any material with localized d or f electrons — band gaps are underestimated, orbital ordering is wrong, and magnetic moments are too small. DFT+U adds an on-site Coulomb correction that fixes this for the correlated orbital manifold.
+
+### Composition-Aware U Values
+
+U values are selected using a 3-level priority hierarchy (not just element-specific):
+
+1. **Material-specific overrides** — validated U for known compounds:
+   - Fe₂O₃: Fe U=4.3 eV (Materials Project)
+   - Cuprates (La/Y/Ba...CuO): Cu U=5.0 eV (Anisimov 1991)
+   - Nickelates (Nd/La...NiO): Ni U=5.1 eV (Lechermann 2020)
+   - Fe-pnictides: Fe U=3.0 eV (tetrahedral, lower than octahedral)
+   - NiO: Ni U=6.4 eV (Dudarev 1998)
+   - MnO: Mn U=3.9 eV (Cococcioni 2005)
+
+2. **Oxidation-state-aware** — estimates oxidation from anion:TM ratio:
+   - High-oxidation (anion:TM > 2): uses higher U (e.g., Fe³⁺ → 4.3 eV)
+   - Low-oxidation (anion:TM ≤ 2): uses lower U (e.g., Fe²⁺ → 3.0 eV)
+
+3. **Element default** — from ELEMENTAL_DATA table (fallback)
+
+### Broadened Trigger Conditions
+
+DFT+U now activates for **all** materials with significant d/f correlation, not just "strongly-correlated" / "Mott-proximate":
+
+- Any 4f/5f element → always apply
+- Any d-electron element with U ≥ 3.0 eV → apply
+- Moderately-correlated regime → apply (previously skipped)
+- Exception: hydrogen-dominated (H-fraction > 60%) → skip (phonon BCS dominates)
+
+### DFT+U Applied to vc-relax (Not Just SCF)
+
+**Critical fix**: DFT+U is now applied during structural relaxation (vc-relax), not just the final SCF. For strongly-correlated materials, the relaxed geometry depends on U — without it, the structure optimizes on the wrong potential energy surface.
+
+Applied to vc-relax when:
+- Regime is "strongly-correlated" or "Mott-proximate"
+- Any site has U ≥ 3.0 eV
+
+### QE Input Generation
+
+```
+lda_plus_u = .true.
+lda_plus_u_kind = 0        (Dudarev simplified)
+Hubbard_U(1) = 4.3         (composition-aware value)
+```
+
+Ref: Dudarev et al., PRB 57, 1505 (1998); Cococcioni & de Gironcoli, PRB 71, 035105 (2005); Himmetoglu et al., IJQC 114, 14 (2014).
+
+---
+
 ## Stage 4: Staged DFT Relaxation
 
 **File**: `server/dft/staged-relaxation.ts` + `server/dft/qe-worker.ts`
@@ -290,35 +412,126 @@ Ref: Errea et al., Nature 578, 66 (2020); Monacelli et al., JPCM 33, 363001 (202
 
 ---
 
-## Stage 9c: Ab-Initio Coulomb Pseudopotential (μ*)
+## Stage 9c: Full SSCHA Anharmonic Phonon Corrections
 
-**File**: `server/physics/mu-star-ab-initio.ts`
+**Files**: `server/dft/sscha-pipeline.ts` + `server/dft/sscha-worker.py`
 
-Replaces the conventional fixed μ* = 0.10–0.13 with a first-principles computation using the RPA-enhanced Morel-Anderson formula.
+For publication-ready hydrides, runs the full Stochastic Self-Consistent Harmonic Approximation to replace harmonic DFPT phonons with anharmonic ones. This is the single biggest physics correction for hydride Tc predictions (20-40% reduction in λ for materials like LaH10 and H3S).
 
-### RPA Morel-Anderson Method
+### SSCHA Workflow
 
-1. **Thomas-Fermi screening**: `k_TF = sqrt(4π * N(E_F))` from computed DOS at Fermi level
-2. **Screened Coulomb matrix element**: `V_c = 4π / (k_F² + k_TF²)` via RPA dielectric function
-3. **Bare Coulomb parameter**: `mu_c = N(E_F) * V_c / epsilon_RPA`
-4. **Morel-Anderson retardation**: `mu* = mu_c / (1 + mu_c * ln(E_F / omega_D))`
-5. **Pressure correction**: Higher pressure → wider bandwidth → larger E_F/ω_D → lower μ*
-6. **Orbital character correction**: d/f character increases effective Coulomb repulsion
+1. Load harmonic dynamical matrices from DFPT (.dyn files)
+2. Generate stochastic displaced atomic configurations (50 per iteration)
+3. Compute DFT forces on each configuration via pw.x SCF
+4. Feed forces to SSCHA free energy minimizer
+5. Self-consistently update the dynamical matrix until the free energy Hessian converges
+6. Extract: anharmonic ω_log, corrected λ, free energy, Tc with anharmonic correction
+
+### Two Execution Modes
+
+- **Full SSCHA** (when python-sscha + cellconstructor installed): proper stochastic sampling + self-consistent minimization matching Errea/Monacelli group methodology
+- **Numpy fallback**: stochastic displacement + least-squares force constant fitting. Less rigorous but still captures dominant anharmonic effects without external dependencies
+
+### Eligibility Gate
+
+- Residual force < 0.001 Ry/bohr (publication-ready)
+- H-fraction ≥ 25% of total atoms
+- Pressure ≥ 20 GPa (dense hydrogen packing where anharmonicity is significant)
+
+### Compute Budget
+
+- 50 displaced configurations × 3-8 iterations = 150-400 DFT force calculations
+- Each force calculation: 5-30 min depending on system size
+- Total: 12-200 hours per material
+- Timeout: 24h cap
+
+Ref: Errea et al., Nature 578, 66 (2020); Monacelli et al., JPCM 33, 363001 (2021).
+
+---
+
+## Stage 9d: ACBN0 First-Principles Coulomb Pseudopotential (μ*)
+
+**File**: `server/dft/acbn0-pipeline.ts`
+
+Computes μ* from first principles via QE's hp.x (Hubbard parameters from DFPT linear response) instead of using the conventional fixed μ* = 0.10-0.13.
+
+### ACBN0 Self-Consistent Workflow
+
+1. Run DFT+U SCF with initial Hubbard U values (or U=0)
+2. Run hp.x — DFPT linear response computes screened Coulomb interaction
+3. Parse hp.x output: chi0/chi susceptibilities, Thomas-Fermi screening length, Hubbard U
+4. Check convergence (ΔU < 0.1 eV) — if not converged, update U and repeat from step 1
+5. Compute μ* from screening data + Morel-Anderson retardation:
+   - `mu_bare = N(E_F) * V_screened` from hp.x screening
+   - `mu* = mu_bare / (1 + mu_bare * ln(E_F / omega_D))`
+
+### Three μ* Computation Methods (ranked by data quality)
+
+1. **hp.x chi0/chi screening** — direct from DFPT linear response (best)
+2. **Thomas-Fermi screening length** — from hp.x k_TF output
+3. **N(E_F) estimate** — pure DOS-based (fallback)
 
 ### Key Outputs
 
-- `muStar`: Computed value (physical range [0.05, 0.20])
-- `conventionalMuStar`: What a fixed assumption would give (for comparison)
-- `tcSensitivity`: How much Tc changes per 0.01 μ* shift (typically 2–10 K for hydrides)
-- `deviationFromConventional`: Shows where fixed μ* was wrong
+- `muStar`: First-principles value (physical range [0.05, 0.20])
+- `muStarConventional`: What fixed assumption gives (for comparison)
+- `hubbardU`: Per-element computed U values (eV)
+- `screeningLength`: Thomas-Fermi screening length (Bohr)
+- `converged`: Whether self-consistent U loop converged
 
-Ref: Morel & Anderson, Phys. Rev. 125, 1263 (1962); Agapito et al., PRX 5, 011006 (2015).
+### Compute Budget
+
+- 2-3 iterations of DFT+U SCF + hp.x
+- Total: 1-2 hours per material
+- Timeout: 2h cap
+
+Ref: Morel & Anderson, Phys. Rev. 125, 1263 (1962); Agapito et al., PRX 5, 011006 (2015); Timrov et al., PRB 98, 085127 (2018).
+
+---
+
+## K-Point and Smearing Convergence
+
+K-mesh density and smearing width directly affect N(E_F) for metals, which propagates into λ (via DOS-weighted e-ph coupling) and μ* (via Morel-Anderson). The pipeline uses stage-dependent and quality-tiered convergence parameters.
+
+### Adaptive K-Mesh (kspacing in Å⁻¹, lower = denser)
+
+| Stage | Screening | Publication (force < 0.001) |
+|-------|-----------|---------------------------|
+| Relax | 0.40 | 0.40 |
+| vc-relax | 0.30 | 0.30 |
+| SCF (metal) | 0.20 | **0.15** (aiida "moderate") |
+| SCF (insulator) | 0.25 | **0.20** |
+| Phonon | tiered by force | tiered by force |
+| EPW NSCF | 8-12 per direction | 8-12 per direction |
+| EPW fine | up to 40×40×40 | up to 40×40×40 |
+
+Additional modifiers:
+- **Metallicity boost**: metals get 1.3× denser grids (kspacing × 0.77)
+- **Large cell coarsening**: >8 atoms get 1.15× coarser (already well-sampled by volume)
+- **Layered boost**: quasi-2D materials get 1.5× denser in the stacking direction
+
+### Smearing (degauss in Ry)
+
+| Stage | Value | In eV | Method | Notes |
+|-------|-------|-------|--------|-------|
+| SCF (default) | 0.005 | 68 meV | mv | Tight — good for N(E_F) accuracy |
+| vc-relax (non-mag) | 0.015 | 204 meV | mv | Wider for convergence stability |
+| vc-relax (magnetic) | 0.020 | 272 meV | mv | Extra width for spin stability |
+| EPW NSCF | 0.020 | 272 meV | cold | Marzari-Vanderbilt cold smearing |
+| SCF retry (diverging) | 0.030 | 408 meV | mp | Emergency Methfessel-Paxton |
+
+**Key insight**: For publication materials, the N(E_F) that matters for λ and μ* comes from three independent sources:
+1. **SCF** (degauss=0.005, mv) — used by the semi-empirical physics engine
+2. **EPW** — recomputes electronic structure on ultra-dense k-grids with proper BZ integration
+3. **ACBN0** — runs its own DFT+U SCF with hp.x for screening parameters
+
+The vc-relax smearing (0.015-0.02) is intentionally loose for convergence — it only affects the screening-tier N(E_F). Publication-grade analysis always uses tighter parameters from downstream stages.
 
 ---
 
 ## Stage 10: Results → Database → Next Iteration
 
-Extended dataset fields: tcConservative, tcUpperBound, tcMethod, lambdaMethod, phononMethod, tcConfidence, learningScore, qualityTier, hullLabel, residualForce, nqeApplied, nqeMethod, lambdaNQE, lambdaReduction, nqeAnharmonicStrength, nqeStabilityShift, muStarMethod, muStarConventional, muStarDeviation, muStarTcSensitivity, epwLambda, epwTcME, epwGapZero, epwMethod.
+Extended dataset fields: tcConservative, tcUpperBound, tcMethod, lambdaMethod, phononMethod, tcConfidence, learningScore, qualityTier, hullLabel, residualForce, nqeApplied, nqeMethod, lambdaNQE, lambdaReduction, nqeAnharmonicStrength, nqeStabilityShift, muStarMethod, muStarConventional, muStarDeviation, muStarTcSensitivity, epwLambda, epwTcME, epwGapZero, epwMethod, socEnabled, socMaxEnergy, socDosImpact, magneticOrdering, magneticEnergyGap, magneticMagnetization, hubbardApplied, hubbardCorrelatedSites, hubbardRegime, hubbardAppliedToVCRelax, sschaOmegaLogAnharmonic, sschaLambdaAnharmonic, sschaTcCorrected, sschaConverged, acbn0MuStar, acbn0MuStarConventional, acbn0HubbardU, acbn0ScreeningLength, acbn0Converged.
 
 ### Multi-Objective Learning Score
 
@@ -345,7 +558,7 @@ Every result carries: tcConfidence (high/medium/low/surrogate), lambdaConfidence
 
 ## Reproducibility Bundles
 
-For every non-failed candidate: quality_report.json, candidate_provenance.json, final_structure.poscar, scf_summary.json, phonon_summary.json, dfpt_results.json, epw_results.json (when EPW runs).
+For every non-failed candidate: quality_report.json, candidate_provenance.json, final_structure.poscar, scf_summary.json, phonon_summary.json, dfpt_results.json, epw_results.json (when EPW runs), sscha_results.json (when SSCHA runs), acbn0_results.json (when ACBN0 runs).
 
 ---
 
@@ -384,11 +597,11 @@ PP validation: UPF format check (header + closing tag), semicore state verificat
 
 ### Current Limitations
 
-**1. Anharmonic phonon corrections (Priority: CRITICAL for hydrides)**
-Hydrides at high pressure are notoriously anharmonic — the SCDFT/SSCHA framework (Errea, Calandra, Mauri) routinely shows that Tc predictions from harmonic DFPT are off by 20-40% for compounds like LaH10 and H3S. The pipeline applies a semi-empirical SSCHA-model correction (mass-dependent, H-cage-aware, pressure-stiffened) calibrated to published results, but full self-consistent SSCHA would be more accurate. Full SSCHA requires 100-1000+ DFT force calculations per material — practical only for the very best candidates.
+**1. SSCHA compute cost**
+Full SSCHA requires 150-400 DFT force calculations per material (12-200 hours). Only practical for the very best candidates (force < 0.001, H-rich, P ≥ 20 GPa). The semi-empirical SSCHA-model correction (Stage 9b) is applied to all hydrides as a fast approximation; full SSCHA (Stage 9c) runs only when compute budget allows.
 
-**2. Anisotropic Eliashberg solver (Priority: ADDRESSED via EPW)**
-EPW now provides anisotropic Migdal-Eliashberg gap equations for publication-ready materials. Multi-band superconductors (MgB2, iron pnictides, hydrides with multiple Fermi sheets) get properly resolved gap functions.
+**2. ACBN0 accuracy vs. SCDFT**
+The hp.x-based ACBN0 μ* is more accurate than fixed μ*=0.10-0.13 but still relies on RPA screening. Full SCDFT (superconducting DFT) would give the most accurate μ* but requires specialized codes not yet integrated.
 
 ### Surrogate Tc Integrity
 
@@ -406,5 +619,11 @@ Surrogate Tc predictions (XGBoost/GNN) are allowed when force < 0.10 but ≥ 0.0
 | **Phase 2** | Pseudo-DOJO PP integration (lanthanide/actinide coverage) | **DONE** |
 | **Phase 3** | NQE correction (SSCHA-model lambda/omega_log renormalization) | **DONE** |
 | **Phase 4** | Ab-initio μ* (RPA Morel-Anderson) | **DONE** |
-| **Phase 5** | Full SSCHA/PIMD integration | Future (major — external code, days of compute per material) |
-| **Phase 6** | Full ACBN0 μ* with Wannier functions | Future (requires EPW Wannier data) |
+| **Phase 5** | Spin-orbit coupling (SOC analysis + noncolin/lspinorb for heavy elements) | **DONE** |
+| **Phase 6** | Magnetic ground-state search (FM/AFM/NM energy comparison before phonons) | **DONE** |
+| **Phase 7** | DFT+U Hubbard workflow (composition-aware U, vc-relax integration, broadened triggers) | **DONE** |
+| **Phase 8** | Full SSCHA anharmonic phonons (sscha-pipeline.ts + sscha-worker.py) | **DONE** |
+| **Phase 9** | ACBN0 first-principles μ* via hp.x (acbn0-pipeline.ts) | **DONE** |
+| **Phase 10** | K-mesh/smearing convergence tiering for publication | **DONE** |
+| **Phase 11** | SCDFT (superconducting DFT) for beyond-RPA μ* | Future (specialized code) |
+| **Phase 12** | Path-integral MD for NQE beyond SSCHA | Future (PIMD integration) |
