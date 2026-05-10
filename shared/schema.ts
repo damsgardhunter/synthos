@@ -451,6 +451,44 @@ export const quantumEngineDataset = pgTable("quantum_engine_dataset", {
   tier: text("tier").notNull().default("surrogate"),
   wallTimeMs: real("wall_time_ms").notNull().default(0),
   dosPrefilter: jsonb("dos_prefilter"),
+  // NQE correction fields
+  nqeApplied: boolean("nqe_applied").notNull().default(false),
+  nqeMethod: text("nqe_method"),                        // "sscha-model" | "heuristic-penalty" | "none"
+  lambdaNQE: real("lambda_nqe"),                         // NQE-corrected lambda
+  lambdaReduction: real("lambda_reduction"),              // fractional reduction
+  nqeAnharmonicStrength: real("nqe_anharmonic_strength"), // sigma parameter
+  nqeStabilityShift: real("nqe_stability_shift"),         // pressure shift (GPa)
+  // Ab-initio mu* fields
+  muStarMethod: text("mu_star_method"),                   // "rpa-morel-anderson" | "conventional-fixed"
+  muStarConventional: real("mu_star_conventional"),        // conventional fixed value for comparison
+  muStarDeviation: real("mu_star_deviation"),              // deviation from conventional
+  muStarTcSensitivity: real("mu_star_tc_sensitivity"),     // K per 0.01 mu* change
+  // SOC fields
+  socEnabled: boolean("soc_enabled").notNull().default(false),
+  socMaxEnergy: real("soc_max_energy"),                     // max SOC energy scale (eV)
+  socDosImpact: real("soc_dos_impact"),                     // estimated fractional N(E_F) change
+  // Magnetic ground-state fields
+  magneticOrdering: text("magnetic_ordering"),               // "NM" | "FM" | "AFM-stripe" | etc.
+  magneticEnergyGap: real("magnetic_energy_gap"),            // energy gap to next state (Ry/atom)
+  magneticMagnetization: real("magnetic_magnetization"),      // total magnetization (Bohr mag/cell)
+  // DFT+U Hubbard workflow fields
+  hubbardApplied: boolean("hubbard_applied").notNull().default(false),
+  hubbardCorrelatedSites: integer("hubbard_correlated_sites"),  // number of sites with U > 0
+  hubbardRegime: text("hubbard_regime"),                        // correlation regime
+  hubbardAppliedToVCRelax: boolean("hubbard_applied_to_vc_relax"),
+  // SSCHA anharmonic phonon fields
+  sschaConverged: boolean("sscha_converged"),
+  sschaOmegaLog: real("sscha_omega_log"),               // meV — anharmonic omega_log
+  sschaTcCorrected: real("sscha_tc_corrected"),           // K — anharmonic Tc
+  // ACBN0 first-principles mu* fields
+  acbn0Converged: boolean("acbn0_converged"),
+  acbn0MuStar: real("acbn0_mu_star"),                     // first-principles mu*
+  acbn0Method: text("acbn0_method"),                       // "ACBN0-hp.x" | "ACBN0-SCF-only"
+  // EPW electron-phonon coupling fields
+  epwConverged: boolean("epw_converged"),
+  epwLambda: real("epw_lambda"),
+  epwTcME: real("epw_tc_me"),                              // Migdal-Eliashberg Tc
+  epwMethod: text("epw_method"),
   createdAt: timestamp("created_at").defaultNow(),
 }, (table) => [
   index("qe_dataset_material_idx").on(table.material),
@@ -566,5 +604,60 @@ export const codStructureCache = pgTable("cod_structure_cache", {
 ]);
 
 export type SystemState = typeof systemState.$inferSelect;
+
+export const pressureObservationsLog = pgTable("pressure_observations_log", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  formula: text("formula").notNull(),
+  pressureGpa: real("pressure_gpa").notNull(),
+  tc: real("tc").notNull(),
+  stable: boolean("stable"),
+  enthalpy: real("enthalpy"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => [
+  index("pressure_obs_formula_idx").on(table.formula),
+  index("pressure_obs_created_idx").on(table.createdAt),
+]);
+export type PressureObservationLog = typeof pressureObservationsLog.$inferSelect;
+export type InsertPressureObservationLog = typeof pressureObservationsLog.$inferInsert;
+
+export const crossEngineInsightsLog = pgTable("cross_engine_insights_log", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  formula: text("formula").notNull(),
+  engine: text("engine").notNull(),
+  insightData: jsonb("insight_data"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+export type CrossEngineInsightLog = typeof crossEngineInsightsLog.$inferSelect;
+export type InsertCrossEngineInsightLog = typeof crossEngineInsightsLog.$inferInsert;
+
+export const formulaScreenLog = pgTable("formula_screen_log", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  formula: text("formula").notNull(),
+  status: text("status").notNull(),
+  reason: text("reason"),
+  tc: real("tc"),
+  lambda: real("lambda"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+export type FormulaScreenLogEntry = typeof formulaScreenLog.$inferSelect;
+export type InsertFormulaScreenLogEntry = typeof formulaScreenLog.$inferInsert;
+
+export const engineInsightsLog = pgTable("engine_insights_log", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  insightText: text("insight_text").notNull(),
+  cycle: integer("cycle"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+export type EngineInsightLog = typeof engineInsightsLog.$inferSelect;
+export type InsertEngineInsightLog = typeof engineInsightsLog.$inferInsert;
+
+export const cycleDiagnosticReportsLog = pgTable("cycle_diagnostic_reports_log", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  cycle: integer("cycle").notNull(),
+  reportData: jsonb("report_data"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+export type CycleDiagnosticReportLog = typeof cycleDiagnosticReportsLog.$inferSelect;
+export type InsertCycleDiagnosticReportLog = typeof cycleDiagnosticReportsLog.$inferInsert;
 
 export * from "./models/chat";

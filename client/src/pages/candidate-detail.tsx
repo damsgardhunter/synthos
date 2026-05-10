@@ -283,7 +283,7 @@ function ScoreBar({ label, score, color }: { label: string; score: number | null
   );
 }
 
-function CandidateHeader({ candidate, p90 }: { candidate: SuperconductorCandidate; p90?: number }) {
+function CandidateHeader({ candidate, p90, unifiedCI }: { candidate: SuperconductorCandidate; p90?: number; unifiedCI?: UnifiedCIData }) {
   const statusColor = STATUS_COLORS[candidate.status] ?? STATUS_COLORS["theoretical"];
   const tcColor = (candidate.predictedTc ?? 0) >= 293 ? "text-green-600 dark:text-green-400" : "text-foreground";
 
@@ -309,18 +309,29 @@ function CandidateHeader({ candidate, p90 }: { candidate: SuperconductorCandidat
               <Thermometer className="h-3.5 w-3.5 text-muted-foreground" />
               <span className="text-xs text-muted-foreground">Physics Engine Tc</span>
             </div>
-            <div className="flex items-center gap-1.5">
-              <p className={`text-xl font-mono font-bold ${tcColor}`}>
-                {candidate.predictedTc ? `${candidate.predictedTc}K` : "N/A"}
-              </p>
-              <ConfidenceBadge level={candidate.dataConfidence} verificationStage={candidate.verificationStage} />
-            </div>
-            {(candidate.verificationStage == null || candidate.verificationStage < 2) && (
-              <p className="text-[10px] text-amber-600 dark:text-amber-400 mt-0.5">not ML-validated — see consensus below</p>
-            )}
-            {candidate.predictedTc != null && p90 != null && (
-              <TcConfidenceRange predictedTc={candidate.predictedTc} p90={p90} label="Physics-only CI:" />
-            )}
+            {(() => {
+              // Prefer live physics UQ over stale DB value — the DB value may be
+              // from an older cycle with different coupling parameters.
+              const liveTc = unifiedCI?.physicsUQ?.tcMean;
+              const liveStd = unifiedCI?.physicsUQ?.tcStd;
+              const displayTc = liveTc != null && liveTc > 0 ? liveTc : candidate.predictedTc;
+              return (
+                <>
+                  <div className="flex items-center gap-1.5">
+                    <p className={`text-xl font-mono font-bold ${tcColor}`}>
+                      {displayTc ? `${Math.round(displayTc * 10) / 10}K` : "N/A"}
+                    </p>
+                    <ConfidenceBadge level={candidate.dataConfidence} verificationStage={candidate.verificationStage} />
+                  </div>
+                  {liveStd != null && liveStd > 0 && (
+                    <p className="text-[10px] text-muted-foreground mt-0.5">&plusmn; {Math.round(liveStd * 10) / 10}K (physics UQ)</p>
+                  )}
+                  {(candidate.verificationStage == null || candidate.verificationStage < 2) && (
+                    <p className="text-[10px] text-amber-600 dark:text-amber-400 mt-0.5">not ML-validated — see consensus below</p>
+                  )}
+                </>
+              );
+            })()}
           </div>
           <div className="p-3 bg-muted/50 rounded-md">
             <div className="flex items-center gap-1.5 mb-1">
@@ -2172,7 +2183,7 @@ export default function CandidateDetail() {
       {/* Consensus panel uses the pre-fetched data — no second request */}
       {formula && <ConsensusTcPanel formula={formula} data={unifiedCI} />}
 
-      {candidate && <CandidateHeader candidate={candidate} p90={p90} />}
+      {candidate && <CandidateHeader candidate={candidate} p90={p90} unifiedCI={unifiedCI} />}
 
       {formula && <ReferenceBenchmarkSection formula={formula} />}
 

@@ -3,7 +3,7 @@ import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { db } from "./db";
 import { insertMaterialSchema, insertResearchLogSchema, insertExperimentalValidationSchema, insertClientErrorSchema } from "@shared/schema";
-import { initWebSocket, startEngine, stopEngine, pauseEngine, resumeEngine, getStatus, getAutonomousLoopStats } from "./learning/engine";
+import { initWebSocket, startEngine, stopEngine, pauseEngine, resumeEngine, getStatus, getAutonomousLoopStats, runTcUqMigration } from "./learning/engine";
 import { getSignalDefinitions } from "./learning/material-signal-scanner";
 import { enumeratePrototypesForFormula } from "./learning/crystal-prototypes";
 import { isDFTAvailable, getDFTMethodInfo, getXTBStats, runLandscapeExploration, getLandscapeStats as getEnergyLandscapeStats } from "./dft/qe-dft-engine";
@@ -704,6 +704,15 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json(status);
     } catch (e) {
       res.status(500).json({ error: "Failed to start engine" });
+    }
+  });
+
+  app.post("/api/engine/recompute-tc", engineLimiter, async (_req, res) => {
+    try {
+      const result = await runTcUqMigration();
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message?.slice(0, 200) ?? "Failed" });
     }
   });
 

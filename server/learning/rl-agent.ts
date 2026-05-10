@@ -543,6 +543,11 @@ export class RLChemicalSpaceAgent {
   private bestActionSequence: { action: RLAction; reward: number }[] = [];
   private motifPickHistory: Map<string, { count: number; lastBestTc: number }> = new Map();
   private lastKnownStagnation = 0;
+  private _focusFamily: string | null = null;
+
+  setFocusFamily(family: string | null): void {
+    this._focusFamily = family;
+  }
 
   constructor() {
     this.policy = {

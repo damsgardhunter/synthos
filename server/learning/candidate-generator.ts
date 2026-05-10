@@ -311,7 +311,12 @@ function passesStericCheck(counts: Record<string, number>): boolean {
     if (r > maxRadius) maxRadius = r;
     if (r < minRadius) minRadius = r;
   }
-  if (maxRadius > 0 && minRadius > 0 && maxRadius / minRadius > 4.0) return false;
+  // Radius ratio check relaxed for hydrides — H occupies interstitial/cage
+  // sites in metallic hydrides where classical radius ratios don't apply.
+  // LaH10, CaH6, YH9 all have La/H radius ratio > 4 but are real compounds.
+  const hasH = counts["H"] != null && counts["H"] > 0;
+  const radiusLimit = hasH ? 8.0 : 4.0;
+  if (maxRadius > 0 && minRadius > 0 && maxRadius / minRadius > radiusLimit) return false;
 
   return true;
 }
@@ -892,6 +897,7 @@ function computeWeightedVEC(formula: string): number {
 }
 
 export async function rapidGBScreen(formulas: string[]): Promise<RapidScreenResult[]> {
+  const { computePhysicsTcUQ } = await import("./physics-engine");
   const results: RapidScreenResult[] = [];
 
   for (const formula of formulas) {
@@ -900,13 +906,15 @@ export async function rapidGBScreen(formulas: string[]): Promise<RapidScreenResu
       const vec = computeWeightedVEC(formula);
       if (vec < 1.0 || vec > 11.0) continue;
 
-      const features = await extractFeatures(formula);
-      const gb = await gbPredict(features);
-      if (gb.tcPredicted >= 5) {
+      // Use physics UQ for scoring — single source of truth for Tc predictions.
+      // XGBoost was trained on old data and under-scores novel superhydrides.
+      const pressure = estimateFamilyPressure(formula);
+      const uq = computePhysicsTcUQ(formula, pressure);
+      if (uq.mean >= 5) {
         results.push({
           formula,
-          predictedTc: gb.tcPredicted,
-          gbScore: gb.score,
+          predictedTc: uq.mean,
+          gbScore: Math.min(0.95, uq.mean / 300), // normalize Tc to 0-1 score
         });
       }
     } catch {
@@ -1008,14 +1016,28 @@ const UNCONVENTIONAL_SEEDS: string[][] = [
   ["Ba", "Fe", "As"], ["Sr", "Fe", "As"], ["La", "Fe", "P"],
   ["K", "V", "Sb"], ["Cs", "V", "Bi"], ["Rb", "V", "Sb"],
   ["La", "Ni", "O"], ["Sr", "Co", "O"], ["Ba", "Cu", "O"],
-  ["Ca", "H"], ["La", "H"], ["Y", "H"],
+  // Binary hydride seeds (generate H6/H8/H9/H10/H12 stoichiometries)
+  ["Ca", "H"], ["La", "H"], ["Y", "H"], ["Sc", "H"], ["Sr", "H"],
+  ["Ba", "H"], ["Mg", "H"], ["Th", "H"], ["Ac", "H"],
+  // Ternary hydride seeds — DFT-predicted high-Tc compositions from literature
+  // These produce novel combinations that binary seeds cannot generate
+  ["Li", "Mg", "H"], ["La", "Be", "H"], ["Ca", "Be", "H"], ["Y", "Be", "H"],
+  ["Sr", "Ca", "H"], ["La", "Y", "H"], ["Sc", "Y", "H"], ["Ca", "La", "H"],
+  ["Li", "Ca", "H"], ["Na", "Ca", "H"], ["K", "Ca", "H"],
+  ["Li", "Y", "H"], ["Na", "Y", "H"], ["Li", "La", "H"],
+  ["Mg", "Ca", "H"], ["Mg", "La", "H"], ["Mg", "Y", "H"],
+  ["Sc", "La", "H"], ["Ba", "La", "H"], ["Sr", "La", "H"],
   ["Nb", "Se", "S"], ["Ta", "Se", "Te"], ["Mo", "S", "Se"],
 ];
 
+export function getSeedsFromClusterGuidance(_clusters: any): string[] {
+  return [];
+}
+
 export function selectSeedPairs(focusArea: string): string[][] {
   const focusPairs = FOCUS_ELEMENTS[focusArea] || FOCUS_ELEMENTS["Carbides"];
-  const biasedSubset = fisherYatesShuffle(SC_BIASED_SEEDS).slice(0, 4);
-  const unconvSubset = fisherYatesShuffle(UNCONVENTIONAL_SEEDS).slice(0, 8);
+  const biasedSubset = fisherYatesShuffle(SC_BIASED_SEEDS).slice(0, 6);
+  const unconvSubset = fisherYatesShuffle(UNCONVENTIONAL_SEEDS).slice(0, 16);
   return [...focusPairs, ...biasedSubset, ...unconvSubset];
 }
 
@@ -1037,6 +1059,37 @@ export async function runMassiveGeneration(
   const seedSet = new Set<string>();
   for (const pair of combinedPairs) {
     const stoichs = [[1, 1], [1, 2], [2, 1], [3, 1], [1, 3], [2, 3], [3, 2]];
+
+    // For pairs containing H, also generate high-stoichiometry hydride patterns.
+    // Superhydrides (LaH10, CaH6, YH9, ScH9, SrH10, BaH12) have H:metal ratios
+    // of 6-12 — without these the generator CANNOT discover the highest-Tc compounds.
+    const hasHydrogen = pair.includes("H");
+    if (hasHydrogen) {
+      const hIdx = pair.indexOf("H");
+      const metalEl = pair[hIdx === 0 ? 1 : 0];
+      for (const hCount of [6, 8, 9, 10, 12]) {
+        const raw = `${metalEl}H${hCount}`;
+        const canonical = canonicalize(raw);
+        if (canonical && canonical.length > 1) seedSet.add(canonical);
+      }
+      // Ternary superhydrides: A + B + H(high) with varied stoichiometries.
+      // Literature predicts many high-Tc ternary hydrides: Li2MgH16 (~300K),
+      // LaBeH8 (~185K), CaBeH8 (~140K), (La,Y)H10, etc.
+      if (pair.length >= 3) {
+        const metals = pair.filter(e => e !== "H");
+        if (metals.length >= 2) {
+          for (const hCount of [6, 8, 10, 12, 16]) {
+            // A1B1Hn, A2B1Hn, A1B2Hn
+            for (const [a, b] of [[1, 1], [2, 1], [1, 2]]) {
+              const raw = `${metals[0]}${a > 1 ? a : ""}${metals[1]}${b > 1 ? b : ""}H${hCount}`;
+              const canonical = canonicalize(raw);
+              if (canonical && canonical.length > 1) seedSet.add(canonical);
+            }
+          }
+        }
+      }
+    }
+
     for (const s of stoichs) {
       let raw: string;
       if (pair.length === 2) {

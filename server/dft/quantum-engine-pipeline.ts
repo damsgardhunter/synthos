@@ -132,6 +132,44 @@ export interface QuantumEngineDatasetEntry {
   hullLabel?: string;
   /** Residual force at SCF (Ry/bohr) */
   residualForce?: number;
+  // NQE correction fields
+  nqeApplied?: boolean;
+  nqeMethod?: string;
+  lambdaNQE?: number;
+  lambdaReduction?: number;
+  nqeAnharmonicStrength?: number;
+  nqeStabilityShift?: number;
+  // Ab-initio mu* fields
+  muStarMethod?: string;
+  muStarConventional?: number;
+  muStarDeviation?: number;
+  muStarTcSensitivity?: number;
+  // SOC fields
+  socEnabled?: boolean;
+  socMaxEnergy?: number;
+  socDosImpact?: number;
+  // Magnetic ground-state fields
+  magneticOrdering?: string;
+  magneticEnergyGap?: number;
+  magneticMagnetization?: number;
+  // DFT+U Hubbard workflow fields
+  hubbardApplied?: boolean;
+  hubbardCorrelatedSites?: number;
+  hubbardRegime?: string;
+  hubbardAppliedToVCRelax?: boolean;
+  // SSCHA fields
+  sschaConverged?: boolean;
+  sschaOmegaLog?: number;
+  sschaTcCorrected?: number;
+  // ACBN0 fields
+  acbn0Converged?: boolean;
+  acbn0MuStar?: number;
+  acbn0Method?: string;
+  // EPW fields
+  epwConverged?: boolean;
+  epwLambda?: number;
+  epwTcME?: number;
+  epwMethod?: string;
 }
 
 export interface QuantumEngineResult {
@@ -749,6 +787,44 @@ export async function runQuantumEnginePipeline(
     qualityTier,
     hullLabel,
     residualForce: residualForce ?? undefined,
+    // NQE correction fields
+    nqeApplied: eliashbergResult?.nqeCorrection?.applied ?? false,
+    nqeMethod: eliashbergResult?.nqeCorrection?.method ?? undefined,
+    lambdaNQE: eliashbergResult?.nqeCorrection?.lambdaNQE ?? undefined,
+    lambdaReduction: eliashbergResult?.nqeCorrection?.lambdaReduction ?? undefined,
+    nqeAnharmonicStrength: eliashbergResult?.nqeCorrection?.anharmonicStrength ?? undefined,
+    nqeStabilityShift: eliashbergResult?.nqeCorrection?.stabilityPressureShift ?? undefined,
+    // Ab-initio mu* fields
+    muStarMethod: eliashbergResult?.muStarAbInitio?.method ?? undefined,
+    muStarConventional: eliashbergResult?.muStarAbInitio?.conventionalMuStar ?? undefined,
+    muStarDeviation: eliashbergResult?.muStarAbInitio?.deviationFromConventional ?? undefined,
+    muStarTcSensitivity: eliashbergResult?.muStarAbInitio?.tcSensitivity ?? undefined,
+    // SOC fields
+    socEnabled: dftResult?.socAnalysis?.enableFullSOC ?? false,
+    socMaxEnergy: dftResult?.socAnalysis?.maxSOCEnergy ?? undefined,
+    socDosImpact: dftResult?.socAnalysis?.estimatedDOSImpact ?? undefined,
+    // Magnetic ground-state fields
+    magneticOrdering: dftResult?.magneticGroundState?.groundState ?? undefined,
+    magneticEnergyGap: dftResult?.magneticGroundState?.energyGapPerAtom ?? undefined,
+    magneticMagnetization: dftResult?.magneticGroundState?.groundStateMagnetization ?? undefined,
+    // DFT+U Hubbard workflow fields
+    hubbardApplied: dftResult?.hubbardWorkflow?.applyDFTplusU ?? false,
+    hubbardCorrelatedSites: dftResult?.hubbardWorkflow?.correlatedSiteCount ?? undefined,
+    hubbardRegime: dftResult?.hubbardWorkflow?.correlationRegime ?? undefined,
+    hubbardAppliedToVCRelax: dftResult?.hubbardWorkflow?.applyToVCRelax ?? undefined,
+    // SSCHA fields
+    sschaConverged: dftResult?.sscha?.converged ?? undefined,
+    sschaOmegaLog: dftResult?.sscha?.omegaLogAnharmonic ?? undefined,
+    sschaTcCorrected: dftResult?.sscha?.tcCorrected ?? undefined,
+    // ACBN0 fields
+    acbn0Converged: dftResult?.acbn0?.converged ?? undefined,
+    acbn0MuStar: dftResult?.acbn0?.muStar ?? undefined,
+    acbn0Method: dftResult?.acbn0?.method ?? undefined,
+    // EPW fields
+    epwConverged: dftResult?.epw?.converged ?? undefined,
+    epwLambda: dftResult?.epw?.lambda ?? undefined,
+    epwTcME: dftResult?.epw?.tcMigdalEliashberg ?? undefined,
+    epwMethod: dftResult?.epw?.method ?? undefined,
   };
 
   // Compute learning score (multi-objective, not just max Tc)

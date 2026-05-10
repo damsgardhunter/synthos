@@ -33,7 +33,13 @@ export interface SSCHAResult {
   nImaginaryModes?: number;
   harmonicImaginaryCount?: number;
   anharmonicFreqsCm?: number[];
-  method: string;               // "SSCHA-full" | "SSCHA-fallback" | "SSCHA-error"
+  /**
+   * Method tier for SSCHA results:
+   *   "sscha_sc"       — full self-consistent SSCHA minimization (best)
+   *   "sscha_one_shot"  — single stochastic update without self-consistency (numpy fallback)
+   *   "sscha_error"     — computation failed, partial results only
+   */
+  method: "sscha_sc" | "sscha_one_shot" | "sscha_error";
   warnings: string[];
   elapsedSeconds?: number;
 }
@@ -77,22 +83,48 @@ const PYTHON_BIN = process.env.SSCHA_PYTHON || "python3";
 
 // Gate thresholds for SSCHA eligibility
 const MAX_RESIDUAL_FORCE = 0.001;  // Ry/Bohr
-const MIN_H_FRACTION = 0.25;       // at least 25% H atoms
-const MIN_PRESSURE_GPA = 20;       // GPa
 
 // ---------------------------------------------------------------------------
 // Gate check — is this candidate worth an SSCHA run?
 // ---------------------------------------------------------------------------
 
+/**
+ * Determine whether SSCHA anharmonic corrections are warranted.
+ *
+ * Old gate: H-fraction >= 25% AND pressure >= 20 GPa.
+ * Problem: filters out real anharmonic non-hydride candidates — sulfur
+ * and selenium under pressure, lithium under pressure, borides, and any
+ * system with a soft TA branch all have non-trivial anharmonic Tc corrections.
+ *
+ * New gate: trigger on ANY system where anharmonicity indicators are present:
+ *   1. Force convergence (always required — unconverged structures can't run SSCHA)
+ *   2. Phonon-based trigger (at least one must be true):
+ *      a. Lowest acoustic phonon frequency below threshold (soft TA branch)
+ *      b. Large Grüneisen parameter (strong volume-dependent phonon shifts)
+ *      c. High hydrogen content under pressure (legacy hydride trigger)
+ *      d. Anharmonicity index from physics-engine above threshold
+ *      e. Light elements (Li, Be, B) under significant pressure
+ *
+ * @see I. Errea et al., PRL 114, 157004 (2015) — SSCHA for non-hydride (H3S was thought to be hydride, but sulfur anharmonicity matters too)
+ * @see M. Borinaga et al., JPCM 28, 494001 (2016) — importance of anharmonicity beyond hydrides
+ */
 export function checkSSCHAEligibility(opts: {
-  maxForce: number;              // Ry/Bohr — residual force from relaxation
+  maxForce: number;
   elements: string[];
   counts: Record<string, number>;
   pressureGPa: number;
+  /** Lowest acoustic phonon frequency (cm^-1), if available from gamma phonon */
+  lowestAcousticFreq?: number;
+  /** Grüneisen parameter (average), if available from physics-engine */
+  gruneisenParam?: number;
+  /** Anharmonicity index from PhononSpectrum (0-1) */
+  anharmonicityIndex?: number;
+  /** Soft mode score from PhononSpectrum (0-1) */
+  softModeScore?: number;
 }): SSCHAGateCheck {
   const { maxForce, elements, counts, pressureGPa } = opts;
 
-  // Check force convergence
+  // Gate 1: Force convergence — always required
   if (maxForce > MAX_RESIDUAL_FORCE) {
     return {
       eligible: false,
@@ -100,26 +132,62 @@ export function checkSSCHAEligibility(opts: {
     };
   }
 
-  // Check hydrogen content
+  // Gate 2: At least one anharmonicity indicator must trigger
+
   const totalAtoms = Object.values(counts).reduce((a, b) => a + b, 0);
   const hCount = counts["H"] ?? 0;
   const hFraction = totalAtoms > 0 ? hCount / totalAtoms : 0;
-  if (hFraction < MIN_H_FRACTION) {
+  const reasons: string[] = [];
+
+  // 2a. Soft acoustic branch: lowest acoustic mode below 50 cm^-1
+  // indicates a system close to a structural instability
+  if (opts.lowestAcousticFreq != null && opts.lowestAcousticFreq < 50 && opts.lowestAcousticFreq > 0) {
+    reasons.push(`soft acoustic mode (${opts.lowestAcousticFreq.toFixed(1)} cm^-1 < 50)`);
+  }
+
+  // 2b. Large Grüneisen parameter: γ > 2.0 means phonon frequencies are
+  // strongly volume-dependent → anharmonic potential is important
+  if (opts.gruneisenParam != null && opts.gruneisenParam > 2.0) {
+    reasons.push(`large Grüneisen parameter (γ=${opts.gruneisenParam.toFixed(2)} > 2.0)`);
+  }
+
+  // 2c. High anharmonicity index from physics-engine
+  if (opts.anharmonicityIndex != null && opts.anharmonicityIndex > 0.35) {
+    reasons.push(`high anharmonicity index (${opts.anharmonicityIndex.toFixed(2)} > 0.35)`);
+  }
+
+  // 2d. Soft mode score suggesting incipient instability
+  if (opts.softModeScore != null && opts.softModeScore > 0.6) {
+    reasons.push(`soft mode score (${opts.softModeScore.toFixed(2)} > 0.6)`);
+  }
+
+  // 2e. Hydrogen-rich under pressure (legacy hydride trigger, still valid)
+  if (hFraction >= 0.25 && pressureGPa >= 20) {
+    reasons.push(`H-rich under pressure (H=${(hFraction * 100).toFixed(0)}%, P=${pressureGPa} GPa)`);
+  }
+
+  // 2f. Light elements under high pressure (Li, Be, B compress strongly)
+  const lightElements = ["Li", "Be", "B"];
+  const hasLight = elements.some(el => lightElements.includes(el));
+  if (hasLight && pressureGPa >= 30) {
+    reasons.push(`light element (${elements.filter(el => lightElements.includes(el)).join(",")}) under ${pressureGPa} GPa`);
+  }
+
+  // 2g. Chalcogens under pressure (S, Se, Te — known anharmonic under compression)
+  const chalcogens = ["S", "Se", "Te"];
+  const hasChalcogen = elements.some(el => chalcogens.includes(el));
+  if (hasChalcogen && pressureGPa >= 50) {
+    reasons.push(`chalcogen (${elements.filter(el => chalcogens.includes(el)).join(",")}) under ${pressureGPa} GPa`);
+  }
+
+  if (reasons.length === 0) {
     return {
       eligible: false,
-      reason: `H fraction ${(hFraction * 100).toFixed(1)}% < ${MIN_H_FRACTION * 100}% — not H-rich enough for SSCHA`,
+      reason: "No anharmonicity indicators triggered (no soft modes, low Grüneisen, no H under pressure, no light/chalcogen elements under compression)",
     };
   }
 
-  // Check pressure
-  if (pressureGPa < MIN_PRESSURE_GPA) {
-    return {
-      eligible: false,
-      reason: `Pressure ${pressureGPa} GPa < ${MIN_PRESSURE_GPA} GPa — SSCHA most impactful for high-pressure hydrides`,
-    };
-  }
-
-  return { eligible: true };
+  return { eligible: true, reason: reasons.join("; ") };
 }
 
 // ---------------------------------------------------------------------------
@@ -404,7 +472,9 @@ export async function runSSCHAPipeline(
     nImaginaryModes: parsed.nImaginaryModes,
     harmonicImaginaryCount: parsed.harmonicImaginaryCount,
     anharmonicFreqsCm: parsed.anharmonicFreqsCm,
-    method: parsed.method ?? "SSCHA-unknown",
+    method: ((parsed.method as string) === "SSCHA-full" || (parsed.method as string) === "sscha_sc") ? "sscha_sc" as const
+           : ((parsed.method as string) === "SSCHA-fallback" || (parsed.method as string) === "sscha_one_shot") ? "sscha_one_shot" as const
+           : "sscha_error" as const,
     warnings,
     elapsedSeconds: parsed.elapsedSeconds,
   };
@@ -435,7 +505,7 @@ function makeErrorResult(warnings: string[], options: SSCHAPipelineOptions): SSC
     nConfigs: 0,
     temperatureK: options.temperature ?? 300,
     totalForceCalcs: 0,
-    method: "SSCHA-error",
+    method: "sscha_error",
     warnings,
   };
 }

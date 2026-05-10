@@ -321,12 +321,11 @@ export class DatabaseStorage implements IStorage {
     const m = notes.match(/eAboveHull=([0-9]+(?:\.[0-9]*)?)/);
     if (!m) return true;
     const dist = parseFloat(m[1]);
-    // Values > 5 eV/atom are physically impossible at any real synthesis condition.
-    // They indicate an ambient-pressure Miedema estimate for a compound that is
-    // only stable under high pressure (e.g. polyhydrides at 100-300 GPa).
-    // These must NOT be filtered out — they are valid candidates awaiting DFT
-    // validation at the correct pressure.
-    if (dist > 5.0) return true;
+    // Pressure-aware hull guard: high-pressure materials (LaH10, CaH6, H3S)
+    // have large ambient hull distances (1-3 eV/atom) but are stable at their
+    // operating pressure. Only filter at ambient (<50 GPa) with strict threshold.
+    const pressure = c.pressureGpa ?? 0;
+    if (pressure > 50) return true; // high-pressure: ambient hull irrelevant
     return dist <= 0.5;
   }
 
@@ -439,7 +438,7 @@ export class DatabaseStorage implements IStorage {
           ensembleScore: sql`GREATEST(${superconductorCandidates.ensembleScore}, EXCLUDED.ensemble_score)`,
           xgboostScore: sql`CASE WHEN EXCLUDED.ensemble_score > ${superconductorCandidates.ensembleScore} THEN EXCLUDED.xgboost_score ELSE ${superconductorCandidates.xgboostScore} END`,
           neuralNetScore: sql`CASE WHEN EXCLUDED.ensemble_score > ${superconductorCandidates.ensembleScore} THEN EXCLUDED.neural_net_score ELSE ${superconductorCandidates.neuralNetScore} END`,
-          predictedTc: sql`CASE WHEN EXCLUDED.ensemble_score > ${superconductorCandidates.ensembleScore} THEN EXCLUDED.predicted_tc ELSE ${superconductorCandidates.predictedTc} END`,
+          predictedTc: sql`COALESCE(EXCLUDED.predicted_tc, ${superconductorCandidates.predictedTc})`,
           mlFeatures: sql`CASE WHEN EXCLUDED.ensemble_score > ${superconductorCandidates.ensembleScore} THEN EXCLUDED.ml_features ELSE ${superconductorCandidates.mlFeatures} END`,
           notes: sql`CASE WHEN EXCLUDED.ensemble_score > ${superconductorCandidates.ensembleScore} THEN EXCLUDED.notes ELSE ${superconductorCandidates.notes} END`,
         },
@@ -484,7 +483,7 @@ export class DatabaseStorage implements IStorage {
               ensembleScore: sql`GREATEST(${superconductorCandidates.ensembleScore}, EXCLUDED.ensemble_score)`,
               xgboostScore: sql`CASE WHEN EXCLUDED.ensemble_score > ${superconductorCandidates.ensembleScore} THEN EXCLUDED.xgboost_score ELSE ${superconductorCandidates.xgboostScore} END`,
               neuralNetScore: sql`CASE WHEN EXCLUDED.ensemble_score > ${superconductorCandidates.ensembleScore} THEN EXCLUDED.neural_net_score ELSE ${superconductorCandidates.neuralNetScore} END`,
-              predictedTc: sql`CASE WHEN EXCLUDED.ensemble_score > ${superconductorCandidates.ensembleScore} THEN EXCLUDED.predicted_tc ELSE ${superconductorCandidates.predictedTc} END`,
+              predictedTc: sql`COALESCE(EXCLUDED.predicted_tc, ${superconductorCandidates.predictedTc})`,
               mlFeatures: sql`CASE WHEN EXCLUDED.ensemble_score > ${superconductorCandidates.ensembleScore} THEN EXCLUDED.ml_features ELSE ${superconductorCandidates.mlFeatures} END`,
               notes: sql`CASE WHEN EXCLUDED.ensemble_score > ${superconductorCandidates.ensembleScore} THEN EXCLUDED.notes ELSE ${superconductorCandidates.notes} END`,
             },

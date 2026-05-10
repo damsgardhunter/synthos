@@ -1503,7 +1503,19 @@ export async function gbPredict(features: MLFeatureVector, formula?: string): Pr
   // Try both the raw formula and the normalized _sourceFormula since the cache
   // may store keys in either format (e.g. "Sc2H5" vs alphabetized "H5Sc2").
   if (_xgbCache.size > 0) {
-    const candidates = [formula, features._sourceFormula].filter(Boolean) as string[];
+    const pressure = features.pressureGpa ?? 0;
+    // Look up PRESSURE-AWARE cache key first (e.g. "LaH10@170GPa" → 241K)
+    // then fall back to bare formula (e.g. "H10La" → 17K ambient).
+    // The GCP XGBoost model is pressure-aware — without the pressure suffix
+    // it returns ambient predictions that massively underestimate superhydrides.
+    // Try BOTH normalized (H10La) and original (LaH10) forms since the GCP
+    // cache may store either (depends on which format was submitted for training).
+    const candidates: string[] = [];
+    const baseFormulas = [...new Set([formula, features._sourceFormula, normalizeFormula(formula ?? "")].filter(Boolean))] as string[];
+    if (pressure > 0) {
+      for (const f of baseFormulas) candidates.push(`${f}@${Math.round(pressure)}GPa`);
+    }
+    candidates.push(...baseFormulas);
     for (const f of candidates) {
       const cached = _xgbCache.get(f);
       if (cached && Date.now() - cached.fetchedAt < XGB_CACHE_TTL_MS) {
@@ -1513,7 +1525,7 @@ export async function gbPredict(features: MLFeatureVector, formula?: string): Pr
         return {
           tcPredicted: Math.min(350, Math.max(0, Math.round(tc * 10) / 10)),
           score: applicationAwareScore(tc),
-          reasoning: [`Colab-XGB cache: Tc=${tc.toFixed(1)}K`],
+          reasoning: [`Colab-XGB cache: Tc=${tc.toFixed(1)}K${pressure > 0 ? ` @${Math.round(pressure)}GPa` : ''}`],
         };
       }
     }

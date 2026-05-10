@@ -4,7 +4,7 @@ import type { EventEmitter } from "./engine";
 import { extractFeatures, runMLPrediction, isSweepGuardActive } from "./ml-predictor";
 import { gbPredict } from "./gradient-boost";
 import { classifyFamily, getPrototypeHash, normalizeFormula, isValidFormula } from "./utils";
-import { applyAmbientTcCap, computeElectronicStructure, computePhononSpectrum, computeElectronPhononCoupling, parseFormulaElements, computeDimensionalityScore, detectStructuralMotifs, evaluateCompetingPhases } from "./physics-engine";
+import { applyAmbientTcCap, computeElectronicStructure, computePhononSpectrum, computeElectronPhononCoupling, parseFormulaElements, computeDimensionalityScore, detectStructuralMotifs, evaluateCompetingPhases, computePhysicsTcUQ } from "./physics-engine";
 import type { CapExtensionEvidence } from "./physics-engine";
 import { passesStabilityGate } from "./phase-diagram-engine";
 import { passesElementCountCap, estimateFamilyPressure } from "./candidate-generator";
@@ -195,7 +195,11 @@ export async function runSuperconductorResearch(
       duplicatesSkipped++;
       continue;
     }
-    const stabilityCheck = passesStabilityGate(formula);
+    // Pass estimated pressure to stability gate — high-pressure hydrides like
+    // LaH10 are stable at 170 GPa but decompose at ambient. Without pressure,
+    // the gate rejects ALL superhydrides (killed 5000+ valid candidates).
+    const candidatePressureEst = candidate.pressureGpa ?? estimateFamilyPressure(formula);
+    const stabilityCheck = passesStabilityGate(formula, candidatePressureEst);
     if (!stabilityCheck.pass) {
       duplicatesSkipped++;
       continue;
@@ -254,12 +258,12 @@ export async function runSuperconductorResearch(
 
     const existing = await storage.getSuperconductorByFormula(formula);
     if (existing) {
-      const newTc = candidate.predictedTc ?? existing.predictedTc;
       const existingTc = existing.predictedTc ?? 0;
-      const existingLambda = existing.electronPhononCoupling ?? candidate.electronPhononCoupling ?? 0;
-      const tcImproved = (newTc ?? 0) > existingTc;
       const scoreMuchHigher = newScore > (existing.ensembleScore ?? 0) * 1.15;
-      const tcDowngradeNeeded = scoreMuchHigher && (newTc ?? 0) < existingTc;
+      // Always recompute Tc via physics UQ — single source of truth
+      const uqTc = computePhysicsTcUQ(formula, candidate.pressureGpa ?? existing.pressureGpa ?? 0);
+      const newTc = uqTc.mean;
+      const tcImproved = newTc > existingTc;
       if (newScore > (existing.ensembleScore ?? 0) || tcImproved) {
         const updates: any = {
           ensembleScore: Math.max(newScore, existing.ensembleScore ?? 0),
@@ -267,16 +271,9 @@ export async function runSuperconductorResearch(
           neuralNetScore: candidate.neuralNetScore ?? existing.neuralNetScore,
           mlFeatures: candidate.mlFeatures ?? existing.mlFeatures,
           notes: buildVerificationNotes(candidate),
+          // Always write the UQ-computed Tc
+          predictedTc: newTc,
         };
-        if ((newTc ?? 0) > existingTc) {
-          const tcUpCap = existingLambda > 2.5 ? 150 : existingLambda > 2.0 ? 120 : existingLambda > 1.5 ? 90 : existingLambda > 1.0 ? 70 : 50;
-          let cappedUpTc = Math.min(newTc ?? 0, existingTc + tcUpCap);
-          cappedUpTc = Math.min(cappedUpTc, effectiveTcCapML);
-          updates.predictedTc = cappedUpTc;
-        } else if (tcDowngradeNeeded) {
-          updates.predictedTc = Math.max(newTc ?? 0, Math.round(existingTc * 0.5));
-          updates.ensembleScore = newScore;
-        }
         const tcDetail = tcImproved
           ? `, Tc ${existingTc}K -> ${updates.predictedTc ?? newTc}K`
           : tcDowngradeNeeded
@@ -306,7 +303,7 @@ export async function runSuperconductorResearch(
         id,
         name: candidate.name || "Unknown",
         formula,
-        predictedTc: candidate.predictedTc ?? null,
+        predictedTc: computePhysicsTcUQ(formula, candidate.pressureGpa ?? 0).mean,
         pressureGpa: candidate.pressureGpa ?? null,
         meissnerEffect: candidate.meissnerEffect ?? false,
         zeroResistance: candidate.zeroResistance ?? false,
@@ -652,7 +649,7 @@ Return JSON 'candidates' array: 'name', 'formula', 'predictedTc' (K, realistic),
 
       try {
         if (!passesElementCountCap(c.formula)) continue;
-        const stabilityCheck = passesStabilityGate(c.formula);
+        const stabilityCheck = passesStabilityGate(c.formula, c.pressureGpa ?? estimateFamilyPressure(c.formula));
         if (!stabilityCheck.pass) {
           continue;
         }
@@ -1033,7 +1030,7 @@ Return JSON 'candidates' array: 'formula', 'name', 'predictedTc' (K), 'pressureG
 
       try {
         if (!passesElementCountCap(c.formula)) continue;
-        const stabilityCheck = passesStabilityGate(c.formula);
+        const stabilityCheck = passesStabilityGate(c.formula, c.pressureGpa ?? estimateFamilyPressure(c.formula));
         if (!stabilityCheck.pass) {
           continue;
         }

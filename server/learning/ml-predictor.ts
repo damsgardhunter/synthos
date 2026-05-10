@@ -1459,22 +1459,14 @@ export async function runMLPrediction(
 
       const effectiveMuStar = xgb.features.muStarEstimate;
 
-      const isHydrideML = xgb.features.hasHydrogen && xgb.features.hydrogenRatio >= 0.5;
-      let finalTc: number;
-      let tcMethod: string;
+      // Use computePhysicsTcUQ as single source of truth for Tc predictions
+      const uqResult = computePhysicsTcUQ(xgb.mat.formula, xgb.features.pressureGpa ?? 0);
+      let finalTc = uqResult.mean;
+      let tcMethod = "Physics-UQ";
       if (isStronglyCorrelated) {
         const corrSuppression = Math.max(0.1, 1.0 - (corrStrength - 0.6) * 1.5);
-        const rawAD = featureLambda > 0
-          ? allenDynesTcRaw(featureLambda, xgb.features.logPhononFreq ?? 300, effectiveMuStar, undefined, isHydrideML, xgb.mat.formula, xgb.features.pressureGpa ?? 0)
-          : 0;
-        finalTc = Math.round(Math.max(0, rawAD * corrSuppression));
-        tcMethod = `Allen-Dynes*corr_supp(${corrSuppression.toFixed(2)})`;
-      } else {
-        const allenDynesTc = featureLambda > 0
-          ? allenDynesTcRaw(featureLambda, xgb.features.logPhononFreq ?? 300, effectiveMuStar, undefined, isHydrideML, xgb.mat.formula, xgb.features.pressureGpa ?? 0)
-          : 0;
-        finalTc = Math.round(allenDynesTc > 0 ? allenDynesTc : 0);
-        tcMethod = "Allen-Dynes";
+        finalTc = Math.round(Math.max(0, finalTc * corrSuppression));
+        tcMethod = `Physics-UQ*corr_supp(${corrSuppression.toFixed(2)})`;
       }
 
       const heuristicPressure = estimateFamilyPressure(xgb.mat.formula);
@@ -1573,18 +1565,12 @@ export async function runMLPrediction(
         const effectiveMuStarFB = c.features.muStarEstimate;
         const isHydrideFB = c.features.hasHydrogen && c.features.hydrogenRatio >= 0.5;
 
-        let finalTc: number;
+        // Use computePhysicsTcUQ as single source of truth
+        const uqFB = computePhysicsTcUQ(c.mat.formula, c.features.pressureGpa ?? 0);
+        let finalTc = uqFB.mean;
         if (isCorrelatedFB) {
           const suppression = Math.max(0.1, 1.0 - (corrStrengthFB - 0.6) * 1.5);
-          const rawAD = featureLambda > 0
-            ? allenDynesTcRaw(featureLambda, c.features.logPhononFreq ?? 300, effectiveMuStarFB, undefined, isHydrideFB, c.mat.formula, c.features.pressureGpa ?? 0)
-            : 0;
-          finalTc = Math.round(Math.max(0, rawAD * suppression));
-        } else {
-          const physOnlyTc = featureLambda > 0
-            ? allenDynesTcRaw(featureLambda, c.features.logPhononFreq ?? 300, effectiveMuStarFB, undefined, isHydrideFB, c.mat.formula, c.features.pressureGpa ?? 0)
-            : 0;
-          finalTc = Math.round(Math.max(0, physOnlyTc));
+          finalTc = Math.round(Math.max(0, finalTc * suppression));
         }
 
         const heuristicPressureFB = estimateFamilyPressure(c.mat.formula);

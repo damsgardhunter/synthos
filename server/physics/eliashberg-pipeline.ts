@@ -29,6 +29,8 @@ import {
   empiricalTcPnictide,
   empiricalTcChalcogenide,
 } from "./tc-formulas";
+import { computeNQECorrection, type NQECorrectionResult } from "./nqe-correction";
+import { computeMuStarAbInitio, type MuStarAbInitioResult } from "./mu-star-ab-initio";
 
 export interface ModeResolvedLambda {
   acoustic: number;
@@ -107,6 +109,10 @@ export interface EliashbergPipelineResult {
   confidenceBand: [number, number];
   warnings: string[];
   wallTimeMs: number;
+  /** Nuclear quantum effects correction (SSCHA-model) */
+  nqeCorrection: NQECorrectionResult;
+  /** Ab-initio Coulomb pseudopotential (RPA Morel-Anderson) */
+  muStarAbInitio: MuStarAbInitioResult;
 }
 
 function expandParentheses(formula: string): string {
@@ -755,11 +761,26 @@ export function runEliashbergPipeline(
     phononDOS, formula, electronic, coupling, pressureGpa, phonon.maxPhononFrequency
   );
 
-  const muStar = computeScreenedMuStar(formula, pressureGpa, electronic.densityOfStatesAtFermi);
+  // --- Ab-initio mu* (RPA Morel-Anderson) replaces heuristic computeScreenedMuStar ---
+  const muStarResult = computeMuStarAbInitio(
+    formula, pressureGpa, electronic, phonon,
+    alpha2FSpec.integratedLambda, alpha2FSpec.omegaLog
+  );
+  const muStar = muStarResult.muStar;
+
+  // --- NQE correction (SSCHA-model) for hydrogen-rich compounds ---
+  const nqeResult = computeNQECorrection(
+    formula, pressureGpa, alpha2FSpec.integratedLambda,
+    alpha2FSpec.omegaLog, phonon, electronic
+  );
+
+  // Use NQE-corrected lambda and omega_log for Tc calculation when applicable
+  const effectiveLambda = nqeResult.applied ? nqeResult.lambdaNQE : alpha2FSpec.integratedLambda;
+  const effectiveOmegaLog = nqeResult.applied ? nqeResult.omegaLogNQE : alpha2FSpec.omegaLog;
 
   const allenDynes = computeAllenDynesTc(
-    alpha2FSpec.integratedLambda,
-    alpha2FSpec.omegaLog,
+    effectiveLambda,
+    effectiveOmegaLog,
     alpha2FSpec.omega2,
     muStar
   );
@@ -787,8 +808,13 @@ export function runEliashbergPipeline(
 
   let surrogateAnharmonicUncertainty = 0.0;
   if (isHighPressureHydride) {
-    const anharmonicityEst = Math.min(0.35, 0.05 + pressureGpa * 0.0008 + hRatioPipe * 0.015);
-    surrogateAnharmonicUncertainty = anharmonicityEst;
+    // Use NQE-derived anharmonicity when available, otherwise fall back to heuristic
+    if (nqeResult.applied) {
+      surrogateAnharmonicUncertainty = nqeResult.lambdaReduction * 0.8;
+    } else {
+      const anharmonicityEst = Math.min(0.35, 0.05 + pressureGpa * 0.0008 + hRatioPipe * 0.015);
+      surrogateAnharmonicUncertainty = anharmonicityEst;
+    }
   }
 
   let confidence: "low" | "medium" | "high" = "medium";
@@ -813,10 +839,31 @@ export function runEliashbergPipeline(
 
   if (isHighPressureHydride) {
     if (confidence === "high") confidence = "medium";
+    if (nqeResult.applied) {
+      warnings.push(
+        `NQE correction applied (${nqeResult.method}): lambda ${nqeResult.lambdaHarmonic.toFixed(3)} -> ` +
+        `${nqeResult.lambdaNQE.toFixed(3)} (-${(nqeResult.lambdaReduction * 100).toFixed(1)}%), ` +
+        `sigma=${nqeResult.anharmonicStrength.toFixed(3)}, ` +
+        `stability shift ~${nqeResult.stabilityPressureShift.toFixed(0)} GPa. ` +
+        `Full SSCHA/PIMD recommended for publication-grade accuracy. ` +
+        `Ref: Errea et al., Nature 578, 66 (2020); Monacelli et al., JPCM 33, 363001 (2021).`
+      );
+    } else {
+      warnings.push(
+        `Surrogate anharmonicity uncertainty: harmonic approximation may overestimate phonon frequencies ` +
+        `for high-pressure hydride (H-ratio=${hRatioPipe.toFixed(1)}, P=${pressureGpa} GPa). ` +
+        `Confidence band widened by ${(surrogateAnharmonicUncertainty * 100).toFixed(0)}%. DFPT verification recommended.`
+      );
+    }
+  }
+
+  // mu* method warning
+  if (muStarResult.method === "rpa-morel-anderson" && Math.abs(muStarResult.deviationFromConventional) > 0.02) {
     warnings.push(
-      `Surrogate anharmonicity uncertainty: harmonic approximation may overestimate phonon frequencies ` +
-      `for high-pressure hydride (H-ratio=${hRatioPipe.toFixed(1)}, P=${pressureGpa} GPa). ` +
-      `Confidence band widened by ${(surrogateAnharmonicUncertainty * 100).toFixed(0)}%. DFPT verification recommended.`
+      `Ab-initio mu*=${muStar.toFixed(4)} (RPA Morel-Anderson) deviates from conventional ` +
+      `mu*=${muStarResult.conventionalMuStar.toFixed(2)} by ${(muStarResult.deviationFromConventional * 100).toFixed(1)}%. ` +
+      `Tc sensitivity: ${muStarResult.tcSensitivity.toFixed(1)} K per 0.01 mu*. ` +
+      `Ref: Morel & Anderson, Phys. Rev. 125, 1263 (1962); Agapito et al., PRX 5, 011006 (2015).`
     );
   }
 
@@ -895,6 +942,8 @@ export function runEliashbergPipeline(
     confidenceBand,
     warnings,
     wallTimeMs: Date.now() - startTime,
+    nqeCorrection: nqeResult,
+    muStarAbInitio: muStarResult,
   };
 
   pipelineStats.totalRuns++;
@@ -1027,8 +1076,22 @@ export function runEliashbergFromAlpha2FFile(
     },
   };
 
-  const muStar = computeScreenedMuStar(formula, pressureGpa, electronic.densityOfStatesAtFermi);
-  const allenDynes = computeAllenDynesTc(integratedLambda, omegaLog, omega2, muStar);
+  // --- Ab-initio mu* (RPA Morel-Anderson) ---
+  const muStarResult = computeMuStarAbInitio(
+    formula, pressureGpa, electronic, phonon,
+    integratedLambda, omegaLog
+  );
+  const muStar = muStarResult.muStar;
+
+  // --- NQE correction (SSCHA-model) for DFPT-tier results ---
+  const nqeResult = computeNQECorrection(
+    formula, pressureGpa, integratedLambda, omegaLog, phonon, electronic
+  );
+
+  const effectiveLambdaDfpt = nqeResult.applied ? nqeResult.lambdaNQE : integratedLambda;
+  const effectiveOmegaLogDfpt = nqeResult.applied ? nqeResult.omegaLogNQE : omegaLog;
+
+  const allenDynes = computeAllenDynesTc(effectiveLambdaDfpt, effectiveOmegaLogDfpt, omega2, muStar);
 
   let gapTrialTcDfpt: number;
   if (allenDynes.tc > 0) {
@@ -1068,12 +1131,35 @@ export function runEliashbergFromAlpha2FFile(
   const isHighPressureHydrideDfpt = hRatioDfpt >= 4 && pressureGpa >= 100;
   let dfptLambdaUncorrected = coupling.lambdaUncorrected;
   if (isHighPressureHydrideDfpt) {
-    const anharmonicFrac = Math.min(0.25, 0.03 + pressureGpa * 0.0005 + hRatioDfpt * 0.01);
-    dfptLambdaUncorrected = Number((coupling.lambdaUncorrected * (1 - anharmonicFrac)).toFixed(4));
+    if (nqeResult.applied) {
+      // Use physics-based NQE correction instead of heuristic percentage
+      dfptLambdaUncorrected = Number((coupling.lambdaUncorrected * (1 - nqeResult.lambdaReduction)).toFixed(4));
+      dfptWarnings.push(
+        `NQE correction applied (${nqeResult.method}): lambda ${nqeResult.lambdaHarmonic.toFixed(3)} -> ` +
+        `${nqeResult.lambdaNQE.toFixed(3)} (-${(nqeResult.lambdaReduction * 100).toFixed(1)}%), ` +
+        `sigma=${nqeResult.anharmonicStrength.toFixed(3)}. ` +
+        `Harmonic lambda_uncorrected: ${coupling.lambdaUncorrected.toFixed(4)}. ` +
+        `Stability shift: ~${nqeResult.stabilityPressureShift.toFixed(0)} GPa. ` +
+        `Ref: Errea et al., Nature 578, 66 (2020).`
+      );
+    } else {
+      const anharmonicFrac = Math.min(0.25, 0.03 + pressureGpa * 0.0005 + hRatioDfpt * 0.01);
+      dfptLambdaUncorrected = Number((coupling.lambdaUncorrected * (1 - anharmonicFrac)).toFixed(4));
+      dfptWarnings.push(
+        `DFPT harmonic lambda_uncorrected adjusted by -${(anharmonicFrac * 100).toFixed(0)}% for anharmonic H modes ` +
+        `(H-ratio=${hRatioDfpt.toFixed(1)}, P=${pressureGpa} GPa). ` +
+        `Raw harmonic value: ${coupling.lambdaUncorrected.toFixed(4)}.`
+      );
+    }
+  }
+
+  // mu* method warning for DFPT tier
+  if (muStarResult.method === "rpa-morel-anderson" && Math.abs(muStarResult.deviationFromConventional) > 0.02) {
     dfptWarnings.push(
-      `DFPT harmonic lambda_uncorrected adjusted by -${(anharmonicFrac * 100).toFixed(0)}% for anharmonic H modes ` +
-      `(H-ratio=${hRatioDfpt.toFixed(1)}, P=${pressureGpa} GPa). ` +
-      `Raw harmonic value: ${coupling.lambdaUncorrected.toFixed(4)}.`
+      `Ab-initio mu*=${muStar.toFixed(4)} (RPA Morel-Anderson) deviates from conventional ` +
+      `mu*=${muStarResult.conventionalMuStar.toFixed(2)} by ${(muStarResult.deviationFromConventional * 100).toFixed(1)}%. ` +
+      `Tc sensitivity: ${muStarResult.tcSensitivity.toFixed(1)} K per 0.01 mu*. ` +
+      `Ref: Morel & Anderson, Phys. Rev. 125, 1263 (1962).`
     );
   }
 
@@ -1156,6 +1242,8 @@ export function runEliashbergFromAlpha2FFile(
     confidenceBand,
     warnings: dfptWarnings,
     wallTimeMs: Date.now() - startTime,
+    nqeCorrection: nqeResult,
+    muStarAbInitio: muStarResult,
   };
 }
 

@@ -474,10 +474,17 @@ Computes μ* from first principles via QE's hp.x (Hubbard parameters from DFPT l
 ### Key Outputs
 
 - `muStar`: First-principles value (physical range [0.05, 0.20])
-- `muStarConventional`: What fixed assumption gives (for comparison)
-- `hubbardU`: Per-element computed U values (eV)
+- `hubbardU`: Per-element computed U values from hp.x linear response (eV)
 - `screeningLength`: Thomas-Fermi screening length (Bohr)
 - `converged`: Whether self-consistent U loop converged
+
+### Self-Consistent U Feedback Loop
+
+When ACBN0 computes U from first principles via hp.x, those values are fed back into the Hubbard workflow result:
+- Each element's U in `hubbardWorkflow.sites` is updated with the hp.x value
+- The source is promoted to "material-specific" (first-principles quality)
+- Large shifts (>0.3 eV from initial U) are logged as warnings
+- These values persist in the dataset for use in future runs of the same formula
 
 ### Compute Budget
 
@@ -531,7 +538,7 @@ The vc-relax smearing (0.015-0.02) is intentionally loose for convergence — it
 
 ## Stage 10: Results → Database → Next Iteration
 
-Extended dataset fields: tcConservative, tcUpperBound, tcMethod, lambdaMethod, phononMethod, tcConfidence, learningScore, qualityTier, hullLabel, residualForce, nqeApplied, nqeMethod, lambdaNQE, lambdaReduction, nqeAnharmonicStrength, nqeStabilityShift, muStarMethod, muStarConventional, muStarDeviation, muStarTcSensitivity, epwLambda, epwTcME, epwGapZero, epwMethod, socEnabled, socMaxEnergy, socDosImpact, magneticOrdering, magneticEnergyGap, magneticMagnetization, hubbardApplied, hubbardCorrelatedSites, hubbardRegime, hubbardAppliedToVCRelax, sschaOmegaLogAnharmonic, sschaLambdaAnharmonic, sschaTcCorrected, sschaConverged, acbn0MuStar, acbn0MuStarConventional, acbn0HubbardU, acbn0ScreeningLength, acbn0Converged.
+Extended dataset fields: tcConservative, tcUpperBound, tcMethod, lambdaMethod, phononMethod, tcConfidence, learningScore, qualityTier, hullLabel, residualForce, nqeApplied, nqeMethod, lambdaNQE, lambdaReduction, nqeAnharmonicStrength, nqeStabilityShift, muStarMethod, muStarConventional, muStarDeviation, muStarTcSensitivity, epwLambda, epwTcME, epwGapZero, epwMethod, socEnabled, socMaxEnergy, socDosImpact, magneticOrdering, magneticEnergyGap, magneticMagnetization, hubbardApplied, hubbardCorrelatedSites, hubbardRegime, hubbardAppliedToVCRelax, sschaConverged, sschaOmegaLog, sschaTcCorrected, acbn0Converged, acbn0MuStar, acbn0Method, epwConverged, epwLambda, epwTcME, epwMethod.
 
 ### Multi-Objective Learning Score
 
@@ -623,7 +630,7 @@ Surrogate Tc predictions (XGBoost/GNN) are allowed when force < 0.10 but ≥ 0.0
 | **Phase 6** | Magnetic ground-state search (FM/AFM/NM energy comparison before phonons) | **DONE** |
 | **Phase 7** | DFT+U Hubbard workflow (composition-aware U, vc-relax integration, broadened triggers) | **DONE** |
 | **Phase 8** | Full SSCHA anharmonic phonons (sscha-pipeline.ts + sscha-worker.py) | **DONE** |
-| **Phase 9** | ACBN0 first-principles μ* via hp.x (acbn0-pipeline.ts) | **DONE** |
+| **Phase 9** | ACBN0 first-principles μ* via hp.x + self-consistent U feedback to Hubbard workflow | **DONE** |
 | **Phase 10** | K-mesh/smearing convergence tiering for publication | **DONE** |
 | **Phase 11** | SCDFT (superconducting DFT) for beyond-RPA μ* | Future (specialized code) |
 | **Phase 12** | Path-integral MD for NQE beyond SSCHA | Future (PIMD integration) |

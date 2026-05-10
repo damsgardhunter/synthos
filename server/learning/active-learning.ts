@@ -672,13 +672,24 @@ export async function selectForDFT(
       const ucbScore = finiteOr(computeUCB(tc, sigmaRaw, kappa, tcScale), 0);
       const curiosityScore = finiteOr(computeCuriosityScore(structuralDistance, combinedUncertainty, oodScoreVal, noveltyScore), 0);
 
+      // Boost acquisition for candidates with heuristic-only predictions.
+      // These are novel compounds where we genuinely don't know the Tc — DFT
+      // data would be maximally informative. The heuristicConfidence from
+      // computeElectronPhononCoupling tells us how much we're guessing.
+      const mlFeats = (candidate.mlFeatures as Record<string, any>) ?? {};
+      const epcSource = mlFeats.epcSource ?? mlFeats.tcSource ?? null;
+      const heuristicBoost = (epcSource === "heuristic-hopfield" || epcSource === null)
+        ? 0.15 * (1 - (mlFeats.heuristicConfidence ?? 0.3))  // max +0.105 for totally unknown
+        : 0;
+
       const acquisitionScore = finiteOr(
         0.30 * eiScore +
         0.25 * ucbScore +
         0.20 * combinedUncertainty +
         0.10 * curiosityScore +
         0.10 * normalizedTc +
-        0.05 * stabilityProbability,
+        0.05 * stabilityProbability +
+        heuristicBoost,
         0,
       );
 
@@ -1673,19 +1684,55 @@ export async function runActiveLearningCycle(
   enrichmentLogCount = 0;
   const enrichedFormulaPressures = new Set<string>();
 
+  // Stage 0.5 pre-screening: quickly validate candidates with structural
+  // calculations before committing expensive DFT resources. Candidates that
+  // Stage 0.5 shows are clearly unstable or insulating get deprioritized.
+  let stage05Filtered = selected;
+  try {
+    const { runStage05PreScreen } = await import("../csp/stage05-prescreener");
+    const stage05Results: { formula: string; recommendation: string; tc: number; ms: number }[] = [];
+    for (const ranked of selected) {
+      try {
+        const s05 = await runStage05PreScreen(ranked.candidate.formula, ranked.targetPressureGpa ?? ranked.candidate.pressureGpa ?? undefined);
+        stage05Results.push({ formula: ranked.candidate.formula, recommendation: s05.recommendation, tc: s05.tcEstimate, ms: s05.wallTimeMs });
+        // Store Stage 0.5 results in mlFeatures for downstream use
+        const mlf = (ranked.candidate.mlFeatures as Record<string, any>) ?? {};
+        ranked.candidate.mlFeatures = { ...mlf, stage05: { recommendation: s05.recommendation, tc: s05.tcEstimate, phononStable: s05.phononStable, omegaLog: s05.omegaLogEstimate, confidence: s05.confidence } } as any;
+      } catch {}
+    }
+    // Keep promoted + borderline, drop rejects (but always keep at least 2)
+    const promoted = stage05Filtered.filter((r, i) => {
+      const s = stage05Results.find(s => s.formula === r.candidate.formula);
+      return !s || s.recommendation !== "reject";
+    });
+    if (promoted.length >= 2) stage05Filtered = promoted;
+    const rejectedCount = selected.length - stage05Filtered.length;
+    if (rejectedCount > 0 || stage05Results.length > 0) {
+      emit("log", {
+        phase: "active-learning",
+        event: "Stage 0.5 pre-screen",
+        detail: `${stage05Results.length} screened, ${rejectedCount} rejected. ${stage05Results.filter(s => s.recommendation === "promote-to-dft").map(s => `${s.formula}(${s.tc.toFixed(0)}K,${s.ms}ms)`).join(", ")}`,
+        dataSource: "Stage 0.5 Prescreener",
+      });
+    }
+  } catch (s05Err: any) {
+    // Stage 0.5 unavailable (PyXtal/CHGNet not installed) — proceed without it
+    console.warn(`[ActiveLearning] Stage 0.5 unavailable: ${s05Err?.message?.slice(0, 80)}`);
+  }
+
   // Announce which candidates are entering the quantum engine — this fires
   // immediately so the frontend feed doesn't go silent during the 30-90s
   // concurrent xTB computation that follows.
   emit("log", {
     phase: "active-learning",
     event: "Quantum engine pipeline running",
-    detail: `Running xTB/phonon pipeline concurrently for ${selected.length} candidates: ${selected.map(r => r.candidate.formula).join(", ")}`,
+    detail: `Running xTB/phonon pipeline concurrently for ${stage05Filtered.length} candidates: ${stage05Filtered.map(r => r.candidate.formula).join(", ")}`,
     dataSource: "Active Learning",
   });
 
   // Run all selected candidates concurrently — xTB takes 30-90s each so
   // sequential execution would block the engine cycle for 10-30 minutes.
-  await Promise.allSettled(selected.map(async (ranked) => {
+  await Promise.allSettled(stage05Filtered.map(async (ranked) => {
     const { candidate } = ranked;
     const isPressureTier = ranked.selectionTier === "pressure-exploration";
     const mlf = (candidate.mlFeatures as Record<string, any>) ?? {};

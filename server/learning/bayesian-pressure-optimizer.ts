@@ -227,6 +227,19 @@ function evictLRU(): void {
   }
 }
 
+export async function rehydratePressureObservations(): Promise<void> {
+  try {
+    const { loadRecentPressureObservations } = await import("./db-learning-store");
+    const rows = await loadRecentPressureObservations(50_000);
+    for (const row of rows) {
+      addPressureObservation(row.formula, row.pressureGpa, row.tc, row.stable ?? true, row.enthalpy ?? undefined);
+    }
+    console.log(`[BayesianPressure] Rehydrated ${rows.length} pressure observations from DB`);
+  } catch (e: any) {
+    console.warn(`[BayesianPressure] Rehydration failed: ${e?.message?.slice(0, 100)}`);
+  }
+}
+
 export function addPressureObservation(
   formula: string,
   pressureGpa: number,

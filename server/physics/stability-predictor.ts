@@ -771,8 +771,30 @@ export function predictStability(formula: string, pressureGpa: number = 0): Stab
   };
 }
 
-export function passesStabilityPreFilter(formula: string): { pass: boolean; reason: string; prediction: StabilityPrediction } {
+export function passesStabilityPreFilter(formula: string, pressureGpa: number = 0): { pass: boolean; reason: string; prediction: StabilityPrediction } {
   const prediction = predictStability(formula);
+
+  // High-pressure materials (>50 GPa) bypass ambient stability checks entirely.
+  // The convex hull shifts dramatically under pressure — compounds that decompose
+  // at ambient (LaH10, H3S, CaH6) are thermodynamically stable at their operating
+  // pressure. Ambient synthesizability/decomposition scores are IRRELEVANT for
+  // high-pressure superconductors. This filter killed 5000+ valid hydride candidates
+  // including LaH10 (Tc=250K) by evaluating them at 0 GPa.
+  if (pressureGpa > 50) {
+    // Only reject at high pressure if elements are truly incompatible
+    if (prediction.details.elementCompatibility < 0.10) {
+      return {
+        pass: false,
+        reason: `incompatible elements at ${pressureGpa} GPa (compat=${prediction.details.elementCompatibility.toFixed(3)})`,
+        prediction,
+      };
+    }
+    return {
+      pass: true,
+      reason: `high-pressure bypass @${pressureGpa}GPa (ambient: ${prediction.stabilityClass}, synth=${prediction.synthesizabilityScore.toFixed(3)})`,
+      prediction,
+    };
+  }
 
   if (prediction.stabilityClass === "unstable" && prediction.synthesizabilityScore < 0.25) {
     return {

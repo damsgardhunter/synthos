@@ -864,14 +864,24 @@ class MultitaskLoss(nn.Module):
             if not mask.any(): return None
             return F.binary_cross_entropy_with_logits(logit[mask], target[mask])
 
-        # ── Tc regression (log1p normalised, direct) ─────────────────────────
+        # ── Tc regression (heteroscedastic Gaussian NLL in normalised space) ──
+        # The variance head (log_var[:, 2]) learns per-sample aleatoric
+        # uncertainty via the NLL loss: L = 0.5 * (log(var) + (y-mu)²/var).
+        # This replaces the plain MSE so the model learns WHEN it's uncertain,
+        # not just what the mean should be. Without NLL the variance head gets
+        # no gradient signal and outputs garbage.
         tc_t = targets.get("tc")
         if tc_t is not None:
             mask = (tc_t.isfinite()) & (tc_t >= 0)
             if mask.any():
                 tc_norm_pred = out.raw_out[:, 8][mask]
                 tc_norm_targ = torch.log1p(tc_t[mask] / 10.0) / TC_LOG_SCALE
-                losses["tc"] = F.mse_loss(tc_norm_pred, tc_norm_targ)
+                # Aleatoric variance in normalised space
+                tc_log_var = out.raw_log_var[:, 2][mask]
+                tc_var_norm = F.softplus(tc_log_var).clamp(min=1e-6)
+                # Gaussian NLL: trains both mean AND variance
+                nll = 0.5 * (torch.log(tc_var_norm) + (tc_norm_targ - tc_norm_pred) ** 2 / tc_var_norm)
+                losses["tc"] = nll.mean()
 
         # ── Formation energy ─────────────────────────────────────────────────
         l = mse_masked(out.formation_energy, targets.get("fe"))
