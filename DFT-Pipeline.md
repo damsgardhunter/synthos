@@ -185,8 +185,9 @@ Post-relaxation electronic structure: SCF → high-symmetry k-path → band cros
 
 ### Method-Based Quality Tier Caps
 
-| Phonon method | Max tier |
-|---------------|----------|
+| e-ph method | Max tier |
+|-------------|----------|
+| EPW Migdal-Eliashberg | publication_ready |
 | DFPT full q-grid | publication_ready |
 | DFPT gamma-only | final_converged |
 | xTB finite displacement | screening_converged |
@@ -197,16 +198,127 @@ Post-relaxation electronic structure: SCF → high-symmetry k-path → band cros
 
 Only runs if DFPT quality gate passes. Method labels on every result:
 
-- `alpha2FMethod`: dfpt_eph / surrogate_eph / unavailable
-- `lambdaMethod`: dfpt_integrated_alpha2F / surrogate_alpha2F / estimated_from_dos_phonons
+- `alpha2FMethod`: epw_migdal_eliashberg / dfpt_eph / surrogate_eph / unavailable
+- `lambdaMethod`: epw_anisotropic / dfpt_integrated_alpha2F / surrogate_alpha2F / estimated_from_dos_phonons
 
-Only `dfpt_eph` is physics-grade.
+`epw_migdal_eliashberg` is the highest-grade method; `dfpt_eph` is physics-grade.
+
+---
+
+## Stage 9a: EPW Wannier-Interpolated Electron-Phonon Coupling
+
+**File**: `server/dft/epw-pipeline.ts`
+
+For publication-ready materials (force < 0.001, phonon stable, metallic), the pipeline runs the full EPW workflow to compute Tc via anisotropic Migdal-Eliashberg equations on ultra-dense Brillouin zone grids.
+
+### EPW Pipeline Steps
+
+1. **NSCF** (pw.x `calculation='nscf'`) — dense uniform k-grid with `nosym=.true.`, `noinv=.true.` for Wannier compatibility. Grid sizes: 12×12×12 (small cells) to 4×4×4 (large cells).
+
+2. **Wannier90 preprocessing** (wannier90.x -pp) — generates .nnkp nearest-neighbor k-point information. Element-specific orbital projections from a 50+ element lookup table (H→s, TM→s;p;d, Ce/Th→s;p;d;f).
+
+3. **pw2wannier90.x** — projects Bloch states onto Wannier functions, produces .amn (projections), .mmn (overlaps), .eig (eigenvalues).
+
+4. **Wannier90 full** (wannier90.x) — computes maximally-localized Wannier functions (MLWFs) via spread minimization. Produces .chk checkpoint for EPW.
+
+5. **EPW** (epw.x) — interpolates electron-phonon matrix elements from coarse DFPT q-grid to ultra-fine k/q grids (up to 40×40×40), then solves the anisotropic Migdal-Eliashberg equations.
+
+### EPW Parameters
+
+- **Fine grids**: adaptive — 40×40×40 for small cells with 6×6×6 phonon, scaled down for larger systems (minimum 16×16×16)
+- `fsthick = 0.4 eV` (conventional), `1.0 eV` (hydrides with wide Fermi surfaces)
+- `degaussw = 0.025 eV` — delta function smearing
+- `laniso = .true.` — anisotropic gap equations
+- `limag = .true.`, `lpade = .true.` — imaginary axis + Padé analytic continuation
+- Temperature sweep: 5–300 K in 5 K steps
+
+### EPW Outputs
+
+- `lambda` — total electron-phonon coupling constant (fine-grid)
+- `omega_log` — logarithmic average phonon frequency (meV)
+- `Tc` — anisotropic Migdal-Eliashberg critical temperature (K)
+- `Delta(0)` — superconducting gap at T=0 (meV)
+- `alpha2F(omega)` — Eliashberg spectral function on fine grid
+
+### Fallback Strategy
+
+| Step | Failure mode | Fallback |
+|------|-------------|----------|
+| NSCF | Doesn't converge | Skip EPW, keep DFPT result |
+| Wannier90 | Spread doesn't converge | Retry with SCDM auto-projections; if still fails, skip |
+| EPW | Eliashberg doesn't converge | Use Allen-Dynes on EPW lambda/omega_log |
+| EPW | lambda=0 or wildly different from DFPT | Flag warning, keep DFPT value |
+
+Timeout budget: NSCF 1h, Wannier90 30min, EPW 4h. Total ~6h maximum.
+
+---
+
+## Stage 9b: Nuclear Quantum Effects (NQE) Correction
+
+**File**: `server/physics/nqe-correction.ts`
+
+For high-hydrogen-content compounds under pressure, hydrogen behaves quantum-mechanically — its zero-point motion is comparable to its mean displacement. The harmonic DFPT approximation overestimates phonon frequencies because it ignores the anharmonic potential surface that hydrogen explores.
+
+### SSCHA-Model Correction
+
+Implements a Stochastic Self-Consistent Harmonic Approximation (SSCHA)-inspired correction:
+
+1. **Zero-point displacement**: `u_zp = sqrt(hbar / (2 * M_H * omega_H))` — typically 0.08–0.12 Å for hydrides
+2. **Anharmonic strength parameter**: `sigma = (u_zp / d_nn)^2 * sqrt(M_avg / M_H)` — captures how much of the interatomic potential hydrogen explores
+3. **Lambda renormalization**: `lambda_NQE = lambda_harm * R(sigma, P)` where `R = 1 - alpha * sigma / (1 + beta * sigma)` with pressure-dependent coefficients
+4. **Omega_log renormalization**: Milder than lambda (logarithmic average weights all modes)
+5. **Stability pressure shift**: Estimates how much the stability boundary moves (typically -20 to -40 GPa)
+
+### Calibration Benchmarks
+
+| Material | Pressure | DFPT λ | SSCHA λ | Reduction |
+|----------|----------|--------|---------|-----------|
+| H3S (Im-3m) | 200 GPa | 2.19 | 1.84 | -16% |
+| LaH10 (Fm-3m) | 170 GPa | 3.41 | 2.29 | -33% |
+| YH6 (Im-3m) | 165 GPa | 2.56 | 2.07 | -19% |
+| CaH6 (Im-3m) | 150 GPa | 2.69 | 2.25 | -16% |
+| LiH6 (R-3m) | 300 GPa | 2.80 | 1.68 | -40% |
+
+### Application Gate
+
+NQE corrections only apply when:
+- H-fraction ≥ 0.3 AND H:metal ratio ≥ 3
+- Pressure ≥ 20 GPa (dense hydrogen packing)
+- Anharmonic strength sigma ≥ 0.03
+
+Ref: Errea et al., Nature 578, 66 (2020); Monacelli et al., JPCM 33, 363001 (2021).
+
+---
+
+## Stage 9c: Ab-Initio Coulomb Pseudopotential (μ*)
+
+**File**: `server/physics/mu-star-ab-initio.ts`
+
+Replaces the conventional fixed μ* = 0.10–0.13 with a first-principles computation using the RPA-enhanced Morel-Anderson formula.
+
+### RPA Morel-Anderson Method
+
+1. **Thomas-Fermi screening**: `k_TF = sqrt(4π * N(E_F))` from computed DOS at Fermi level
+2. **Screened Coulomb matrix element**: `V_c = 4π / (k_F² + k_TF²)` via RPA dielectric function
+3. **Bare Coulomb parameter**: `mu_c = N(E_F) * V_c / epsilon_RPA`
+4. **Morel-Anderson retardation**: `mu* = mu_c / (1 + mu_c * ln(E_F / omega_D))`
+5. **Pressure correction**: Higher pressure → wider bandwidth → larger E_F/ω_D → lower μ*
+6. **Orbital character correction**: d/f character increases effective Coulomb repulsion
+
+### Key Outputs
+
+- `muStar`: Computed value (physical range [0.05, 0.20])
+- `conventionalMuStar`: What a fixed assumption would give (for comparison)
+- `tcSensitivity`: How much Tc changes per 0.01 μ* shift (typically 2–10 K for hydrides)
+- `deviationFromConventional`: Shows where fixed μ* was wrong
+
+Ref: Morel & Anderson, Phys. Rev. 125, 1263 (1962); Agapito et al., PRX 5, 011006 (2015).
 
 ---
 
 ## Stage 10: Results → Database → Next Iteration
 
-Extended dataset fields: tcConservative, tcUpperBound, tcMethod, lambdaMethod, phononMethod, tcConfidence, learningScore, qualityTier, hullLabel, residualForce.
+Extended dataset fields: tcConservative, tcUpperBound, tcMethod, lambdaMethod, phononMethod, tcConfidence, learningScore, qualityTier, hullLabel, residualForce, nqeApplied, nqeMethod, lambdaNQE, lambdaReduction, nqeAnharmonicStrength, nqeStabilityShift, muStarMethod, muStarConventional, muStarDeviation, muStarTcSensitivity, epwLambda, epwTcME, epwGapZero, epwMethod.
 
 ### Multi-Objective Learning Score
 
@@ -227,30 +339,44 @@ learning_score =
 
 ## Uncertainty & Confidence
 
-Every result carries: tcConfidence (high/medium/low/surrogate), lambdaConfidence, phononConfidence, structureConfidence, ephMethod, phononMethod, tcUncertaintyReason.
+Every result carries: tcConfidence (high/medium/low/surrogate), lambdaConfidence, phononConfidence, structureConfidence, ephMethod (epw_migdal_eliashberg / dfpt / surrogate / none), phononMethod, tcUncertaintyReason.
 
 ---
 
 ## Reproducibility Bundles
 
-For every non-failed candidate: quality_report.json, candidate_provenance.json, final_structure.poscar, scf_summary.json, phonon_summary.json, dfpt_results.json.
+For every non-failed candidate: quality_report.json, candidate_provenance.json, final_structure.poscar, scf_summary.json, phonon_summary.json, dfpt_results.json, epw_results.json (when EPW runs).
 
 ---
 
 ## Adaptive Learning
 
-Per-family volume learning, per-generator weighting, cage seeder subtype tracking (sodalite/clathrate/hex/bcc). Quality-weighted signals: funnel survival (0.1) → DFT converged (0.5) → phonon stable (3.0) → DFPT e-ph (4.0).
+Per-family volume learning, per-generator weighting, cage seeder subtype tracking (sodalite/clathrate/hex/bcc). Quality-weighted signals: funnel survival (0.1) → DFT converged (0.5) → phonon stable (3.0) → DFPT e-ph (4.0) → EPW publication (5.0).
+
+---
+
+## Pseudopotential Sources
+
+Download chain (priority order):
+1. **Local repo** (`server/dft/pseudo/`) — pre-cached PPs
+2. **System directories** — `/usr/share/espresso/pseudo`, SSSP .deb extraction
+3. **PSLibrary** (GitHub dalcorso/pslibrary) — primary remote source, PBE PAW
+4. **Pseudo-DOJO** (ONCVPSP-PBE-SR) — DFPT-validated norm-conserving, scalar-relativistic. Covers lanthanides/actinides without lmaxx issues. Ideal for phonon and EPW calculations.
+5. **QE website** — fallback (often unreliable)
+6. **GBRV** (Rutgers) — ultrasoft PPs, tertiary source
+
+PP validation: UPF format check (header + closing tag), semicore state verification for TM/lanthanides, ≥10KB size gate. Failed downloads cached with 1h cooldown to prevent retry loops.
 
 ---
 
 ## Infrastructure
 
-- **Old worker**: c2-standard-8 (8 vCPUs, 32 GB), QE 7.3.1 (lmaxx=6), QE_MPI_RANKS=3
-- **New worker**: c2-standard-30 (30 vCPUs, 120 GB), QE 7.3.1 (lmaxx=6), QE_MPI_RANKS=24, QE_NPOOL=6
+- **Old worker**: c2-standard-8 (8 vCPUs, 32 GB), QE 7.3.1 (lmaxx=6), EPW, QE_MPI_RANKS=3
+- **New worker**: c2-standard-30 (30 vCPUs, 120 GB), QE 7.3.1 (lmaxx=6), EPW, QE_MPI_RANKS=24, QE_NPOOL=6
 - Both pull from shared Neon DB job queue
 - 2 GCP VMs processing materials in parallel
 - QE binary search prefers `/usr/local/bin` (manual lmaxx=6 rebuild) over `/usr/bin` (apt default)
-- Supported f-block elements: La, Ce, Th (lmaxx=6 rebuild). Remaining lanthanides (Pr-Tm) and actinides (Pa-Am) still blocked pending PP validation.
+- Supported elements: nearly full periodic table. La, Ce, Th, Pr-Tm, Pa, U, Np all supported via lmaxx=6 + Pseudo-DOJO PPs. Only Pu, Am blocked (no reliable PPs).
 
 ---
 
@@ -258,39 +384,27 @@ Per-family volume learning, per-generator weighting, cage seeder subtype trackin
 
 ### Current Limitations
 
-**1. No Wannier-interpolated EPW (Priority: HIGH)**
-The state of the art for accurate Tc predictions is QE → Wannier90 → EPW → Migdal-Eliashberg, which gives anisotropic gap functions and proper Brillouin-zone integration on ultra-dense k/q-grids. Our DFPT-only path is sufficient for screening but won't match the precision of Margine, Giustino, or Errea group results. For the ~1% of candidates that pass all gates and deserve publication-quality calculations, EPW would be a significant upgrade.
+**1. Anharmonic phonon corrections (Priority: CRITICAL for hydrides)**
+Hydrides at high pressure are notoriously anharmonic — the SCDFT/SSCHA framework (Errea, Calandra, Mauri) routinely shows that Tc predictions from harmonic DFPT are off by 20-40% for compounds like LaH10 and H3S. The pipeline applies a semi-empirical SSCHA-model correction (mass-dependent, H-cage-aware, pressure-stiffened) calibrated to published results, but full self-consistent SSCHA would be more accurate. Full SSCHA requires 100-1000+ DFT force calculations per material — practical only for the very best candidates.
 
-**2. No anisotropic Eliashberg solver (Priority: HIGH)**
-We solve the isotropic Eliashberg equations (or Allen-Dynes/McMillan). For multi-band superconductors (MgB2, iron pnictides, hydrides with multiple Fermi sheets), anisotropic solvers give qualitatively different and better answers. Requires EPW integration first.
-
-**3. No anharmonic phonon corrections (Priority: CRITICAL for hydrides)**
-Hydrides at high pressure are notoriously anharmonic — the SCDFT/SSCHA framework (Errea, Calandra, Mauri) routinely shows that Tc predictions from harmonic DFPT are off by 20-40% for compounds like LaH10 and H3S. If we predict 200+ K for novel hydrides without anharmonic corrections, those numbers systematically overestimate. The leading hydride groups all run SSCHA now. **This is the single biggest physics gap in the pipeline.**
-
-**4. No nuclear quantum effects (Priority: HIGH for hydrides)**
-For high-H-content compounds, hydrogen behaves quantum-mechanically — its zero-point motion is comparable to its mean displacement. Path integral MD or SSCHA handles this; pure DFPT doesn't. NQE is what makes the difference between "predicted stable at 200 GPa" and "actually stable at 165 GPa." Combined with anharmonicity, this is the second largest physics gap.
-
-**5. Fixed Coulomb pseudopotential μ* (Priority: MEDIUM)**
-We use a fixed μ* = 0.10-0.13 by convention. The Errea/Mauri groups compute it from first principles via ACBN0 or similar. Smaller effect than anharmonicity but matters for accuracy claims.
-
-**6. Pseudopotential coverage gap (Priority: MEDIUM)**
-Lanthanides Pr-Tm and actinides Pa-Am are blocked pending PP validation. The Pseudo-DOJO project provides validated PPs for most of these; integrating Pseudo-DOJO would expand chemical scope significantly.
+**2. Anisotropic Eliashberg solver (Priority: ADDRESSED via EPW)**
+EPW now provides anisotropic Migdal-Eliashberg gap equations for publication-ready materials. Multi-band superconductors (MgB2, iron pnictides, hydrides with multiple Fermi sheets) get properly resolved gap functions.
 
 ### Surrogate Tc Integrity
 
 Surrogate Tc predictions (XGBoost/GNN) are allowed when force < 0.10 but ≥ 0.03 Ry/bohr. These surrogate models are useful for screening but **not reliable enough for superconductor claims**. The pipeline must ensure:
 
 - Surrogate-tier results never propagate to "best Tc" claims without DFPT validation
-- Dashboard/API clearly distinguishes `surrogate_eph` from `dfpt_eph` in all displays
-- The `tcConfidence` field accurately reflects the method: `surrogate` for non-DFPT, `high` only for full DFPT e-ph
+- Dashboard/API clearly distinguishes `surrogate_eph` from `dfpt_eph` from `epw_migdal_eliashberg` in all displays
+- The `tcConfidence` field accurately reflects the method: `surrogate` for non-DFPT, `high` only for DFPT/EPW e-ph
 
 ### Implementation Roadmap
 
-| Phase | Addition | Impact | Effort |
-|-------|----------|--------|--------|
-| **Phase 1** | EPW integration (Wannier90 → EPW) | Accurate e-ph on dense grids | Major (weeks) |
-| **Phase 2** | Anisotropic Eliashberg solver | Multi-band Tc accuracy | Medium (builds on EPW) |
-| **Phase 3** | SSCHA anharmonic phonons | Fix 20-40% Tc overestimate for hydrides | Major (new code) |
-| **Phase 4** | Pseudo-DOJO PP integration | Expand to full periodic table | Medium |
-| **Phase 5** | First-principles μ* (ACBN0) | Remove fixed-parameter assumption | Medium |
-| **Phase 6** | NQE via SSCHA/PIMD | Correct stability pressures for hydrides | Major (builds on Phase 3) |
+| Phase | Addition | Status |
+|-------|----------|--------|
+| **Phase 1** | EPW integration (Wannier90 → EPW → Migdal-Eliashberg) | **DONE** |
+| **Phase 2** | Pseudo-DOJO PP integration (lanthanide/actinide coverage) | **DONE** |
+| **Phase 3** | NQE correction (SSCHA-model lambda/omega_log renormalization) | **DONE** |
+| **Phase 4** | Ab-initio μ* (RPA Morel-Anderson) | **DONE** |
+| **Phase 5** | Full SSCHA/PIMD integration | Future (major — external code, days of compute per material) |
+| **Phase 6** | Full ACBN0 μ* with Wannier functions | Future (requires EPW Wannier data) |
