@@ -31,6 +31,7 @@ import { runEPWPipeline, type EPWResult } from "./epw-pipeline";
 import { checkSSCHAEligibility, runSSCHAPipeline, type SSCHAResult } from "./sscha-pipeline";
 import { runACBN0Pipeline, type ACBN0Result } from "./acbn0-pipeline";
 import { analyzeSOCRequirement, type SOCAnalysis } from "./soc-handler";
+import { analyzeHubbardWorkflow, type HubbardWorkflowResult } from "./hubbard-workflow";
 import {
   classifyMagneticLandscape,
   shouldSearchMagneticGS,
@@ -357,6 +358,8 @@ export interface QEFullResult {
     ephMethod: "dfpt" | "surrogate" | "none";
     phononMethod: "dfpt_full" | "dfpt_gamma" | "finite_displacement" | "surrogate" | "none";
   };
+  /** Hubbard U workflow analysis (composition-aware DFT+U). */
+  hubbardWorkflow?: HubbardWorkflowResult;
   /** Spin-orbit coupling analysis for this material. */
   socAnalysis?: SOCAnalysis;
   /** Magnetic ground-state search results (FM/AFM/NM comparison). */
@@ -1641,7 +1644,7 @@ function autoKPoints(
   minK: number = 4,
   dimensionality?: string,
   kspacing: number = DEFAULT_KSPACING,
-  adaptiveOpts?: { stage?: "relax" | "vc-relax" | "scf" | "phonon"; isMetallic?: boolean; totalAtoms?: number },
+  adaptiveOpts?: { stage?: "relax" | "vc-relax" | "scf" | "phonon"; isMetallic?: boolean; totalAtoms?: number; publicationReady?: boolean },
 ): string {
   // Density-based k-point grid: n_i = ceil(2π / (kspacing * a_i)).
   // kspacing=0.157 Å⁻¹ ≈ densityFactor=40 (legacy); aiida's "fast" protocol
@@ -1660,6 +1663,11 @@ function autoKPoints(
       case "scf":      effectiveKspacing = adaptiveOpts.isMetallic ? 0.20 : 0.25; break;
       case "phonon":   effectiveKspacing = 0.25; break;
     }
+  }
+  // Publication-tier densification: when residual force indicates publication
+  // quality, N(E_F) accuracy matters for λ and μ* — use tighter kspacing.
+  if (adaptiveOpts?.publicationReady && adaptiveOpts.stage === "scf") {
+    effectiveKspacing = adaptiveOpts.isMetallic ? 0.15 : 0.20; // aiida "moderate" for metals
   }
   // Metallicity boost: metals need denser k-grids for Fermi surface resolution
   if (adaptiveOpts?.isMetallic && !adaptiveOpts?.stage) {
@@ -3482,7 +3490,7 @@ function generateVCRelaxInput(
   positions: Array<{ element: string; x: number; y: number; z: number }>,
   pressureGPa: number = 0,
   nstepOverride?: number,
-  opts?: { socFlags?: string; forceNspin?: 1 | 2; forceMagBlock?: string },
+  opts?: { socFlags?: string; forceNspin?: 1 | 2; forceMagBlock?: string; hubbardBlock?: string },
 ): string {
   const totalAtoms = positions.length;
   const nTypes = elements.length;
@@ -3577,7 +3585,7 @@ function generateVCRelaxInput(
   smearing = 'mv',
   degauss = ${vcRelaxDegauss},
   nspin = ${nspin},
-${socLinesVcr}${magLines}/
+${socLinesVcr}${magLines}${opts?.hubbardBlock ?? ""}/
 &ELECTRONS
   electron_maxstep = 300,
   conv_thr = 1.0d-7,
@@ -4152,9 +4160,28 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     const magSearchDecision = shouldSearchMagneticGS(elements, counts);
     if (magSearchDecision.shouldSearch) {
       console.log(`[QE-Worker] Magnetic ground-state search warranted for ${formula}: ${magSearchDecision.reason}`);
-      // The actual search (multiple SCF trials) happens during Stage 1 relaxation
-      // where we can compare energies from different magnetic orderings.
-      // classifyMagneticLandscape() provides the trial configs.
+    }
+
+    // --- Hubbard U workflow: composition-aware DFT+U for d/f electron systems ---
+    let hubbardResult: HubbardWorkflowResult | undefined;
+    try {
+      const corrEffects = await estimateCorrelationEffects(formula, {});
+      hubbardResult = analyzeHubbardWorkflow(
+        formula, elements, counts,
+        corrEffects.regime.regime,
+        corrEffects.materialPatterns,
+      );
+      result.hubbardWorkflow = hubbardResult;
+      if (hubbardResult.applyDFTplusU) {
+        result.qeDFTPlusU = true;
+        result.dftPlusUTcModifier = corrEffects.tcModifier;
+        console.log(`[QE-Worker] DFT+U workflow for ${formula}: ${hubbardResult.correlatedSiteCount} sites, ` +
+          `regime=${hubbardResult.correlationRegime}, ` +
+          `vcRelax=${hubbardResult.applyToVCRelax}, phonons=${hubbardResult.applyToPhonons}, ` +
+          `sites=[${hubbardResult.sites.filter(s => s.needsU).map(s => `${s.element}:U=${s.uEffective}(${s.source})`).join(", ")}]`);
+      }
+    } catch (corrErr: any) {
+      console.log(`[QE-Worker] Hubbard workflow analysis failed for ${formula}: ${(corrErr.message || "").slice(0, 100)}`);
     }
 
     // --- Vegard's law enhanced lattice estimation ---
@@ -5245,6 +5272,7 @@ ${cellBlockEos}
         socFlags: socAnalysis?.enableFullSOC ? socAnalysis.qeSystemFlags : undefined,
         forceNspin: result.magneticGroundState?.winningNspin,
         forceMagBlock: result.magneticGroundState?.winningMagBlock || undefined,
+        hubbardBlock: hubbardResult?.applyToVCRelax ? hubbardResult.qeSystemBlock : undefined,
       });
       const vcFile = path.join(jobDir, "vc_relax.in");
       fs.writeFileSync(vcFile, vcInput);
@@ -5532,38 +5560,23 @@ ${cellBlockEos}
       }
     }
 
-    // --- DFT+U detection for strongly-correlated materials ---
+    // --- DFT+U for correlated materials (uses Hubbard workflow from earlier analysis) ---
     let dftPlusULines = "";
     let dftPlusUNspin2 = false;
-    try {
-      const corrEffects = await estimateCorrelationEffects(formula, {});
-      const regime = corrEffects.regime.regime;
-      if (regime === "strongly-correlated" || regime === "Mott-proximate") {
-        const hubbardParts: string[] = ["  lda_plus_u = .true.,\n", "  lda_plus_u_kind = 0,\n"];
+    if (hubbardResult?.applyDFTplusU) {
+      dftPlusULines = hubbardResult.qeSystemBlock;
+      // For magnetic correlated materials (cuprates, pnictides), force nspin=2
+      const isMagCorrMat = hubbardResult.materialPatterns.some(p =>
+        p.includes("cuprate") || p.includes("Fe-pnictide"));
+      if (isMagCorrMat) {
+        dftPlusUNspin2 = true;
         for (let i = 0; i < elements.length; i++) {
-          const u = getHubbardU(elements[i]);
-          if (u != null && u > 0) {
-            hubbardParts.push(`  Hubbard_U(${i + 1}) = ${u.toFixed(1)},\n`);
+          const site = hubbardResult.sites[i];
+          if (site && site.uEffective > 0) {
+            dftPlusULines += `  starting_magnetization(${i + 1}) = 0.5,\n`;
           }
         }
-        dftPlusULines = hubbardParts.join("");
-        const isMagCorrMat = corrEffects.materialPatterns.some(p =>
-          p.includes("cuprate") || p.includes("Fe-pnictide"));
-        if (isMagCorrMat) {
-          dftPlusUNspin2 = true;
-          for (let i = 0; i < elements.length; i++) {
-            const u = getHubbardU(elements[i]);
-            if (u != null && u > 0) {
-              dftPlusULines += `  starting_magnetization(${i + 1}) = 0.5,\n`;
-            }
-          }
-        }
-        result.qeDFTPlusU = true;
-        result.dftPlusUTcModifier = corrEffects.tcModifier;
-        console.log(`[QE-Worker] DFT+U enabled for ${formula}: regime=${regime}, patterns=${corrEffects.materialPatterns.join(",")}, tcModifier=${corrEffects.tcModifier.toFixed(3)}`);
       }
-    } catch (corrErr: any) {
-      console.log(`[QE-Worker] Correlation detection skipped for ${formula}: ${(corrErr.message || "").slice(0, 100)}`);
     }
 
     // TSC jobs (submitted with jobType="scf_tsc" or opts.forceSpin) require
