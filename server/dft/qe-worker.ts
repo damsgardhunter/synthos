@@ -4456,6 +4456,16 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       latticeA = estimateLatticeConstant(elements, counts, workerPressure);
       console.log(`[QE-Worker] Using volume-sum lattice for ${formula}: ${latticeA.toFixed(3)} A (Vegard conf=${vegardResult?.confidence?.toFixed(2) ?? "N/A"})`);
     }
+    // For known structures with explicit lattice parameters, override the Vegard estimate.
+    // Vegard produces a cubic-equivalent lattice (e.g., 13.885 Å for Bi2212) but the
+    // fractional coordinates from the known-structure database assume the real cell
+    // (a=3.81, c=30.89 Å). Using the wrong lattice with the right positions = atom overlaps.
+    const ksOverride = lookupKnownStructure(formula);
+    if (ksOverride && ksOverride.latticeA > 0) {
+      const vegardA = latticeA;
+      latticeA = ksOverride.latticeA;
+      console.log(`[QE-Worker] Using known structure for ${formula} (${ksOverride.atoms.length} atoms, ${ksOverride.spaceGroup}, a=${ksOverride.latticeA.toFixed(2)} Å${ksOverride.latticeC ? `, c=${ksOverride.latticeC.toFixed(2)} Å` : ""}) — overrides Vegard a=${vegardA.toFixed(3)} Å`);
+    }
     result.initialLatticeA = latticeA;
 
     if (workerPressure > 0) {
@@ -4509,8 +4519,13 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     let skipXtb = false;
     const knownStruct = formula ? lookupKnownStructure(formula) : null;
     if (knownStruct && positions.length === knownStruct.atoms.length) {
-      // Check distances at the ACTUAL DFT lattice (not the compressed xTB lattice)
-      const dftLattice = knownStruct.latticeA;
+      // Check distances at the ACTUAL DFT lattice using anisotropic cell dimensions.
+      // For tetragonal/orthorhombic cells (cuprates, layered), c ≠ a so dz must
+      // be scaled by c, not a. Without this, Bi2212 (c/a=8.1) reports O-O=0.12 Å
+      // when the real distance is 3+ Å.
+      const dftA = knownStruct.latticeA;
+      const dftB = knownStruct.latticeB ?? dftA;
+      const dftC = knownStruct.latticeC ?? dftA;
       let minDist = Infinity;
       let minPair = "";
       for (let i = 0; i < positions.length; i++) {
@@ -4519,7 +4534,7 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
           let dy = positions[i].y - positions[j].y;
           let dz = positions[i].z - positions[j].z;
           dx -= Math.round(dx); dy -= Math.round(dy); dz -= Math.round(dz);
-          const dist = Math.sqrt((dx * dftLattice) ** 2 + (dy * dftLattice) ** 2 + (dz * dftLattice) ** 2);
+          const dist = Math.sqrt((dx * dftA) ** 2 + (dy * dftB) ** 2 + (dz * dftC) ** 2);
           if (dist < minDist) { minDist = dist; minPair = `${positions[i].element}-${positions[j].element}`; }
         }
       }
@@ -4531,9 +4546,9 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       if (minDist >= distThreshold) {
         skipXtb = true;
         result.xtbPreRelaxed = true;
-        console.log(`[QE-Worker] Known-structure positions validated for ${formula}: minDist=${minDist.toFixed(3)} Å [${minPair}] at DFT lattice ${dftLattice.toFixed(2)} Å — skipping xTB (literature Wyckoff positions are DFT-quality)`);
+        console.log(`[QE-Worker] Known-structure positions validated for ${formula}: minDist=${minDist.toFixed(3)} Å [${minPair}] at DFT cell ${dftA.toFixed(2)}×${dftB.toFixed(2)}×${dftC.toFixed(2)} Å — skipping xTB (literature Wyckoff positions are DFT-quality)`);
       } else {
-        console.log(`[QE-Worker] Known-structure distance check: ${minPair}=${minDist.toFixed(3)} Å < ${distThreshold.toFixed(2)} Å at DFT lattice — proceeding to xTB`);
+        console.log(`[QE-Worker] Known-structure distance check: ${minPair}=${minDist.toFixed(3)} Å < ${distThreshold.toFixed(2)} Å at DFT cell ${dftA.toFixed(2)}×${dftB.toFixed(2)}×${dftC.toFixed(2)} Å — proceeding to xTB`);
       }
     }
 
