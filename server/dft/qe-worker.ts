@@ -37,6 +37,9 @@ import {
   shouldSearchMagneticGS,
   selectMagneticGroundState,
   parseMagnetizationFromOutput,
+  buildCantedNoncollinearTrial,
+  TRIAGE_CONV_THR,
+  TIGHT_CONV_THR,
   type MagneticGroundStateResult,
   type MagneticTrialResult,
 } from "./magnetic-ground-state";
@@ -3368,7 +3371,7 @@ function generateSCFInputWithParams(
   counts: Record<string, number>,
   latticeA: number,
   positions: Array<{ element: string; x: number; y: number; z: number }>,
-  params: { mixingBeta: number; maxSteps: number; diag: string; smearing?: string; degauss?: number; ecutwfcBoost?: number; convThr?: string; forcConvThr?: string; etotConvThr?: string; dftPlusULines?: string; dftPlusUNspin2?: boolean; mixingMode?: string; mixingNdim?: number; startingwfc?: string; startingpot?: string; diagoThrInit?: string; restartFromScratch?: boolean; maxSecondsOverride?: number; socFlags?: string; forceNspin?: 1 | 2; forceMagBlock?: string },
+  params: { mixingBeta: number; maxSteps: number; diag: string; smearing?: string; degauss?: number; ecutwfcBoost?: number; convThr?: string; forcConvThr?: string; etotConvThr?: string; dftPlusULines?: string; dftPlusUNspin2?: boolean; mixingMode?: string; mixingNdim?: number; startingwfc?: string; startingpot?: string; diagoThrInit?: string; restartFromScratch?: boolean; maxSecondsOverride?: number; socFlags?: string; forceNspin?: 1 | 2; forceMagBlock?: string; forceNoncolin?: boolean },
 ): string {
   const totalAtoms = positions.length;
   const nTypes = elements.length;
@@ -3417,7 +3420,8 @@ function generateSCFInputWithParams(
   // and uses 4-component spinors internally. We still emit nspin=1 in the input
   // because QE requires it to be absent or 1 when noncolin is set.
   const hasSOC = !!(params.socFlags);
-  const useNspin2 = !hasSOC && ((params.dftPlusUNspin2 ?? false) || (params.forceNspin === 2) || broadMagnetic);
+  const hasNoncolin = !!(params.forceNoncolin);
+  const useNspin2 = !hasSOC && !hasNoncolin && ((params.dftPlusUNspin2 ?? false) || (params.forceNspin === 2) || broadMagnetic);
   // When DFT+U nspin2 is set, starting_magnetization is already embedded in dftPlusULines
   // When forceMagBlock is provided (from magnetic ground-state search), use it directly
   const magBlock = params.forceMagBlock
@@ -3428,7 +3432,11 @@ function generateSCFInputWithParams(
   const hubbardBlock = params.dftPlusULines ?? "";
   const socBlock = params.socFlags ?? "";
 
-  const nspinOut = hasSOC ? 1 : (useNspin2 ? 2 : (params.forceNspin ?? 1));
+  // When noncolin=.true., QE ignores nspin — emit nspin=1 or omit it.
+  // forceNoncolin (from magnetic ground-state search non-collinear trials)
+  // behaves same as SOC noncolin — 4-component spinors, angle1/angle2 format.
+  const nspinOut = (hasSOC || hasNoncolin) ? 1 : (useNspin2 ? 2 : (params.forceNspin ?? 1));
+  const noncolinBlock = hasNoncolin ? "  noncolin = .true.,\n" : "";
   const nbnd = computeNbnd(elements, counts, nspinOut, positions);
   // restart_mode='restart' on retry attempts 2+ preserves the partial SCF
   // charge density from the previous wall-time-killed attempt instead of
@@ -3461,7 +3469,7 @@ function generateSCFInputWithParams(
   smearing = '${smearing}',
   degauss = ${degauss},
   nspin = ${nspinOut},
-${socBlock}${magBlock}${hubbardBlock}/
+${socBlock}${noncolinBlock}${magBlock}${hubbardBlock}/
 &ELECTRONS
   electron_maxstep = ${params.maxSteps},
   conv_thr = ${convThr},
@@ -4182,6 +4190,74 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       }
     } catch (corrErr: any) {
       console.log(`[QE-Worker] Hubbard workflow analysis failed for ${formula}: ${(corrErr.message || "").slice(0, 100)}`);
+    }
+
+    // --- Pre-relax ACBN0: compute U from first principles BEFORE vc-relax ---
+    // For strongly-correlated materials, running a quick single-iteration
+    // ACBN0 (coarse grid, 1 SCF + 1 hp.x) on the unrelaxed structure gives
+    // first-principles U values for the vc-relax, instead of optimizing the
+    // geometry against literature U guesses and only correcting afterward.
+    // This costs ~20-30 min extra but produces a self-consistent structure.
+    if (hubbardResult?.applyToVCRelax &&
+        hubbardResult.correlationRegime !== "moderately-correlated" &&
+        hubbardResult.correlatedSiteCount > 0) {
+      try {
+        console.log(`[QE-Worker] Pre-relax ACBN0 for ${formula}: computing first-principles U before vc-relax`);
+        const prePrefix = formula.replace(/[^a-zA-Z0-9]/g, "") + "_preU";
+        const preCOverA = estimateCOverA(elements, counts);
+        const preBOverA = estimateBOverA(elements, counts);
+        const preACBN0 = await runACBN0Pipeline(
+          formula, elements, counts, positions, latticeA, jobDir, workerPressure,
+          {
+            ecutwfc: computeEcutwfc(elements, 0, 80, 45),
+            ecutrho: computeEcutwfc(elements, 0, 80, 45) * ecutrhoMultiplier(elements),
+            pseudoDir: QE_PSEUDO_DIR_INPUT,
+            prefix: prePrefix,
+            initialU: Object.fromEntries(hubbardResult.sites.filter(s => s.needsU).map(s => [s.element, s.uEffective])),
+            maxSCFIterations: 1, // single pass — coarse is fine pre-relax
+            cellParameters: generateCellParameters(latticeA, preCOverA, 0, preBOverA, elements, counts),
+          },
+          {
+            runQEBinary: (binary, inputFile, cwd, timeoutMs) => runQECommand(binary, inputFile, cwd, timeoutMs),
+            getPseudoDirInput: () => QE_PSEUDO_DIR_INPUT,
+            resolvePPFilename,
+          },
+        );
+
+        if (preACBN0 && Object.keys(preACBN0.hubbardU).some(el => preACBN0.hubbardU[el] > 0)) {
+          let anyChanged = false;
+          for (const site of hubbardResult.sites) {
+            const hpU = preACBN0.hubbardU[site.element];
+            if (hpU != null && hpU > 0 && Math.abs(hpU - site.uEffective) > 0.2) {
+              console.log(`[QE-Worker] Pre-relax U for ${site.element}: ${site.uEffective.toFixed(1)} -> ${hpU.toFixed(1)} eV (hp.x)`);
+              site.uEffective = hpU;
+              site.source = "material-specific";
+              anyChanged = true;
+            }
+          }
+          if (anyChanged) {
+            // Rebuild the QE system block with updated U values
+            let newBlock = "  lda_plus_u = .true.,\n";
+            newBlock += `  lda_plus_u_kind = ${hubbardResult.hubbardKind},\n`;
+            for (const site of hubbardResult.sites) {
+              if (site.uEffective > 0) {
+                newBlock += `  Hubbard_U(${site.speciesIndex}) = ${site.uEffective.toFixed(1)},\n`;
+                if (hubbardResult.hubbardKind === 1 && site.hunds > 0) {
+                  newBlock += `  Hubbard_J(1,${site.speciesIndex}) = ${site.hunds.toFixed(2)},\n`;
+                }
+              }
+            }
+            hubbardResult.qeSystemBlock = newBlock;
+            hubbardResult.notes.push(
+              `Pre-relax ACBN0: U values updated from hp.x linear response before vc-relax. ` +
+              `Geometry will optimize on the self-consistent potential. ` +
+              `Ref: Cococcioni & de Gironcoli, PRB 71, 035105 (2005).`
+            );
+          }
+        }
+      } catch (preErr: any) {
+        console.log(`[QE-Worker] Pre-relax ACBN0 failed for ${formula}: ${(preErr.message || "").slice(0, 150)} — using literature U values`);
+      }
     }
 
     // --- Vegard's law enhanced lattice estimation ---
@@ -5186,7 +5262,7 @@ ${cellBlockEos}
     // Runs short SCF trials with different spin orderings BEFORE the expensive
     // vc-relax, so phonons are computed on the correct magnetic state.
     if (magSearchDecision.shouldSearch && !result.vcRelaxed) {
-      const magConfigs = classifyMagneticLandscape(elements, counts);
+      const magConfigs = classifyMagneticLandscape(elements, counts, socAnalysis?.enableFullSOC ?? false);
       if (magConfigs.length >= 2) {
         console.log(`[QE-Worker] Running magnetic ground-state search for ${formula}: ${magConfigs.length} orderings (${magConfigs.map(c => c.ordering).join(", ")})`);
         const magTrials: MagneticTrialResult[] = [];
@@ -5196,14 +5272,15 @@ ${cellBlockEos}
           try {
             const magInput = generateSCFInputWithParams(formula, elements, counts, latticeA, positions, {
               mixingBeta: 0.3,
-              maxSteps: 80, // short trial — just enough to converge energy
+              maxSteps: 120, // increased from 80 — tighter conv_thr needs more steps
               diag: "david",
               smearing: "mv",
               degauss: 0.02,
-              convThr: "1.0d-5",
-              forceNspin: config.nspin === 1 ? 1 : 2,
+              convThr: config.convThr ? `${config.convThr}` : "1.0d-6", // tightened from 1e-5
+              forceNspin: config.noncolin ? 2 : (config.nspin === 1 ? 1 : 2),
               forceMagBlock: config.magnetizationBlock,
-              maxSecondsOverride: 600, // 10 min cap per trial
+              forceNoncolin: config.noncolin ?? false,
+              maxSecondsOverride: 900, // 15 min cap (non-collinear trials are slower)
             });
             const magFile = path.join(jobDir, `mag_trial_${config.ordering}.in`);
             fs.writeFileSync(magFile, magInput);
@@ -7036,15 +7113,26 @@ ${r2Cell}
     }
 
     // --- SSCHA Anharmonic Phonon Corrections ---
-    // Only for publication-ready hydrides where anharmonicity is significant.
-    if (publicationForce && phononPhysicallyStable && checkSSCHAEligibility({
-      formula, elements, counts, residualForce: residualForce ?? 999, pressure: workerPressure,
-    })) {
+    // Triggers on any system with anharmonicity indicators, not just hydrides.
+    const sschaLowestAcoustic = result.phonon?.frequencies?.length
+      ? Math.min(...result.phonon.frequencies.filter((f: number) => f > 0))
+      : undefined;
+    const sschaGate = checkSSCHAEligibility({
+      maxForce: residualForce ?? 999, elements, counts, pressureGPa: workerPressure,
+      lowestAcousticFreq: sschaLowestAcoustic,
+      anharmonicityIndex: result.phonon?.anharmonicityIndex,
+      softModeScore: result.phonon?.softModeScore,
+    });
+    if (publicationForce && phononPhysicallyStable && sschaGate.eligible) {
       try {
-        console.log(`[QE-Worker] ${formula} qualifies for SSCHA anharmonic corrections`);
+        console.log(`[QE-Worker] ${formula} qualifies for SSCHA: ${sschaGate.reason}`);
         const harmonicLambda = result.epw?.lambda ?? (result.dfpt as any)?.lambda ?? null;
         const harmonicOmegaLog = result.epw?.omegaLog ?? result.phonon?.omegaLog ?? null;
         const prefix = formula.replace(/[^a-zA-Z0-9]/g, "");
+        // Adaptive nConfigs: scale with cell size (more atoms = more configs needed)
+        // Errea group typically uses 100-500. 50 is noise-dominated for larger cells.
+        // Rule: 100 base, +50 per 4 atoms above 4, capped at 500.
+        const sschaNConfigs = Math.min(500, Math.max(100, 100 + Math.floor((positions.length - 4) / 4) * 50));
         result.sscha = await runSSCHAPipeline(
           formula, elements, counts, positions, latticeA, jobDir, workerPressure,
           harmonicLambda, harmonicOmegaLog,
@@ -7054,7 +7142,7 @@ ${r2Cell}
             pseudoDir: QE_PSEUDO_DIR_INPUT,
             prefix,
             temperature: 300,
-            nConfigs: 50, // start conservative
+            nConfigs: sschaNConfigs,
           },
         );
         if (result.sscha?.converged) {
@@ -7093,7 +7181,33 @@ ${r2Cell}
           },
         );
         if (result.acbn0?.converged) {
-          console.log(`[QE-Worker] ACBN0 complete for ${formula}: μ*=${result.acbn0.muStar.toFixed(4)} (conventional=${result.acbn0.muStarConventional?.toFixed(4) ?? "N/A"}, deviation=${((result.acbn0.muStar - (result.acbn0.muStarConventional ?? 0.1)) * 100).toFixed(1)}%)`);
+          const conventionalMu = 0.10; // standard convention
+          console.log(`[QE-Worker] ACBN0 complete for ${formula}: μ*=${result.acbn0.muStar.toFixed(4)} (conventional=${conventionalMu}, deviation=${((result.acbn0.muStar - conventionalMu) * 100).toFixed(1)}%, method=${result.acbn0.method})`);
+
+          // Feed self-consistent U values back into the Hubbard workflow result
+          // so downstream consumers (learning, dataset) get the first-principles values
+          if (result.hubbardWorkflow && Object.keys(result.acbn0.hubbardU).length > 0) {
+            const scU = result.acbn0.hubbardU;
+            let updated = 0;
+            for (const site of result.hubbardWorkflow.sites) {
+              if (scU[site.element] != null && scU[site.element] > 0) {
+                const oldU = site.uEffective;
+                site.uEffective = scU[site.element];
+                site.source = "material-specific"; // promoted from hp.x
+                updated++;
+                if (Math.abs(oldU - site.uEffective) > 0.3) {
+                  console.log(`[QE-Worker] Self-consistent U for ${site.element}: ${oldU.toFixed(1)} -> ${site.uEffective.toFixed(1)} eV (from hp.x)`);
+                }
+              }
+            }
+            if (updated > 0) {
+              result.hubbardWorkflow.notes.push(
+                `Self-consistent U from ACBN0/hp.x applied to ${updated} site(s): ` +
+                `${Object.entries(scU).filter(([, v]) => v > 0).map(([k, v]) => `${k}=${v.toFixed(2)} eV`).join(", ")}. ` +
+                `Ref: Timrov et al., PRB 98, 085127 (2018).`
+              );
+            }
+          }
         }
       } catch (acbn0Err: any) {
         console.log(`[QE-Worker] ACBN0 failed for ${formula}: ${(acbn0Err.message ?? "").slice(0, 200)}`);
@@ -7111,7 +7225,7 @@ ${r2Cell}
     const hasGammaOnly = phononHasResults && result.phonon!.frequencies.length < 10 && result.phonon!.frequencies.length > 0;
 
     const tcConfidence: "high" | "medium" | "low" | "surrogate" =
-      hasEPW && result.epw!.converged ? "high" :
+      (hasEPW && result.epw!.converged) || (hasSSCHA && hasDFPT) ? "high" :
       hasDFPT && dfptGatePass ? "high" :
       hasFullPhonon && qualityGatePass ? "medium" :
       scfConverged && isMetallicForTc ? "low" : "surrogate";
@@ -7130,8 +7244,11 @@ ${r2Cell}
       result.vcRelaxed && scfForceOkDFPT && scfPressureOk ? "high" :
       scfConverged ? "medium" : "low";
 
-    const ephMethod: "epw_migdal_eliashberg" | "dfpt" | "surrogate" | "none" =
-      hasEPW ? "epw_migdal_eliashberg" : hasDFPT ? "dfpt" : "surrogate";
+    const hasSSCHA = result.sscha != null && result.sscha.converged;
+    const hasACBN0 = result.acbn0 != null && result.acbn0.converged;
+
+    const ephMethod: "dfpt" | "surrogate" | "none" =
+      hasDFPT ? "dfpt" : "surrogate";
 
     const phononMethod: "dfpt_full" | "dfpt_gamma" | "finite_displacement" | "surrogate" | "none" =
       hasFullPhonon ? "dfpt_full" :
@@ -7147,6 +7264,10 @@ ${r2Cell}
     else tcReasons.push("SCF partial/failed");
     if (!scfForceOkScreening) tcReasons.push(`high force (${result.scf?.totalForce?.toFixed(3)} > 0.10)`);
     if (!scfPressureOk) tcReasons.push(`high pressure (${result.scf?.pressure?.toFixed(1)} kbar)`);
+    if (hasEPW) tcReasons.push("EPW Migdal-Eliashberg");
+    if (hasSSCHA) tcReasons.push("SSCHA anharmonic corrections");
+    if (hasACBN0) tcReasons.push(`ACBN0 μ*=${result.acbn0!.muStar.toFixed(3)}`);
+    if (result.qeDFTPlusU) tcReasons.push("DFT+U applied");
 
     result.uncertainty = {
       tcConfidence,
