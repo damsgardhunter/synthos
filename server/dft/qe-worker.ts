@@ -27,6 +27,7 @@ import {
   type ElectronPhononCoupling,
 } from "../learning/physics-engine";
 import { generateStructureCandidates, vegardEstimate, type StructureCandidate, type VegardEstimate } from "./vegard-lattice";
+import { runEPWPipeline, type EPWResult } from "./epw-pipeline";
 import { lookupKnownStructure, getKnownStructureFormulas } from "../learning/known-structures";
 import { airssEngine } from "../csp/airss-wrapper";
 import { pyxtalEngine } from "../csp/pyxtal-wrapper";
@@ -276,6 +277,7 @@ export interface QEFullResult {
   phonon: QEPhononResult | null;
   bandStructure: DFTBandStructureResult | null;
   dfpt?: QEDFPTResult;
+  epw?: import("./epw-pipeline").EPWResult;
   wallTimeTotal: number;
   error: string | null;
   retryCount?: number;
@@ -6820,21 +6822,65 @@ ${r2Cell}
       console.log(`[QE-Worker] ${formula} DFPT EPC skipped — phonon produced 0 modes (timeout/crash), no data to build on`);
     }
 
+    // --- EPW Wannier-interpolated electron-phonon coupling ---
+    // Only for publication-ready materials: force < 0.001, phonon stable, metallic.
+    // EPW interpolates e-ph matrix elements from the coarse DFPT q-grid to ultra-fine
+    // k/q grids, then solves the anisotropic Migdal-Eliashberg equations for Tc.
+    const publicationForce = residualForce != null && residualForce < 0.001;
+    if (scfUsable && dfptGatePass && publicationForce && phononPhysicallyStable && !opts?.skipEph) {
+      try {
+        const phForceEPW = result.scf?.totalForce ?? 999;
+        const [epwQGrid] = autoPhononQGrid(elements, positions.length, phForceEPW);
+        const epwCOverA = estimateCOverA(elements, counts);
+        const epwBOverA = estimateBOverA(elements, counts);
+
+        console.log(`[QE-Worker] ${formula} qualifies for EPW pipeline (force=${residualForce?.toFixed(6)}, phonon stable, metallic)`);
+        result.epw = await runEPWPipeline(
+          formula, elements, counts, positions, latticeA, jobDir, workerPressure,
+          {
+            fermiEnergy: result.scf!.fermiEnergy!,
+            ecutwfc: computeEcutwfc(elements, 0, 80, 45),
+            ecutrho: computeEcutwfc(elements, 0, 80, 45) * ecutrhoMultiplier(elements),
+            phononQGrid: [epwQGrid, epwQGrid, epwQGrid] as [number, number, number],
+            cellParameters: generateCellParameters(latticeA, epwCOverA, 0, epwBOverA, elements, counts),
+          },
+          {
+            runQEBinary: (binary, inputFile, cwd, timeoutMs) => runQECommand(binary, inputFile, cwd, timeoutMs),
+            getPseudoDirInput: () => QE_PSEUDO_DIR_INPUT,
+            resolvePPFilename,
+          },
+        );
+
+        if (result.epw && result.epw.lambda > 0) {
+          console.log(`[QE-Worker] EPW complete for ${formula}: λ=${result.epw.lambda.toFixed(3)}, Tc(ME)=${result.epw.tcMigdalEliashberg.toFixed(1)} K, Tc(AD)=${result.epw.tcAllenDynes.toFixed(1)} K`);
+        } else {
+          console.log(`[QE-Worker] EPW returned no usable e-ph coupling for ${formula}`);
+        }
+      } catch (epwErr: any) {
+        console.log(`[QE-Worker] EPW pipeline failed for ${formula}: ${(epwErr.message ?? "").slice(0, 200)}`);
+      }
+    } else if (publicationForce && !phononPhysicallyStable) {
+      console.log(`[QE-Worker] ${formula} has publication-ready force but unstable phonons — EPW skipped`);
+    }
+
     // --- Populate quality gate and uncertainty fields ---
     result.qualityGatePassed = qualityGatePass;
     result.qualityGateReasons = qualityGateReason;
 
     // Determine uncertainty/confidence for each result dimension
     const hasDFPT = result.dfpt != null && (result.dfpt as any).lambda > 0;
+    const hasEPW = result.epw != null && result.epw.lambda > 0;
     const hasFullPhonon = phononHasResults && result.phonon!.frequencies.length >= 10;
     const hasGammaOnly = phononHasResults && result.phonon!.frequencies.length < 10 && result.phonon!.frequencies.length > 0;
 
     const tcConfidence: "high" | "medium" | "low" | "surrogate" =
+      hasEPW && result.epw!.converged ? "high" :
       hasDFPT && dfptGatePass ? "high" :
       hasFullPhonon && qualityGatePass ? "medium" :
       scfConverged && isMetallicForTc ? "low" : "surrogate";
 
     const lambdaConfidence: "high" | "medium" | "low" | "surrogate" =
+      hasEPW ? "high" :
       hasDFPT ? "high" :
       hasFullPhonon ? "medium" : "surrogate";
 
@@ -6847,8 +6893,8 @@ ${r2Cell}
       result.vcRelaxed && scfForceOkDFPT && scfPressureOk ? "high" :
       scfConverged ? "medium" : "low";
 
-    const ephMethod: "dfpt" | "surrogate" | "none" =
-      hasDFPT ? "dfpt" : "surrogate";
+    const ephMethod: "epw_migdal_eliashberg" | "dfpt" | "surrogate" | "none" =
+      hasEPW ? "epw_migdal_eliashberg" : hasDFPT ? "dfpt" : "surrogate";
 
     const phononMethod: "dfpt_full" | "dfpt_gamma" | "finite_displacement" | "surrogate" | "none" =
       hasFullPhonon ? "dfpt_full" :
