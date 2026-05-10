@@ -7221,6 +7221,8 @@ ${r2Cell}
     // Determine uncertainty/confidence for each result dimension
     const hasDFPT = result.dfpt != null && (result.dfpt as any).lambda > 0;
     const hasEPW = result.epw != null && result.epw.lambda > 0;
+    const hasSSCHA = result.sscha != null && result.sscha.converged;
+    const hasACBN0 = result.acbn0 != null && result.acbn0.converged;
     const hasFullPhonon = phononHasResults && result.phonon!.frequencies.length >= 10;
     const hasGammaOnly = phononHasResults && result.phonon!.frequencies.length < 10 && result.phonon!.frequencies.length > 0;
 
@@ -7243,9 +7245,6 @@ ${r2Cell}
     const structureConfidence: "high" | "medium" | "low" =
       result.vcRelaxed && scfForceOkDFPT && scfPressureOk ? "high" :
       scfConverged ? "medium" : "low";
-
-    const hasSSCHA = result.sscha != null && result.sscha.converged;
-    const hasACBN0 = result.acbn0 != null && result.acbn0.converged;
 
     const ephMethod: "dfpt" | "surrogate" | "none" =
       hasDFPT ? "dfpt" : "surrogate";
