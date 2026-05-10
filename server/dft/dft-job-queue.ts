@@ -911,20 +911,46 @@ let lastStaleCleanup = 0;
 // High-priority compounds that must always be at the front of the queue.
 // These are submitted at priority 9999 on startup if not already running/completed.
 const CRITICAL_PRIORITY_FORMULAS: string[] = [
-  // Novel hydrides — CSP must discover structures independently (no known-structures override)
-  "Li2LaH12", "LaH11Li2", "LaH12", "YH9Na2",
-  // Predicted hydrides — removed from known-structures, need full CSP discovery
-  "SrH6", "LaH6", "ScH6", "ScH9", "BaH6", "MgH6", "ThH9",
-  // Binary high-P hydrides (benchmark superconductors, experimentally verified)
+  // ── Highest-Tc ambient-pressure superconductors ──
+  "HgBa2Ca2Cu3O8",   // Tc≈134K — WORLD RECORD ambient SC
+  "HgBa2CaCu2O6",    // Tc≈127K — highest confirmed ambient SC
+  "Bi2Sr2Ca2Cu3O10",  // Tc≈110K — Bi-2223
+  "YBa2Cu3O7",        // Tc≈93K  — YBCO
+  "Bi2Sr2CaCu2O8",    // Tc≈85K  — Bi-2212
+  "La2CuO4",          // Tc≈38K  — first cuprate
+  "HgBa2CuO4",        // Tc≈97K  — Hg-1201
+  "TlBa2CaCu2O7",     // Tc≈108K — Tl-1212
+  "TlBa2Ca2Cu3O9",    // Tc≈133K — Tl-1223
+
+  // ── High-P hydride superconductors (experimentally verified) ──
   "LaH10", "CaH6", "YH6", "H3S", "YH9", "ThH10", "CeH9",
-  // Conventional superconductors (validation targets)
-  "MgB2", "Nb3Sn", "Nb3Ge", "V3Si",
-  // Iron-based (pnictide/chalcogenide families)
+
+  // ── Novel hydrides — CSP must discover structures independently ──
+  "Li2LaH12", "LaH11Li2", "LaH12", "YH9Na2",
+  "SrH6", "LaH6", "ScH6", "ScH9", "BaH6", "MgH6", "ThH9",
+
+  // ── Conventional superconductors (validation targets) ──
+  "MgB2", "Nb3Sn", "Nb3Ge", "V3Si", "NbN", "NbC",
+  "ZrB12",            // Tc≈6K  — dodecaboride SC
+
+  // ── Iron-based (pnictide/chalcogenide families) ──
   "BaFe2As2", "LaFeAsO", "FeSe", "LiFeAs",
-  // Cuprates
-  "YBa2Cu3O7", "La2CuO4", "Bi2Sr2CaCu2O8",
-  // Heavy-fermion / unconventional
+  "SrFe2As2", "CaFe2As2",
+
+  // ── Nickelate superconductors ──
+  "La3Ni2O7",         // Tc≈80K under pressure — RP n=2
+  "La4Ni3O10",        // Tc≈30K under pressure — RP n=3
+
+  // ── Heavy-fermion / unconventional ──
   "CeCoIn5", "Sr2RuO4",
+
+  // ── Key functional materials for template validation ──
+  "CsPbI3",           // Halide perovskite solar cell
+  "LiNbO3",           // Electro-optic crystal
+  "LiFePO4",          // Battery cathode (quaternary olivine)
+  "SrTaO2N",          // Oxynitride photocatalyst
+  "Na3Bi",            // Topological Dirac semimetal
+  "SmCo5",            // Permanent magnet
 ];
 
 async function bootstrapCriticalCandidates(): Promise<void> {
