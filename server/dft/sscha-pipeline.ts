@@ -14,6 +14,7 @@
 
 import * as fs from "fs";
 import * as path from "path";
+import { fileURLToPath } from "url";
 import { execFile } from "child_process";
 
 // ---------------------------------------------------------------------------
@@ -77,7 +78,8 @@ export interface SSCHAPipelineCallbacks {
 // Constants
 // ---------------------------------------------------------------------------
 
-const SSCHA_WORKER_SCRIPT = path.resolve(__dirname, "sscha-worker.py");
+const __sschaDirname = typeof import.meta?.url === "string" ? path.dirname(fileURLToPath(import.meta.url)) : process.cwd();
+const SSCHA_WORKER_SCRIPT = path.resolve(__sschaDirname, "sscha-worker.py");
 const SSCHA_TOTAL_TIMEOUT_MS = 24 * 60 * 60 * 1000; // 24 hours
 const PYTHON_BIN = process.env.SSCHA_PYTHON || "python3";
 
