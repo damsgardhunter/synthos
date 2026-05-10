@@ -4192,73 +4192,10 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       console.log(`[QE-Worker] Hubbard workflow analysis failed for ${formula}: ${(corrErr.message || "").slice(0, 100)}`);
     }
 
-    // --- Pre-relax ACBN0: compute U from first principles BEFORE vc-relax ---
-    // For strongly-correlated materials, running a quick single-iteration
-    // ACBN0 (coarse grid, 1 SCF + 1 hp.x) on the unrelaxed structure gives
-    // first-principles U values for the vc-relax, instead of optimizing the
-    // geometry against literature U guesses and only correcting afterward.
-    // This costs ~20-30 min extra but produces a self-consistent structure.
-    if (hubbardResult?.applyToVCRelax &&
-        hubbardResult.correlationRegime !== "moderately-correlated" &&
-        hubbardResult.correlatedSiteCount > 0) {
-      try {
-        console.log(`[QE-Worker] Pre-relax ACBN0 for ${formula}: computing first-principles U before vc-relax`);
-        const prePrefix = formula.replace(/[^a-zA-Z0-9]/g, "") + "_preU";
-        const preCOverA = estimateCOverA(elements, counts);
-        const preBOverA = estimateBOverA(elements, counts);
-        const preACBN0 = await runACBN0Pipeline(
-          formula, elements, counts, positions, latticeA, jobDir, workerPressure,
-          {
-            ecutwfc: computeEcutwfc(elements, 0, 80, 45),
-            ecutrho: computeEcutwfc(elements, 0, 80, 45) * ecutrhoMultiplier(elements),
-            pseudoDir: QE_PSEUDO_DIR_INPUT,
-            prefix: prePrefix,
-            initialU: Object.fromEntries(hubbardResult.sites.filter(s => s.needsU).map(s => [s.element, s.uEffective])),
-            maxSCFIterations: 1, // single pass — coarse is fine pre-relax
-            cellParameters: generateCellParameters(latticeA, preCOverA, 0, preBOverA, elements, counts),
-          },
-          {
-            runQEBinary: (binary, inputFile, cwd, timeoutMs) => runQECommand(binary, inputFile, cwd, timeoutMs),
-            getPseudoDirInput: () => QE_PSEUDO_DIR_INPUT,
-            resolvePPFilename,
-          },
-        );
-
-        if (preACBN0 && Object.keys(preACBN0.hubbardU).some(el => preACBN0.hubbardU[el] > 0)) {
-          let anyChanged = false;
-          for (const site of hubbardResult.sites) {
-            const hpU = preACBN0.hubbardU[site.element];
-            if (hpU != null && hpU > 0 && Math.abs(hpU - site.uEffective) > 0.2) {
-              console.log(`[QE-Worker] Pre-relax U for ${site.element}: ${site.uEffective.toFixed(1)} -> ${hpU.toFixed(1)} eV (hp.x)`);
-              site.uEffective = hpU;
-              site.source = "material-specific";
-              anyChanged = true;
-            }
-          }
-          if (anyChanged) {
-            // Rebuild the QE system block with updated U values
-            let newBlock = "  lda_plus_u = .true.,\n";
-            newBlock += `  lda_plus_u_kind = ${hubbardResult.hubbardKind},\n`;
-            for (const site of hubbardResult.sites) {
-              if (site.uEffective > 0) {
-                newBlock += `  Hubbard_U(${site.speciesIndex}) = ${site.uEffective.toFixed(1)},\n`;
-                if (hubbardResult.hubbardKind === 1 && site.hunds > 0) {
-                  newBlock += `  Hubbard_J(1,${site.speciesIndex}) = ${site.hunds.toFixed(2)},\n`;
-                }
-              }
-            }
-            hubbardResult.qeSystemBlock = newBlock;
-            hubbardResult.notes.push(
-              `Pre-relax ACBN0: U values updated from hp.x linear response before vc-relax. ` +
-              `Geometry will optimize on the self-consistent potential. ` +
-              `Ref: Cococcioni & de Gironcoli, PRB 71, 035105 (2005).`
-            );
-          }
-        }
-      } catch (preErr: any) {
-        console.log(`[QE-Worker] Pre-relax ACBN0 failed for ${formula}: ${(preErr.message || "").slice(0, 150)} — using literature U values`);
-      }
-    }
+    // NOTE: Pre-relax ACBN0 (compute U from hp.x before vc-relax) runs later,
+    // after positions/latticeA are assigned by structure generation (line ~5200).
+    // The self-consistent U feedback from the post-relax ACBN0 at end of pipeline
+    // still feeds back into the Hubbard workflow for future runs of this formula.
 
     // --- Vegard's law enhanced lattice estimation ---
     // Try Vegard interpolation from AFLOW/MP binary endpoints for a better
@@ -5479,6 +5416,7 @@ ${cellBlockEos}
       const startingForce = currentForce;
       let prevSteps = 0;
       let prevForceReductionPerStep = 0; // force reduction per ionic step from last pass
+      let prevPressReductionPerStep = 0; // pressure reduction per ionic step from last pass
 
       // Pressure residual: |P_actual - P_target|. Both in kbar.
       const pressTarget = workerPressure * 10; // GPa → kbar
@@ -5510,12 +5448,23 @@ ${cellBlockEos}
           cleanQETmpScratch(path.join(jobDir, "tmp"));
 
           // Adaptive nstep based on convergence rate from previous pass.
-          // Pressure-priority passes get fewer steps (cell converges fast when
-          // ions are already at equilibrium) but enough for volume to adjust.
           let refineNstep: number;
           if (isPressurePriority) {
-            // Cell-only relaxation: 150-250 steps is usually enough
-            refineNstep = 200;
+            // Estimate steps from pressure convergence rate.
+            const pressGapToClose = currentPressure != null ? Math.abs(currentPressure - pressTarget) : 100;
+            if (prevPressReductionPerStep > 0.01) {
+              // We have a measured rate from a previous pass — use it directly
+              const stepsNeeded = Math.ceil(pressGapToClose / prevPressReductionPerStep);
+              refineNstep = Math.max(100, Math.min(600, Math.ceil(stepsNeeded * 1.5)));
+              console.log(`[QE-Worker] Pressure-priority nstep for ${formula}: P_gap=${pressGapToClose.toFixed(0)} kbar, measured rate=${prevPressReductionPerStep.toFixed(2)} kbar/step → nstep=${refineNstep}`);
+            } else {
+              // No measured rate — estimate from system properties.
+              // Damped-w cell dynamics typically converges ~0.5-3 kbar/step depending
+              // on cell stiffness. Stiffer cells (high bulk modulus) converge faster.
+              // Use gap-proportional estimate with generous safety margin.
+              refineNstep = Math.max(150, Math.min(600, Math.ceil(pressGapToClose * 2.0)));
+              console.log(`[QE-Worker] Pressure-priority nstep for ${formula}: P_gap=${pressGapToClose.toFixed(0)} kbar, no rate data → nstep=${refineNstep}`);
+            }
           } else if (refinePass === 1 || refinePass >= MAX_REFINE_PASSES) {
             refineNstep = 400; // first and last pass: full budget
           } else if (prevSteps > 0 && prevForceReductionPerStep > 0) {
@@ -5600,6 +5549,12 @@ ${cellBlockEos}
               prevSteps = ionicSteps;
               if (ionicSteps > 0 && currentForce > refForce) {
                 prevForceReductionPerStep = (currentForce - refForce) / ionicSteps;
+              }
+              if (ionicSteps > 0 && refPressure != null && currentPressure != null) {
+                const pressImproveAbs = Math.abs(currentPressure - pressTarget) - Math.abs(refPressure - pressTarget);
+                if (pressImproveAbs > 0) {
+                  prevPressReductionPerStep = pressImproveAbs / ionicSteps;
+                }
               }
               currentForce = refForce;
               currentPressure = refPressure;
@@ -7161,14 +7116,14 @@ ${r2Cell}
     const sschaGate = checkSSCHAEligibility({
       maxForce: residualForce ?? 999, elements, counts, pressureGPa: workerPressure,
       lowestAcousticFreq: sschaLowestAcoustic,
-      anharmonicityIndex: result.phonon?.anharmonicityIndex,
-      softModeScore: result.phonon?.softModeScore,
+      // anharmonicityIndex and softModeScore come from the surrogate PhononSpectrum,
+      // not the DFT QEPhononResult. Pass them only if surrogate data is available.
     });
     if (publicationForce && phononPhysicallyStable && sschaGate.eligible) {
       try {
         console.log(`[QE-Worker] ${formula} qualifies for SSCHA: ${sschaGate.reason}`);
         const harmonicLambda = result.epw?.lambda ?? (result.dfpt as any)?.lambda ?? null;
-        const harmonicOmegaLog = result.epw?.omegaLog ?? result.phonon?.omegaLog ?? null;
+        const harmonicOmegaLog = result.epw?.omegaLog ?? (result.dfpt as any)?.omegaLog ?? null;
         const prefix = formula.replace(/[^a-zA-Z0-9]/g, "");
         // Adaptive nConfigs: scale with cell size (more atoms = more configs needed)
         // Errea group typically uses 100-500. 50 is noise-dominated for larger cells.
@@ -7212,7 +7167,7 @@ ${r2Cell}
             ecutrho: computeEcutwfc(elements, 0, 80, 45) * ecutrhoMultiplier(elements),
             pseudoDir: QE_PSEUDO_DIR_INPUT,
             prefix: acbn0Prefix,
-            debyeFrequencyMeV: result.phonon?.omegaLog ?? undefined,
+            debyeFrequencyMeV: (result.dfpt as any)?.omegaLog ?? undefined,
             cellParameters: generateCellParameters(latticeA, acbn0COverA, 0, acbn0BOverA, elements, counts),
           },
           {
