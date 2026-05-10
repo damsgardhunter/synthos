@@ -105,11 +105,11 @@ export async function submitDFTJob(
     return null;
   }
 
-  // Atom count pre-filter — mirrors qe-worker limit of 16 atoms
+  // Atom count pre-filter — mirrors qe-worker limit of 24 atoms
   const formulaAtomCounts = parseFormulaCounts(formula);
   const formulaTotalAtoms = Object.values(formulaAtomCounts).reduce((s, v) => s + v, 0);
-  if (formulaTotalAtoms > 16) {
-    console.log(`[DFT-Queue] Formula ${formula} rejected: ${formulaTotalAtoms} atoms > 16 atom limit`);
+  if (formulaTotalAtoms > 24) {
+    console.log(`[DFT-Queue] Formula ${formula} rejected: ${formulaTotalAtoms} atoms > 24 atom limit`);
     return null;
   }
 
@@ -240,7 +240,7 @@ export async function syncQueueWithAcquisitionRanking(): Promise<{ reprioritized
         if (mlFeatures.qeDFT) return false;
         const counts = parseFormulaCounts(c.formula);
         const totalAtoms = Object.values(counts).reduce((s, v) => s + v, 0);
-        return totalAtoms <= 16;
+        return totalAtoms <= 24;
       })
       .map(c => {
         const tcNorm = Math.min(1.0, (c.predictedTc ?? 0) / 300);
@@ -630,17 +630,17 @@ async function cleanupOverstoichiometricJobs() {
     for (const job of queued) {
       const counts = parseFormulaCounts(job.formula);
       const total = Object.values(counts).reduce((s, v) => s + v, 0);
-      if (total > 16) {
+      if (total > 24) {
         await storage.updateDftJob(job.id, {
           status: "failed",
           completedAt: new Date(),
-          errorMessage: `Pre-filter rejected: Too many atoms (${total}), max 16`,
+          errorMessage: `Pre-filter rejected: Too many atoms (${total}), max 24`,
         } as any);
         cancelled++;
       }
     }
     if (cancelled > 0) {
-      console.log(`[DFT-Queue] Cancelled ${cancelled} queued overstoichiometric jobs (>16 atoms)`);
+      console.log(`[DFT-Queue] Cancelled ${cancelled} queued overstoichiometric jobs (>24 atoms)`);
     }
   } catch (err: any) {
     console.log(`[DFT-Queue] Overstoichiometric cleanup error: ${err.message}`);
@@ -738,7 +738,7 @@ async function refillQueueIfLow(): Promise<number> {
       // Atom count gate — don't queue overstoichiometric formulas that QE will reject
       const counts = parseFormulaCounts(c.formula);
       const totalAtoms = Object.values(counts).reduce((s, v) => s + v, 0);
-      if (totalAtoms > 16) return false;
+      if (totalAtoms > 24) return false;
       // f-block element gate — PPs need lmaxx>3 which our QE build doesn't support
       if (Object.keys(counts).some(el => LMAXX_INCOMPATIBLE_QUEUE.has(el))) return false;
       // Phonon stability gate — skip candidates already flagged as dynamically unstable

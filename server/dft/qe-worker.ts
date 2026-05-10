@@ -2217,7 +2217,7 @@ function generateAtomicPositions(
     const hPerMetal = Math.round(hCount / metalCount);
     const effectiveLatticeA = latticeA ?? estimateLatticeConstant(elements, counts);
     const cagePositions = generateHydrideCagePositions(metalElements, counts, hPerMetal, totalAtoms, effectiveLatticeA);
-    if (cagePositions.length === totalAtoms && cagePositions.length <= 16) {
+    if (cagePositions.length === totalAtoms && cagePositions.length <= 24) {
       if (latticeA && latticeA > 0) {
         const distValid = validatePositionDistances(cagePositions, latticeA);
         if (distValid) {
@@ -3010,7 +3010,7 @@ function softValidateGeometry(
 ): { valid: boolean; reason: string; warnings: string[] } {
   const warnings: string[] = [];
   if (positions.length === 0) return { valid: false, reason: "No atomic positions", warnings };
-  if (positions.length > 16) return { valid: false, reason: `Too many atoms (${positions.length}), max 16 for available resources`, warnings };
+  if (positions.length > 24) return { valid: false, reason: `Too many atoms (${positions.length}), max 24 for available resources`, warnings };
 
   const isHighPressure = pressureGPa > 50;
   const minLattice = isHighPressure ? 2.0 : 2.5;
@@ -3079,8 +3079,8 @@ function validateFormulaForDFT(formula: string, counts: Record<string, number>):
   if (elements.length > 5) {
     return { valid: false, reason: `Too many distinct elements (${elements.length}), max 5 for simple cubic DFT` };
   }
-  if (totalAtoms > 16) {
-    return { valid: false, reason: `Too many atoms (${totalAtoms}), max 16 for available resources` };
+  if (totalAtoms > 24) {
+    return { valid: false, reason: `Too many atoms (${totalAtoms}), max 24 for available resources` };
   }
 
   const ALKALINE_EARTH_SYMBOLS = new Set(["Ca", "Sr", "Ba", "Mg"]);
