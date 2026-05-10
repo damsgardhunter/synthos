@@ -5214,6 +5214,8 @@ ${cellBlockEos}
       let refinePass = 0;
       let totalRefineWallSec = 0;
       const startingForce = currentForce;
+      let prevSteps = 0;
+      let prevForceReductionPerStep = 0; // force reduction per ionic step from last pass
 
       if (currentForce <= PUB_FORCE_THR) {
         console.log(`[QE-Worker] Refinement not needed for ${formula}: run 1 force=${currentForce.toFixed(6)} already ≤ ${PUB_FORCE_THR} (publication-ready)`);
@@ -5226,13 +5228,22 @@ ${cellBlockEos}
 
           cleanQETmpScratch(path.join(jobDir, "tmp"));
 
-          // Variable nstep: 400, 300, 300, 150, 150, 400
-          // First pass gets full 400, middle passes get shorter (already close),
-          // last pass gets 400 again for one final big push if still not converged
-          const refineNstep = refinePass === 1 ? 400
-            : refinePass <= 3 ? 300
-            : refinePass <= 5 ? 150
-            : 400;
+          // Adaptive nstep based on convergence rate from previous pass.
+          // If the previous pass made good progress per step, keep it going.
+          // If it stalled (tiny improvement over many steps), cut steps short.
+          // First pass always gets 400. Last pass (6) gets 400 for a final push.
+          let refineNstep: number;
+          if (refinePass === 1 || refinePass >= MAX_REFINE_PASSES) {
+            refineNstep = 400; // first and last pass: full budget
+          } else if (prevSteps > 0 && prevForceReductionPerStep > 0) {
+            // Estimate how many steps to reach target from current force
+            const stepsToTarget = Math.ceil((currentForce - PUB_FORCE_THR) / prevForceReductionPerStep);
+            // Clamp: at least 100 (don't waste a pass), at most 400 (cap compute)
+            refineNstep = Math.max(100, Math.min(400, Math.ceil(stepsToTarget * 1.5))); // 1.5x safety margin
+            console.log(`[QE-Worker] Adaptive nstep for ${formula}: ${prevForceReductionPerStep.toExponential(2)}/step × ${stepsToTarget} steps to target → nstep=${refineNstep}`);
+          } else {
+            refineNstep = 300; // fallback if no convergence data
+          }
           const refineInput = generateVCRelaxInput(formula, elements, counts, latticeA, positions, workerPressure, refineNstep);
           const refineFile = path.join(jobDir, `vc_relax_refine${refinePass}.in`);
           fs.writeFileSync(refineFile, refineInput);
@@ -5281,6 +5292,11 @@ ${cellBlockEos}
                 console.log(`[QE-Worker]   refine${refinePass} atom[${pi}] ${p.element.padEnd(2)} (${p.x.toFixed(5)}, ${p.y.toFixed(5)}, ${p.z.toFixed(5)})`);
               }
               if (refineParsed.finalPositions.length > 4) console.log(`[QE-Worker]   ... and ${refineParsed.finalPositions.length - 4} more`);
+              // Track convergence rate for adaptive nstep
+              prevSteps = ionicSteps;
+              if (ionicSteps > 0 && currentForce > refForce) {
+                prevForceReductionPerStep = (currentForce - refForce) / ionicSteps;
+              }
               currentForce = refForce;
               currentPressure = refPressure;
             } else {

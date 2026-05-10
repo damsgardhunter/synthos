@@ -97,7 +97,7 @@ After the initial vc-relax, if residual force > 0.001 Ry/bohr (publication thres
 2. Eliminates oscillation inherited from the bad starting structure
 3. Converges tighter in fewer steps since forces are already small
 
-Variable nstep per pass: 400, 300, 300, 150, 150, 400. The last pass gets 400 again for one final push if still not converged.
+**Adaptive nstep** based on observed convergence rate: after each pass, the pipeline measures force reduction per ionic step and estimates how many steps the next pass needs to reach the 0.001 target (with 1.5x safety margin, clamped to 100-400). First and last passes always get 400. This replaces hand-tuned nstep schedules with a principled estimate that adapts to each material's convergence behavior.
 
 Stops early if a pass doesn't improve force. Timeout per pass: 2.5h (high-P hydrides), 40 min (magnetic), 20 min (default).
 
@@ -251,3 +251,46 @@ Per-family volume learning, per-generator weighting, cage seeder subtype trackin
 - 2 GCP VMs processing materials in parallel
 - QE binary search prefers `/usr/local/bin` (manual lmaxx=6 rebuild) over `/usr/bin` (apt default)
 - Supported f-block elements: La, Ce, Th (lmaxx=6 rebuild). Remaining lanthanides (Pr-Tm) and actinides (Pa-Am) still blocked pending PP validation.
+
+---
+
+## Known Physics Gaps & Roadmap
+
+### Current Limitations
+
+**1. No Wannier-interpolated EPW (Priority: HIGH)**
+The state of the art for accurate Tc predictions is QE → Wannier90 → EPW → Migdal-Eliashberg, which gives anisotropic gap functions and proper Brillouin-zone integration on ultra-dense k/q-grids. Our DFPT-only path is sufficient for screening but won't match the precision of Margine, Giustino, or Errea group results. For the ~1% of candidates that pass all gates and deserve publication-quality calculations, EPW would be a significant upgrade.
+
+**2. No anisotropic Eliashberg solver (Priority: HIGH)**
+We solve the isotropic Eliashberg equations (or Allen-Dynes/McMillan). For multi-band superconductors (MgB2, iron pnictides, hydrides with multiple Fermi sheets), anisotropic solvers give qualitatively different and better answers. Requires EPW integration first.
+
+**3. No anharmonic phonon corrections (Priority: CRITICAL for hydrides)**
+Hydrides at high pressure are notoriously anharmonic — the SCDFT/SSCHA framework (Errea, Calandra, Mauri) routinely shows that Tc predictions from harmonic DFPT are off by 20-40% for compounds like LaH10 and H3S. If we predict 200+ K for novel hydrides without anharmonic corrections, those numbers systematically overestimate. The leading hydride groups all run SSCHA now. **This is the single biggest physics gap in the pipeline.**
+
+**4. No nuclear quantum effects (Priority: HIGH for hydrides)**
+For high-H-content compounds, hydrogen behaves quantum-mechanically — its zero-point motion is comparable to its mean displacement. Path integral MD or SSCHA handles this; pure DFPT doesn't. NQE is what makes the difference between "predicted stable at 200 GPa" and "actually stable at 165 GPa." Combined with anharmonicity, this is the second largest physics gap.
+
+**5. Fixed Coulomb pseudopotential μ* (Priority: MEDIUM)**
+We use a fixed μ* = 0.10-0.13 by convention. The Errea/Mauri groups compute it from first principles via ACBN0 or similar. Smaller effect than anharmonicity but matters for accuracy claims.
+
+**6. Pseudopotential coverage gap (Priority: MEDIUM)**
+Lanthanides Pr-Tm and actinides Pa-Am are blocked pending PP validation. The Pseudo-DOJO project provides validated PPs for most of these; integrating Pseudo-DOJO would expand chemical scope significantly.
+
+### Surrogate Tc Integrity
+
+Surrogate Tc predictions (XGBoost/GNN) are allowed when force < 0.10 but ≥ 0.03 Ry/bohr. These surrogate models are useful for screening but **not reliable enough for superconductor claims**. The pipeline must ensure:
+
+- Surrogate-tier results never propagate to "best Tc" claims without DFPT validation
+- Dashboard/API clearly distinguishes `surrogate_eph` from `dfpt_eph` in all displays
+- The `tcConfidence` field accurately reflects the method: `surrogate` for non-DFPT, `high` only for full DFPT e-ph
+
+### Implementation Roadmap
+
+| Phase | Addition | Impact | Effort |
+|-------|----------|--------|--------|
+| **Phase 1** | EPW integration (Wannier90 → EPW) | Accurate e-ph on dense grids | Major (weeks) |
+| **Phase 2** | Anisotropic Eliashberg solver | Multi-band Tc accuracy | Medium (builds on EPW) |
+| **Phase 3** | SSCHA anharmonic phonons | Fix 20-40% Tc overestimate for hydrides | Major (new code) |
+| **Phase 4** | Pseudo-DOJO PP integration | Expand to full periodic table | Medium |
+| **Phase 5** | First-principles μ* (ACBN0) | Remove fixed-parameter assumption | Medium |
+| **Phase 6** | NQE via SSCHA/PIMD | Correct stability pressures for hydrides | Major (builds on Phase 3) |
