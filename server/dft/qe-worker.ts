@@ -5480,11 +5480,18 @@ ${cellBlockEos}
       let prevSteps = 0;
       let prevForceReductionPerStep = 0; // force reduction per ionic step from last pass
 
-      if (currentForce <= PUB_FORCE_THR) {
-        console.log(`[QE-Worker] Refinement not needed for ${formula}: run 1 force=${currentForce.toFixed(6)} already ≤ ${PUB_FORCE_THR} (publication-ready)`);
+      // Pressure residual: |P_actual - P_target|. Both in kbar.
+      const pressTarget = workerPressure * 10; // GPa → kbar
+      const pressureResidual = currentPressure != null ? Math.abs(currentPressure - pressTarget) : 0;
+      const PRESSURE_THR = 50; // kbar — quality gate threshold
+
+      const needsRefinement = currentForce > PUB_FORCE_THR || pressureResidual > PRESSURE_THR;
+
+      if (!needsRefinement) {
+        console.log(`[QE-Worker] Refinement not needed for ${formula}: force=${currentForce.toFixed(6)} ≤ ${PUB_FORCE_THR}, P_residual=${pressureResidual.toFixed(1)} kbar ≤ ${PRESSURE_THR} (publication-ready)`);
       }
 
-      while (currentForce > PUB_FORCE_THR && refinePass < MAX_REFINE_PASSES) {
+      while ((currentForce > PUB_FORCE_THR || (currentPressure != null && Math.abs(currentPressure - pressTarget) > PRESSURE_THR)) && refinePass < MAX_REFINE_PASSES) {
         refinePass++;
         try {
           console.log(`[QE-Worker] Refinement pass ${refinePass}/${MAX_REFINE_PASSES} for ${formula}: force=${currentForce.toFixed(6)} > ${PUB_FORCE_THR}, P=${currentPressure?.toFixed(1) ?? "N/A"} kbar — restarting with zeroed velocities`);
