@@ -302,17 +302,17 @@ function computeStage1Params(elements: string[], totalAtoms: number, counts?: Re
   // Floor at 15 min (simple systems).
   // Cap depends on system complexity:
   // - Simple non-magnetic ambient: 90 min (5400s)
-  // - High-P hydrides (10-15 atoms, tricky H convergence): 150 min (9000s)
-  // - Magnetic (nspin=2): 150 min (9000s) — spin-polarized SCF converges
-  //   much slower, especially for pnictides (BaFe2As2, FeSe) where spin
-  //   ordering competes with charge ordering.
-  // - Magnetic + heavy elements: 180 min (10800s)
+  // Base timeouts calibrated for 7-atom cells; scale by (nAtoms/7)^1.2 for larger.
+  // - High-P hydrides: 150 min base (tricky H convergence)
+  // - Magnetic (nspin=2): 150 min base — spin-polarized SCF converges slowly
+  // - Magnetic + heavy elements: 180 min base
   const hasH = elements.includes("H");
   const isHighPressureHydride = hasH && totalAtoms >= 7;
-  const maxTimeoutS = hasMagnetic
+  const stageAtomScale = totalAtoms > 7 ? Math.pow(totalAtoms / 7, 1.2) : 1.0;
+  const maxTimeoutS = Math.round((hasMagnetic
     ? (heavyCount >= 1 ? 10800 : 9000)
     : isHighPressureHydride ? 9000
-    : 5400;
+    : 5400) * stageAtomScale);
   // FLOOR by system type — the cost model underestimates for magnetic systems
   // because spin-polarized SCF on Fe/Mn/Cr is intrinsically much harder than
   // the atom-count-based model predicts. FeSe (4 atoms) and LiFeAs (3 atoms)

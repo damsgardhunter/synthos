@@ -1676,9 +1676,11 @@ function autoKPoints(
   if (adaptiveOpts?.isMetallic && !adaptiveOpts?.stage) {
     effectiveKspacing *= 0.77;  // ~1.3x denser
   }
-  // Large cells (>8 atoms) already sample well; slightly coarsen to save compute
-  if (adaptiveOpts?.totalAtoms && adaptiveOpts.totalAtoms > 8) {
-    effectiveKspacing *= 1.15;
+  // Large cells already sample well via volume; progressively coarsen to save compute
+  if (adaptiveOpts?.totalAtoms && adaptiveOpts.totalAtoms > 12) {
+    effectiveKspacing *= 1.20;  // ~1.2x coarser for 13+ atoms
+  } else if (adaptiveOpts?.totalAtoms && adaptiveOpts.totalAtoms > 8) {
+    effectiveKspacing *= 1.10;  // ~1.1x coarser for 9-12 atoms
   }
 
   const densityFactor = (2 * Math.PI) / effectiveKspacing;
@@ -2691,8 +2693,9 @@ function autoPhononQGrid(elements: string[], totalAtoms?: number, residualForce?
     if (nAtoms <= 4) return [4, 4, 4];                  // small+heavy
     if (nAtoms <= 8 && !hasHeavy) return [4, 4, 4];    // medium+light
     if (nAtoms <= 8) return [3, 3, 3];                  // medium+heavy
-    if (nAtoms <= 15) return [3, 3, 3];                 // large
-    return [2, 2, 2];                                    // very large (16+)
+    if (nAtoms <= 15) return [3, 3, 3];                 // large (9-15)
+    if (nAtoms <= 20) return [2, 2, 2];                 // very large (16-20)
+    return [2, 2, 2];                                    // ultra-large (21-24)
   }
 
   // DFPT-quality: force < 0.03
@@ -2702,10 +2705,12 @@ function autoPhononQGrid(elements: string[], totalAtoms?: number, residualForce?
     if (nAtoms <= 8 && !hasHeavy) return [3, 3, 3];
     if (nAtoms <= 8) return [2, 2, 2];
     if (nAtoms <= 15) return [2, 2, 2];
-    return [1, 1, 1];
+    if (nAtoms <= 20) return [2, 2, 2];                 // large (16-20): still 2×2×2
+    return [1, 1, 1];                                    // ultra-large (21-24): gamma-only
   }
 
   // Screening: force >= 0.03
+  if (nAtoms >= 15) return [1, 1, 1];                    // large+: gamma-only for screening
   if (nAtoms >= 9) return [1, 1, 1];
   if (nAtoms >= 5 && hasHeavy) return [1, 1, 1];
   return [2, 2, 2];
@@ -3543,13 +3548,16 @@ function generateVCRelaxInput(
   const hasMagneticEl = elements.some(el => el in MAGNETIC_ELEMENTS);
   const vcRelaxDegauss = hasMagneticEl ? 0.02 : 0.015;
 
-  // vc-relax wall-time cap — scaled by system complexity.
+  // vc-relax wall-time cap — scaled by system complexity and atom count.
   const hasHVcr = elements.includes("H");
   const hasMagVcr = elements.some(el => el in MAGNETIC_ELEMENTS);
   const isHighPHydride = hasHVcr && pressureGPa >= 50 && totalAtoms >= 7;
-  const vcRelaxMaxSeconds = isHighPHydride ? 10800   // 3h for high-P hydrides
-    : hasMagVcr ? 3600                                // 60 min for magnetic systems
-    : Math.max(600, Math.min(QE_MAX_SECONDS, 1800));  // 30 min default
+  // Atom-count scaling: larger cells need proportionally more time.
+  // Base budgets calibrated for 7-atom cells; scale by (nAtoms/7)^1.2 for larger.
+  const atomScale = totalAtoms > 7 ? Math.pow(totalAtoms / 7, 1.2) : 1.0;
+  const vcRelaxMaxSeconds = isHighPHydride ? Math.round(10800 * atomScale) // 3h base for high-P hydrides, scaled
+    : hasMagVcr ? Math.round(3600 * atomScale)                              // 60 min base for magnetic, scaled
+    : Math.round(Math.max(600, Math.min(QE_MAX_SECONDS, 1800)) * atomScale); // 30 min base, scaled
   const VC_RELAX_MAX_SECONDS = vcRelaxMaxSeconds;
   // UNIFIED vc-relax: damped dynamics with TIGHT SCF convergence.
   // Cell and positions converge TOGETHER in a single calculation.
@@ -5493,8 +5501,9 @@ ${cellBlockEos}
           const hasHRefine = elements.includes("H");
           const hasMagRefine = elements.some(el => el in MAGNETIC_ELEMENTS);
           const isHighPHRefine = hasHRefine && workerPressure >= 50 && positions.length >= 7;
-          // Shorter timeout per pass — starting close to minimum each time
-          const refineMaxSec = isHighPHRefine ? 9000 : hasMagRefine ? 2400 : 1200; // 2.5h per pass for high-P hydrides
+          // Timeout per refinement pass, scaled by atom count (base calibrated for 7 atoms)
+          const refineAtomScale = positions.length > 7 ? Math.pow(positions.length / 7, 1.2) : 1.0;
+          const refineMaxSec = Math.round((isHighPHRefine ? 9000 : hasMagRefine ? 2400 : 1200) * refineAtomScale);
           const refineKillMs = refineMaxSec * 1000 + 60_000;
 
           console.log(`[QE-Worker] Refinement pass ${refinePass} starting for ${formula} (a=${latticeA.toFixed(3)} A, ${positions.length} atoms, nstep=${refineNstep}, timeout=${refineMaxSec}s)`);

@@ -90,12 +90,18 @@ export function autoEPWGrids(
   else if (q >= 3) { nscf = 9;  fine = 30; }
   else             { nscf = 8;  fine = 24; }
 
-  // Halve fine grids for large unit cells
-  if (nAtoms > 12) {
-    fine = Math.max(16, Math.floor(fine / 2));
+  // Progressive grid reduction for large unit cells
+  if (nAtoms > 20) {
+    fine = Math.max(12, Math.floor(fine / 3));   // ultra-large: 1/3 grid
+    nscf = Math.max(6, Math.floor(nscf * 0.6));
+  } else if (nAtoms > 16) {
+    fine = Math.max(14, Math.floor(fine / 2));    // very large: 1/2 grid
+    nscf = Math.max(6, Math.floor(nscf * 0.75));
+  } else if (nAtoms > 12) {
+    fine = Math.max(16, Math.floor(fine * 0.65)); // large: 2/3 grid
   }
   // Enforce minimum
-  fine = Math.max(fine, 16);
+  fine = Math.max(fine, 12);
 
   return {
     nscfK: [nscf, nscf, nscf],
