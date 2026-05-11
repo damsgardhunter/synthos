@@ -76,9 +76,15 @@ def _periodize_fourier(sigma_K, K_cluster, kpoints):
     shape_rest = sigma_K.shape[1:]
     dim = K_cluster.shape[1]
 
-    # Cluster real-space vectors: R = {(0,0), (1,0), (0,1), (1,1)} for 2×2
-    # In π/a units, the cluster cell is 2×2, so R ∈ {0, 1} per direction
-    R_cluster = K_cluster.copy()  # same lattice (self-dual for square cluster)
+    # Cluster real-space vectors: R_i = integer site positions in units of a.
+    # For N_c=4 (2×2): R = {(0,0),(1,0),(0,1),(1,1)} — same as K in π/a units.
+    # For N_c=16 (4×4): R = {0,1,2,3}×{0,1,2,3} ≠ K = {0,0.5,1,1.5}×...
+    L_c = int(round(nc ** (1.0 / dim)))
+    R_cluster = np.array(
+        [[i, j] for i in range(L_c) for j in range(L_c)]
+        if dim == 2 else
+        [[i, j, k] for i in range(L_c) for j in range(L_c) for k in range(L_c)]
+    , dtype=float)
 
     # FT to real space: Σ(R) = (1/N_c) Σ_K Σ(K) exp(-iK·R·π)
     sigma_R = np.zeros_like(sigma_K)

@@ -589,11 +589,12 @@ def run_dca(
         diff = np.max(np.abs(sigma_mixed - sigma_c))
         sigma_c = sigma_mixed
 
-        # Compute density (with tail correction)
+        # Compute density (both spins, SU(2) symmetry)
+        # n_total(K) = 2×n_↑ = 1 + (2/β) Σ_ω Re G_↑(K,ω), averaged over K
         density = 0.0
         for ic in range(nc):
             density += 1.0 + (2.0 / params.beta) * np.sum(g_c[ic].real)
-        density *= 2.0 / nc
+        density /= nc
 
         elapsed_iter = time.time() - t_iter
         convergence_history.append(float(diff))

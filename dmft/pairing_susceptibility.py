@@ -233,15 +233,27 @@ def construct_pairing_matrix(
 
 
 def _build_minus_k_map(kpoints: np.ndarray) -> np.ndarray:
-    """Map each k-point index to its -k partner in the mesh."""
+    """Map each k-point index to its -k partner in the mesh.
+
+    Auto-detects BZ period from mesh range:
+      - kpoints in [0,1) fractional coords → period 1
+      - kpoints in [-1,1) π/a units → period 2
+    """
     n_k = kpoints.shape[0]
-    minus_k = np.mod(-kpoints, 1.0)  # -k mod 1
+
+    # Detect BZ period: if any k < -0.01, mesh is [-1,1) with period 2
+    period = 2.0 if np.any(kpoints < -0.01) else 1.0
+    half = period / 2.0
+
+    # Wrap -k into the mesh range
+    k_min = kpoints.min(axis=0)
+    minus_k = np.mod(-kpoints - k_min, period) + k_min
 
     # Find nearest neighbor for each -k in the mesh
     mapping = np.zeros(n_k, dtype=int)
     for ik in range(n_k):
         dists = np.linalg.norm(
-            np.mod(kpoints - minus_k[ik] + 0.5, 1.0) - 0.5, axis=1
+            np.mod(kpoints - minus_k[ik] + half, period) - half, axis=1
         )
         mapping[ik] = np.argmin(dists)
 

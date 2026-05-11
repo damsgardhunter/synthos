@@ -454,12 +454,12 @@ def _solve_multiorbital_triqs(
                             c_dag("up", I_a) * c("down", I_a) *
                             c_dag("down", I_b) * c("up", I_b)
                         )
-                        # Pair-hopping
-                        if a < b:
-                            H_int += Jpair * (
-                                c_dag("up", I_a) * c_dag("down", I_a) *
-                                c("down", I_b) * c("up", I_b)
-                            )
+                        # Pair-hopping: sum over all a≠b (not a<b) for rotational invariance
+                        # Same convention as spin-flip and build_triqs_h_int
+                        H_int += Jpair * (
+                            c_dag("up", I_a) * c_dag("down", I_a) *
+                            c("down", I_b) * c("up", I_b)
+                        )
     else:
         # Fallback: simple Hubbard U on all orbitals
         H_int = Operator()
@@ -628,12 +628,13 @@ def run_multiorbital_dca(
         diff = np.max(np.abs(sigma_mixed - sigma_c))
         sigma_c = sigma_mixed
 
-        # Density per orbital
+        # Density per orbital (both spins, SU(2) symmetry)
+        # n_total(K) = 2×n_↑ = 1 + (2/β) Σ_ω Re G_↑(K,ω), averaged over K
         density = np.zeros(no)
         for a in range(no):
             for ic in range(nc):
                 density[a] += 1.0 + (2.0 / params.beta) * np.sum(g_c[ic, :, a, a].real)
-            density[a] *= 2.0 / nc
+            density[a] /= nc
 
         elapsed_iter = time.time() - t_iter
         convergence_history.append(float(diff))

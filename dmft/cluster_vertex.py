@@ -144,23 +144,34 @@ def extract_cluster_pairing_vertex(
     # For tractability, work at Ω=0 only (pairing channel)
     iw_zero = n_iw_b  # center of bosonic grid
 
-    # Build cluster pp bubble: χ⁰_pp(K,K') at Ω=0
-    # χ⁰_pp is diagonal in K (single-site-like within each patch)
-    # χ⁰_pp(K; iν) = -β G(K,iν) G(K,-iν)  (summed over ν for static)
+    # Build cluster pp bubble: χ⁰_pp(K) at Ω=0
+    # χ⁰_pp(K) = -(1/β) Σ_ν G(K,ν)·G(-K,-ν)
+    # For N_c=4 all K are self-conjugate (-K=K), but for N_c=8,16
+    # some momenta have -K ≠ K (e.g., (π/2,π/2) → (3π/2,3π/2))
     chi0_pp_static = np.zeros(nc, dtype=complex)
     n_w = g_cluster.shape[1] if g_cluster.ndim >= 2 else len(g_cluster)
 
+    # Build -K map on cluster momenta (period 2 in π/a units)
+    from dca_solver import generate_cluster_momenta
+    K_cluster = generate_cluster_momenta(nc, dim=2)
+    minus_K_map = np.zeros(nc, dtype=int)
     for ic in range(nc):
+        mK = np.mod(-K_cluster[ic] + 1.0, 2.0) - 1.0
+        dists = np.linalg.norm(
+            np.mod(K_cluster - mK + 1.0, 2.0) - 1.0, axis=1
+        )
+        minus_K_map[ic] = np.argmin(dists)
+
+    for ic in range(nc):
+        ic_minus = minus_K_map[ic]
         for iw in range(n_w):
             iw_minus = n_w - 1 - iw
             if g_cluster.ndim >= 3:
-                # Multi-orbital: trace
-                # χ⁰_pp(K) = -T Σ_ν G(K,ν)·G(K,-ν) = -(1/β) Σ_ν G·G
                 g_up = g_cluster[ic, iw]
-                g_dn = g_cluster[ic, iw_minus]
+                g_dn = g_cluster[ic_minus, iw_minus]
                 chi0_pp_static[ic] += -np.trace(g_up @ g_dn) / beta
             elif g_cluster.ndim == 2:
-                chi0_pp_static[ic] += -g_cluster[ic, iw] * g_cluster[ic, iw_minus] / beta
+                chi0_pp_static[ic] += -g_cluster[ic, iw] * g_cluster[ic_minus, iw_minus] / beta
             else:
                 chi0_pp_static[ic] += -g_cluster[iw] * g_cluster[iw_minus] / beta
 
