@@ -73,7 +73,8 @@ RUN cd /tmp && \
     cd / && rm -rf /tmp/triqs
 
 ENV PATH="${TRIQS_INSTALL_DIR}/bin:${PATH}"
-ENV PYTHONPATH="${TRIQS_INSTALL_DIR}/lib/python3/dist-packages:${PYTHONPATH}"
+# TRIQS cmake installs Python modules to lib/python3.10/site-packages (Ubuntu 22.04)
+ENV PYTHONPATH="${TRIQS_INSTALL_DIR}/lib/python3.10/site-packages:${TRIQS_INSTALL_DIR}/lib/python3/dist-packages:${PYTHONPATH}"
 ENV CMAKE_PREFIX_PATH="${TRIQS_INSTALL_DIR}:${CMAKE_PREFIX_PATH}"
 ENV LD_LIBRARY_PATH="${TRIQS_INSTALL_DIR}/lib:${LD_LIBRARY_PATH}"
 
