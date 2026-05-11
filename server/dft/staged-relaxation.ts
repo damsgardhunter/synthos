@@ -907,7 +907,6 @@ export async function runStage4GammaPhonon(opts: Stage4Opts): Promise<StageResul
 `;
 
   console.log(`[Staged-Relax] ${formula} Stage 4 cost model: ${nReps} reps, ${phElectrons} e-, ${phNkpts} kpts, nspin=${phNspin} → cost/rep=${costPerRep.toFixed(0)}, est=${estimatedPhSeconds.toFixed(0)}s, timeout=${phTimeoutS.toFixed(0)}s (${(phTimeoutS/60).toFixed(0)} min)`);
-  }
 
   // 2-attempt retry matching production phonon pipeline (qe-worker.ts lines 4580-4644):
   //   Attempt 1: tr2_ph=1e-12, alpha_mix=0.3 (production defaults)
