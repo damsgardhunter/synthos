@@ -968,7 +968,7 @@ export class DatabaseStorage implements IStorage {
   }
 
   async hasActiveOrRecentFailedDftJobs(formula: string): Promise<{ activeJob: DftJob | null; recentValidatedFailures: number }> {
-    const oneDayAgo = new Date(Date.now() - 24 * 3600_000);
+    const oneHourAgo = new Date(Date.now() - 1 * 3600_000);
     const rows = await db.select().from(dftJobs)
       .where(and(
         eq(dftJobs.formula, formula),
@@ -976,7 +976,7 @@ export class DatabaseStorage implements IStorage {
           inArray(dftJobs.status, ["queued", "running"]),
           and(
             eq(dftJobs.status, "failed"),
-            gt(dftJobs.completedAt, oneDayAgo),
+            gt(dftJobs.completedAt, oneHourAgo),
           ),
         ),
       ))
