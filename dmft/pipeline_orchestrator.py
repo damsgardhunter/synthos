@@ -1191,8 +1191,9 @@ def run_orchestrated_pipeline(
             g_c = last_dca_result.get("g_c")
             if g_c is not None:
                 ac_dir = os.path.join(work_dir, "analytic_continuation")
-                # Average G over patches for DOS
-                g_avg = np.mean(g_c, axis=0) if g_c.ndim >= 3 else g_c
+                # Average G over cluster patches for DOS
+                # g_c shape: [nc, 2*n_iw] (single-orb) or [nc, 2*n_iw, n_orb, n_orb]
+                g_avg = np.mean(g_c, axis=0)  # always average over cluster index
                 n_orb_ac = g_avg.shape[-1] if g_avg.ndim >= 2 else 1
                 beta_last = 1.0 / T_grid[-1] if T_grid else 40.0
 
@@ -1213,12 +1214,17 @@ def run_orchestrated_pipeline(
                     lambda_dft = data.get("lambda_dft", 0)
                     omega_log = data.get("omega_log", 0)
                     if lambda_dft > 0 and omega_log > 0:
+                        # sigma_c is [nc, 2*n_iw, n_orb, n_orb] — average over
+                        # cluster momenta to get [2*n_iw, n_orb, n_orb] for Z extraction
+                        sigma_for_z = last_dca_result.get("sigma_c")
+                        if sigma_for_z is not None and sigma_for_z.ndim == 4:
+                            sigma_for_z = np.mean(sigma_for_z, axis=0)
                         tc_corr = correct_tc_with_dmft(
                             n_ef_dft=n_ef_dft,
                             n_ef_dmft=n_ef_dmft,
                             lambda_dft=lambda_dft,
                             omega_log=omega_log,
-                            sigma_iw=last_dca_result.get("sigma_c"),
+                            sigma_iw=sigma_for_z,
                             beta=beta_last,
                         )
                         all_results["phases"]["dmft_tc_correction"] = tc_corr
@@ -1243,8 +1249,30 @@ def run_orchestrated_pipeline(
                     method="cumulant" if g0_c is not None else "self_energy",
                     g0_K=g0_c,
                 )
+                # Build H(k) on the SAME k-mesh as sigma_k
+                # (data["hk"] is on the bundle's Wannier90 mesh, not kpoints_full)
+                from multiorbital_dca import build_emery_hamiltonian
+                n_orb_hk = data["hk"].shape[1] if data["hk"].ndim == 3 else 1
+                if n_orb_hk == 3 and model.get("material_class") == "cuprate":
+                    hk_full = build_emery_hamiltonian(kpoints_full)
+                elif n_orb_hk == 1:
+                    from dca_solver import lattice_dispersion_hubbard
+                    eps_full = lattice_dispersion_hubbard(kpoints_full)
+                    hk_full = eps_full[:, np.newaxis, np.newaxis]
+                else:
+                    # Periodize sigma to the bundle k-mesh
+                    # Bundle kpoints are in fractional [0,1); periodize needs π/a units
+                    bundle_kpoints = data.get("kpoints", kpoints_full)
+                    bundle_kpoints_pia = bundle_kpoints * 2.0  # frac [0,1) → π/a [0,2)
+                    sigma_k = periodize_self_energy(
+                        sigma_c, K_cluster, bundle_kpoints_pia,
+                        method="cumulant" if g0_c is not None else "self_energy",
+                        g0_K=g0_c,
+                    )
+                    hk_full = data["hk"]
+                    kpoints_full = bundle_kpoints_pia
                 fs = compute_fermi_surface(
-                    data["hk"], sigma_k, data.get("fermi_energy", 0), kpoints_full,
+                    hk_full, sigma_k, data.get("fermi_energy", 0), kpoints_full,
                     beta=1.0 / T_grid[-1] if T_grid else 40.0,
                 )
                 all_results["phases"]["periodization"] = {

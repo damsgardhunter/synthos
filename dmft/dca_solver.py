@@ -482,10 +482,14 @@ def _solve_cluster_hubbard_i(
     for ic in range(nc):
         for iw in range(n_w):
             w = params.wn[iw]
-            # Hubbard-I self-energy
-            sigma_atomic[ic, iw] = params.U * filling + (
-                params.U ** 2 * filling * (1 - filling) / (1j * w)
-            )
+            # Hubbard-I self-energy (exact atomic limit):
+            # Σ(z) = U·n·z / (z - U·(1-n))
+            z = 1j * w
+            denom = z - params.U * (1 - filling)
+            if abs(denom) > 1e-20:
+                sigma_atomic[ic, iw] = params.U * filling * z / denom
+            else:
+                sigma_atomic[ic, iw] = params.U * filling
 
     # G_c = (G⁰⁻¹ - Σ)⁻¹
     g_c = np.zeros_like(g0_iw_cluster)
