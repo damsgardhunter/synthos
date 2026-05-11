@@ -16,16 +16,31 @@ The active learning loop selects which formulas to investigate — prioritizing 
 
 **File**: `server/dft/qe-worker.ts`
 
-Six sources run in parallel to create a diverse pool of crystal structure candidates:
+### LLM Structure Advisor (Pre-Generation)
+
+**File**: `server/dft/structure-advisor.ts`
+
+Before generating candidates, one gpt-4o-mini call per formula (~$0.001, ~3s, cached to disk permanently) provides structural hints:
+- Expected crystal structure type (clathrate, perovskite, layered, A15, etc.)
+- Likely space group number and alternatives
+- Per-pair minimum distances (H-H, M-H, M-M) — used to set AIRSS MINSEP
+- Element coordination roles (cage-center, vertex, network)
+- Approximate lattice parameters for cross-checking Vegard
+
+Falls back gracefully to heuristics if OpenAI is unavailable (circuit breaker).
+
+### Candidate Generators
+
+Seven sources run in parallel to create a diverse pool of crystal structure candidates:
 
 1. **Vegard/VCA** — interpolates lattice + positions from binary endpoint structures (AFLOW/MP/known-structures)
-2. **AIRSS** (`server/csp/airss-wrapper.ts`) — fully random cells via `buildcell`, pressure-aware MINSEP, Z-sweeps (Z=1,2,3,4,6,8), volume ensemble from Birch-Murnaghan
+2. **AIRSS** (`server/csp/airss-wrapper.ts`) — fully random cells via `buildcell`, pressure-aware MINSEP (informed by LLM-advised pair distances when available), Z-sweeps (Z=1,2,3,4,6,8), volume ensemble from Birch-Murnaghan
 3. **PyXtal** (`server/csp/pyxtal-wrapper.ts`) — Wyckoff-aware random generation respecting space group symmetry, tiered SG sampling (40% high-sym / 30% med / 20% low / 10% P1)
 4. **Cage Seeder** (`server/csp/cage-seeder.ts`) — for hydrides: 20-30 candidates at 3-5 pressure-compressed volumes each. Proper ternary A/M site placement: guest metals (Li, Na, K) go to interstitial "A" sites, host metals (La, Y, Ca) go to cage-center "M" sites. Uses Wyckoff orbits from 141 tagged prototype templates (sodalite, clathrate, hex-clathrate, bcc-hydride)
 5. **Mutations** (`server/csp/structure-mutator.ts`) — 8 mutation types on top-3 candidates: lattice strain +/-10%, volume compress/expand, H shuffle, symmetry break, Wyckoff perturbation
 6. **DFT Structure Cache** — previous best DFT-optimized structures per formula, injected at confidence=0.99. Stored in `/tmp/qe_calculations/structure_cache/{formula}.json`. Only overwrites if new structure has lower force than cached. Gives the pipeline a head start instead of rediscovering the same geometry from scratch.
 
-Budget is tier-dependent (preview: ~85 candidates, deep: ~10K AIRSS + 1K PyXtal). Atom count cap per candidate: preview 30, standard 40, deep 50, publication 60. Oversized candidates are backfilled from the next best.
+Budget is tier-dependent (preview: ~85 candidates, deep: ~10K AIRSS + 1K PyXtal). DFT atom limit: 24 atoms per formula unit. Per-candidate supercell caps: preview 30, standard 40, deep 50, publication 60. Oversized candidates are backfilled from the next best. All timeouts, phonon grids, and EPW grids scale with atom count (calibrated base × (nAtoms/7)^1.2).
 
 ---
 
@@ -213,17 +228,28 @@ Timeout: 3h (high-P hydrides), 60 min (magnetic), 30 min (default).
 
 ### Refinement vc-relax Loop
 
-After the initial vc-relax, if residual force > 0.001 Ry/bohr (publication threshold), the pipeline loops up to **6 refinement passes**. Each pass:
+After the initial vc-relax, if residual force > 0.001 Ry/bohr OR residual pressure > ±50 kbar, the pipeline loops up to **6 refinement passes**. Each pass:
 
 1. Restarts from the previous pass's final geometry with **zeroed velocities**
 2. Eliminates oscillation inherited from the bad starting structure
 3. Converges tighter in fewer steps since forces are already small
 
-**Adaptive nstep** based on observed convergence rate: after each pass, the pipeline measures force reduction per ionic step and estimates how many steps the next pass needs to reach the 0.001 target (with 1.5x safety margin, clamped to 100-400). First and last passes always get 400. This replaces hand-tuned nstep schedules with a principled estimate that adapts to each material's convergence behavior.
+**Dual convergence gate**: Both force AND pressure must be within tolerance before declaring "publication-ready." Previously, force < 0.001 alone was sufficient, which caused materials like MgH6 to skip refinement with 140 kbar residual pressure — sending wrong-volume structures to phonons.
 
-Stops early if a pass doesn't improve force. Timeout per pass: 2.5h (high-P hydrides), 40 min (magnetic), 20 min (default).
+**Pressure-priority mode**: When force is already publication-ready (< 0.001) but pressure residual exceeds 50 kbar, the refinement enters a cell-equilibration mode:
+- `forc_conv_thr = 1e-5` (ultra-tight, ions freeze on step 1)
+- `press_conv_thr = 0.1 kbar` (tight cell convergence)
+- Remaining nstep budget goes purely to cell dynamics (damp-w)
+- Progress accepted if pressure improves, even if force stays flat
+- Force degradation guard: rejects pass if force exceeds 1.5× threshold
 
-The best structure from the refinement loop is saved to the DFT structure cache for future runs.
+**Adaptive nstep**: based on observed convergence rate from previous pass:
+- Force-priority: estimates steps from force reduction per step × remaining gap
+- Pressure-priority: estimates from pressure reduction per step (tracked across passes)
+- Gap-proportional fallback when no rate data available
+- All timeouts scale with atom count: base × (nAtoms/7)^1.2
+
+Stops early if neither force nor pressure improved. The best structure from the refinement loop is saved to the DFT structure cache for future runs.
 
 ### SCF Skip
 
@@ -235,14 +261,14 @@ The unified vc-relax uses `disk_io='high'` and `conv_thr=1e-7`, so its final SCF
 
 ### Gamma Phonon
 
-Fast dynamical stability screen. Uses `dynmat.x` post-processing to extract frequencies from `.dyn` file when `ph.x` doesn't print them to stdout.
+Fast dynamical stability screen. Always runs regardless of cost estimate (timeout cap raised to 8h). Uses `dynmat.x` post-processing to extract frequencies from `.dyn` file when `ph.x` doesn't print them to stdout.
 
 ### Pre-Phonon Force Gate
 
 - force < 0.10 Ry/bohr: screening gate, allows surrogate Tc
 - force < 0.03 Ry/bohr: DFPT gate, allows physics-grade e-ph coupling
 
-### Soft Mode Following
+### Gamma Soft Mode Following
 
 When gamma phonon finds imaginary modes (freq < -50 cm-1), the structure WANTS to distort along those directions. Instead of giving up:
 
@@ -280,6 +306,25 @@ QE `ph.x` on q-grid → phonon dispersion + DOS. Timeout scales with q-grid dens
 - Retry strategy: if ph.x crashes, retry with `tr2_ph=1e-10, alpha_mix=0.1` (gentler convergence)
 
 Output: frequencies, dispersion, phonon DOS, omega_log, stability assessment.
+
+---
+
+## Stage 6a: Zone-Boundary Soft Mode Following
+
+**File**: `server/dft/zone-boundary-softmode.ts`
+
+When the full phonon grid (Stage 6) finds imaginary modes at q≠0 that gamma didn't catch, those modes tell us exactly which supercell distortion the structure wants. Instead of discarding the result:
+
+1. **Scan .dyn files** for all q-points — find the worst instability (most negative frequency)
+2. **Extract eigenvectors** at that q-point via matdyn.x with `flvec` output
+3. **Apply the distortion**: u_n = Re[ε_n · exp(i·q·R_n)] × amplitude. For commensurate q-points (e.g., q=[0.5,0,0]), this creates a real-valued supercell modulation pattern.
+4. **Re-relax** the displaced structure with vc-relax (200 steps, damped dynamics)
+5. **Quick gamma phonon check** on the new structure
+6. **Iterate** up to 3 times with increasing amplitude (0.03, 0.05, 0.08 fractional coords)
+
+This is how the Pickard/Errea groups find stable high-pressure phases that no random search discovers — the phonon instability IS the search direction pointing toward the true ground-state structure.
+
+Ref: Pickard & Needs, JPCM 23, 053201 (2011); Errea et al., PRL 114, 157004 (2015).
 
 ---
 
@@ -496,6 +541,49 @@ Ref: Morel & Anderson, Phys. Rev. 125, 1263 (1962); Agapito et al., PRX 5, 01100
 
 ---
 
+## Stage 9e: Spin-Fluctuation Pairing Channel
+
+**File**: `server/physics/spin-fluctuation-pairing.ts`
+
+For cuprates, iron-pnictides, nickelates, and heavy-fermion systems, superconductivity is driven by spin fluctuations rather than phonons. The Eliashberg pipeline now identifies and quantifies this channel.
+
+### Pairing Channel Classifier
+
+Uses existing pipeline data to determine the dominant pairing mechanism:
+
+| Signal | Phonon-BCS | Spin-Fluctuation |
+|--------|-----------|-----------------|
+| Magnetic ground state | NM or FM | AFM (stripe, checkerboard, layered) |
+| Fermi surface | No nesting | Strong nesting at Q≠0 |
+| Correlation regime | Weakly correlated | Mott-proximate or strongly correlated |
+| Band character | sp-dominated | d/f orbital, flat bands at E_F |
+| Material pattern | Hydride, elemental metal | Cuprate, pnictide, heavy-fermion |
+
+Output: `phonon-bcs` / `spin-fluctuation` / `mixed-phonon-spin` / `orbital-fluctuation`
+
+### Lindhard + RPA Spin Susceptibility
+
+1. **Static Lindhard χ₀(Q)**: Non-interacting susceptibility from DOS at Fermi level, enhanced by nesting score. Cheap — uses existing electronic structure data.
+2. **RPA enhancement**: χ_RPA(Q) = χ₀(Q) / (1 - U·χ₀(Q)) where U is from the DFT+U Hubbard workflow. Stoner factor S = 1/(1-U·χ₀) detects proximity to magnetic instability.
+3. **Characteristic frequency**: ω_sf = W/S (bandwidth / Stoner enhancement). For cuprates near optimal doping, ω_sf ≈ 40-80 meV.
+
+### Spin-Fluctuation Tc
+
+- **Coupling constant**: λ_sf ≈ N(E_F) · U² · χ_RPA(Q) / ω_sf
+- **d-wave formula**: Monthoux-Scalapino with μ*_sf = 0 (d-wave symmetry cancels isotropic Coulomb repulsion)
+- **s±-wave formula**: for pnictides, μ*_sf = 0.05 (partial cancellation from sign change between pockets)
+
+### Combined Tc (Phonon + Spin Fluctuation)
+
+The interaction between channels depends on pairing symmetry:
+- **d-wave cuprates**: phonons are weakly pair-breaking. Tc = Tc_sf - 0.15·Tc_ph (destructive)
+- **s± pnictides**: both channels constructive. Tc = sqrt(Tc_ph² + Tc_sf²)
+- **Conventional BCS**: spin fluctuations negligible. Tc = Tc_ph
+
+Ref: Berk & Schrieffer, PRL 17, 433 (1966); Moriya, Spin Fluctuations (1985); Scalapino, Rev. Mod. Phys. 84, 1383 (2012); Monthoux et al., Nature 450, 1177 (2007).
+
+---
+
 ## K-Point and Smearing Convergence
 
 K-mesh density and smearing width directly affect N(E_F) for metals, which propagates into λ (via DOS-weighted e-ph coupling) and μ* (via Morel-Anderson). The pipeline uses stage-dependent and quality-tiered convergence parameters.
@@ -538,7 +626,7 @@ The vc-relax smearing (0.015-0.02) is intentionally loose for convergence — it
 
 ## Stage 10: Results → Database → Next Iteration
 
-Extended dataset fields: tcConservative, tcUpperBound, tcMethod, lambdaMethod, phononMethod, tcConfidence, learningScore, qualityTier, hullLabel, residualForce, nqeApplied, nqeMethod, lambdaNQE, lambdaReduction, nqeAnharmonicStrength, nqeStabilityShift, muStarMethod, muStarConventional, muStarDeviation, muStarTcSensitivity, epwLambda, epwTcME, epwGapZero, epwMethod, socEnabled, socMaxEnergy, socDosImpact, magneticOrdering, magneticEnergyGap, magneticMagnetization, hubbardApplied, hubbardCorrelatedSites, hubbardRegime, hubbardAppliedToVCRelax, sschaConverged, sschaOmegaLog, sschaTcCorrected, acbn0Converged, acbn0MuStar, acbn0Method, epwConverged, epwLambda, epwTcME, epwMethod.
+Extended dataset fields: tcConservative, tcUpperBound, tcMethod, lambdaMethod, phononMethod, tcConfidence, learningScore, qualityTier, hullLabel, residualForce, nqeApplied, nqeMethod, lambdaNQE, lambdaReduction, nqeAnharmonicStrength, nqeStabilityShift, muStarMethod, muStarConventional, muStarDeviation, muStarTcSensitivity, epwLambda, epwTcME, epwGapZero, epwMethod, socEnabled, socMaxEnergy, socDosImpact, magneticOrdering, magneticEnergyGap, magneticMagnetization, hubbardApplied, hubbardCorrelatedSites, hubbardRegime, hubbardAppliedToVCRelax, sschaConverged, sschaOmegaLog, sschaTcCorrected, acbn0Converged, acbn0MuStar, acbn0Method, epwConverged, epwLambda, epwTcME, epwMethod, pairingChannel, pairingSymmetry, spinFluctuationLambda, spinFluctuationTc, tcCombined.
 
 ### Multi-Objective Learning Score
 
@@ -632,5 +720,11 @@ Surrogate Tc predictions (XGBoost/GNN) are allowed when force < 0.10 but ≥ 0.0
 | **Phase 8** | Full SSCHA anharmonic phonons (sscha-pipeline.ts + sscha-worker.py) | **DONE** |
 | **Phase 9** | ACBN0 first-principles μ* via hp.x + self-consistent U feedback to Hubbard workflow | **DONE** |
 | **Phase 10** | K-mesh/smearing convergence tiering for publication | **DONE** |
-| **Phase 11** | SCDFT (superconducting DFT) for beyond-RPA μ* | Future (specialized code) |
-| **Phase 12** | Path-integral MD for NQE beyond SSCHA | Future (PIMD integration) |
+| **Phase 11** | Zone-boundary soft mode following (phonon-guided structure search) | **DONE** |
+| **Phase 12** | LLM structure advisor (gpt-4o-mini hints for CSP generation) | **DONE** |
+| **Phase 13** | Spin-fluctuation pairing channel (Lindhard+RPA χ, I²χ, combined Tc) | **DONE** |
+| **Phase 14** | Pressure-priority refinement + dual convergence gate (force + pressure) | **DONE** |
+| **Phase 15** | DFT atom limit raised to 24 + atom-scaled timeouts/grids | **DONE** |
+| **Phase 16** | Liechtenstein DFT+U (kind=1 with Hund's J for nickelates/ruthenates) | **DONE** |
+| **Phase 17** | SCDFT (superconducting DFT) for beyond-RPA μ* | Future (specialized code) |
+| **Phase 18** | Path-integral MD for NQE beyond SSCHA | Future (PIMD integration) |
