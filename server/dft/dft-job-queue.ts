@@ -953,7 +953,45 @@ const CRITICAL_PRIORITY_FORMULAS: string[] = [
   "SmCo5",            // Permanent magnet
 ];
 
+// Force-requeue cuprate for DMFT pipeline testing.
+// These bypass the "already completed" check and always insert a fresh job.
+const DMFT_TEST_FORMULAS = ["La2CuO4"];
+
+async function bootstrapDMFTTestCandidates(): Promise<void> {
+  if (!process.env.DMFT_SERVICE_URL) return; // only when DMFT is configured
+  for (const formula of DMFT_TEST_FORMULAS) {
+    try {
+      // Check if there's already a queued/running job — don't double-queue
+      const { activeJob } = await storage.hasActiveOrRecentFailedDftJobs(formula);
+      if (activeJob && (activeJob.status === "queued" || activeJob.status === "running")) {
+        // Bump to top priority
+        if ((activeJob.priority ?? 0) < 9999) {
+          await storage.updateDftJobIfStatus(activeJob.id, "queued", { priority: 9999 } as any);
+        }
+        console.log(`[DFT-Queue] DMFT test: ${formula} already ${activeJob.status} (job #${activeJob.id}), ensured priority 9999`);
+        continue;
+      }
+      // Force-insert even if previously completed — we want a fresh DFT run
+      // so the DMFT bundle gets exported with the latest pipeline code
+      const job = await storage.insertDftJob({
+        formula,
+        candidateId: null,
+        status: "queued",
+        jobType: "scf",
+        priority: 9999,
+        inputData: { formula, candidateId: null, requestedAt: new Date().toISOString(), dmftTest: true },
+      });
+      console.log(`[DFT-Queue] DMFT test: force-queued ${formula} at priority 9999 (job #${job.id})`);
+    } catch (err: any) {
+      console.warn(`[DFT-Queue] DMFT test requeue failed for ${formula}: ${err.message?.slice(0, 80)}`);
+    }
+  }
+}
+
 async function bootstrapCriticalCandidates(): Promise<void> {
+  // First: DMFT test candidates (highest priority)
+  await bootstrapDMFTTestCandidates();
+
   for (const formula of CRITICAL_PRIORITY_FORMULAS) {
     try {
       const { activeJob } = await storage.hasActiveOrRecentFailedDftJobs(formula);
