@@ -955,7 +955,11 @@ const CRITICAL_PRIORITY_FORMULAS: string[] = [
 
 // Force-requeue cuprate for DMFT pipeline testing.
 // These bypass the "already completed" check and always insert a fresh job.
-const DMFT_TEST_FORMULAS = ["La2CuO4"];
+const DMFT_TEST_FORMULAS = [
+  "La2CuO4",   // cuprate — d-wave benchmark target
+  "FeSe",      // Fe-pnictide — s±-wave, strongly correlated Fe-3d
+  "SrFe2As2",  // Fe-pnictide — stripe AFM, DMFT orbital-selective physics
+];
 
 async function bootstrapDMFTTestCandidates(): Promise<void> {
   if (!process.env.DMFT_SERVICE_URL) return; // only when DMFT is configured
