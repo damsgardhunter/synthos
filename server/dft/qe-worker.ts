@@ -5275,8 +5275,9 @@ ${cellBlockEos}
             });
             console.log(`[QE-Worker] Mag trial ${config.ordering} failed: ${magErr.message?.slice(0, 100)}`);
           }
-          // Clean tmp between trials to avoid charge contamination
-          cleanQETmpDir(path.join(jobDir, "tmp"));
+          // Clean scratch between trials to avoid charge contamination — but preserve
+          // .save/ dirs so subsequent vc-relax can potentially restart from them
+          cleanQETmpScratch(path.join(jobDir, "tmp"));
         }
 
         const magGS = selectMagneticGroundState(magTrials, magConfigs, positions.length);
@@ -5877,9 +5878,12 @@ ${cellBlockEos}
       const scfInputFile = path.join(jobDir, `scf_attempt${attempt}.in`);
       fs.writeFileSync(scfInputFile, scfInput);
 
-      // Clean tmp/ when not recovering or when forcing clean restart
+      // Clean scratch when not recovering or forcing clean restart — but preserve
+      // .save/ dirs because ph.x and bands need the collected wavefunctions from
+      // vc-relax (disk_io='high'). Using cleanQETmpDir here was wiping wfc files
+      // that FeSe/Sr2RuO4 needed for phonon calculations.
       if (attempt > 0 && (!canRecover || forceClean)) {
-        cleanQETmpDir(path.join(jobDir, "tmp"));
+        cleanQETmpScratch(path.join(jobDir, "tmp"));
       }
 
       const smearInfo = params.smearing ? `, smearing=${params.smearing}` : "";
