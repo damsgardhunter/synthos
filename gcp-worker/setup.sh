@@ -79,6 +79,11 @@ ENABLE_GNN_WORKER=true
 ENABLE_XGB_WORKER=true
 ENABLE_ML_WORKER=false
 
+# DMFT service (runs on gnn-training VM in Docker, port 8780)
+# If this is the gnn-training VM itself, use localhost.
+# If this is the DFT worker, use the gnn-training external IP.
+DMFT_SERVICE_URL=http://34.130.121.199:8780
+
 OMP_NUM_THREADS=2
 NODE_ENV=production
 EOF

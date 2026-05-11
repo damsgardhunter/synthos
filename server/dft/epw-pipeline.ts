@@ -19,6 +19,16 @@ import * as path from "path";
 // Types
 // ---------------------------------------------------------------------------
 
+/**
+ * Wannier90 mode selector:
+ *   'epw'             — wide disentanglement window, all orbitals (s;p;d;f),
+ *                       spread minimization for smooth e-ph interpolation
+ *   'dmft_projector'  — tight window around correlated d/f orbitals only,
+ *                       projector-style localization for DMFT downfolding.
+ *                       Produces H(k) in _hr.dat for TRIQS/DFTTools import.
+ */
+export type WannierMode = "epw" | "dmft_projector";
+
 export interface EPWResult {
   lambda: number;
   lambdaMax: number;
@@ -64,6 +74,28 @@ const WANNIER_PROJECTIONS: Record<string, string> = {
   Tl: "s;p", Pb: "s;p", Bi: "s;p",
 };
 
+/**
+ * DMFT projector-mode projections — only the correlated d/f orbitals.
+ * For DMFT we want tightly localized Wannier functions on the correlated
+ * subspace (Cu-d_x²-y² for cuprates, Ni-d for nickelates, Fe-d for pnictides).
+ * Non-correlated elements get NO projections — they're integrated out.
+ */
+const DMFT_PROJECTIONS: Record<string, string> = {
+  // 3d transition metals — project onto d manifold only
+  Sc: "d", Ti: "d", V: "d", Cr: "d", Mn: "d",
+  Fe: "d", Co: "d", Ni: "d", Cu: "d", Zn: "d",
+  // 4d transition metals
+  Y: "d", Zr: "d", Nb: "d", Mo: "d", Tc: "d",
+  Ru: "d", Rh: "d", Pd: "d", Ag: "d", Cd: "d",
+  // 5d transition metals
+  La: "d", Hf: "d", Ta: "d", W: "d", Re: "d",
+  Os: "d", Ir: "d", Pt: "d", Au: "d", Hg: "d",
+  // f-block — project onto f manifold (d is not correlated for these)
+  Ce: "f", Pr: "f", Nd: "f", Sm: "f", Eu: "f",
+  Gd: "f", Tb: "f", Dy: "f", Ho: "f", Er: "f", Tm: "f",
+  Th: "f", U: "f",
+};
+
 /** Number of Wannier orbitals per projection keyword */
 const ORBITALS_PER_PROJ: Record<string, number> = {
   s: 1, p: 3, d: 5, f: 7,
@@ -72,6 +104,29 @@ const ORBITALS_PER_PROJ: Record<string, number> = {
 function countWannierOrbitals(projStr: string): number {
   return projStr.split(";").reduce((sum, p) => sum + (ORBITALS_PER_PROJ[p] ?? 0), 0);
 }
+
+/**
+ * Count the number of correlated Wannier orbitals for DMFT.
+ * Returns per-element counts and total, useful for building the DMFT bundle.
+ */
+export function countDMFTOrbitals(
+  elements: string[],
+  counts: Record<string, number>,
+): { total: number; perElement: Record<string, { orbitals: number; manifold: string }> } {
+  const perElement: Record<string, { orbitals: number; manifold: string }> = {};
+  let total = 0;
+  for (const el of elements) {
+    const proj = DMFT_PROJECTIONS[el];
+    if (!proj) continue;
+    const norb = countWannierOrbitals(proj) * (counts[el] ?? 1);
+    perElement[el] = { orbitals: norb, manifold: proj };
+    total += norb;
+  }
+  return { total, perElement };
+}
+
+/** Expose DMFT projection table for external use */
+export { DMFT_PROJECTIONS };
 
 // ---------------------------------------------------------------------------
 // Auto grid selection
@@ -197,31 +252,37 @@ export function generateWannier90Win(opts: {
   fermiEnergy: number;
   latticeVectors: number[][];   // 3×3 in Angstrom
   positions: Array<{ element: string; x: number; y: number; z: number }>;
+  /** Wannier90 mode: 'epw' for e-ph interpolation, 'dmft_projector' for DMFT downfolding */
+  wannierMode?: WannierMode;
 }): string {
   const {
     prefix, elements, counts, numBands, kGrid,
     fermiEnergy, latticeVectors, positions,
+    wannierMode = "epw",
   } = opts;
+
+  const isDMFT = wannierMode === "dmft_projector";
+
+  // Select projection table based on mode
+  const projTable = isDMFT ? DMFT_PROJECTIONS : WANNIER_PROJECTIONS;
 
   // Count total Wannier functions
   let numWann = 0;
-  for (const el of elements) {
-    const proj = WANNIER_PROJECTIONS[el] ?? "s;p";
-    numWann += countWannierOrbitals(proj) * (counts[el] ?? 1);
-  }
-
-  // Build projections block
   const projLines: string[] = [];
   for (const el of elements) {
-    const proj = WANNIER_PROJECTIONS[el] ?? "s;p";
+    const proj = projTable[el];
+    if (!proj) {
+      // In DMFT mode, non-correlated elements are skipped entirely
+      if (!isDMFT) {
+        const fallback = "s;p";
+        numWann += countWannierOrbitals(fallback) * (counts[el] ?? 1);
+        projLines.push(`${el}: ${fallback}`);
+      }
+      continue;
+    }
+    numWann += countWannierOrbitals(proj) * (counts[el] ?? 1);
     projLines.push(`${el}: ${proj.replace(/;/g, ";")}`);
   }
-
-  // Disentanglement windows — generous window around Fermi level
-  const disWinMin = fermiEnergy - 15.0;
-  const disWinMax = fermiEnergy + 20.0;
-  const disFrozMin = fermiEnergy - 5.0;
-  const disFrozMax = fermiEnergy + 2.0;
 
   // Generate k-point list on the nscf mesh (Gamma-centered, no shift)
   const kPoints: string[] = [];
@@ -244,7 +305,14 @@ export function generateWannier90Win(opts: {
     .map(p => `${p.element}  ${p.x.toFixed(10)}  ${p.y.toFixed(10)}  ${p.z.toFixed(10)}`)
     .join("\n");
 
-  return `num_wann = ${numWann}
+  // ── EPW mode: wide disentanglement, spread minimization ──────────────
+  if (!isDMFT) {
+    const disWinMin = fermiEnergy - 15.0;
+    const disWinMax = fermiEnergy + 20.0;
+    const disFrozMin = fermiEnergy - 5.0;
+    const disFrozMax = fermiEnergy + 2.0;
+
+    return `num_wann = ${numWann}
 num_bands = ${numBands}
 
 ! Disentanglement
@@ -261,6 +329,69 @@ num_print_cycles = 20
 
 ! Write AMN and MMN (needed for pw2wannier90)
 write_hr = .true.
+
+! K-mesh
+mp_grid = ${nk1} ${nk2} ${nk3}
+
+begin projections
+${projLines.join("\n")}
+end projections
+
+begin unit_cell_cart
+Ang
+${unitCellCart}
+end unit_cell_cart
+
+begin atoms_frac
+${atomsFrac}
+end atoms_frac
+
+begin kpoints
+${kPoints.join("\n")}
+end kpoints
+`;
+  }
+
+  // ── DMFT projector mode: tight window, correlated orbitals only ───────
+  // For DMFT we need:
+  //   1. Tight energy window around the correlated bands (E_F ± 3-5 eV)
+  //   2. No disentanglement (or very narrow frozen window = full window)
+  //   3. write_hr = .true. to get H(k) in real space for TRIQS
+  //   4. hr_plot = .true. for visualization / debugging
+  //   5. Projector-style: minimize spread but keep localized on d/f sites
+  const dmftWinMin = fermiEnergy - 5.0;
+  const dmftWinMax = fermiEnergy + 5.0;
+
+  return `num_wann = ${numWann}
+num_bands = ${numBands}
+
+! ===== DMFT PROJECTOR MODE =====
+! Tight window around correlated bands for DMFT downfolding.
+! Only correlated d/f orbitals are Wannierized.
+! Output: ${prefix}_hr.dat contains H(k) for TRIQS/DFTTools.
+
+! Energy window — tight around correlated manifold
+dis_win_min  = ${dmftWinMin.toFixed(4)}
+dis_win_max  = ${dmftWinMax.toFixed(4)}
+! Frozen window = full window (no disentanglement, pure projection)
+dis_froz_min = ${dmftWinMin.toFixed(4)}
+dis_froz_max = ${dmftWinMax.toFixed(4)}
+dis_num_iter = 0
+dis_mix_ratio = 1.0
+
+! Wannierization — tighter convergence for DMFT quality
+num_iter = 500
+num_print_cycles = 50
+conv_tol = 1.0e-10
+conv_window = 5
+
+! Write H(R) for TRIQS import + real-space Hamiltonian plot
+write_hr = .true.
+hr_plot  = .true.
+write_xyz = .true.
+
+! Band structure for validation (optional, useful for checking downfolding)
+bands_plot = .true.
 
 ! K-mesh
 mp_grid = ${nk1} ${nk2} ${nk3}

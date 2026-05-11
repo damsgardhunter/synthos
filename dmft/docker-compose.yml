@@ -1,0 +1,54 @@
+# ==============================================================================
+# DMFT service for QAE — runs alongside existing GNN/XGB services on gnn-training
+#
+# Start:  docker compose -f dmft/docker-compose.yml up -d
+# Logs:   docker compose -f dmft/docker-compose.yml logs -f dmft
+# Stop:   docker compose -f dmft/docker-compose.yml down
+# ==============================================================================
+
+services:
+  dmft:
+    build:
+      context: ..
+      dockerfile: dmft/Dockerfile
+    container_name: qae-dmft
+    restart: unless-stopped
+    ports:
+      - "8780:8780"
+    volumes:
+      # Persistent storage for DMFT jobs, results, and input bundles
+      - dmft-jobs:/data/dmft_jobs
+      - dmft-results:/data/dmft_results
+      - dmft-bundles:/data/dmft_bundles
+      # Mount the host tmp where DFT workers write structure cache + bundles
+      - /tmp/qe_calculations:/data/qe_calculations:ro
+    environment:
+      # MPI parallelism: 2 ranks for CTHYB on g2-standard-4 (4 vCPU, 16GB, 1x L4 GPU)
+      # GNN training + predictions use the L4 GPU + 1-2 cores
+      # DMFT gets 2 cores — enough for small clusters (N_c=4, single-band)
+      - DMFT_MPI_RANKS=2
+      - OMP_NUM_THREADS=1
+      # TRIQS CTHYB solver parameters — reduced cycles for 2-rank setup
+      - CTHYB_N_WARMUP=20000
+      - CTHYB_N_CYCLES=2000000
+      - CTHYB_LENGTH_CYCLE=100
+      # Database URL for job status updates (injected from host env)
+      - DATABASE_URL=${DATABASE_URL}
+    deploy:
+      resources:
+        limits:
+          cpus: "3"
+          memory: 10G
+        reservations:
+          cpus: "2"
+          memory: 4G
+    healthcheck:
+      test: ["CMD", "python3", "/app/triqs-healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  dmft-jobs:
+  dmft-results:
+  dmft-bundles:

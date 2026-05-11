@@ -837,6 +837,23 @@ export async function runQuantumEnginePipeline(
     spinFluctuationLambda: eliashbergResult?.spinFluctuation?.lambdaSF ?? undefined,
     spinFluctuationTc: eliashbergResult?.spinFluctuation?.tcSpinFluctuation ?? undefined,
     tcCombined: eliashbergResult?.combinedTc?.tcCombined ?? undefined,
+    // DMFT fields — bundle export
+    dmftBundleExported: dftResult?.dmftBundle != null ? true : undefined,
+    dmftHamiltonianParsed: dftResult?.dmftBundle?.hamiltonianParsed ?? undefined,
+    dmftCorrelatedShells: dftResult?.dmftBundle?.nCorrelatedShells ?? undefined,
+    dmftCorrelatedOrbitals: dftResult?.dmftBundle?.nCorrelatedOrbitals ?? undefined,
+    dmftJobId: (dftResult as any)?.dmftJobId ?? undefined,
+    // DMFT fields — polled results from DMFT service
+    dmftConverged: (dftResult as any)?.dmftConverged ?? undefined,
+    dmftLambdaPair: (dftResult as any)?.dmftLambdaPair ?? undefined,
+    dmftGapSymmetry: (dftResult as any)?.dmftGapSymmetry ?? undefined,
+    dmftGapNodes: (dftResult as any)?.dmftGapNodes ?? undefined,
+    dmftIsUnconventional: (dftResult as any)?.dmftIsUnconventional ?? undefined,
+    dmftTcBSE: (dftResult as any)?.dmftTcBSE ?? undefined,
+    dmftTcBSEConfidence: (dftResult as any)?.dmftTcBSEConfidence ?? undefined,
+    dmftDominantChannel: (dftResult as any)?.dmftDominantChannel ?? undefined,
+    dmftClusterSize: (dftResult as any)?.dmftClusterSize ?? undefined,
+    dmftAvgSign: (dftResult as any)?.dmftAvgSign ?? undefined,
   };
 
   // Compute learning score (multi-objective, not just max Tc)

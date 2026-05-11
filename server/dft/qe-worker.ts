@@ -7530,10 +7530,25 @@ ${r2Cell}
           if (dmftServiceUrl) {
             try {
               const bundlePath = result.dmftBundle.bundlePath;
+              // Upload the bundle file via multipart form data.
+              // The DMFT service may be on a different VM (gnn-training),
+              // so we can't pass a local file path — must upload the file.
+              const bundleData = fs.readFileSync(bundlePath);
+              const boundary = `----QAEBundle${Date.now()}`;
+              const fileName = path.posix.basename(bundlePath);
+              const multipartBody = Buffer.concat([
+                Buffer.from(
+                  `--${boundary}\r\n` +
+                  `Content-Disposition: form-data; name="bundle"; filename="${fileName}"\r\n` +
+                  `Content-Type: application/octet-stream\r\n\r\n`
+                ),
+                bundleData,
+                Buffer.from(`\r\n--${boundary}--\r\n`),
+              ]);
               const submitRes = await fetch(`${dmftServiceUrl}/submit`, {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ bundle_path: bundlePath }),
+                headers: { "Content-Type": `multipart/form-data; boundary=${boundary}` },
+                body: multipartBody,
               });
               if (submitRes.ok) {
                 const submitData = await submitRes.json() as any;

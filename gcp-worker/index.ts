@@ -36,6 +36,7 @@ import { startDFTLoop, stopDFTLoop } from "./dft-loop";
 import { startGNNLoop, stopGNNLoop } from "./gnn-loop";
 import { startXGBLoop, stopXGBLoop } from "./xgb-loop";
 import { startMLLoop, stopMLLoop } from "./ml-loop";
+import { startDMFTLoop, stopDMFTLoop } from "./dmft-loop";
 import { startSuperConIngestion } from "../server/learning/supercon-db-ingestion";
 import { startJarvisIngestion } from "../server/learning/jarvis-ingestion";
 import { startThreeDSCIngestion } from "../server/learning/threedsc-ingestion";
@@ -66,6 +67,7 @@ const ENABLE_GNN = process.env.ENABLE_GNN_WORKER !== "false";
 // xgb_training_jobs DB rows written by gnn-loop.ts (cycle 1381).
 const ENABLE_XGB = false;
 const ENABLE_ML  = process.env.ENABLE_ML_WORKER  !== "false";
+const ENABLE_DMFT = process.env.DMFT_SERVICE_URL ? true : false;
 
 console.log("=".repeat(60));
 console.log("  Quantum Alchemy Engine — GCP Worker");
@@ -73,6 +75,7 @@ console.log(`  GNN/XGB  : ${ENABLE_GNN ? "ENABLED (nightly training @ midnight U
 console.log(`  DFT loop : ${ENABLE_DFT ? "ENABLED" : "disabled"}`);
 console.log(`  XGB loop : ${ENABLE_XGB ? "ENABLED" : "disabled"}`);
 console.log(`  ML  loop : ${ENABLE_ML  ? "ENABLED" : "disabled"}`);
+console.log(`  DMFT svc : ${ENABLE_DMFT ? `ENABLED (${process.env.DMFT_SERVICE_URL})` : "disabled (set DMFT_SERVICE_URL to enable)"}`);
 console.log(`  OMP_NUM_THREADS = ${process.env.OMP_NUM_THREADS}`);
 console.log(`  QE_BIN_DIR      = ${process.env.QE_BIN_DIR ?? "(auto)"}`);
 console.log("=".repeat(60));
@@ -109,10 +112,14 @@ function delay(ms: number): Promise<void> {
 
 const loops: Promise<void>[] = [];
 
-if (ENABLE_GNN) loops.push(startGNNLoop());
-if (ENABLE_DFT) loops.push(delay(3_000).then(() => startDFTLoop()));
-if (ENABLE_XGB) loops.push(delay(6_000).then(() => startXGBLoop()));
-if (ENABLE_ML)  loops.push(delay(9_000).then(() => startMLLoop()));
+// DMFT starts first — it's a Docker container that boots in ~10-20s.
+// Once healthy, it's ready to receive bundles from DFT jobs.
+if (ENABLE_DMFT) loops.push(startDMFTLoop());
+
+if (ENABLE_GNN) loops.push(delay(2_000).then(() => startGNNLoop()));
+if (ENABLE_DFT) loops.push(delay(5_000).then(() => startDFTLoop()));
+if (ENABLE_XGB) loops.push(delay(8_000).then(() => startXGBLoop()));
+if (ENABLE_ML)  loops.push(delay(11_000).then(() => startMLLoop()));
 
 if (loops.length === 0) {
   console.error("No workers enabled — set ENABLE_DFT_WORKER=true or ENABLE_GNN_WORKER=true");
@@ -121,6 +128,7 @@ if (loops.length === 0) {
 
 function shutdown(signal: string) {
   console.log(`\n[GCP-Worker] Received ${signal} — shutting down gracefully...`);
+  stopDMFTLoop();
   stopDFTLoop();
   stopGNNLoop();
   stopXGBLoop();

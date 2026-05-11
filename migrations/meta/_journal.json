@@ -8,6 +8,13 @@
       "when": 1777306196297,
       "tag": "0000_faulty_shiva",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1778536800000,
+      "tag": "0001_add_dmft_columns",
+      "breakpoints": true
     }
   ]
 }

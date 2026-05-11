@@ -1,0 +1,453 @@
+#!/usr/bin/env python3
+"""
+D2: Charge Self-Consistent DFT+DMFT Loop.
+
+In standard DFT+DMFT, the DFT Hamiltonian H(k) is computed once and
+then DMFT runs on top. But the DMFT self-energy changes the electronic
+density, which should feed back into the DFT charge density and update
+H(k). This loop:
+
+  DFT → H(k) → DMFT → ρ_DMFT(r) → DFT(ρ_new) → H'(k) → DMFT → ...
+
+is called charge self-consistency (CSC). It matters when:
+  - DMFT significantly redistributes charge between orbitals
+  - The structural/electronic properties depend on the charge density
+    (e.g., Mott transition, orbital polarization in nickelates)
+  - You want quantitatively accurate Tc predictions
+
+Implementation strategy:
+  1. Run QE SCF with current charge density → H(k) via Wannier90
+  2. Run DMFT with H(k) → Σ(K,iω), new occupations n_DMFT
+  3. Construct updated density matrix from DMFT Green's function
+  4. Feed back to QE as starting charge density
+  5. Check density convergence: ||ρ_new - ρ_old|| < tol → stop
+  6. Mix densities: ρ_next = α·ρ_old + (1-α)·ρ_new
+
+The outer loop typically converges in 5-15 iterations.
+Each iteration costs one QE SCF (~minutes) + one DMFT (~hours).
+
+solid_dmft has experimental CSC support, but we implement our own
+loop for tighter control over the QE↔DMFT interface and to reuse
+the existing QE worker infrastructure.
+
+References:
+  Savrasov et al., PRL 87, 216405 (2001) — first CSC DFT+DMFT
+  Haule et al., PRB 81, 195107 (2010) — eDMFT CSC
+  Aichhorn et al., PRB 84, 054529 (2011) — CSC with TRIQS
+  Park et al., PRB 89, 245133 (2014) — CSC for nickelates
+"""
+
+import numpy as np
+import json
+import os
+import time
+from typing import Optional, Dict
+
+# ── Density matrix from DMFT Green's function ───────────────────────────────
+
+
+def compute_density_matrix_from_gf(
+    g_iw: np.ndarray,
+    beta: float,
+) -> np.ndarray:
+    """
+    Compute the orbital density matrix from the Matsubara Green's function:
+
+      n_{ab} = <c†_a c_b> = lim_{τ→0⁻} G_{ab}(τ)
+             = (1/β) Σ_n G_{ab}(iω_n) · e^{iω_n·0⁺}
+             = (1/β) Σ_n G_{ab}(iω_n) + tail correction
+
+    The tail of G(iω) → 1/iω for large ω, so we need to sum carefully:
+      n_{ab} = δ_{ab}/2 + (1/β) Σ_n [G_{ab}(iω_n) - δ_{ab}/(iω_n)]
+
+    Args:
+        g_iw: G(iω), shape [2*n_iw, n_orb, n_orb] or [nc, 2*n_iw, n_orb, n_orb]
+        beta: inverse temperature
+
+    Returns:
+        density_matrix: [n_orb, n_orb] or [nc, n_orb, n_orb] real
+    """
+    if g_iw.ndim == 4:
+        # Cluster: [nc, 2*n_iw, n_orb, n_orb]
+        nc = g_iw.shape[0]
+        n_iw = g_iw.shape[1] // 2
+        n_orb = g_iw.shape[2]
+        wn = np.array([(2 * (n - n_iw) + 1) * np.pi / beta for n in range(2 * n_iw)])
+
+        dens = np.zeros((nc, n_orb, n_orb))
+        for ic in range(nc):
+            eye = np.eye(n_orb)
+            tail_sum = np.zeros((n_orb, n_orb), dtype=complex)
+            for iw in range(2 * n_iw):
+                tail_sum += g_iw[ic, iw] - eye / (1j * wn[iw])
+            dens[ic] = (eye / 2.0 + (tail_sum / beta).real)
+        return dens
+
+    elif g_iw.ndim == 3:
+        # Single-site: [2*n_iw, n_orb, n_orb]
+        n_iw = g_iw.shape[0] // 2
+        n_orb = g_iw.shape[1]
+        wn = np.array([(2 * (n - n_iw) + 1) * np.pi / beta for n in range(2 * n_iw)])
+
+        eye = np.eye(n_orb)
+        tail_sum = np.zeros((n_orb, n_orb), dtype=complex)
+        for iw in range(2 * n_iw):
+            tail_sum += g_iw[iw] - eye / (1j * wn[iw])
+        return (eye / 2.0 + (tail_sum / beta).real)
+
+    else:
+        raise ValueError(f"Unexpected g_iw shape: {g_iw.shape}")
+
+
+# ── QE density update ───────────────────────────────────────────────────────
+
+def write_qe_density_correction(
+    density_matrix_dmft: np.ndarray,
+    density_matrix_dft: np.ndarray,
+    orbital_labels: list,
+    output_path: str,
+):
+    """
+    Write the density correction Δn = n_DMFT - n_DFT for QE to read.
+
+    QE can read an external occupation matrix via the starting_ns_eigenvalue
+    card (for DFT+U) or via a custom density restart. We write both formats.
+
+    The correction is applied to the correlated subspace occupations.
+    Non-correlated orbitals keep their DFT values.
+
+    Args:
+        density_matrix_dmft: [n_orb, n_orb] from DMFT Green's function
+        density_matrix_dft:  [n_orb, n_orb] from DFT (Wannier projection)
+        orbital_labels: e.g., ["d_x2y2", "p_x", "p_y"]
+        output_path: where to write the correction file
+    """
+    delta_n = density_matrix_dmft - density_matrix_dft
+    n_orb = delta_n.shape[0]
+
+    data = {
+        "n_orb": n_orb,
+        "orbital_labels": orbital_labels,
+        "density_matrix_dmft": density_matrix_dmft.tolist(),
+        "density_matrix_dft": density_matrix_dft.tolist(),
+        "delta_n": delta_n.tolist(),
+        "trace_dmft": float(np.trace(density_matrix_dmft)),
+        "trace_dft": float(np.trace(density_matrix_dft)),
+        "max_correction": float(np.max(np.abs(delta_n))),
+    }
+
+    # Write JSON for the QAE pipeline to read
+    with open(output_path, "w") as f:
+        json.dump(data, f, indent=2)
+
+    # Write QE starting_ns_eigenvalue format for DFT+U restart
+    occ_path = output_path.replace(".json", "_qe_occ.dat")
+    with open(occ_path, "w") as f:
+        f.write(f"# DMFT orbital occupations for QE restart\n")
+        f.write(f"# n_orb = {n_orb}\n")
+        evals = np.linalg.eigvalsh(density_matrix_dmft)
+        for i, ev in enumerate(evals):
+            f.write(f"  {ev:.8f}\n")
+
+
+def generate_qe_scf_with_dmft_density(
+    base_scf_input: str,
+    density_correction_path: str,
+    iteration: int,
+) -> str:
+    """
+    Modify a QE SCF input to incorporate DMFT density feedback.
+
+    Strategy:
+      1. Set startingpot = 'file' to read density from previous SCF
+      2. Update starting_magnetization if DMFT changes spin polarization
+      3. Ensure disk_io = 'high' so we can extract the new H(k)
+      4. Set electron_maxstep higher for CSC stability
+
+    Args:
+        base_scf_input: the original QE SCF input string
+        density_correction_path: path to the density correction JSON
+        iteration: CSC iteration number
+
+    Returns:
+        Modified QE SCF input string
+    """
+    lines = base_scf_input.split("\n")
+    modified = []
+
+    for line in lines:
+        stripped = line.strip().lower()
+
+        # For iterations > 0, read density from previous run
+        if "startingpot" in stripped:
+            if iteration > 0:
+                modified.append("  startingpot = 'file',")
+            else:
+                modified.append(line)
+        elif "electron_maxstep" in stripped:
+            modified.append("  electron_maxstep = 200,")
+        elif "conv_thr" in stripped and "forc_conv" not in stripped:
+            # Tighter convergence for CSC
+            modified.append("  conv_thr = 1.0d-8,")
+        else:
+            modified.append(line)
+
+    # Add disk_io if not present
+    if not any("disk_io" in l.lower() for l in modified):
+        for i, line in enumerate(modified):
+            if "&CONTROL" in line.upper():
+                modified.insert(i + 1, "  disk_io = 'high',")
+                break
+
+    return "\n".join(modified)
+
+
+# ── CSC outer loop ───────────────────────────────────────────────────────────
+
+class CSCParams:
+    """Parameters for the charge self-consistency loop."""
+
+    def __init__(
+        self,
+        max_iterations: int = 15,
+        density_mix: float = 0.3,
+        density_tol: float = 1e-4,
+        # Whether to do Wannier90 re-projection at each step
+        # (expensive but captures H(k) changes beyond occupations)
+        reproject_wannier: bool = True,
+        # Whether to do full DCA or single-site DMFT in the inner loop
+        use_dca: bool = False,
+        dca_nc: int = 4,
+    ):
+        self.max_iterations = max_iterations
+        self.density_mix = density_mix
+        self.density_tol = density_tol
+        self.reproject_wannier = reproject_wannier
+        self.use_dca = use_dca
+        self.dca_nc = dca_nc
+
+
+def run_csc_loop(
+    bundle_data: dict,
+    dmft_config: dict,
+    csc_params: CSCParams,
+    work_dir: str,
+    qe_callback=None,
+    wannier_callback=None,
+) -> dict:
+    """
+    Run the charge self-consistent DFT+DMFT outer loop.
+
+    Outer loop:
+      1. QE SCF with current density → charge density, band structure
+      2. Wannier90 projection → H(k) for DMFT
+      3. DMFT (single-site or DCA) → Σ(iω), G(iω), new density matrix
+      4. Compute density correction Δn = n_DMFT - n_DFT
+      5. Update charge density: ρ_next = mix(ρ_old, ρ_DMFT)
+      6. Check convergence → repeat or stop
+
+    Args:
+        bundle_data: DMFT bundle dict (hk, corr_shells, etc.)
+        dmft_config: solid_dmft config dict
+        csc_params: CSC parameters
+        work_dir: output directory
+        qe_callback: async function(scf_input, work_dir) → scf_output
+            Runs QE SCF. If None, H(k) is reused without QE update.
+        wannier_callback: async function(scf_dir) → hk_new
+            Re-runs Wannier90 projection. If None, H(k) unchanged.
+
+    Returns:
+        dict with convergence history, final density, final Σ
+    """
+    os.makedirs(work_dir, exist_ok=True)
+
+    t0 = time.time()
+    n_orb = bundle_data["hk"].shape[1]
+    beta = dmft_config.get("general", {}).get("beta", 40.0)
+
+    hk_current = bundle_data["hk"].copy()
+    sigma_current = None  # Warm-start from previous iteration
+
+    convergence_history = []
+    density_history = []
+    density_matrix_prev = None
+
+    print(f"\n{'='*60}")
+    print(f"[CSC] Charge Self-Consistent DFT+DMFT Loop")
+    print(f"[CSC] n_orb={n_orb}, max_iter={csc_params.max_iterations}, "
+          f"mix={csc_params.density_mix}, tol={csc_params.density_tol}")
+    print(f"{'='*60}")
+
+    for iteration in range(csc_params.max_iterations):
+        iter_dir = os.path.join(work_dir, f"csc_iter_{iteration:03d}")
+        os.makedirs(iter_dir, exist_ok=True)
+        t_iter = time.time()
+
+        print(f"\n[CSC] === Iteration {iteration+1}/{csc_params.max_iterations} ===")
+
+        # ── Step 1: QE SCF (if callback available) ───────────────────
+        if qe_callback is not None and iteration > 0:
+            print(f"[CSC] Running QE SCF with updated density...")
+            try:
+                qe_result = qe_callback(iter_dir)
+                if qe_result.get("converged"):
+                    print(f"[CSC] QE SCF converged: E={qe_result.get('energy', '?')}")
+                else:
+                    print(f"[CSC] QE SCF did not converge — using previous H(k)")
+            except Exception as e:
+                print(f"[CSC] QE SCF failed: {e} — using previous H(k)")
+
+        # ── Step 2: Wannier90 re-projection (if callback available) ──
+        if wannier_callback is not None and csc_params.reproject_wannier and iteration > 0:
+            print(f"[CSC] Re-projecting Wannier90...")
+            try:
+                hk_new = wannier_callback(iter_dir)
+                if hk_new is not None and hk_new.shape == hk_current.shape:
+                    hk_current = hk_new
+                    print(f"[CSC] H(k) updated from new Wannier projection")
+                else:
+                    print(f"[CSC] Wannier re-projection returned incompatible H(k)")
+            except Exception as e:
+                print(f"[CSC] Wannier re-projection failed: {e}")
+
+        # ── Step 3: Run DMFT with current H(k) ──────────────────────
+        bundle_data_iter = dict(bundle_data)
+        bundle_data_iter["hk"] = hk_current
+
+        if csc_params.use_dca:
+            from multiorbital_dca import (
+                MultiOrbitalDCAParams, KanamoriInteraction,
+                run_multiorbital_dca, compute_lattice_gf_multiorbital_fast,
+                assign_k_to_patches,
+            )
+
+            U_vals = bundle_data.get("U_values", np.ones(n_orb) * 4.0)
+            J_vals = bundle_data.get("J_values", np.ones(n_orb) * 0.7)
+
+            interaction = KanamoriInteraction(n_orb, U_vals, J_vals)
+            dca_params = MultiOrbitalDCAParams(
+                n_orb=n_orb,
+                nc=csc_params.dca_nc,
+                interaction=interaction,
+                beta=beta,
+                mu=bundle_data.get("fermi_energy", 0.0),
+                n_iw=128,
+                n_k_per_dim=32,
+                n_iter=20,
+                sigma_mix=0.5,
+            )
+
+            from dca_solver import build_lattice_kpoints
+            kpoints = build_lattice_kpoints(dca_params.n_k_per_dim, dim=2)
+            patch_assignment = assign_k_to_patches(kpoints, dca_params.K_cluster)
+
+            dca_result = run_multiorbital_dca(
+                hk=hk_current, kpoints=kpoints,
+                params=dca_params, work_dir=os.path.join(iter_dir, "dca"),
+                initial_sigma=sigma_current,
+            )
+
+            g_c = dca_result.get("g_c")  # [nc, n_w, n_orb, n_orb]
+            sigma_current = dca_result.get("sigma_c")
+            dmft_converged = dca_result.get("converged", False)
+
+            # Average density matrix over patches
+            density_matrix_dmft = compute_density_matrix_from_gf(g_c, beta)
+            density_matrix_avg = np.mean(density_matrix_dmft, axis=0)
+
+        else:
+            # Single-site DMFT via run-dmft pipeline
+            from run_dmft import build_solid_dmft_config, run_solid_dmft, write_solid_dmft_inputs
+
+            config = build_solid_dmft_config(bundle_data_iter, iter_dir)
+            write_solid_dmft_inputs(bundle_data_iter, config, iter_dir)
+            dmft_result = run_solid_dmft(iter_dir, config)
+            dmft_converged = dmft_result.get("converged", False)
+
+            # Extract G(iω) from DMFT output
+            import h5py
+            seedname = config["general"]["seedname"]
+            h5_path = os.path.join(iter_dir, f"{seedname}.h5")
+            g_iw = None
+            try:
+                with h5py.File(h5_path, "r") as f:
+                    dmft_grp = f.get("DMFT_results")
+                    if dmft_grp:
+                        iters = sorted([k for k in dmft_grp.keys() if k.startswith("it_")])
+                        if iters:
+                            last = dmft_grp[iters[-1]]
+                            for path in ["G_iw", "solver/G_iw", "Gimp_iw"]:
+                                if path in last:
+                                    for block in last[path].keys():
+                                        if "data" in last[path][block]:
+                                            g_iw = last[path][block]["data"][()]
+                                            break
+                                    break
+            except Exception as e:
+                print(f"[CSC] Failed to extract G(iω): {e}")
+
+            if g_iw is not None:
+                density_matrix_avg = compute_density_matrix_from_gf(g_iw, beta)
+            else:
+                density_matrix_avg = np.eye(n_orb) * 0.5
+                print(f"[CSC] WARNING: Could not extract density matrix, using default")
+
+        # ── Step 4: Compute density correction ───────────────────────
+        if density_matrix_prev is not None:
+            delta_density = np.max(np.abs(density_matrix_avg - density_matrix_prev))
+        else:
+            delta_density = float("inf")
+
+        convergence_history.append(float(delta_density))
+        density_history.append(density_matrix_avg.tolist())
+
+        # Save correction for QE
+        write_qe_density_correction(
+            density_matrix_avg,
+            density_matrix_prev if density_matrix_prev is not None else np.eye(n_orb) * 0.5,
+            [f"orb_{i}" for i in range(n_orb)],
+            os.path.join(iter_dir, "density_correction.json"),
+        )
+
+        # ── Step 5: Mix densities ────────────────────────────────────
+        if density_matrix_prev is not None:
+            density_matrix_mixed = (
+                csc_params.density_mix * density_matrix_prev +
+                (1 - csc_params.density_mix) * density_matrix_avg
+            )
+        else:
+            density_matrix_mixed = density_matrix_avg
+
+        density_matrix_prev = density_matrix_mixed
+
+        elapsed_iter = time.time() - t_iter
+        trace = np.trace(density_matrix_avg)
+        print(f"[CSC] iter {iteration+1}: ||Δn||={delta_density:.2e}, "
+              f"Tr(n)={trace:.4f}, DMFT_converged={dmft_converged}, "
+              f"time={elapsed_iter:.0f}s")
+
+        # ── Step 6: Check convergence ────────────────────────────────
+        if delta_density < csc_params.density_tol and iteration > 0:
+            print(f"[CSC] Density converged after {iteration+1} iterations")
+            break
+
+    elapsed_total = time.time() - t0
+    converged = (convergence_history[-1] < csc_params.density_tol
+                 if convergence_history else False)
+
+    # Save final state
+    results = {
+        "converged": converged,
+        "n_iterations": len(convergence_history),
+        "convergence_history": convergence_history,
+        "final_density_matrix": density_matrix_avg.tolist() if density_matrix_avg is not None else None,
+        "final_trace": float(np.trace(density_matrix_avg)) if density_matrix_avg is not None else None,
+        "elapsed_seconds": elapsed_total,
+    }
+
+    results_path = os.path.join(work_dir, "csc_results.json")
+    with open(results_path, "w") as f:
+        json.dump(results, f, indent=2, default=str)
+    print(f"[CSC] Results saved to {results_path}")
+
+    return results

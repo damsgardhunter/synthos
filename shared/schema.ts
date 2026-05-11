@@ -495,6 +495,22 @@ export const quantumEngineDataset = pgTable("quantum_engine_dataset", {
   spinFluctuationLambda: real("spin_fluctuation_lambda"),      // λ_sf from RPA susceptibility
   spinFluctuationTc: real("spin_fluctuation_tc"),              // Tc from spin-fluctuation channel (K)
   tcCombined: real("tc_combined"),                             // combined Tc from all channels
+  // DMFT fields
+  dmftBundleExported: boolean("dmft_bundle_exported"),           // whether a DMFT bundle was exported
+  dmftHamiltonianParsed: boolean("dmft_hamiltonian_parsed"),     // whether H(k) was in the bundle
+  dmftCorrelatedShells: integer("dmft_correlated_shells"),       // number of correlated shells
+  dmftCorrelatedOrbitals: integer("dmft_correlated_orbitals"),   // total correlated orbitals
+  dmftJobId: text("dmft_job_id"),                               // job ID on DMFT service
+  dmftConverged: boolean("dmft_converged"),                     // whether DMFT converged
+  dmftLambdaPair: real("dmft_lambda_pair"),                     // leading pairing eigenvalue
+  dmftGapSymmetry: text("dmft_gap_symmetry"),                   // "d-x2y2-wave" | "s-wave" | etc.
+  dmftGapNodes: text("dmft_gap_nodes"),                         // "nodeless" | "line_nodes" | etc.
+  dmftIsUnconventional: boolean("dmft_is_unconventional"),      // whether pairing is unconventional
+  dmftTcBSE: real("dmft_tc_bse"),                               // Tc from BSE pairing susceptibility (K)
+  dmftTcBSEConfidence: text("dmft_tc_bse_confidence"),          // "interpolated" | "extrapolated" | etc.
+  dmftDominantChannel: text("dmft_dominant_channel"),           // "d-x2y2" | "s±-wave" | etc.
+  dmftClusterSize: integer("dmft_cluster_size"),                // N_c used in DCA (0 = single-site)
+  dmftAvgSign: real("dmft_avg_sign"),                           // average QMC sign (sign problem indicator)
   createdAt: timestamp("created_at").defaultNow(),
 }, (table) => [
   index("qe_dataset_material_idx").on(table.material),
