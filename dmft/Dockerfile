@@ -1,10 +1,10 @@
 # ==============================================================================
 # TRIQS 3.3.x + solid_dmft — DMFT solver for Quantum Alchemy Engine
 #
-# Installs TRIQS ecosystem from the official Flatiron PPA on Ubuntu 22.04.
-# TRIQS does NOT publish Docker Hub images — we build from their APT repo.
+# Builds TRIQS and all solvers from source (C++ compilation, ~30-60 min).
+# TRIQS does NOT publish pip wheels or Docker Hub images.
 #
-# Build:
+# Build (first time ~45 min, cached rebuilds ~2 min):
 #   docker build -t qae-dmft:latest -f dmft/Dockerfile .
 #
 # Run (on gnn-training VM):
@@ -18,49 +18,100 @@ LABEL description="TRIQS 3.3 + solid_dmft for QAE DMFT pipeline"
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# ── System deps + TRIQS PPA ─────────────────────────────────────────────────
+# ── System deps for TRIQS C++ build ─────────────────────────────────────────
 RUN apt-get update -qq && \
     apt-get install -y --no-install-recommends \
       ca-certificates curl gnupg software-properties-common \
-      git build-essential cmake \
-      python3 python3-pip python3-dev \
+      git build-essential cmake g++ gfortran \
+      python3 python3-pip python3-dev python3-setuptools \
       libopenmpi-dev openmpi-bin \
       libhdf5-mpi-dev libfftw3-dev \
-      libgmp-dev libboost-all-dev \
+      libgmp-dev libnfft3-dev \
+      libboost-all-dev \
+      libclang-dev \
       wget jq openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
-# ── Install TRIQS from Flatiron PPA ─────────────────────────────────────────
-# TRIQS 3.x packages are distributed via their own Ubuntu PPA.
-# If the PPA is unavailable, fall back to pip install.
-RUN echo ">>> Installing TRIQS ecosystem..." && \
-    (apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys 63E03B28DB77B050 2>/dev/null || true) && \
-    (add-apt-repository -y ppa:triqs/unstable 2>/dev/null || true) && \
-    apt-get update -qq && \
-    (apt-get install -y triqs triqs-cthyb triqs-dft-tools triqs-maxent 2>/dev/null || \
-     echo ">>> PPA install failed — falling back to pip") && \
-    rm -rf /var/lib/apt/lists/*
-
-# ── Pip fallback for TRIQS (if PPA didn't work) + required Python packages ──
-# --ignore-installed: Ubuntu 22.04 ships distutils-managed blinker that
-# conflicts with Flask's dependency. Force-replacing it is safe in a container.
+# ── Python deps needed before TRIQS build ────────────────────────────────────
+# --ignore-installed: Ubuntu 22.04 blinker conflicts with Flask
 RUN pip3 install --no-cache-dir --upgrade pip && \
     pip3 install --no-cache-dir --ignore-installed \
-      numpy scipy h5py mpi4py \
+      numpy scipy h5py mpi4py mako \
+      sphinx sphinx-rtd-theme \
+      matplotlib \
       flask==3.1.* gunicorn==23.* \
-      toml==0.10.* watchdog==6.* && \
-    # Try pip install of TRIQS components (may fail on some platforms)
-    (pip3 install --no-cache-dir triqs 2>/dev/null || echo "TRIQS pip not available") && \
-    (pip3 install --no-cache-dir triqs_cthyb 2>/dev/null || echo "CTHYB pip not available") && \
-    (pip3 install --no-cache-dir triqs_dft_tools 2>/dev/null || echo "DFTTools pip not available") && \
-    (pip3 install --no-cache-dir triqs_maxent 2>/dev/null || echo "maxent pip not available")
+      toml==0.10.* watchdog==6.*
 
-# ── Install solid_dmft from source ──────────────────────────────────────────
+# ── Build TRIQS core from source ────────────────────────────────────────────
+# TRIQS 3.3.x — the core Green's function library
+ENV TRIQS_INSTALL_DIR=/opt/triqs
+ENV CXXFLAGS="-std=c++20"
+
+RUN cd /tmp && \
+    git clone --depth 1 --branch 3.3.x https://github.com/TRIQS/triqs.git && \
+    mkdir triqs/build && cd triqs/build && \
+    cmake .. \
+      -DCMAKE_INSTALL_PREFIX=${TRIQS_INSTALL_DIR} \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DBuild_Tests=OFF \
+      -DBuild_Documentation=OFF \
+    && make -j$(nproc) && make install && \
+    cd / && rm -rf /tmp/triqs
+
+ENV PATH="${TRIQS_INSTALL_DIR}/bin:${PATH}"
+ENV PYTHONPATH="${TRIQS_INSTALL_DIR}/lib/python3/dist-packages:${PYTHONPATH}"
+ENV CMAKE_PREFIX_PATH="${TRIQS_INSTALL_DIR}:${CMAKE_PREFIX_PATH}"
+ENV LD_LIBRARY_PATH="${TRIQS_INSTALL_DIR}/lib:${LD_LIBRARY_PATH}"
+
+# ── Build TRIQS/CTHYB (CT-HYB impurity solver) ─────────────────────────────
+RUN cd /tmp && \
+    git clone --depth 1 --branch 3.3.x https://github.com/TRIQS/cthyb.git && \
+    mkdir cthyb/build && cd cthyb/build && \
+    cmake .. \
+      -DCMAKE_INSTALL_PREFIX=${TRIQS_INSTALL_DIR} \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DBuild_Tests=OFF \
+      -DBuild_Documentation=OFF \
+    && make -j$(nproc) && make install && \
+    cd / && rm -rf /tmp/cthyb
+
+# ── Build TRIQS/DFTTools (Wannier90 converter, SumkDFT) ────────────────────
+RUN cd /tmp && \
+    git clone --depth 1 --branch 3.3.x https://github.com/TRIQS/dft_tools.git && \
+    mkdir dft_tools/build && cd dft_tools/build && \
+    cmake .. \
+      -DCMAKE_INSTALL_PREFIX=${TRIQS_INSTALL_DIR} \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DBuild_Tests=OFF \
+      -DBuild_Documentation=OFF \
+    && make -j$(nproc) && make install && \
+    cd / && rm -rf /tmp/dft_tools
+
+# ── Build TRIQS/maxent (analytic continuation) ──────────────────────────────
+RUN cd /tmp && \
+    git clone --depth 1 --branch 3.3.x https://github.com/TRIQS/maxent.git && \
+    mkdir maxent/build && cd maxent/build && \
+    cmake .. \
+      -DCMAKE_INSTALL_PREFIX=${TRIQS_INSTALL_DIR} \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DBuild_Tests=OFF \
+      -DBuild_Documentation=OFF \
+    && make -j$(nproc) && make install && \
+    cd / && rm -rf /tmp/maxent
+
+# ── Install solid_dmft ──────────────────────────────────────────────────────
 RUN cd /opt && \
-    git clone --depth 1 --branch stable https://github.com/flatironinstitute/solid_dmft.git 2>/dev/null && \
+    git clone --depth 1 --branch stable https://github.com/flatironinstitute/solid_dmft.git && \
     cd solid_dmft && \
-    pip3 install --no-cache-dir . 2>/dev/null || echo "solid_dmft install skipped" && \
+    pip3 install --no-cache-dir . && \
     cd / && rm -rf /opt/solid_dmft/.git
+
+# ── Verify TRIQS installation ───────────────────────────────────────────────
+RUN python3 -c "import triqs; print(f'TRIQS {triqs.version.version} installed')" && \
+    python3 -c "import triqs_cthyb; print('CTHYB installed')" && \
+    python3 -c "import triqs_dft_tools; print('DFTTools installed')" && \
+    (python3 -c "import triqs_maxent; print('maxent installed')" || echo "maxent: skipped") && \
+    (python3 -c "import solid_dmft; print('solid_dmft installed')" || echo "solid_dmft: skipped")
 
 # ── Create working directories ──────────────────────────────────────────────
 RUN mkdir -p /data/dmft_jobs /data/dmft_results /data/dmft_bundles /app
@@ -99,9 +150,8 @@ ENV DMFT_BUNDLE_DIR=/data/dmft_bundles
 
 EXPOSE 8780
 
-# Health check — tolerant: reports degraded if TRIQS missing but service still runs
 HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
-  CMD python3 /app/triqs-healthcheck.py || curl -sf http://localhost:8780/health > /dev/null
+  CMD python3 /app/triqs-healthcheck.py
 
 WORKDIR /app
 CMD ["gunicorn", "-w", "2", "-b", "0.0.0.0:8780", "--timeout", "7200", "dmft-service:app"]
