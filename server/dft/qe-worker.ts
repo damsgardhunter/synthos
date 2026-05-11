@@ -5545,15 +5545,20 @@ ${cellBlockEos}
             // Count ionic steps from output
             const ionicSteps = [...refineResult.stdout.matchAll(/Total force\s*=\s*([\d.]+)/g)].length;
 
-            // Accept the pass if force improved OR pressure improved (pressure-priority mode)
+            // Accept the pass if force improved OR pressure improved.
+            // Key insight: a refinement pass that makes force 0.04% worse but moves
+            // the cell 100 kbar closer to target pressure IS progress. The old code
+            // only accepted force improvement and broke immediately on any force
+            // regression, even when the cell was 1000+ kbar off target.
             const refPressResidual = refPressure != null ? Math.abs(refPressure - pressTarget) : 999;
             const prevPressResidual = currentPressure != null ? Math.abs(currentPressure - pressTarget) : 999;
             const forceImproved = refForce < currentForce;
             const pressureImproved = refPressResidual < prevPressResidual - 1.0; // at least 1 kbar improvement
-            // In pressure-priority mode: accept if pressure improved AND force didn't
-            // degrade past the publication threshold (allow minor force fluctuation)
-            const forceStillOk = refForce <= PUB_FORCE_THR * 1.5; // allow 50% slack
-            const madeProgress = forceImproved || (isPressurePriority && pressureImproved && forceStillOk);
+            // Allow force to degrade slightly if pressure is improving — the cell
+            // is finding the right volume and force will re-converge in later passes.
+            // Guard: force can't more than double (catastrophic regression = bad pass).
+            const forceNotCatastrophic = refForce < currentForce * 2.0;
+            const madeProgress = forceImproved || (pressureImproved && forceNotCatastrophic);
 
             if (madeProgress) {
               positions = refineParsed.finalPositions;
@@ -5561,8 +5566,7 @@ ${cellBlockEos}
                 latticeA = refineParsed.finalLatticeAng;
                 result.relaxedLatticeA = latticeA;
               }
-              const pLabel = isPressurePriority ? `, P_residual=${refPressResidual.toFixed(1)}→${prevPressResidual.toFixed(1)} kbar` : "";
-              console.log(`[QE-Worker] Refinement pass ${refinePass} DONE for ${formula}: force ${currentForce.toFixed(6)} → ${refForce.toFixed(6)} Ry/bohr, a=${refLattice.toFixed(3)} Å, P=${refPressure?.toFixed(1) ?? "N/A"} kbar${pLabel}, wall=${refWall.toFixed(0)}s, steps=${ionicSteps}, converged=${refineParsed.converged}`);
+              console.log(`[QE-Worker] Refinement pass ${refinePass} DONE for ${formula}: force ${currentForce.toFixed(6)} → ${refForce.toFixed(6)} Ry/bohr, a=${refLattice.toFixed(3)} Å, P=${refPressure?.toFixed(1) ?? "N/A"} kbar (residual=${refPressResidual.toFixed(1)}), wall=${refWall.toFixed(0)}s, steps=${ionicSteps}${isPressurePriority ? " [pressure-priority]" : ""}`);
               // Log positions for the first few atoms
               for (let pi = 0; pi < Math.min(4, refineParsed.finalPositions.length); pi++) {
                 const p = refineParsed.finalPositions[pi];
@@ -5583,7 +5587,7 @@ ${cellBlockEos}
               currentForce = refForce;
               currentPressure = refPressure;
             } else {
-              console.log(`[QE-Worker] Refinement pass ${refinePass} no improvement for ${formula}: force ${currentForce.toFixed(6)} → ${refForce.toFixed(6)}, P_residual=${refPressResidual.toFixed(1)} kbar (wall=${refWall.toFixed(0)}s, steps=${ionicSteps}) — stopping refinement`);
+              console.log(`[QE-Worker] Refinement pass ${refinePass} no improvement for ${formula}: force ${currentForce.toFixed(6)} → ${refForce.toFixed(6)} (${forceImproved ? "improved" : "worse"}), P_residual=${prevPressResidual.toFixed(1)} → ${refPressResidual.toFixed(1)} kbar (${pressureImproved ? "improved" : "no improvement"}) (wall=${refWall.toFixed(0)}s, steps=${ionicSteps}) — stopping refinement`);
               totalRefineWallSec += refWall;
               break;
             }
