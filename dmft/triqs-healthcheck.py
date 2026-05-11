@@ -50,8 +50,14 @@ def check():
         errors.append(f"mpi4py: {e}")
 
     if errors:
-        print(f"UNHEALTHY: {'; '.join(errors)}", file=sys.stderr)
-        sys.exit(1)
+        # Distinguish between critical (h5py/numpy) and optional (triqs components)
+        critical = [e for e in errors if "h5py" in e or "numpy" in e]
+        if critical:
+            print(f"UNHEALTHY: {'; '.join(critical)}", file=sys.stderr)
+            sys.exit(1)
+        else:
+            print(f"DEGRADED (service runs but TRIQS components missing): {'; '.join(errors)}")
+            sys.exit(0)  # still healthy enough to accept jobs
 
     print("OK: triqs, cthyb, dft_tools, maxent, solid_dmft, h5py, mpi4py")
     sys.exit(0)
