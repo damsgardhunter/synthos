@@ -170,6 +170,12 @@ export interface QuantumEngineDatasetEntry {
   epwLambda?: number;
   epwTcME?: number;
   epwMethod?: string;
+  // Pairing channel
+  pairingChannel?: string;
+  pairingSymmetry?: string;
+  spinFluctuationLambda?: number;
+  spinFluctuationTc?: number;
+  tcCombined?: number;
 }
 
 export interface QuantumEngineResult {
@@ -825,6 +831,12 @@ export async function runQuantumEnginePipeline(
     epwLambda: dftResult?.epw?.lambda ?? undefined,
     epwTcME: dftResult?.epw?.tcMigdalEliashberg ?? undefined,
     epwMethod: dftResult?.epw?.method ?? undefined,
+    // Pairing channel
+    pairingChannel: eliashbergResult?.pairingClassification?.dominantChannel ?? undefined,
+    pairingSymmetry: eliashbergResult?.pairingClassification?.pairingSymmetry ?? undefined,
+    spinFluctuationLambda: eliashbergResult?.spinFluctuation?.lambdaSF ?? undefined,
+    spinFluctuationTc: eliashbergResult?.spinFluctuation?.tcSpinFluctuation ?? undefined,
+    tcCombined: eliashbergResult?.combinedTc?.tcCombined ?? undefined,
   };
 
   // Compute learning score (multi-objective, not just max Tc)

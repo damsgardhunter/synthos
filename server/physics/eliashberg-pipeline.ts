@@ -31,6 +31,14 @@ import {
 } from "./tc-formulas";
 import { computeNQECorrection, type NQECorrectionResult } from "./nqe-correction";
 import { computeMuStarAbInitio, type MuStarAbInitioResult } from "./mu-star-ab-initio";
+import {
+  classifyPairingChannel,
+  computeSpinSusceptibility,
+  combineTcEstimates,
+  type PairingClassification,
+  type SpinSusceptibilityResult,
+  type CombinedTcResult,
+} from "./spin-fluctuation-pairing";
 
 export interface ModeResolvedLambda {
   acoustic: number;
@@ -113,6 +121,12 @@ export interface EliashbergPipelineResult {
   nqeCorrection: NQECorrectionResult;
   /** Ab-initio Coulomb pseudopotential (RPA Morel-Anderson) */
   muStarAbInitio: MuStarAbInitioResult;
+  /** Pairing channel classification (phonon-BCS vs spin-fluctuation vs mixed) */
+  pairingClassification: PairingClassification | null;
+  /** Spin susceptibility and spin-fluctuation Tc (when spin channel is significant) */
+  spinFluctuation: SpinSusceptibilityResult | null;
+  /** Combined Tc from all pairing channels */
+  combinedTc: CombinedTcResult | null;
 }
 
 function expandParentheses(formula: string): string {
@@ -944,7 +958,46 @@ export function runEliashbergPipeline(
     wallTimeMs: Date.now() - startTime,
     nqeCorrection: nqeResult,
     muStarAbInitio: muStarResult,
+    // Pairing channel analysis — classifies phonon-BCS vs spin-fluctuation
+    pairingClassification: null,
+    spinFluctuation: null,
+    combinedTc: null,
   };
+
+  // --- Pairing channel classification ---
+  // Run after tcBest is computed so we can combine phonon + spin-fluctuation Tc
+  try {
+    const pairingElements = parseFormulaElements(formula);
+    const avgU = pairingElements.reduce((sum: number, el: string) => {
+      const data = getElementData(el);
+      return sum + (data?.hubbardU ?? 0);
+    }, 0) / Math.max(1, pairingElements.length);
+    const estBandwidth = Math.max(0.5, electronic.correlationStrength > 0 ? 3.0 / electronic.correlationStrength : 5.0);
+
+    const pairing = classifyPairingChannel(
+      electronic, null, // no magnetic GS in surrogate tier
+      scGate.tcApproach === "suppress" ? "strongly-correlated" : "weakly-correlated",
+      [scFamily],
+      avgU, estBandwidth,
+    );
+    result.pairingClassification = pairing;
+
+    if (pairing.shouldComputeSusceptibility && avgU > 0) {
+      const susc = computeSpinSusceptibility(
+        electronic, avgU, estBandwidth,
+        electronic.nestingScore, pairing.pairingSymmetry,
+      );
+      result.spinFluctuation = susc;
+
+      if (susc.tcSpinFluctuation > 0 || result.tcBest > 0) {
+        result.combinedTc = combineTcEstimates(result.tcBest, susc.tcSpinFluctuation, pairing);
+        // Update tcBest with combined estimate
+        if (result.combinedTc.tcCombined > 0) {
+          result.tcBest = Number(result.combinedTc.tcCombined.toFixed(2));
+        }
+      }
+    }
+  } catch {}
 
   pipelineStats.totalRuns++;
   pipelineStats.surrogateRuns++;
@@ -1244,6 +1297,9 @@ export function runEliashbergFromAlpha2FFile(
     wallTimeMs: Date.now() - startTime,
     nqeCorrection: nqeResult,
     muStarAbInitio: muStarResult,
+    pairingClassification: null,
+    spinFluctuation: null,
+    combinedTc: null,
   };
 }
 

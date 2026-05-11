@@ -489,6 +489,12 @@ export const quantumEngineDataset = pgTable("quantum_engine_dataset", {
   epwLambda: real("epw_lambda"),
   epwTcME: real("epw_tc_me"),                              // Migdal-Eliashberg Tc
   epwMethod: text("epw_method"),
+  // Pairing channel classification
+  pairingChannel: text("pairing_channel"),                   // "phonon-bcs" | "spin-fluctuation" | "mixed" | etc.
+  pairingSymmetry: text("pairing_symmetry"),                  // "s-wave" | "d-wave" | "s±-wave"
+  spinFluctuationLambda: real("spin_fluctuation_lambda"),      // λ_sf from RPA susceptibility
+  spinFluctuationTc: real("spin_fluctuation_tc"),              // Tc from spin-fluctuation channel (K)
+  tcCombined: real("tc_combined"),                             // combined Tc from all channels
   createdAt: timestamp("created_at").defaultNow(),
 }, (table) => [
   index("qe_dataset_material_idx").on(table.material),
