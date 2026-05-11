@@ -31,6 +31,7 @@ RUN apt-get update -qq && \
       libgmp-dev libnfft3-dev \
       libboost-all-dev \
       libclang-dev \
+      libblas-dev liblapack-dev \
       wget jq openssh-client \
     && add-apt-repository -y ppa:ubuntu-toolchain-r/test \
     && apt-get update -qq \
