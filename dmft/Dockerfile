@@ -114,8 +114,9 @@ RUN cd /tmp && \
     cd / && rm -rf /tmp/maxent
 
 # ── Install solid_dmft ──────────────────────────────────────────────────────
+# solid_dmft has no "stable" branch — use "main" (or latest tag if available)
 RUN cd /opt && \
-    git clone --depth 1 --branch stable https://github.com/flatironinstitute/solid_dmft.git && \
+    git clone --depth 1 https://github.com/flatironinstitute/solid_dmft.git && \
     cd solid_dmft && \
     pip3 install --no-cache-dir . && \
     cd / && rm -rf /opt/solid_dmft/.git
