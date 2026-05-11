@@ -42,8 +42,10 @@ RUN echo ">>> Installing TRIQS ecosystem..." && \
     rm -rf /var/lib/apt/lists/*
 
 # ── Pip fallback for TRIQS (if PPA didn't work) + required Python packages ──
+# --ignore-installed: Ubuntu 22.04 ships distutils-managed blinker that
+# conflicts with Flask's dependency. Force-replacing it is safe in a container.
 RUN pip3 install --no-cache-dir --upgrade pip && \
-    pip3 install --no-cache-dir \
+    pip3 install --no-cache-dir --ignore-installed \
       numpy scipy h5py mpi4py \
       flask==3.1.* gunicorn==23.* \
       toml==0.10.* watchdog==6.* && \
