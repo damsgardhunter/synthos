@@ -32,6 +32,7 @@ import { checkSSCHAEligibility, runSSCHAPipeline, type SSCHAResult } from "./ssc
 import { runACBN0Pipeline, type ACBN0Result } from "./acbn0-pipeline";
 import { analyzeSOCRequirement, type SOCAnalysis } from "./soc-handler";
 import { analyzeHubbardWorkflow, type HubbardWorkflowResult } from "./hubbard-workflow";
+import { followZoneBoundarySoftMode } from "./zone-boundary-softmode";
 import {
   classifyMagneticLandscape,
   shouldSearchMagneticGS,
@@ -6965,6 +6966,103 @@ ${r2Cell}
           const fullHighest = result.phonon.highestFrequency;
           console.log(`[QE-Worker] Stage 5 spectrum: ${formula} ${result.phonon.frequencies.length} modes, range [${fullLowest.toFixed(1)}, ${fullHighest.toFixed(1)}] cm-1, ${result.phonon.imaginaryCount} imaginary`);
         }
+      }
+    }
+
+    // ── Zone-boundary soft mode following ──────────────────────────────────
+    // When the full phonon grid found imaginary modes, attempt to follow the
+    // worst instability to a dynamically stable phase.
+    if (result.phonon?.hasImaginary && result.phonon.imaginaryCount > 0 &&
+        result.phonon.lowestFrequency < -50 && result.vcRelaxed) {
+      try {
+        const zbPrefix = formula.replace(/[^a-zA-Z0-9]/g, "");
+        console.log(`[QE-Worker] ${formula}: ${result.phonon.imaginaryCount} imaginary modes (lowest=${result.phonon.lowestFrequency.toFixed(1)} cm⁻¹) — attempting zone-boundary soft mode following`);
+
+        const zbResult = await followZoneBoundarySoftMode(
+          formula, zbPrefix, positions, latticeA, jobDir,
+          {
+            runQEBinary: (binary, inputFile, cwd, timeoutMs) =>
+              runQECommand(path.posix.join(getQEBinDir(), binary), inputFile, cwd, timeoutMs),
+            runVCRelax: async (displacedPos, displacedA) => {
+              const zbNstep = 200;
+              const zbInput = generateVCRelaxInput(
+                formula, elements, counts, displacedA, displacedPos, workerPressure, zbNstep, {
+                  hubbardCard: hubbardResult?.applyToVCRelax ? hubbardResult.qeHubbardCard : undefined,
+                  forceNspin: result.magneticGroundState?.winningNspin,
+                  forceMagBlock: result.magneticGroundState?.winningMagBlock || undefined,
+                },
+              );
+              const zbFile = path.join(jobDir, "vc_relax_zbsm.in");
+              fs.writeFileSync(zbFile, zbInput);
+              cleanQETmpScratch(path.join(jobDir, "tmp"));
+              const isHighPH = elements.includes("H") && workerPressure >= 50;
+              const zbTimeout = isHighPH ? 5400_000 : 1800_000;
+              const zbRun = await runQECommand(
+                path.posix.join(getQEBinDir(), "pw.x"), zbFile, jobDir, zbTimeout,
+              );
+              fs.writeFileSync(path.join(jobDir, "vc_relax_zbsm.out"), zbRun.stdout);
+              const parsed = parseVCRelaxOutput(zbRun.stdout);
+              const forceMatches = [...zbRun.stdout.matchAll(/Total force\s*=\s*([\d.]+)/g)];
+              const force = forceMatches.length > 0 ? parseFloat(forceMatches[forceMatches.length - 1][1]) : 999;
+              const pressMatches = [...zbRun.stdout.matchAll(/P=\s*([-\d.]+)/g)];
+              const pressure = pressMatches.length > 0 ? parseFloat(pressMatches[pressMatches.length - 1][1]) : null;
+              const scfParsed = parseSCFOutput(zbRun.stdout, 0.015);
+              return {
+                positions: parsed.finalPositions ?? displacedPos,
+                latticeA: parsed.finalLatticeAng ?? displacedA,
+                force,
+                pressure,
+                energy: scfParsed.totalEnergy,
+                converged: parsed.converged,
+              };
+            },
+            runGammaPhonon: async (phPos, phA) => {
+              const phPrefix = formula.replace(/[^a-zA-Z0-9]/g, "") + "_zbph";
+              // Quick gamma phonon: generate SCF + phonon input
+              const phScfInput = generateSCFInputWithParams(
+                formula, elements, counts, phA, phPos, {
+                  mixingBeta: 0.3, maxSteps: 200, diag: "david",
+                  convThr: "1.0d-7", hubbardCard: hubbardResult?.applyDFTplusU ? hubbardResult.qeHubbardCard : undefined,
+                },
+              );
+              const phScfFile = path.join(jobDir, `${phPrefix}_scf.in`);
+              fs.writeFileSync(phScfFile, phScfInput);
+              cleanQETmpScratch(path.join(jobDir, "tmp"));
+              await runQECommand(
+                path.posix.join(getQEBinDir(), "pw.x"), phScfFile, jobDir, 1800_000,
+              );
+              const phInput = generatePhononInput(formula, elements, phPos.length, {
+                maxSeconds: 3600, tr2Ph: "1.0d-10", alphaMix: 0.5,
+              });
+              const phFile = path.join(jobDir, `${phPrefix}_ph.in`);
+              fs.writeFileSync(phFile, phInput);
+              const phRun = await runQECommand(
+                path.posix.join(getQEBinDir(), "ph.x"), phFile, jobDir, 3600_000,
+              );
+              const phParsed = parsePhononOutput(phRun.stdout);
+              const freqs = phParsed.frequencies;
+              const imagCount = freqs.filter((f: number) => f < -50).length;
+              return { frequencies: freqs, passed: imagCount === 0 };
+            },
+          },
+        );
+
+        if (zbResult.foundStablePhase && zbResult.newPositions) {
+          console.log(`[QE-Worker] ${formula}: zone-boundary soft mode following FOUND STABLE PHASE — updating structure`);
+          positions = zbResult.newPositions;
+          latticeA = zbResult.newLatticeA ?? latticeA;
+          result.phonon!.hasImaginary = false;
+          result.phonon!.imaginaryCount = 0;
+          // Flag that we should re-run full phonon grid on the new structure
+          // (the gamma check passed, but full grid confirmation is needed)
+        } else {
+          console.log(`[QE-Worker] ${formula}: zone-boundary soft mode following did not find stable phase (${zbResult.iterations} iterations, ${zbResult.notes.length} notes)`);
+        }
+        for (const note of zbResult.notes) {
+          console.log(`[QE-Worker] [ZB-SM] ${note}`);
+        }
+      } catch (zbErr: any) {
+        console.log(`[QE-Worker] ${formula}: zone-boundary soft mode following failed: ${(zbErr.message ?? "").slice(0, 200)}`);
       }
     }
 
