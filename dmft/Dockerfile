@@ -113,13 +113,17 @@ RUN cd /tmp && \
     && make -j$(nproc) && make install && \
     cd / && rm -rf /tmp/maxent
 
-# ── Install solid_dmft ──────────────────────────────────────────────────────
-# solid_dmft has no "stable" branch — use "main" (or latest tag if available)
-RUN cd /opt && \
+# ── Install solid_dmft (cmake project, not pip) ─────────────────────────────
+RUN cd /tmp && \
     git clone --depth 1 https://github.com/flatironinstitute/solid_dmft.git && \
-    cd solid_dmft && \
-    pip3 install --no-cache-dir . && \
-    cd / && rm -rf /opt/solid_dmft/.git
+    mkdir solid_dmft/build && cd solid_dmft/build && \
+    cmake .. \
+      -DCMAKE_INSTALL_PREFIX=${TRIQS_INSTALL_DIR} \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DBuild_Tests=OFF \
+      -DBuild_Documentation=OFF \
+    && make -j$(nproc) && make install && \
+    cd / && rm -rf /tmp/solid_dmft
 
 # ── Verify TRIQS installation ───────────────────────────────────────────────
 RUN python3 -c "import triqs; print(f'TRIQS {triqs.version.version} installed')" && \
