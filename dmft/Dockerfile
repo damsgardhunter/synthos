@@ -19,10 +19,12 @@ LABEL description="TRIQS 3.3 + solid_dmft for QAE DMFT pipeline"
 ENV DEBIAN_FRONTEND=noninteractive
 
 # ── System deps for TRIQS C++ build ─────────────────────────────────────────
+# TRIQS 3.3.x requires GCC >= 12. Ubuntu 22.04 ships GCC 11.
+# Install GCC 12 from the Ubuntu toolchain PPA and set as default.
 RUN apt-get update -qq && \
     apt-get install -y --no-install-recommends \
       ca-certificates curl gnupg software-properties-common \
-      git build-essential cmake g++ gfortran \
+      git build-essential cmake gfortran \
       python3 python3-pip python3-dev python3-setuptools \
       libopenmpi-dev openmpi-bin \
       libhdf5-mpi-dev libfftw3-dev \
@@ -30,6 +32,13 @@ RUN apt-get update -qq && \
       libboost-all-dev \
       libclang-dev \
       wget jq openssh-client \
+    && add-apt-repository -y ppa:ubuntu-toolchain-r/test \
+    && apt-get update -qq \
+    && apt-get install -y gcc-12 g++-12 \
+    && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 120 \
+    && update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-12 120 \
+    && update-alternatives --install /usr/bin/cc cc /usr/bin/gcc-12 120 \
+    && update-alternatives --install /usr/bin/c++ c++ /usr/bin/g++-12 120 \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Python deps needed before TRIQS build ────────────────────────────────────
