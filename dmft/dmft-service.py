@@ -121,8 +121,8 @@ def health():
     """Check TRIQS installation and service health."""
     checks = {}
     try:
-        import triqs
-        checks["triqs"] = triqs.version.version
+        import triqs.gf  # noqa: F401
+        checks["triqs"] = "ok"
     except Exception as e:
         checks["triqs"] = f"ERROR: {e}"
 
