@@ -33,6 +33,7 @@ import { runACBN0Pipeline, type ACBN0Result } from "./acbn0-pipeline";
 import { analyzeSOCRequirement, type SOCAnalysis } from "./soc-handler";
 import { analyzeHubbardWorkflow, type HubbardWorkflowResult } from "./hubbard-workflow";
 import { followZoneBoundarySoftMode } from "./zone-boundary-softmode";
+import { exportDMFTBundle, isDMFTEligible, type DMFTBundleResult } from "./dmft-bundle-exporter";
 import { getStructureAdvice, type StructureAdvice } from "./structure-advisor";
 import {
   classifyMagneticLandscape,
@@ -369,6 +370,8 @@ export interface QEFullResult {
   socAnalysis?: SOCAnalysis;
   /** Magnetic ground-state search results (FM/AFM/NM comparison). */
   magneticGroundState?: MagneticGroundStateResult;
+  /** DMFT-ready bundle export (for correlated materials with final_converged+ quality). */
+  dmftBundle?: DMFTBundleResult;
 }
 
 const HASH_CACHE_MAX = 2000;
@@ -1993,6 +1996,19 @@ function generateCellParameters(
   ${a.toFixed(8)}  0.000000000  0.000000000
   0.000000000  ${b.toFixed(8)}  0.000000000
   0.000000000  0.000000000  ${c.toFixed(8)}`;
+}
+
+/** Parse CELL_PARAMETERS text block into a 3×3 numeric lattice vector array. */
+function latticeVectorsFromParams(
+  latticeA: number, cOverA: number, bOverA: number,
+  elements?: string[], counts?: Record<string, number>,
+): number[][] {
+  const cellStr = generateCellParameters(latticeA, cOverA, 0, bOverA, elements, counts);
+  const lines = cellStr.split("\n").filter(l => l.trim() && !l.includes("CELL_PARAMETERS"));
+  return lines.map(line => {
+    const nums = line.trim().split(/\s+/).map(Number);
+    return [nums[0] || 0, nums[1] || 0, nums[2] || 0];
+  });
 }
 
 function generateSCFInput(
@@ -5241,29 +5257,44 @@ ${cellBlockEos}
     if (magSearchDecision.shouldSearch && !result.vcRelaxed) {
       const magConfigs = classifyMagneticLandscape(elements, counts, socAnalysis?.enableFullSOC ?? false);
       if (magConfigs.length >= 2) {
-        console.log(`[QE-Worker] Running magnetic ground-state search for ${formula}: ${magConfigs.length} orderings (${magConfigs.map(c => c.ordering).join(", ")})`);
+        const magAtomsPre = positions.length;
+        const magElecPre = positions.reduce((s, p) => s + (getZValence(p.element) ?? 10), 0);
+        const magNspinPre = magConfigs.some(c => c.nspin === 2) ? 2 : 1;
+        const magBasePre = 600;
+        const magScaledPre = Math.round(magBasePre * Math.pow(magAtomsPre / 4, 1.3) * Math.sqrt(magElecPre / 20) * magNspinPre);
+        const magTimeoutPre = Math.max(600, Math.min(3600, magScaledPre));
+        console.log(`[QE-Worker] Running magnetic ground-state search for ${formula}: ${magConfigs.length} orderings (${magConfigs.map(c => c.ordering).join(", ")}), ${magAtomsPre} atoms, ${magElecPre} e-, timeout=${magTimeoutPre}s/trial`);
         const magTrials: MagneticTrialResult[] = [];
 
         for (const config of magConfigs) {
           const magStartTime = Date.now();
+          // Scale magnetic trial timeout by system size: 10-atom pnictides with
+          // nspin=2 and 72 electrons need 30+ min, not the old 10 min hardcoded cap.
+          const magAtoms = positions.length;
+          const magElectrons = positions.reduce((s, p) => s + (getZValence(p.element) ?? 10), 0);
+          const magNspin = config.nspin === 2 ? 2 : 1;
+          const magBaseSeconds = 600; // 10 min base for small systems
+          const magScaledSeconds = Math.round(magBaseSeconds * Math.pow(magAtoms / 4, 1.3) * Math.sqrt(magElectrons / 20) * magNspin);
+          const magMaxSeconds = Math.max(600, Math.min(3600, magScaledSeconds)); // clamp to 10-60 min
+          const magKillMs = magMaxSeconds * 1000 + 60_000;
           try {
             const magInput = generateSCFInputWithParams(formula, elements, counts, latticeA, positions, {
               mixingBeta: 0.3,
-              maxSteps: 120, // increased from 80 — tighter conv_thr needs more steps
+              maxSteps: Math.max(120, Math.round(magMaxSeconds / 8)), // scale steps with timeout
               diag: "david",
               smearing: "mv",
               degauss: 0.02,
-              convThr: config.convThr ? `${config.convThr}` : "1.0d-6", // tightened from 1e-5
+              convThr: config.convThr ? `${config.convThr}` : "1.0d-6",
               forceNspin: config.noncolin ? 2 : (config.nspin === 1 ? 1 : 2),
               forceMagBlock: config.magnetizationBlock,
               forceNoncolin: config.noncolin ?? false,
-              maxSecondsOverride: 900, // 15 min cap (non-collinear trials are slower)
+              maxSecondsOverride: magMaxSeconds,
             });
             const magFile = path.join(jobDir, `mag_trial_${config.ordering}.in`);
             fs.writeFileSync(magFile, magInput);
 
             const magResult = await runQECommand(
-              path.posix.join(getQEBinDir(), "pw.x"), magFile, jobDir, 660_000,
+              path.posix.join(getQEBinDir(), "pw.x"), magFile, jobDir, magKillMs,
             );
             fs.writeFileSync(path.join(jobDir, `mag_trial_${config.ordering}.out`), magResult.stdout);
             const magSCF = parseSCFOutput(magResult.stdout, 0.02);
@@ -7357,6 +7388,222 @@ ${r2Cell}
         }
       } catch (acbn0Err: any) {
         console.log(`[QE-Worker] ACBN0 failed for ${formula}: ${(acbn0Err.message ?? "").slice(0, 200)}`);
+      }
+    }
+
+    // --- DMFT bundle export for correlated materials ---
+    const dmftCheck = isDMFTEligible(result.hubbardWorkflow, result.qualityTier);
+    if (dmftCheck.eligible && result.scf?.fermiEnergy != null) {
+      try {
+        console.log(`[QE-Worker] ${formula} eligible for DMFT bundle: ${dmftCheck.reason}`);
+        const dmftPrefix = formula.replace(/[^a-zA-Z0-9]/g, "");
+        const dmftWannierDir = path.posix.join(jobDir, "dmft_wannier");
+
+        const {
+          generateWannier90Win, generateNSCFInput, generatePW2Wannier90Input,
+          countDMFTOrbitals,
+        } = await import("./epw-pipeline");
+
+        if (!fs.existsSync(dmftWannierDir)) {
+          fs.mkdirSync(dmftWannierDir, { recursive: true });
+        }
+
+        const dmftCOverA = estimateCOverA(elements, counts);
+        const dmftBOverA = estimateBOverA(elements, counts);
+        const dmftLatticeVectors = latticeVectorsFromParams(latticeA, dmftCOverA, dmftBOverA, elements, counts);
+        const dmftOrbitals = countDMFTOrbitals(elements, counts);
+        const dmftNumWann = dmftOrbitals.total;
+        const dmftNbnd = Math.max(dmftNumWann + 4, Math.ceil(dmftNumWann * 1.3));
+        const dmftKGrid: [number, number, number] = [8, 8, 8];
+        const dmftEcutwfc = computeEcutwfc(elements, 0, 80, 45);
+        const dmftEcutrho = dmftEcutwfc * ecutrhoMultiplier(elements);
+
+        // ── Step 1: NSCF on uniform k-grid (reuses converged SCF density) ──
+        console.log(`[QE-Worker] DMFT Wannier step 1/4: NSCF on ${dmftKGrid.join("x")} k-grid`);
+        const dmftNscfInput = generateNSCFInput({
+          prefix: dmftPrefix,
+          pseudoDir: QE_PSEUDO_DIR_INPUT,
+          ecutwfc: dmftEcutwfc,
+          ecutrho: dmftEcutrho,
+          latticeA,
+          cellParameters: generateCellParameters(latticeA, dmftCOverA, 0, dmftBOverA, elements, counts),
+          positions, elements,
+          ppFilenames: Object.fromEntries(elements.map(el => [el, resolvePPFilename(el)])),
+          kGrid: dmftKGrid,
+          nbnd: dmftNbnd,
+        });
+        const dmftNscfFile = path.posix.join(dmftWannierDir, `${dmftPrefix}_nscf.in`);
+        fs.writeFileSync(dmftNscfFile, dmftNscfInput);
+
+        // Copy .save directory from the main SCF so NSCF can read the density
+        const mainSaveDir = path.posix.join(jobDir, "tmp", `${dmftPrefix}.save`);
+        const dmftTmpDir = path.posix.join(dmftWannierDir, "tmp");
+        const dmftSaveDir = path.posix.join(dmftTmpDir, `${dmftPrefix}.save`);
+        if (!fs.existsSync(dmftTmpDir)) fs.mkdirSync(dmftTmpDir, { recursive: true });
+        if (fs.existsSync(mainSaveDir) && !fs.existsSync(dmftSaveDir)) {
+          try {
+            execSync(`cp -r "${mainSaveDir}" "${dmftSaveDir}"`, { timeout: 120_000 });
+          } catch { /* best effort — NSCF will recompute if missing */ }
+        }
+
+        const nscfRes = await runQECommand(
+          path.posix.join("/usr/local/bin", "pw.x"), dmftNscfFile, dmftWannierDir, 3_600_000,
+        );
+        if (nscfRes.exitCode !== 0) {
+          console.log(`[QE-Worker] DMFT NSCF failed (exit ${nscfRes.exitCode}), skipping Wannier90`);
+        } else {
+          console.log(`[QE-Worker] DMFT NSCF completed`);
+
+          // ── Step 2: Wannier90 preprocessing (-pp) ──
+          console.log(`[QE-Worker] DMFT Wannier step 2/4: wannier90.x -pp`);
+          const dmftWinContent = generateWannier90Win({
+            prefix: dmftPrefix, elements, counts, numBands: dmftNbnd,
+            kGrid: dmftKGrid, fermiEnergy: result.scf!.fermiEnergy!,
+            latticeVectors: dmftLatticeVectors, positions,
+            wannierMode: "dmft_projector",
+          });
+          fs.writeFileSync(path.posix.join(dmftWannierDir, `${dmftPrefix}.win`), dmftWinContent);
+
+          const w90ppRes = await runQECommand(
+            path.posix.join("/usr/local/bin", "wannier90.x"),
+            `-pp ${dmftPrefix}`, dmftWannierDir, 600_000,
+          );
+
+          if (w90ppRes.exitCode === 0) {
+            // ── Step 3: pw2wannier90 ──
+            console.log(`[QE-Worker] DMFT Wannier step 3/4: pw2wannier90.x`);
+            const pw2wInput = generatePW2Wannier90Input(dmftPrefix);
+            const pw2wFile = path.posix.join(dmftWannierDir, `${dmftPrefix}_pw2wan.in`);
+            fs.writeFileSync(pw2wFile, pw2wInput);
+
+            const pw2wRes = await runQECommand(
+              path.posix.join("/usr/local/bin", "pw2wannier90.x"),
+              pw2wFile, dmftWannierDir, 1_800_000,
+            );
+
+            if (pw2wRes.exitCode === 0) {
+              // ── Step 4: Wannier90 full minimization ──
+              console.log(`[QE-Worker] DMFT Wannier step 4/4: wannier90.x (full, DMFT projector)`);
+              const w90Res = await runQECommand(
+                path.posix.join("/usr/local/bin", "wannier90.x"),
+                dmftPrefix, dmftWannierDir, 1_800_000,
+              );
+
+              if (w90Res.exitCode === 0) {
+                console.log(`[QE-Worker] DMFT Wannier90 completed — _hr.dat should be available`);
+              } else {
+                console.log(`[QE-Worker] DMFT Wannier90 full failed (exit ${w90Res.exitCode}), bundle will lack H(k)`);
+              }
+            } else {
+              console.log(`[QE-Worker] DMFT pw2wannier90 failed (exit ${pw2wRes.exitCode})`);
+            }
+          } else {
+            console.log(`[QE-Worker] DMFT wannier90 -pp failed (exit ${w90ppRes.exitCode})`);
+          }
+        }
+
+        // Export the bundle — now with H(k) from _hr.dat if Wannier90 succeeded
+        result.dmftBundle = await exportDMFTBundle({
+          formula, elements, counts, positions,
+          latticeVectors: dmftLatticeVectors,
+          pressureGpa: workerPressure,
+          fermiEnergy: result.scf!.fermiEnergy!,
+          qualityTier: result.qualityTier ?? "final_converged",
+          hubbardWorkflow: result.hubbardWorkflow!,
+          acbn0: result.acbn0,
+          magneticGroundState: result.magneticGroundState,
+          wannier90Dir: dmftWannierDir,
+          wannier90Prefix: dmftPrefix,
+        });
+
+        console.log(
+          `[QE-Worker] DMFT bundle exported for ${formula}: ` +
+          `${result.dmftBundle.nCorrelatedShells} shells, ` +
+          `${result.dmftBundle.nCorrelatedOrbitals} orbitals, ` +
+          `H(k)=${result.dmftBundle.hamiltonianParsed}, ` +
+          `format=${result.dmftBundle.format}`
+        );
+
+        // ── Submit bundle to DMFT service if available ──
+        if (result.dmftBundle.hamiltonianParsed) {
+          const dmftServiceUrl = process.env.DMFT_SERVICE_URL ?? "";
+          if (dmftServiceUrl) {
+            try {
+              const bundlePath = result.dmftBundle.bundlePath;
+              const submitRes = await fetch(`${dmftServiceUrl}/submit`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ bundle_path: bundlePath }),
+              });
+              if (submitRes.ok) {
+                const submitData = await submitRes.json() as any;
+                (result as any).dmftJobId = submitData.job_id;
+                console.log(`[QE-Worker] DMFT job submitted: ${submitData.job_id} (${submitData.status})`);
+
+                // Poll for results — DMFT runs hours, so poll with backoff
+                // Max 12 polls × 5 min = 1h of polling. DMFT results are also
+                // written to disk and can be picked up by a background loop later.
+                const pollIntervalMs = 300_000; // 5 minutes
+                const maxPolls = 12;
+                for (let poll = 0; poll < maxPolls; poll++) {
+                  await new Promise(r => setTimeout(r, pollIntervalMs));
+                  try {
+                    const statusRes = await fetch(`${dmftServiceUrl}/status/${submitData.job_id}`);
+                    if (!statusRes.ok) break;
+                    const statusData = await statusRes.json() as any;
+
+                    if (statusData.status?.startsWith("completed") || statusData.status === "failed") {
+                      console.log(`[QE-Worker] DMFT job ${submitData.job_id} finished: ${statusData.status}`);
+
+                      // Fetch full results
+                      const resultRes = await fetch(`${dmftServiceUrl}/result/${submitData.job_id}`);
+                      if (resultRes.ok) {
+                        const dmftData = await resultRes.json() as any;
+                        const dmftResults = dmftData.results ?? {};
+                        const phases = dmftResults.phases ?? dmftResults;
+
+                        // Populate DMFT result fields for database
+                        (result as any).dmftConverged = dmftResults.converged ?? phases.dmft_1p?.converged ?? false;
+                        (result as any).dmftClusterSize = dmftResults.cluster_decision?.nc ?? 0;
+                        (result as any).dmftAvgSign = phases.dca_sweep?.sweep?.[0]?.avg_sign ?? null;
+
+                        // Pairing results (from orchestrated pipeline or realistic pipeline)
+                        const pairing = phases.pairing ?? phases.dca_sweep?.sweep?.slice(-1)?.[0]?.pairing ?? {};
+                        (result as any).dmftLambdaPair = dmftResults.lambda_max ?? pairing.lambda ?? null;
+                        (result as any).dmftGapSymmetry = dmftResults.dominant_channel ?? pairing.channel ?? null;
+                        (result as any).dmftGapNodes = pairing.nodes ?? null;
+                        (result as any).dmftIsUnconventional = pairing.is_unconventional ?? null;
+                        (result as any).dmftTcBSE = dmftResults.tc_K ?? null;
+                        (result as any).dmftTcBSEConfidence = dmftResults.tc_confidence ?? null;
+                        (result as any).dmftDominantChannel = dmftResults.dominant_channel ?? null;
+
+                        console.log(
+                          `[QE-Worker] DMFT results for ${formula}: ` +
+                          `Tc=${(result as any).dmftTcBSE ?? "N/A"} K, ` +
+                          `channel=${(result as any).dmftDominantChannel ?? "?"}, ` +
+                          `λ=${(result as any).dmftLambdaPair ?? "?"}`
+                        );
+                      }
+                      break;
+                    }
+
+                    if (statusData.status === "running") {
+                      console.log(`[QE-Worker] DMFT job ${submitData.job_id} still running (poll ${poll + 1}/${maxPolls})`);
+                    }
+                  } catch {
+                    // Polling failed — service may be busy, continue
+                  }
+                }
+              } else {
+                console.log(`[QE-Worker] DMFT service returned ${submitRes.status}: ${await submitRes.text()}`);
+              }
+            } catch (dmftFetchErr: any) {
+              console.log(`[QE-Worker] DMFT service unreachable: ${dmftFetchErr.message}`);
+            }
+          }
+        }
+      } catch (dmftErr: any) {
+        console.log(`[QE-Worker] DMFT bundle export failed for ${formula}: ${(dmftErr.message ?? "").slice(0, 200)}`);
       }
     }
 
