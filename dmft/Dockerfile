@@ -56,6 +56,10 @@ RUN pip3 install --no-cache-dir --upgrade pip && \
 # TRIQS 3.3.x — the core Green's function library
 ENV TRIQS_INSTALL_DIR=/opt/triqs
 ENV CXXFLAGS="-std=c++20"
+# HDF5 MPI headers need to find mpi.h — OpenMPI puts it in a non-standard path
+ENV CPATH="/usr/lib/x86_64-linux-gnu/openmpi/include:${CPATH}"
+ENV C_INCLUDE_PATH="/usr/lib/x86_64-linux-gnu/openmpi/include:${C_INCLUDE_PATH}"
+ENV CPLUS_INCLUDE_PATH="/usr/lib/x86_64-linux-gnu/openmpi/include:${CPLUS_INCLUDE_PATH}"
 
 RUN cd /tmp && \
     git clone --depth 1 --branch 3.3.x https://github.com/TRIQS/triqs.git && \
