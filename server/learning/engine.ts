@@ -389,27 +389,46 @@ async function seedBenchmarkCandidates() {
  * that were in-progress when the worker restarted.
  */
 const CRITICAL_QUEUE_FORMULAS: { formula: string; pressure: number }[] = [
-  // Known high-Tc superconductors — need full DFT validation
-  { formula: "H3S", pressure: 200 },
+  // Known high-Tc superhydrides — need full pipeline (vc-relax → refinement → phonon → EPW)
   { formula: "LaH10", pressure: 170 },
+  { formula: "H3S", pressure: 200 },
   { formula: "CaH6", pressure: 200 },
   { formula: "YH6", pressure: 200 },
   { formula: "YH9", pressure: 200 },
-  { formula: "MgH6", pressure: 140 },
   { formula: "ScH9", pressure: 200 },
+  { formula: "ScH6", pressure: 140 },
   { formula: "ThH10", pressure: 174 },
+  { formula: "ThH9", pressure: 170 },
   { formula: "CeH9", pressure: 150 },
-  // Ternary hydrides — novel candidates
+  { formula: "CeH10", pressure: 100 },
+  { formula: "MgH6", pressure: 140 },
+  { formula: "SrH10", pressure: 300 },
+  { formula: "BaH12", pressure: 200 },
+  { formula: "CaH12", pressure: 200 },
+  { formula: "SrH6", pressure: 200 },
+  { formula: "LaH6", pressure: 120 },
+  // Ternary hydrides — novel high-Tc frontier
+  { formula: "LaH11Li2", pressure: 173 },
   { formula: "Li2LaH12", pressure: 200 },
-  { formula: "YH9Na2", pressure: 160 },
   { formula: "LaBeH8", pressure: 50 },
-  { formula: "Li2MgH16", pressure: 250 },
   { formula: "CaBeH8", pressure: 100 },
-  // Non-hydride known superconductors for DFT+U validation
+  { formula: "YBeH8", pressure: 100 },
+  { formula: "Li2MgH16", pressure: 250 },
+  { formula: "SrCaH12", pressure: 180 },
+  { formula: "LaYH10", pressure: 200 },
+  { formula: "ScYH10", pressure: 200 },
+  { formula: "NaCaH6", pressure: 150 },
+  // Non-hydride known superconductors — DFT validation benchmarks
   { formula: "MgB2", pressure: 0 },
   { formula: "Nb3Sn", pressure: 0 },
+  { formula: "Nb3Ge", pressure: 0 },
   { formula: "NbN", pressure: 0 },
+  { formula: "V3Si", pressure: 0 },
   { formula: "FeSe", pressure: 0 },
+  { formula: "LiFeAs", pressure: 0 },
+  { formula: "BaFe2As2", pressure: 0 },
+  { formula: "YBa2Cu3O7", pressure: 0 },
+  { formula: "Sr2RuO4", pressure: 0 },
 ];
 
 let _criticalQueued = false;
@@ -2449,6 +2468,16 @@ function scheduleWriteQueueFlush(): void {
 }
 
 function queueCandidateWrite(payload: InsertPayload, generatorSource?: string): void {
+  // Ensure every queued candidate has an id — bulk insert fails without it
+  if (!payload.id) {
+    (payload as any).id = `sc-auto-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+  if (!payload.name) {
+    (payload as any).name = payload.formula;
+  }
+  if (!payload.status) {
+    (payload as any).status = "theoretical";
+  }
   candidateWriteQueue.push({ payload, generatorSource });
   if (candidateWriteQueue.length >= WRITE_QUEUE_FLUSH_SIZE) {
     flushCandidateWriteQueue();
