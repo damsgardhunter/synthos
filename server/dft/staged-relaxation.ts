@@ -882,22 +882,16 @@ export async function runStage4GammaPhonon(opts: Stage4Opts): Promise<StageResul
   const totalPhCost = nReps * costPerRep;
   const estimatedPhSeconds = totalPhCost * SECONDS_PER_COST_UNIT_PH;
 
-  // Add 10 min safety margin, floor at 30 min, cap at 4 hours
-  // Must be integer — QE's max_seconds requires an integer value.
-  const phTimeoutS = Math.round(Math.max(1800, Math.min(estimatedPhSeconds + 600, 14400)));
+  // Gamma phonon always runs — it's the cheapest stability check available.
+  // Even at 6-8 hours, it's far cheaper than a 48h full grid that may reveal
+  // the structure is garbage. The old 4h cap caused CaBeH8 to skip gamma
+  // entirely, go straight to a 48h full grid, and waste compute on a structure
+  // with 68 imaginary modes that gamma would have caught in 3h.
+  //
+  // Cap at 8 hours for gamma-only (vs 48h for full grid).
+  const phTimeoutS = Math.round(Math.max(1800, Math.min(estimatedPhSeconds + 600, 28800)));
   const phTimeoutMs = phTimeoutS * 1000;
 
-  // Use EXACTLY the same ph.x input as the production Gamma-only phonon
-  // (generatePhononInput in qe-worker.ts, isGammaOnly=true branch).
-  // The only difference is max_seconds which is scaled by the cost model.
-  //
-  // Previous Stage 4 failures were caused by deviating from production:
-  // - Missing fildyn parameter → undefined .dyn output
-  // - Added epsil=.false. → removed dielectric screening that prevents underflow
-  // - Used tr2_ph=1e-10 instead of production's 1e-12 → noise amplification
-  // - Added invalid niter_ph parameter → immediate crash
-  //
-  // Lesson: don't invent custom ph.x parameters — use what works in production.
   const phInput = `Gamma-only phonon calculation
 &INPUTPH
   prefix = '${prefix}',
@@ -913,22 +907,6 @@ export async function runStage4GammaPhonon(opts: Stage4Opts): Promise<StageResul
 `;
 
   console.log(`[Staged-Relax] ${formula} Stage 4 cost model: ${nReps} reps, ${phElectrons} e-, ${phNkpts} kpts, nspin=${phNspin} → cost/rep=${costPerRep.toFixed(0)}, est=${estimatedPhSeconds.toFixed(0)}s, timeout=${phTimeoutS.toFixed(0)}s (${(phTimeoutS/60).toFixed(0)} min)`);
-
-  // If estimated cost exceeds the 4h cap, Stage 4 is too expensive as a screening
-  // gate for this material. Skip directly to Stage 5 (full phonon) which has its
-  // own retry logic and up to 48h budget.
-  if (estimatedPhSeconds > 14400) {
-    console.log(`[Staged-Relax] ${formula} Stage 4: SKIPPED (cost too high) — estimated ${(estimatedPhSeconds/3600).toFixed(1)}h exceeds 4h screening budget, deferring to full phonon pipeline (Stage 5). Note: this is NOT a stability pass — gamma phonon was never run.`);
-    return {
-      stage: 4,
-      passed: true,  // Pass through so Stage 5 runs (not a real phonon pass, just a cost skip)
-      positions: opts.positions,
-      latticeA: opts.latticeA,
-      cellVectors: opts.cellVectors,
-      totalEnergy: 0,
-      wallTimeSeconds: 0,
-      frequencies: [],
-    };
   }
 
   // 2-attempt retry matching production phonon pipeline (qe-worker.ts lines 4580-4644):
