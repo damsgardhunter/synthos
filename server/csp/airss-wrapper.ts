@@ -72,33 +72,28 @@ function generateCellInput(
   const cellVol = targetVolume * totalAtoms;
   const a = Math.pow(cellVol, 1 / 3);
 
-  // Per-pair MINSEP: if LLM structure advice is available, use its per-pair
-  // distances (which reflect real chemistry — H-H in cages vs M-H bond lengths).
-  // Falls back to the global minimum from getGeneratorMinsep().
+  // Global MINSEP: use the smallest pair distance.
+  // If LLM structure advice provides pair distances, use the smallest one as a
+  // better-informed global minimum. Don't use per-pair #MINSEP syntax — buildcell
+  // can't satisfy multiple pair constraints simultaneously in small high-P cells.
   let globalMin = Infinity;
-  const pairMinseps: Record<string, number> = {};
   for (const el1 of elements) {
     for (const el2 of elements) {
-      const pair = el1 <= el2 ? `${el1}-${el2}` : `${el2}-${el1}`;
-      const heuristicMin = getGeneratorMinsep(el1, el2, pressureGPa);
-      // Use LLM-advised distance if available (with 0.85x safety factor — the
-      // advised distance is equilibrium, MINSEP should be slightly smaller)
-      const advisedMin = advisedPairDistances?.[pair] ?? advisedPairDistances?.[`${el2}-${el1}`];
-      const effectiveMin = advisedMin ? Math.max(heuristicMin, advisedMin * 0.85) : heuristicMin;
-      pairMinseps[pair] = effectiveMin;
-      globalMin = Math.min(globalMin, effectiveMin);
+      globalMin = Math.min(globalMin, getGeneratorMinsep(el1, el2, pressureGPa));
+    }
+  }
+  // If advice gives a smallest pair distance, use it as the global MINSEP
+  // (only if it's more informed than the heuristic)
+  if (advisedPairDistances) {
+    const advisedMin = Math.min(...Object.values(advisedPairDistances).filter(d => d > 0.3));
+    if (Number.isFinite(advisedMin) && advisedMin > 0.3) {
+      // Use 0.75x of the advised minimum — equilibrium distance needs slack for random placement
+      globalMin = Math.max(globalMin, advisedMin * 0.75);
     }
   }
 
   let cell = `#TARGVOL=${cellVol.toFixed(1)}\n`;
   cell += `#MINSEP=${Math.max(0.5, globalMin).toFixed(2)}\n`;
-  // Per-pair MINSEP overrides (buildcell supports MINSEP=X-Y dist syntax)
-  for (const [pair, dist] of Object.entries(pairMinseps)) {
-    if (dist > globalMin + 0.1) { // only emit if significantly different from global
-      const [el1, el2] = pair.split("-");
-      cell += `#MINSEP=${el1}-${el2}=${dist.toFixed(2)}\n`;
-    }
-  }
 
   cell += `\n%BLOCK LATTICE_CART\n`;
   cell += `${a.toFixed(4)} 0.0000 0.0000\n`;
