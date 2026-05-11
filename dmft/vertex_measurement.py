@@ -377,11 +377,12 @@ def compute_chi0_loc_fast(g_iw: np.ndarray, beta: float, n_iw_b: int) -> np.ndar
 
     for iw in range(2 * n_iw_b + 1):
         m = iw - n_iw_b
-        # Range of valid fermionic indices after shift
-        iv_start = max(0, -m) + offset
-        iv_end = min(2 * n_iw_f, n_iw_total - m) + offset
-        iv_start = max(iv_start, offset)
-        iv_end = min(iv_end, offset + 2 * n_iw_f)
+        # Range of valid g_iw indices for g_v: [iv_start, iv_end)
+        # Constraints: iv_start >= offset (within fermionic window),
+        #   iv_start + m >= 0 (shifted index valid), iv_end <= offset + 2*n_iw_f,
+        #   iv_end + m <= n_iw_total
+        iv_start = max(offset, -m)
+        iv_end = min(offset + 2 * n_iw_f, n_iw_total - m)
 
         if iv_start >= iv_end:
             continue
