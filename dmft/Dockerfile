@@ -127,7 +127,7 @@ RUN cd /tmp && \
     cd / && rm -rf /tmp/solid_dmft
 
 # ── Verify TRIQS installation ───────────────────────────────────────────────
-RUN python3 -c "import triqs; print(f'TRIQS {triqs.version.version} installed')" && \
+RUN python3 -c "import triqs; print('TRIQS installed')" && \
     python3 -c "import triqs_cthyb; print('CTHYB installed')" && \
     python3 -c "import triqs_dft_tools; print('DFTTools installed')" && \
     (python3 -c "import triqs_maxent; print('maxent installed')" || echo "maxent: skipped") && \
