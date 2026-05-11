@@ -59,6 +59,7 @@ function generateCellInput(
   z: number,
   targetVolume: number,
   pressureGPa: number,
+  advisedPairDistances?: Record<string, number>,
 ): string {
   // Scale counts by Z
   const scaledCounts: Record<string, number> = {};
@@ -71,19 +72,33 @@ function generateCellInput(
   const cellVol = targetVolume * totalAtoms;
   const a = Math.pow(cellVol, 1 / 3);
 
-  // Global MINSEP: use the smallest pair distance
-  // Use generator MINSEP (higher than validation) to prevent H₂ formation.
-  // H-H generator floor = 0.95 Å at ambient — blocks molecular H₂ (0.74 Å)
-  // while allowing cage H-H (1.0-1.5 Å).
+  // Per-pair MINSEP: if LLM structure advice is available, use its per-pair
+  // distances (which reflect real chemistry — H-H in cages vs M-H bond lengths).
+  // Falls back to the global minimum from getGeneratorMinsep().
   let globalMin = Infinity;
+  const pairMinseps: Record<string, number> = {};
   for (const el1 of elements) {
     for (const el2 of elements) {
-      globalMin = Math.min(globalMin, getGeneratorMinsep(el1, el2, pressureGPa));
+      const pair = el1 <= el2 ? `${el1}-${el2}` : `${el2}-${el1}`;
+      const heuristicMin = getGeneratorMinsep(el1, el2, pressureGPa);
+      // Use LLM-advised distance if available (with 0.85x safety factor — the
+      // advised distance is equilibrium, MINSEP should be slightly smaller)
+      const advisedMin = advisedPairDistances?.[pair] ?? advisedPairDistances?.[`${el2}-${el1}`];
+      const effectiveMin = advisedMin ? Math.max(heuristicMin, advisedMin * 0.85) : heuristicMin;
+      pairMinseps[pair] = effectiveMin;
+      globalMin = Math.min(globalMin, effectiveMin);
     }
   }
 
   let cell = `#TARGVOL=${cellVol.toFixed(1)}\n`;
   cell += `#MINSEP=${Math.max(0.5, globalMin).toFixed(2)}\n`;
+  // Per-pair MINSEP overrides (buildcell supports MINSEP=X-Y dist syntax)
+  for (const [pair, dist] of Object.entries(pairMinseps)) {
+    if (dist > globalMin + 0.1) { // only emit if significantly different from global
+      const [el1, el2] = pair.split("-");
+      cell += `#MINSEP=${el1}-${el2}=${dist.toFixed(2)}\n`;
+    }
+  }
 
   cell += `\n%BLOCK LATTICE_CART\n`;
   cell += `${a.toFixed(4)} 0.0000 0.0000\n`;
@@ -284,7 +299,7 @@ export const airssEngine: CSPEngine = {
         for (let i = 0; i < batchBudget; i++) {
           const seed = baseSeed + seedCounter++;
           try {
-            const cellInput = generateCellInput(elements, counts, z, targetVol, config.pressureGPa);
+            const cellInput = generateCellInput(elements, counts, z, targetVol, config.pressureGPa, config.structureAdvice?.pairDistances);
             const inputPath = path.join(workDir, `airss_${seed}.cell`);
             fs.writeFileSync(inputPath, cellInput);
 

@@ -212,6 +212,14 @@ export interface CSPEngineConfig {
   seedStructures?: CSPCandidate[];
   /** Base RNG seed for reproducibility. */
   baseSeed?: number;
+  /** LLM structure advice — per-pair distances, coordination hints, etc. */
+  structureAdvice?: {
+    pairDistances?: Record<string, number>;
+    likelySpaceGroup?: number;
+    alternativeSpaceGroups?: number[];
+    structureType?: string;
+    estimatedLattice?: { a: number; b: number; c: number };
+  };
 }
 
 // ---------------------------------------------------------------------------

@@ -33,6 +33,7 @@ import { runACBN0Pipeline, type ACBN0Result } from "./acbn0-pipeline";
 import { analyzeSOCRequirement, type SOCAnalysis } from "./soc-handler";
 import { analyzeHubbardWorkflow, type HubbardWorkflowResult } from "./hubbard-workflow";
 import { followZoneBoundarySoftMode } from "./zone-boundary-softmode";
+import { getStructureAdvice, type StructureAdvice } from "./structure-advisor";
 import {
   classifyMagneticLandscape,
   shouldSearchMagneticGS,
@@ -4207,6 +4208,14 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     // still feeds back into the Hubbard workflow for future runs of this formula.
 
     // --- Vegard's law enhanced lattice estimation ---
+    // --- LLM structure advisor: get structural hints before CSP generation ---
+    // One cheap OpenAI call per formula (cached to disk) that provides:
+    // - Per-pair MINSEP values for AIRSS
+    // - Likely space group for PyXtal biasing
+    // - Element coordination roles for cage seeder
+    // - Lattice estimate cross-check for Vegard
+    const structureAdvice = await getStructureAdvice(formula, workerPressure, elements).catch(() => null);
+
     // Try Vegard interpolation from AFLOW/MP binary endpoints for a better
     // starting lattice. Falls back to the existing volume-sum estimate if
     // insufficient endpoint data is available (< 30s total with caching).
@@ -4258,6 +4267,13 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
           maxStructures: tierDecision.airssBudget,
           pressureGPa: workerPressure,
           baseSeed: Date.now() % 1e8,
+          structureAdvice: structureAdvice ? {
+            pairDistances: structureAdvice.pairDistances,
+            likelySpaceGroup: structureAdvice.likelySpaceGroup,
+            alternativeSpaceGroups: structureAdvice.alternativeSpaceGroups,
+            structureType: structureAdvice.structureType,
+            estimatedLattice: structureAdvice.estimatedLattice,
+          } : undefined,
         });
         if (airssCandidates.length > 0) {
           // Convert CSPCandidate positions to StructureCandidate format
