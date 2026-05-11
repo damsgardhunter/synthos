@@ -84,11 +84,15 @@ function generateCellInput(
   }
   // If advice gives a smallest pair distance, use it as the global MINSEP
   // (only if it's more informed than the heuristic)
-  if (advisedPairDistances) {
-    const advisedMin = Math.min(...Object.values(advisedPairDistances).filter(d => d > 0.3));
-    if (Number.isFinite(advisedMin) && advisedMin > 0.3) {
-      // Use 0.75x of the advised minimum — equilibrium distance needs slack for random placement
-      globalMin = Math.max(globalMin, advisedMin * 0.75);
+  const heuristicMin = globalMin;
+  if (advisedPairDistances && Object.keys(advisedPairDistances).length > 0) {
+    const advisedValues = Object.values(advisedPairDistances).filter(d => d > 0.3);
+    if (advisedValues.length > 0) {
+      const advisedMin = Math.min(...advisedValues);
+      const advisedMinsep = advisedMin * 0.75;
+      const oldMin = globalMin;
+      globalMin = Math.max(globalMin, advisedMinsep);
+      console.log(`[AIRSS] LLM-advised MINSEP: smallest pair=${advisedMin.toFixed(2)} Å × 0.75 = ${advisedMinsep.toFixed(2)} Å, heuristic=${oldMin.toFixed(2)} Å → using ${globalMin.toFixed(2)} Å`);
     }
   }
 
@@ -242,6 +246,12 @@ export const airssEngine: CSPEngine = {
     const baseSeed = config.baseSeed ?? Math.floor(Math.random() * 1e8);
     const workDir = config.workDir;
     fs.mkdirSync(workDir, { recursive: true });
+
+    if (config.structureAdvice) {
+      const adv = config.structureAdvice;
+      const pairCount = Object.keys(adv.pairDistances ?? {}).length;
+      console.log(`[AIRSS] Structure advice active: type=${adv.structureType ?? "?"}, SG=${adv.likelySpaceGroup ?? "?"}, ${pairCount} pair distances`);
+    }
 
     // Determine screening tier from budget
     let tierConfig: ScreeningTierConfig;
