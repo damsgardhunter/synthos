@@ -57,6 +57,36 @@ def periodize_self_energy(
         raise ValueError(f"Unknown periodization method: {method}")
 
 
+def _compute_cluster_R(K_cluster, nc, dim):
+    """Find real-space vectors R satisfying DCA FT orthogonality with K_cluster."""
+    from itertools import combinations
+
+    L_c = int(round(nc ** (1.0 / dim)))
+    if L_c ** dim == nc:
+        # Square cluster: simple integer grid
+        if dim == 2:
+            return np.array([[i, j] for i in range(L_c) for j in range(L_c)], dtype=float)
+        else:
+            return np.array([[i, j, k] for i in range(L_c) for j in range(L_c) for k in range(L_c)], dtype=float)
+
+    # Non-square: search over integer points for FT-orthogonal set
+    box = int(np.ceil(np.sqrt(nc))) + 1
+    if dim == 2:
+        candidates = [(i, j) for i in range(box + 1) for j in range(box + 1)]
+    else:
+        candidates = [(i, j, k) for i in range(box + 1) for j in range(box + 1) for k in range(box + 1)]
+
+    for combo in combinations(range(len(candidates)), nc):
+        R = np.array([candidates[c] for c in combo], dtype=float)
+        F = np.exp(1j * np.pi * K_cluster @ R.T)
+        FtF = F.conj().T @ F / nc
+        if np.max(np.abs(FtF - np.eye(nc))) < 1e-8:
+            return R
+
+    # Fallback: K_cluster itself (may not be orthogonal for non-square clusters)
+    return K_cluster.copy()
+
+
 def _periodize_nearest(sigma_K, K_cluster, kpoints):
     """Nearest-patch: step function, discontinuous but always causal."""
     from dca_solver import assign_k_to_patches
@@ -76,15 +106,10 @@ def _periodize_fourier(sigma_K, K_cluster, kpoints):
     shape_rest = sigma_K.shape[1:]
     dim = K_cluster.shape[1]
 
-    # Cluster real-space vectors: R_i = integer site positions in units of a.
-    # For N_c=4 (2×2): R = {(0,0),(1,0),(0,1),(1,1)} — same as K in π/a units.
-    # For N_c=16 (4×4): R = {0,1,2,3}×{0,1,2,3} ≠ K = {0,0.5,1,1.5}×...
-    L_c = int(round(nc ** (1.0 / dim)))
-    R_cluster = np.array(
-        [[i, j] for i in range(L_c) for j in range(L_c)]
-        if dim == 2 else
-        [[i, j, k] for i in range(L_c) for j in range(L_c) for k in range(L_c)]
-    , dtype=float)
+    # Cluster real-space vectors R must satisfy the DCA orthogonality:
+    #   (1/N_c) Σ_R exp(i(K-K')·R·π) = δ_{K,K'}
+    # Computed via brute-force search over integer lattice points.
+    R_cluster = _compute_cluster_R(K_cluster, nc, dim)
 
     # FT to real space: Σ(R) = (1/N_c) Σ_K Σ(K) exp(-iK·R·π)
     sigma_R = np.zeros_like(sigma_K)
