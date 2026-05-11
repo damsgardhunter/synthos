@@ -172,7 +172,7 @@ export async function screenRound2(
     const chgnetResult = await runChgnetEvaluation(
       unique, workDir, true, // relax=true for round 2
       Math.min(unique.length, 50),
-      300000, // 5 min
+      900000, // 15 min — 5 min was too tight for 20+ atom cells with relaxation
     );
 
     if (chgnetResult.stats.evaluated > 0) {
