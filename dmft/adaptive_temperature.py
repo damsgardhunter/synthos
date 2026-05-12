@@ -84,7 +84,8 @@ class AdaptiveTemperatureGrid:
         L_asc = L_vals[idx]
 
         lambda_max = np.max(np.abs(L_asc))
-        lambda_growing = len(L_asc) >= 2 and abs(L_asc[-1]) > abs(L_asc[0])
+        # λ grows as T DECREASES, so in ascending-T order L_asc[0] (lowest T) is largest
+        lambda_growing = len(L_asc) >= 2 and abs(L_asc[0]) > abs(L_asc[-1])
 
         if not lambda_growing and lambda_max < 0.1:
             # λ is not growing — no SC instability at these temperatures
@@ -93,8 +94,9 @@ class AdaptiveTemperatureGrid:
         suggestions = []
 
         # Case 1: λ already crossed 1 → bisect to find Tc
+        # In ascending T: L_asc[i] (lower T) has higher λ, L_asc[i+1] (higher T) has lower λ
         for i in range(len(L_asc) - 1):
-            if abs(L_asc[i]) < self.lambda_target and abs(L_asc[i + 1]) >= self.lambda_target:
+            if abs(L_asc[i]) >= self.lambda_target and abs(L_asc[i + 1]) < self.lambda_target:
                 T_bisect = (T_asc[i] + T_asc[i + 1]) / 2
                 suggestions.append(T_bisect)
                 if remaining_budget > 1:
@@ -134,8 +136,8 @@ class AdaptiveTemperatureGrid:
                         T_target = max(1.0 / inv_T_target, self.T_min)
                         suggestions.append(T_target)
 
-            # Also extend below current minimum
-            T_extend = T_asc[-1] * 0.7
+            # Also extend below current minimum (T_asc[0] is lowest T in ascending order)
+            T_extend = T_asc[0] * 0.7
             if T_extend >= self.T_min and not any(abs(T_extend - t) / T_extend < 0.1 for t, _ in self.completed):
                 suggestions.append(T_extend)
 
