@@ -127,11 +127,39 @@ def compute_density_matrix_from_gf(
 
 # ── QE density update ───────────────────────────────────────────────────────
 
+def split_density_by_corr_shells(
+    density_matrix: np.ndarray,
+    corr_shells: list,
+) -> list:
+    """
+    Split a global [n_orb, n_orb] density matrix into per-correlated-atom blocks.
+
+    Given corr_shells = [{atom: 0, dim: 5}, {atom: 1, dim: 5}, ...] and a global
+    density matrix of total size sum(dim), this returns a list of per-shell
+    [dim_shell, dim_shell] sub-matrices.
+
+    Args:
+        density_matrix: [n_orb_total, n_orb_total] complex/real
+        corr_shells: list of {"atom": int, "dim": int, "sort": int, "l": int}
+
+    Returns:
+        list of [dim_i, dim_i] density blocks, one per shell
+    """
+    blocks = []
+    offset = 0
+    for shell in corr_shells:
+        dim = int(shell.get("dim", 5))
+        blocks.append(density_matrix[offset:offset + dim, offset:offset + dim])
+        offset += dim
+    return blocks
+
+
 def write_qe_density_correction(
     density_matrix_dmft: np.ndarray,
     density_matrix_dft: np.ndarray,
     orbital_labels: list,
     output_path: str,
+    corr_shells: list = None,
 ):
     """
     Write the density correction Δn = n_DMFT - n_DFT for QE to read.
@@ -147,20 +175,52 @@ def write_qe_density_correction(
         density_matrix_dft:  [n_orb, n_orb] from DFT (Wannier projection)
         orbital_labels: e.g., ["d_x2y2", "p_x", "p_y"]
         output_path: where to write the correction file
+        corr_shells: optional list of correlated shells for multi-atom CSC.
+                     If provided, the JSON output includes per-atom blocks.
     """
     delta_n = density_matrix_dmft - density_matrix_dft
     n_orb = delta_n.shape[0]
 
+    def _to_serializable(arr):
+        """Convert complex ndarray to JSON-safe nested list of [re, im] pairs."""
+        a = np.asarray(arr)
+        if np.iscomplexobj(a):
+            return [[[float(v.real), float(v.imag)] for v in row] for row in a]
+        return a.tolist()
+
     data = {
         "n_orb": n_orb,
         "orbital_labels": orbital_labels,
-        "density_matrix_dmft": density_matrix_dmft.tolist(),
-        "density_matrix_dft": density_matrix_dft.tolist(),
-        "delta_n": delta_n.tolist(),
-        "trace_dmft": float(np.trace(density_matrix_dmft)),
-        "trace_dft": float(np.trace(density_matrix_dft)),
+        "density_matrix_dmft": _to_serializable(density_matrix_dmft),
+        "density_matrix_dft": _to_serializable(density_matrix_dft),
+        "delta_n": _to_serializable(delta_n),
+        "trace_dmft": float(np.trace(density_matrix_dmft).real),
+        "trace_dft": float(np.trace(density_matrix_dft).real),
         "max_correction": float(np.max(np.abs(delta_n))),
     }
+
+    # Per-atom blocks for multi-atom CSC (e.g., YBCO bilayer with 2 Cu sites)
+    if corr_shells is not None and len(corr_shells) > 0:
+        per_atom_blocks = []
+        offset = 0
+        for shell in corr_shells:
+            dim = int(shell.get("dim", 5))
+            atom = int(shell.get("atom", 0))
+            block = np.asarray(
+                density_matrix_dmft[offset:offset + dim, offset:offset + dim]
+            )
+            per_atom_blocks.append({
+                "atom": atom,
+                "shell_l": int(shell.get("l", 2)),  # 2=d, 3=f
+                "dim": dim,
+                "occupation_matrix": _to_serializable(block),
+                "occupations_eigenvalues": np.linalg.eigvalsh(
+                    0.5 * (block + block.conj().T)
+                ).real.tolist(),
+            })
+            offset += dim
+        data["corr_shells"] = [dict(s) for s in corr_shells]
+        data["per_atom_density"] = per_atom_blocks
 
     # Write JSON for the QAE pipeline to read
     with open(output_path, "w") as f:
@@ -238,10 +298,20 @@ def generate_qe_scf_with_dmft_density(
     # Inject DMFT occupations via starting_ns_eigenvalue (DFT+U/Hubbard framework)
     # This is the standard CSC feedback mechanism: DMFT orbital occupations
     # override the DFT starting guess for the correlated subspace.
-    if dmft_occupations is not None and iteration > 0:
-        n_orb = len(dmft_occupations)
-        occ_evals = np.linalg.eigvalsh(np.array(dmft_occupations))
+    #
+    # Multi-atom support: if the density_correction JSON contains per_atom_density,
+    # emit a separate starting_ns_eigenvalue block per correlated atom (1-based atom
+    # index in QE). Otherwise fall back to single-atom mode (atom=1).
+    per_atom_density = None
+    if density_correction_path and os.path.exists(density_correction_path):
+        try:
+            with open(density_correction_path) as f:
+                dc = json.load(f)
+            per_atom_density = dc.get("per_atom_density")
+        except Exception:
+            pass
 
+    if dmft_occupations is not None and iteration > 0:
         # Ensure lda_plus_u is enabled (required for starting_ns_eigenvalue)
         has_hubbard = any("lda_plus_u" in l.lower() for l in modified)
         if not has_hubbard:
@@ -250,14 +320,36 @@ def generate_qe_scf_with_dmft_density(
                     modified.insert(i + 1, "  lda_plus_u = .true.,")
                     break
 
-        # Add starting_ns_eigenvalue card after &SYSTEM block
-        # Format: starting_ns_eigenvalue(orbital, spin, atom) = occupation
-        # For paramagnetic: spin 1 = spin 2
+        # Build starting_ns_eigenvalue cards. Use per-atom data if available,
+        # else single-atom (atom=1) fallback for backward compatibility.
         ns_lines = []
-        for m in range(n_orb):
-            occ = float(np.clip(occ_evals[m], 0.0, 1.0))
-            ns_lines.append(f"  starting_ns_eigenvalue({m+1},1,1) = {occ:.6f},")
-            ns_lines.append(f"  starting_ns_eigenvalue({m+1},2,1) = {occ:.6f},")
+
+        if per_atom_density and len(per_atom_density) > 0:
+            # Multi-atom mode: emit one block per correlated atom.
+            # QE uses 1-based atom indexing.
+            for shell in per_atom_density:
+                atom_idx = int(shell.get("atom", 0)) + 1  # 0-based → 1-based
+                dim = int(shell.get("dim", 5))
+                evals = shell.get("occupations_eigenvalues", [])
+                for m in range(min(dim, len(evals))):
+                    occ = float(np.clip(evals[m], 0.0, 1.0))
+                    # Format: starting_ns_eigenvalue(m, ispin, atom_index)
+                    ns_lines.append(
+                        f"  starting_ns_eigenvalue({m+1},1,{atom_idx}) = {occ:.6f},"
+                    )
+                    ns_lines.append(
+                        f"  starting_ns_eigenvalue({m+1},2,{atom_idx}) = {occ:.6f},"
+                    )
+        else:
+            # Single-atom fallback (backward compat)
+            n_orb = len(dmft_occupations)
+            occ_evals = np.linalg.eigvalsh(
+                0.5 * (np.array(dmft_occupations) + np.array(dmft_occupations).conj().T)
+            )
+            for m in range(n_orb):
+                occ = float(np.clip(occ_evals[m], 0.0, 1.0))
+                ns_lines.append(f"  starting_ns_eigenvalue({m+1},1,1) = {occ:.6f},")
+                ns_lines.append(f"  starting_ns_eigenvalue({m+1},2,1) = {occ:.6f},")
 
         # Insert before the closing / of &SYSTEM
         for i in range(len(modified) - 1, -1, -1):
@@ -485,11 +577,14 @@ def run_csc_loop(
 
         # Save MIXED density correction for the NEXT iteration's QE callback
         # (QE reads this via starting_ns_eigenvalue to seed the correlated occupations)
+        # Pass corr_shells for multi-atom CSC: each correlated atom gets its own
+        # starting_ns_eigenvalue block instead of all collapsing to atom=1.
         write_qe_density_correction(
             density_matrix_mixed,
             density_matrix_avg,
             [f"orb_{i}" for i in range(n_orb)],
             os.path.join(iter_dir, "density_correction.json"),
+            corr_shells=bundle_data.get("corr_shells"),
         )
 
         elapsed_iter = time.time() - t_iter
