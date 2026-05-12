@@ -90,13 +90,41 @@ def correct_tc_with_dmft(
     }
 
 
-def _allen_dynes(lam: float, omega_log_meV: float, mu_star: float) -> float:
-    """Allen-Dynes Tc formula. Returns Tc in Kelvin."""
+def _allen_dynes(lam: float, omega_log_meV: float, mu_star: float,
+                  omega2_meV: float = None) -> float:
+    """Allen-Dynes Tc formula with strong-coupling corrections f1, f2.
+
+    Tc = (ω_log / 1.2) · f1 · f2 · exp[-1.04(1+λ)/(λ - μ*(1+0.62λ))]
+
+    f1 = [1 + (λ/Λ_1)^(3/2)]^(1/3)      (strong-coupling enhancement)
+    f2 = 1 + (ω_2/ω_log - 1)·λ²/(λ² + Λ_2²)
+    Λ_1 = 2.46(1+3.8μ*)
+    Λ_2 = 1.82(1+6.3μ*)(ω_2/ω_log)
+
+    For λ < 1.5, f1≈f2≈1 and this reduces to McMillan. For strong-coupling
+    hydrides (λ > 2), f1, f2 give 20-50% enhancement.
+
+    Reference: Allen & Dynes, PRB 12, 905 (1975).
+    """
     if lam <= mu_star * (1 + 0.62 * lam) or omega_log_meV <= 0:
         return 0.0
     omega_log_K = omega_log_meV * 11.6045  # meV → K
     exponent = -1.04 * (1 + lam) / (lam - mu_star * (1 + 0.62 * lam))
-    return (omega_log_K / 1.2) * np.exp(exponent)
+    if exponent < -50:
+        return 0.0
+
+    # Strong-coupling corrections
+    if omega2_meV is None or omega2_meV <= 0:
+        omega2_meV = omega_log_meV * 1.3  # typical ω_2/ω_log ratio
+    omega2_ratio = max(1.0, omega2_meV / omega_log_meV)
+
+    Lambda_1 = 2.46 * (1 + 3.8 * mu_star)
+    Lambda_2 = 1.82 * (1 + 6.3 * mu_star) * omega2_ratio
+    f1 = (1 + (lam / Lambda_1) ** 1.5) ** (1.0 / 3.0)
+    f2 = 1 + (omega2_ratio - 1) * lam ** 2 / (lam ** 2 + Lambda_2 ** 2)
+
+    tc = (omega_log_K / 1.2) * f1 * f2 * np.exp(exponent)
+    return float(tc) if np.isfinite(tc) and tc > 0 else 0.0
 
 
 def _extract_quasiparticle_weight(
