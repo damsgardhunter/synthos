@@ -589,11 +589,21 @@ def run_multiorbital_dca(
         g_bar = coarse_grain_gf(gk_iw, patch_assignment, nc)
 
         # 3. Cluster bare G⁰ via Dyson
+        # Guard against empty patches (when k-mesh is too coarse for N_c)
         g0_c = np.zeros((nc, n_w, no, no), dtype=complex)
+        eye_no = np.eye(no, dtype=complex)
         for ic in range(nc):
             for iw in range(n_w):
-                g_bar_inv = np.linalg.inv(g_bar[ic, iw])
-                g0_c[ic, iw] = np.linalg.inv(g_bar_inv + sigma_c[ic, iw])
+                # If patch was empty, g_bar is zero matrix — skip (no contribution)
+                if not np.any(g_bar[ic, iw]):
+                    continue
+                try:
+                    g_bar_inv = np.linalg.inv(g_bar[ic, iw])
+                    g0_c[ic, iw] = np.linalg.inv(g_bar_inv + sigma_c[ic, iw])
+                except np.linalg.LinAlgError:
+                    # Singular matrix — use pseudoinverse as fallback
+                    g_bar_inv = np.linalg.pinv(g_bar[ic, iw], rcond=1e-12)
+                    g0_c[ic, iw] = np.linalg.pinv(g_bar_inv + sigma_c[ic, iw], rcond=1e-12)
 
         # 4. Solve cluster
         solver_result = solve_multiorbital_cluster_cthyb(g0_c, params, work_dir, iteration)

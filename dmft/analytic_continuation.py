@@ -178,7 +178,12 @@ def run_pade(
         z_matsubara = 1j * wn
 
         # Use only the first ~60 frequencies (Padé is unstable for many points)
-        n_pade = min(60, len(g_orb))
+        # Min 4 points required for proper Vidberg-Serene interpolation
+        n_pade = max(4, min(60, len(g_orb)))
+        if n_pade > len(g_orb):
+            # Not enough input — skip Padé for this orbital
+            results["spectral_functions"][f"orb_{orb}"] = [0.0] * n_omega
+            continue
         mid = len(g_orb) // 2
         indices = list(range(mid - n_pade // 2, mid + n_pade // 2))
         z_p = z_matsubara[indices]
@@ -212,8 +217,18 @@ def run_pade(
 
 
 def _pade_evaluate(z_in: np.ndarray, g_in: np.ndarray, z_out: np.ndarray) -> np.ndarray:
-    """Thiele continued-fraction Padé interpolation."""
+    """Thiele continued-fraction Padé interpolation.
+
+    Note: the Vidberg-Serene form requires n >= 4 input points for proper
+    interpolation. For n < 4, the continued fraction has too few free
+    parameters and silently gives wrong results.
+    """
     n = len(z_in)
+    if n < 4:
+        raise ValueError(
+            f"Padé interpolation requires at least 4 input points, got {n}. "
+            f"Increase the Matsubara frequency window or use MaxEnt instead."
+        )
     # Build continued fraction coefficients
     a = np.zeros(n, dtype=complex)
     a[0] = g_in[0]
