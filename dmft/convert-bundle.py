@@ -37,27 +37,34 @@ def convert(json_path: str, h5_path: str):
             nk = km[0] * km[1] * km[2]
             hk = np.zeros((nk, nw, nw), dtype=complex)
 
+            # Build R-vec → H(R) mapping, preserving INSERTION ORDER (matches
+            # the degeneracy array order from Wannier90 _hr.dat).
             r_vecs = {}
-            for row in h["hr_data"]:
+            r_first_idx = {}  # R-vec → original row index for degeneracy lookup
+            for idx, row in enumerate(h["hr_data"]):
                 rx, ry, rz = int(row[0]), int(row[1]), int(row[2])
                 i, j = int(row[3]) - 1, int(row[4]) - 1  # 1-based -> 0-based
                 re, im = row[5], row[6]
                 key = (rx, ry, rz)
                 if key not in r_vecs:
                     r_vecs[key] = np.zeros((nw, nw), dtype=complex)
+                    # Each unique R appears nw² consecutive rows; the R-index
+                    # is idx // nw² (preserves Wannier90 ordering)
+                    r_first_idx[key] = len(r_first_idx)
                 r_vecs[key][i, j] = complex(re, im)
 
             degs = h["degeneracies"]
-            r_list = sorted(r_vecs.keys())
+            # Iterate R-vectors in INSERTION ORDER (matches degeneracy array)
             kidx = 0
             for ik1 in range(km[0]):
                 for ik2 in range(km[1]):
                     for ik3 in range(km[2]):
                         kfrac = np.array([ik1 / km[0], ik2 / km[1], ik3 / km[2]])
-                        for ri, R in enumerate(r_list):
+                        for R, H_R in r_vecs.items():
+                            ri = r_first_idx[R]
                             phase = np.exp(2j * np.pi * np.dot(kfrac, R))
                             deg = degs[ri] if ri < len(degs) else 1
-                            hk[kidx] += phase * r_vecs[R] / deg
+                            hk[kidx] += phase * H_R / deg
                         kidx += 1
 
             hg.create_dataset("hk", data=hk)

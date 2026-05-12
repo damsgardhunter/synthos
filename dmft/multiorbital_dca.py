@@ -126,8 +126,10 @@ def build_multiorbital_hamiltonian_from_hr(
     n_k = kpoints.shape[0]
     hk = np.zeros((n_k, n_orb, n_orb), dtype=complex)
 
-    # Group entries by R-vector
+    # Group entries by R-vector, preserving INSERTION ORDER to match
+    # the degeneracy array from Wannier90 _hr.dat (NOT sorted!)
     r_vecs = {}
+    r_first_idx = {}
     for row in hr_data:
         rx, ry, rz = int(row[0]), int(row[1]), int(row[2])
         i, j = int(row[3]) - 1, int(row[4]) - 1  # 1-based → 0-based
@@ -135,16 +137,16 @@ def build_multiorbital_hamiltonian_from_hr(
         key = (rx, ry, rz)
         if key not in r_vecs:
             r_vecs[key] = []
+            r_first_idx[key] = len(r_first_idx)
         r_vecs[key].append((i, j, val))
 
-    r_list = sorted(r_vecs.keys())
-
-    # Fourier transform
+    # Fourier transform (iterate R in insertion order, NOT sorted)
     for ik in range(n_k):
-        for ri, R in enumerate(r_list):
+        for R, entries in r_vecs.items():
+            ri = r_first_idx[R]
             phase = np.exp(2j * np.pi * np.dot(kpoints[ik], R))
             deg = degeneracies[ri] if ri < len(degeneracies) else 1
-            for (i, j, val) in r_vecs[R]:
+            for (i, j, val) in entries:
                 if i < n_orb and j < n_orb:
                     hk[ik, i, j] += phase * val / deg
 

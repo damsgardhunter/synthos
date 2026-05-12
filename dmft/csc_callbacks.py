@@ -288,20 +288,20 @@ def _parse_hr_simple(hr_path: str, win_path: str, n_orb: int) -> Optional[np.nda
             if mp_match:
                 kmesh = [int(mp_match.group(i)) for i in (1, 2, 3)]
 
-        # Fourier transform
+        # Fourier transform — iterate R in INSERTION order (matches degeneracy
+        # array from Wannier90 _hr.dat, NOT lexicographic sort)
         nk = kmesh[0] * kmesh[1] * kmesh[2]
         hk = np.zeros((nk, num_wann, num_wann), dtype=complex)
-        r_list = sorted(r_vecs.keys())
 
         kidx = 0
         for ik1 in range(kmesh[0]):
             for ik2 in range(kmesh[1]):
                 for ik3 in range(kmesh[2]):
                     kfrac = np.array([ik1 / kmesh[0], ik2 / kmesh[1], ik3 / kmesh[2]])
-                    for ri, R in enumerate(r_list):
+                    for ri, (R, H_R) in enumerate(r_vecs.items()):
                         phase = np.exp(2j * np.pi * np.dot(kfrac, R))
                         deg = degeneracies[ri] if ri < len(degeneracies) else 1
-                        hk[kidx] += phase * r_vecs[R] / deg
+                        hk[kidx] += phase * H_R / deg
                     kidx += 1
 
         return hk
