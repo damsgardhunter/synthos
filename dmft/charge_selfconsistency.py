@@ -95,6 +95,32 @@ def compute_density_matrix_from_gf(
             tail_sum += g_iw[iw] - eye / (1j * wn[iw])
         return (eye / 2.0 + (tail_sum / beta).real)
 
+    elif g_iw.ndim == 2:
+        # Single-orbital cluster: [nc, 2*n_iw] — DCA single-band output
+        nc = g_iw.shape[0]
+        n_iw = g_iw.shape[1] // 2
+        wn = np.array([(2 * (n - n_iw) + 1) * np.pi / beta for n in range(2 * n_iw)])
+
+        # Return [nc, 1, 1] for consistency with multi-orbital cluster
+        dens = np.zeros((nc, 1, 1))
+        for ic in range(nc):
+            tail_sum = 0.0 + 0.0j
+            for iw in range(2 * n_iw):
+                tail_sum += g_iw[ic, iw] - 1.0 / (1j * wn[iw])
+            dens[ic, 0, 0] = 0.5 + (tail_sum / beta).real
+        return dens
+
+    elif g_iw.ndim == 1:
+        # Single-orbital single-site: [2*n_iw]
+        n_iw = g_iw.shape[0] // 2
+        wn = np.array([(2 * (n - n_iw) + 1) * np.pi / beta for n in range(2 * n_iw)])
+
+        tail_sum = 0.0 + 0.0j
+        for iw in range(2 * n_iw):
+            tail_sum += g_iw[iw] - 1.0 / (1j * wn[iw])
+        # Return [1, 1] for consistency
+        return np.array([[0.5 + (tail_sum / beta).real]])
+
     else:
         raise ValueError(f"Unexpected g_iw shape: {g_iw.shape}")
 

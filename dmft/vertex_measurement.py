@@ -424,7 +424,8 @@ def compute_chi_loc_from_g2(
     Returns:
         chi_loc: connected susceptibility, same shape as g2_ph
     """
-    chi_loc = g2_ph.copy()
+    # Ensure complex dtype (g2_ph from QMC may be real)
+    chi_loc = g2_ph.astype(complex, copy=True)
 
     # Find the Ω=0 bosonic index (center of the bosonic axis)
     n_b_total = g2_ph.shape[2]
@@ -432,32 +433,46 @@ def compute_chi_loc_from_g2(
 
     # Subtract disconnected part at Ω=0
     # G²_disc(iν, iν', Ω=0) = β · G(iν) · G(iν') × (orbital structure)
-    n_f = g2_ph.shape[0]
+    n_f = g2_ph.shape[0]  # 2*n_iw_f (vertex window)
+    n_iw_total = g_iw.shape[0]  # 2*n_iw (full G window, typically larger)
     n_orb = g_iw.shape[1] if g_iw.ndim >= 2 else 1
+
+    # Map vertex frequency index → G frequency index (centered window)
+    # vertex iv=0 corresponds to G index iv + offset where offset centers the window
+    offset = (n_iw_total - n_f) // 2
 
     if g_iw.ndim >= 2 and g2_ph.ndim >= 5:
         # Multi-orbital: need to handle index structure carefully
-        # Disconnected: β · G_{ab}(iν) · δ_{ν,ν'} · δ_{cd} ... (depends on channel)
-        # For particle-hole: disc_{abcd} = β · G_{da}(ν) · G_{bc}(ν') · δ_{Ω,0}
-        #   + β · G_{ba}(ν) · δ_{ν,ν'+Ω} · δ_{cd}  (exchange term)
-        # The first term (Hartree-like):
+        # For particle-hole: disc_{abcd}(ν, ν'; Ω=0) = β · G_{da}(ν) · G_{bc}(ν')
         for iv in range(n_f):
+            iv_g = iv + offset
+            if not (0 <= iv_g < n_iw_total):
+                continue
             for ivp in range(n_f):
+                ivp_g = ivp + offset
+                if not (0 <= ivp_g < n_iw_total):
+                    continue
                 if g2_ph.ndim == 7:
                     for a in range(n_orb):
                         for b in range(n_orb):
                             for c in range(n_orb):
                                 for d in range(n_orb):
                                     chi_loc[iv, ivp, iw_zero, a, b, c, d] -= (
-                                        beta * g_iw[iv, d, a] * g_iw[ivp, b, c]
+                                        beta * g_iw[iv_g, d, a] * g_iw[ivp_g, b, c]
                                     )
     else:
         # Single-orbital or flat array: simpler structure
         # disc(ν, ν', Ω=0) = β · G(ν) · G(ν')
         g_flat = g_iw.ravel() if g_iw.ndim > 1 else g_iw
-        for iv in range(min(n_f, len(g_flat))):
-            for ivp in range(min(n_f, len(g_flat))):
-                chi_loc[iv, ivp, iw_zero] -= beta * g_flat[iv] * g_flat[ivp]
+        for iv in range(n_f):
+            iv_g = iv + offset
+            if not (0 <= iv_g < len(g_flat)):
+                continue
+            for ivp in range(n_f):
+                ivp_g = ivp + offset
+                if not (0 <= ivp_g < len(g_flat)):
+                    continue
+                chi_loc[iv, ivp, iw_zero] -= beta * g_flat[iv_g] * g_flat[ivp_g]
 
     return chi_loc
 
