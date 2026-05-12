@@ -36,14 +36,20 @@ def periodize_self_energy(
 
     Args:
         sigma_K: [nc, 2*n_iw] or [nc, 2*n_iw, n_orb, n_orb] cluster Σ
-        K_cluster: [nc, dim] cluster momenta in π/a units
-        kpoints: [n_k, dim] target k-points in π/a units
+        K_cluster: [nc, dim_cluster] cluster momenta in π/a units
+        kpoints: [n_k, dim_k] target k-points in π/a units
+                 (if dim_k > dim_cluster, extra dimensions are ignored)
         method: "nearest", "self_energy", or "cumulant"
         g0_K: [nc, 2*n_iw, ...] bare cluster G⁰ (needed for cumulant)
 
     Returns:
         sigma_k: [n_k, 2*n_iw, ...] interpolated self-energy
     """
+    # Truncate kpoints to match cluster dimension (e.g., 3D bundle → 2D DCA)
+    dim_cluster = K_cluster.shape[1]
+    if kpoints.shape[1] > dim_cluster:
+        kpoints = kpoints[:, :dim_cluster]
+
     if method == "nearest":
         return _periodize_nearest(sigma_K, K_cluster, kpoints)
     elif method == "self_energy":
