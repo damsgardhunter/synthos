@@ -300,14 +300,13 @@ def _build_pairing_operator(
 
                         for a in range(n_orb):
                             for b in range(n_orb):
-                                I_v = ivp * n_orb * n_orb + a * n_orb + b
                                 g_kp = gk_iw[ikp, ivp_gf, a, c]
                                 g_mkp = gk_iw[ik_minus, ivp_minus, b, d]
 
-                                # Apply vertex: Γ · (G·G·x)
+                                # Apply vertex: Γ[(iv,a,b),(ivp,c,d)] · G_ac · G_bd · x_{cd}
                                 for iv in range(nw_v):
                                     Iv = iv * n_orb * n_orb + a * n_orb + b
-                                    gamma_val = gamma_singlet[Iv, I_v]
+                                    gamma_val = gamma_singlet[Iv, J_v]
                                     if abs(gamma_val) < 1e-15:
                                         continue
                                     contribution = prefactor * gamma_val * g_kp * g_mkp * x_val
