@@ -100,7 +100,9 @@ def generate_dcaplus_input(
             },
         },
         "DCA": {
-            "cluster": [int(np.sqrt(nc)), int(np.sqrt(nc))],
+            # For non-square nc (e.g., 8), use rectangular [Lx, Ly] with Lx*Ly=nc
+            "cluster": [int(np.sqrt(nc)), int(np.sqrt(nc))] if int(np.sqrt(nc))**2 == nc
+                        else [2, nc // 2],
             "lattice-size": [64, 64],
             "iterations": 20,
             "convergence-factor": 1e-4,
