@@ -131,7 +131,10 @@ def assign_k_to_patches(
     """
     n_k = kpoints.shape[0]
     nc = K_cluster.shape[0]
-    dim = kpoints.shape[1]
+    dim_cluster = K_cluster.shape[1]
+
+    # Truncate kpoints to cluster dimension (e.g., 3D bundle → 2D DCA)
+    kpts = kpoints[:, :dim_cluster] if kpoints.shape[1] > dim_cluster else kpoints
 
     # BZ periodicity: 2 in units of π/a (i.e., BZ is [-1,1] in π/a units)
     bz_period = 2.0
@@ -142,7 +145,7 @@ def assign_k_to_patches(
         min_dist = np.inf
         for ic in range(nc):
             # Distance with periodic BCs
-            dk = kpoints[ik] - K_cluster[ic]
+            dk = kpts[ik] - K_cluster[ic]
             # Wrap to [-1, 1] in π/a units
             dk = dk - bz_period * np.round(dk / bz_period)
             dist = np.sum(dk ** 2)
