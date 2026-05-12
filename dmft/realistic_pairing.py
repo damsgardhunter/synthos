@@ -340,7 +340,19 @@ def run_realistic_pairing_pipeline(
         model["n_orb"], model["U_values"], model["J_values"],
     )
 
-    kpoints = build_lattice_kpoints(n_k_per_dim, dim=2)
+    # Use the bundle's k-mesh (matches hk_final).
+    # The bundle's kpoints are fractional [0,1); convert to π/a [-1,1) for DCA.
+    if "kpoints" in data and data["kpoints"].shape[0] == hk_final.shape[0]:
+        bundle_kpoints = data["kpoints"]
+        # Convert fractional → π/a: kfrac in [0,1) → k_pia in [-1, 1)
+        # k_pia = 2*kfrac - 1 (centers BZ on Gamma)
+        kpoints = 2.0 * bundle_kpoints[:, :2] - 1.0
+    else:
+        # Fallback: build a 2D DCA k-mesh (may mismatch hk dimensions!)
+        kpoints = build_lattice_kpoints(n_k_per_dim, dim=2)
+        if kpoints.shape[0] != hk_final.shape[0]:
+            print(f"[Realistic] WARNING: kpoints ({kpoints.shape[0]}) != hk ({hk_final.shape[0]}) — DCA will crash")
+
     sweep_results = []
     sigma_warmstart = None
 
