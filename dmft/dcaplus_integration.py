@@ -243,8 +243,12 @@ def parse_dcaplus_output(work_dir: str, elapsed: float) -> Dict:
                     if "leading-eigenvalues" in af:
                         evals = af["leading-eigenvalues"][()]
                         results["eigenvalues"] = evals.tolist()
+                        # Take the eigenvalue with LARGEST |λ| as the pairing
+                        # instability indicator (don't assume DCA++ pre-sorts)
                         if len(evals) > 0:
-                            results["lambda_pair"] = float(evals[0])
+                            evals_arr = np.asarray(evals)
+                            idx_max = int(np.argmax(np.abs(evals_arr)))
+                            results["lambda_pair"] = float(np.real(evals_arr[idx_max]))
 
                     if "leading-eigenvectors" in af:
                         results["eigenvector_available"] = True

@@ -204,7 +204,7 @@ def _periodize_cumulant(sigma_K, K_cluster, kpoints, g0_K):
                 M_K[ic, iw] = sigma_K[ic, iw] / denom if abs(denom) > 1e-20 else 0.0
 
     # Fourier-interpolate M(K) → M(k)
-    M_k = _periodize_fourier.__wrapped__(M_K, K_cluster, kpoints) if hasattr(_periodize_fourier, '__wrapped__') else _periodize_fourier(M_K, K_cluster, kpoints)
+    M_k = _periodize_fourier(M_K, K_cluster, kpoints)
 
     # Recover Σ(k) from M(k)
     # Need G⁰(k) — approximate with nearest-patch G⁰
