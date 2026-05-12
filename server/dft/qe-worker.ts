@@ -4532,11 +4532,18 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       }
     } catch {}
 
-    const initRepair = repairStructureGeometry(positions, latticeA, workerPressure);
-    if (initRepair.repaired) {
-      positions = initRepair.positions;
-      latticeA = initRepair.latticeA;
-      console.log(`[QE-Worker] Repaired initial geometry for ${formula} (lattice=${latticeA.toFixed(3)} A)`);
+    // Skip geometry repair for known structures — their Wyckoff positions are
+    // validated and the repair function doesn't handle tetragonal/hexagonal cells
+    // correctly (it assumes cubic, causing lattice inflation for c/a >> 1 systems
+    // like La2CuO4 where a=3.78 c=13.23 gets inflated to a=7.30).
+    const isKnownStructureOverride = ksOverride && ksOverride.latticeA > 0;
+    if (!isKnownStructureOverride) {
+      const initRepair = repairStructureGeometry(positions, latticeA, workerPressure);
+      if (initRepair.repaired) {
+        positions = initRepair.positions;
+        latticeA = initRepair.latticeA;
+        console.log(`[QE-Worker] Repaired initial geometry for ${formula} (lattice=${latticeA.toFixed(3)} A)`);
+      }
     }
 
     if (positions.length >= 2) {
@@ -5892,6 +5899,26 @@ ${cellBlockEos}
     if (skipSeparateSCF) {
       // vc-relax SCF results already populated — skip entire SCF retry loop
       scfConverged = result.scf?.converged ?? false;
+    } else {
+      // vc-relax didn't provide usable SCF results — clean distributed wfcs
+      // from .save/ before running separate SCF. If vc-relax failed or partially
+      // converged, it may have left distributed-format wfc files (wfcdw*.dat,
+      // wfcup*.dat) that prevent ph.x from reading collected-format wfcs.
+      // The separate SCF with disk_io='high' writes collected wfcs, but only
+      // if the old distributed ones are removed first.
+      const saveDir = path.join(jobDir, "tmp", `${formula.replace(/[^a-zA-Z0-9]/g, "")}.save`);
+      if (fs.existsSync(saveDir)) {
+        try {
+          const saveFiles = fs.readdirSync(saveDir);
+          const distWfcs = saveFiles.filter(f => /^wfc(up|dw)?\d+\.dat$/.test(f));
+          if (distWfcs.length > 0) {
+            for (const f of distWfcs) {
+              fs.unlinkSync(path.join(saveDir, f));
+            }
+            console.log(`[QE-Worker] Cleaned ${distWfcs.length} distributed wfc files from .save/ for ${formula} — SCF will write collected format`);
+          }
+        } catch { /* best effort cleanup */ }
+      }
     }
 
     const effectiveMaxSeconds = computeMaxSeconds(elements, workerPressure);
