@@ -505,28 +505,52 @@ def classify_gap_symmetry(
 
 
 def _count_sign_changes(delta_real: np.ndarray, kpoints: np.ndarray) -> int:
-    """Count sign changes of the gap function along kx at ky≈0, kz≈0."""
-    # Select k-points near ky=0, kz=0 (within tolerance)
+    """Count sign changes of the gap function along high-symmetry directions.
+
+    Checks BOTH the kx-axis (catches p_x-wave nodes at kx=0) AND the diagonal
+    kx=ky (catches d-wave nodes along the diagonal). Returns the max sign
+    changes across these directions.
+    """
+    counts = []
+    # Direction 1: kx axis at ky≈0, kz≈0 (p-wave nodes here)
     tol = 0.05
+    # Use wrapped distance to also catch ky near 1.0 (≡ 0 by periodicity)
+    ky_frac = kpoints[:, 1] % 1
+    kz_frac = kpoints[:, 2] % 1
     near_axis = (
-        (np.abs(kpoints[:, 1] % 1) < tol) &
-        (np.abs(kpoints[:, 2] % 1) < tol)
+        (np.minimum(ky_frac, 1 - ky_frac) < tol) &
+        (np.minimum(kz_frac, 1 - kz_frac) < tol)
     )
-    if np.sum(near_axis) < 3:
-        return 0
 
-    kx_line = kpoints[near_axis, 0]
-    delta_line = delta_real[near_axis]
+    def _sign_changes_along(mask, kx_coord):
+        if np.sum(mask) < 3:
+            return 0
+        kx_line = kpoints[mask, kx_coord]
+        delta_line = delta_real[mask]
+        idx = np.argsort(kx_line)
+        delta_sorted = delta_line[idx]
+        # Filter out near-zero values to avoid counting numerical noise as
+        # sign changes (e.g., d-wave gap is exactly 0 along the diagonal)
+        max_abs = np.max(np.abs(delta_sorted))
+        if max_abs < 1e-12:
+            return 0
+        thresh = 0.01 * max_abs  # 1% of max magnitude
+        significant = delta_sorted[np.abs(delta_sorted) > thresh]
+        if len(significant) < 2:
+            return 0
+        signs = np.sign(significant)
+        return int(np.sum(np.abs(np.diff(signs)) > 0))
 
-    # Sort by kx
-    idx = np.argsort(kx_line)
-    delta_sorted = delta_line[idx]
+    counts.append(_sign_changes_along(near_axis, 0))
 
-    # Count sign changes
-    signs = np.sign(delta_sorted)
-    signs[signs == 0] = 1  # treat zero as positive
-    changes = np.sum(np.abs(np.diff(signs)) > 0)
-    return int(changes)
+    # Direction 2: diagonal kx=ky (d-wave nodes here)
+    # Δ_{x²-y²}(k) = cos(kx)-cos(ky) = 0 along kx=ky
+    kx_frac = kpoints[:, 0] % 1
+    diff_xy = np.abs((kx_frac - ky_frac + 0.5) % 1 - 0.5)  # wrapped |kx-ky|
+    near_diag = (diff_xy < tol) & (np.minimum(kz_frac, 1 - kz_frac) < tol)
+    counts.append(_sign_changes_along(near_diag, 0))
+
+    return max(counts) if counts else 0
 
 
 # ── Temperature sweep & Tc extrapolation ─────────────────────────────────────
