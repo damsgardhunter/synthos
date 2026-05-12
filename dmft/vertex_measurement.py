@@ -252,9 +252,16 @@ def extract_g2_from_h5(h5_path: str, shell_index: int = 0) -> dict:
         for gpath in g2_paths:
             if gpath in last_iter:
                 g2_grp = last_iter[gpath]
-                # TRIQS Block2Gf stored as nested groups per block pair
-                # For single-shell: block "up" × "up" (or "ud" for Kanamori)
-                for block_key in g2_grp.keys():
+                # TRIQS Block2Gf stored as nested groups per block pair.
+                # Prefer same-spin blocks ("up_up" or "up" × "up") which are
+                # the relevant ones for the BSE in the ph channel. Fall back
+                # to whatever block has data.
+                # Iterate blocks: try same-spin first (key contains "up_up" or "ud")
+                preferred_keys = [k for k in g2_grp.keys()
+                                  if "up_up" in k or "uu" == k or "ud" in k]
+                ordered_keys = preferred_keys + [k for k in g2_grp.keys()
+                                                  if k not in preferred_keys]
+                for block_key in ordered_keys:
                     if "data" in g2_grp[block_key]:
                         g2_data = g2_grp[block_key]["data"][()]
                         break
