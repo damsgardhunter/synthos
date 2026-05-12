@@ -1757,7 +1757,7 @@ function computeEcutwfc(elements: string[], extraBoost: number = 0, hydrogenFloo
  * Pm-3n have Z=2 (8 atoms), so the formula gives 53 electrons but the
  * cell has 106 electrons → nbnd must match the cell, not the formula.
  */
-function computeNbnd(elements: string[], counts: Record<string, number>, nspin: number = 1, actualPositions?: Array<{ element: string }>): number {
+function computeNbnd(elements: string[], counts: Record<string, number>, nspin: number = 1, actualPositions?: Array<{ element: string }>, noncolin: boolean = false): number {
   let nelec = 0;
   if (actualPositions && actualPositions.length > 0) {
     // Use actual positions in the cell (handles supercells correctly)
@@ -1770,6 +1770,13 @@ function computeNbnd(elements: string[], counts: Record<string, number>, nspin: 
       const n = Math.round(counts[el] ?? 0);
       nelec += n * getZValence(el);
     }
+  }
+  if (noncolin) {
+    // With noncolin=.true. (SOC or non-collinear magnetism), QE uses
+    // 4-component spinors — each band covers both spin components but
+    // there's no spin degeneracy. QE needs nbnd >= nelec (not nelec/2).
+    // Formula: nbnd = nelec + max(4, ceil(nelec * 0.15))
+    return nelec + Math.max(4, Math.ceil(nelec * 0.15));
   }
   const nbndSpin1 = Math.ceil(nelec / 2) + Math.max(4, Math.ceil(nelec * 0.10));
   return nspin === 2 ? nbndSpin1 * 2 : nbndSpin1;
@@ -3460,7 +3467,7 @@ function generateSCFInputWithParams(
   // behaves same as SOC noncolin — 4-component spinors, angle1/angle2 format.
   const nspinOut = (hasSOC || hasNoncolin) ? 1 : (useNspin2 ? 2 : (params.forceNspin ?? 1));
   const noncolinBlock = hasNoncolin ? "  noncolin = .true.,\n" : "";
-  const nbnd = computeNbnd(elements, counts, nspinOut, positions);
+  const nbnd = computeNbnd(elements, counts, nspinOut, positions, hasSOC || hasNoncolin);
   // restart_mode='restart' on retry attempts 2+ preserves the partial SCF
   // charge density from the previous wall-time-killed attempt instead of
   // throwing it away — aiida's standard move for ElectronicMaxStep /
