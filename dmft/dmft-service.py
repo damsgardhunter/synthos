@@ -187,6 +187,8 @@ def capabilities():
             "run_csc": "bool — include charge self-consistency (default: true)",
             "dca_nc": "int — force DCA cluster size (default: auto-selected)",
             "max_walltime_hours": "float — total budget (default: 72)",
+            "vertex_channel": "'ph' (default) | 'pp' — pp eliminates ph→pp crossing approximation (2× QMC cost)",
+            "use_eliashberg_bisection": "bool — direct Tc bisection vs temperature-sweep extrapolation (default: false)",
         },
     })
 
@@ -236,6 +238,8 @@ def submit():
     dca_nc = None  # auto-select
     mode = "orchestrated"
     max_walltime_hours = 72.0
+    vertex_channel = "ph"
+    use_eliashberg_bisection = False
     if request.is_json:
         opts = request.get_json()
         mode = opts.get("mode", "orchestrated")
@@ -244,6 +248,9 @@ def submit():
         run_csc = opts.get("run_csc", True)
         dca_nc = opts.get("dca_nc", None)
         max_walltime_hours = opts.get("max_walltime_hours", 72.0)
+        # Feature flags
+        vertex_channel = opts.get("vertex_channel", "ph")
+        use_eliashberg_bisection = opts.get("use_eliashberg_bisection", False)
 
     job = {
         "job_id": job_id,
@@ -255,6 +262,8 @@ def submit():
         "run_csc": run_csc,
         "dca_nc": dca_nc,
         "max_walltime_hours": max_walltime_hours,
+        "vertex_channel": vertex_channel,
+        "use_eliashberg_bisection": use_eliashberg_bisection,
         "status": "queued",
         "submitted_at": time.time(),
         "started_at": None,
@@ -408,6 +417,8 @@ def worker_loop_with_benchmark():
                     budget=budget,
                     run_csc=job.get("run_csc", True),
                     force_nc=job.get("dca_nc"),
+                    vertex_channel=job.get("vertex_channel", "ph"),
+                    use_eliashberg_bisection=job.get("use_eliashberg_bisection", False),
                 )
                 has_tc = results.get("tc_K") is not None and results.get("tc_K", 0) > 0
                 job["status"] = "completed" if has_tc else "completed_no_tc"
@@ -438,6 +449,7 @@ def worker_loop_with_benchmark():
                     work_dir=job_work_dir,
                     skip_vertex=skip_vertex,
                     mpi_ranks=mpi_ranks,
+                    vertex_channel=job.get("vertex_channel", "ph"),
                 )
                 job["status"] = "completed" if results.get("converged") else "completed_unconverged"
                 job["results"] = results

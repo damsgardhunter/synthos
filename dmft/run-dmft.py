@@ -338,6 +338,7 @@ def run_full_pipeline(
     work_dir: str,
     skip_vertex: bool = False,
     mpi_ranks: int = 20,
+    vertex_channel: str = "ph",
 ) -> dict:
     """
     Run the complete DMFT + vertex + BSE + pairing pipeline:
@@ -352,6 +353,8 @@ def run_full_pipeline(
         work_dir:    working directory for all calculations
         skip_vertex: if True, only run Phase 1 (single-particle DMFT)
         mpi_ranks:   MPI ranks for CTHYB
+        vertex_channel: "ph" (default) or "pp" — pp eliminates ph→pp crossing
+                        approximation but ~2× the QMC cost
 
     Returns:
         Combined results dict with all phases
@@ -409,6 +412,7 @@ def run_full_pipeline(
             converged_config=config,
             data=data,
             mpi_ranks=mpi_ranks,
+            channel=vertex_channel,
         )
         all_results["phases"]["vertex_g2"] = vertex_results
 

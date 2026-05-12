@@ -745,6 +745,8 @@ def run_orchestrated_pipeline(
     force_temperatures: Optional[List[float]] = None,
     qe_callback=None,
     wannier_callback=None,
+    vertex_channel: str = "ph",
+    use_eliashberg_bisection: bool = False,
 ) -> Dict:
     """
     Production DMFT pipeline with full automation.
@@ -756,7 +758,15 @@ def run_orchestrated_pipeline(
       4. DCA cluster DMFT with fallback chain
       5. Temperature sweep with adaptive grid
       6. Pairing eigenvalue + gap symmetry at each T
-      7. Tc extrapolation
+      7. Tc extrapolation OR Eliashberg bisection
+
+    Args:
+        vertex_channel: "ph" (default, particle-hole G² + crossing) or "pp"
+                        (particle-particle G², direct pairing vertex, no crossing
+                        approximation but ~2× QMC cost)
+        use_eliashberg_bisection: if True, use direct Tc bisection from the
+                                  Eliashberg solver instead of λ(T)→1 extrapolation.
+                                  Typically 3-5 DMFT calls vs 8-10 for the sweep.
 
     Every phase has:
       - Pre-flight resource check
