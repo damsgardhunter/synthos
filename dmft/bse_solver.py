@@ -359,8 +359,12 @@ def run_bse_solver(vertex_data_path: str, work_dir: str) -> dict:
       1. Load vertex data (G², χ⁰_loc, χ_loc) from vertex_measurement output
       2. Reshape into compound-index matrices
       3. Invert BSE to get Γ_loc
-      4. Decompose into spin/charge/pairing channels
+      4. Decompose into pairing channels (ph) or use directly (pp)
       5. Save results
+
+    Channel handling:
+      - ph (default): apply ph→pp crossing approximation to get singlet vertex
+      - pp: Γ_pp IS the singlet pairing vertex directly (no crossing needed)
 
     Args:
         vertex_data_path: path to vertex_data.npz from vertex_measurement
@@ -381,6 +385,11 @@ def run_bse_solver(vertex_data_path: str, work_dir: str) -> dict:
     n_iw_b = grid_params["n_iw_b"]
     n_orb = grid_params["n_orb"]
 
+    # Detect which channel was measured (default "ph" for backward compat)
+    channel = "ph"
+    if "channel" in vdata.files:
+        channel = str(vdata["channel"])
+
     chi0_loc = vdata.get("chi0_loc")
     chi_loc = vdata.get("chi_loc")
 
@@ -388,7 +397,8 @@ def run_bse_solver(vertex_data_path: str, work_dir: str) -> dict:
         return {"converged": False, "error": "Missing χ⁰_loc or χ_loc in vertex data"}
 
     N = 2 * n_iw_f * n_orb * n_orb
-    print(f"[BSE] Matrix size N={N} ({2*n_iw_f} freq × {n_orb}² orbitals), "
+    print(f"[BSE] {channel.upper()} channel — matrix size N={N} "
+          f"({2*n_iw_f} freq × {n_orb}² orbitals), "
           f"{2*n_iw_b+1} bosonic frequencies")
 
     # SVD-stabilized BSE inversion
@@ -403,9 +413,36 @@ def run_bse_solver(vertex_data_path: str, work_dir: str) -> dict:
           f"truncated modes: χ⁰={diagnostics['total_truncated_chi0']}, "
           f"χ={diagnostics['total_truncated_chi']}")
 
-    # Channel decomposition
-    print("[BSE] Decomposing vertex into pairing channels...")
-    channels = decompose_vertex_channels(gamma_loc, n_iw_f, n_orb)
+    if channel == "pp":
+        # Γ_pp at Ω=0 IS the singlet pairing vertex — no crossing approximation
+        print("[BSE] PP channel — Γ_pp is the direct pairing vertex (no crossing)")
+        iw_zero = n_iw_b  # center bosonic index
+        gamma_singlet = gamma_loc[:, :, iw_zero]
+        # Triplet from antisymmetric part of Γ_pp (orbital-antisymmetric)
+        gamma_triplet = (gamma_singlet - gamma_singlet.T) / 2
+        # Symmetrize for the singlet projection (Cooper-pair orbital-symmetric)
+        gamma_singlet_sym = (gamma_singlet + gamma_singlet.T) / 2
+        # Spectral properties
+        evals_singlet = np.linalg.eigvalsh(
+            (gamma_singlet_sym + gamma_singlet_sym.conj().T) / 2
+        )
+        evals_triplet = np.linalg.eigvalsh(
+            (gamma_triplet + gamma_triplet.conj().T) / 2
+        )
+        channels = {
+            "gamma_singlet": gamma_singlet_sym,
+            "gamma_triplet": gamma_triplet,
+            "gamma_charge": gamma_singlet_sym,  # no separate charge in pp
+            "gamma_spin": gamma_triplet,        # triplet ≈ spin-like
+            "max_eval_singlet": float(np.max(np.abs(evals_singlet))),
+            "max_eval_triplet": float(np.max(np.abs(evals_triplet))),
+            "singlet_attractive": bool(np.min(evals_singlet.real) < 0),
+            "triplet_attractive": bool(np.min(evals_triplet.real) < 0),
+        }
+    else:
+        # ph channel: use leading-order crossing to get singlet vertex
+        print("[BSE] PH channel — applying leading-order ph→pp crossing")
+        channels = decompose_vertex_channels(gamma_loc, n_iw_f, n_orb)
 
     elapsed = time.time() - t0
     print(f"[BSE] Singlet attractive: {channels['singlet_attractive']}, "
@@ -425,11 +462,13 @@ def run_bse_solver(vertex_data_path: str, work_dir: str) -> dict:
         gamma_charge=channels["gamma_charge"],
         gamma_spin=channels["gamma_spin"],
         grid_params_json=json.dumps(grid_params),
+        channel=channel,
     )
     print(f"[BSE] Results saved to {bse_path} ({os.path.getsize(bse_path)/1e6:.0f} MB)")
 
     return {
         "converged": True,
+        "channel": channel,
         "elapsed_seconds": elapsed,
         "diagnostics": diagnostics,
         "singlet_attractive": channels["singlet_attractive"],

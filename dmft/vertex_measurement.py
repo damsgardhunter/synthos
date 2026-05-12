@@ -142,6 +142,7 @@ def build_g2_solver_params(
     grid_params: dict,
     base_n_cycles: int = 5_000_000,
     base_length_cycle: int = 200,
+    channel: str = "ph",
 ) -> dict:
     """
     Build CTHYB solver parameters for the two-particle measurement run.
@@ -149,13 +150,22 @@ def build_g2_solver_params(
     This is a SEPARATE run from the converged 1P DMFT — we load the
     converged self-energy and measure G² without further self-consistency.
 
+    Args:
+        grid_params: frequency grid configuration from compute_g2_grid_params
+        base_n_cycles: base QMC cycles per orbital
+        base_length_cycle: base length of QMC cycle
+        channel: "ph" (particle-hole, for spin/charge) or "pp" (particle-particle,
+                 for direct pairing vertex extraction). "pp" eliminates the
+                 ph→pp crossing approximation in the BSE.
+
     Returns a dict of solver parameters to merge into the CTHYB config.
     """
     multiplier = grid_params["g2_cycle_multiplier"]
 
-    return {
-        # Core G² measurement flags
-        "measure_G2_iw_ph": True,       # particle-hole channel (for spin/charge susceptibility)
+    if channel not in ("ph", "pp"):
+        raise ValueError(f"Unknown G² channel: {channel} (expected 'ph' or 'pp')")
+
+    params = {
         "measure_G2_n_fermionic": grid_params["n_iw_f"],
         "measure_G2_n_bosonic": grid_params["n_iw_b"],
 
@@ -173,11 +183,21 @@ def build_g2_solver_params(
         "perform_tail_fit": True,
     }
 
+    # Enable the requested channel measurement.
+    # CTHYB supports both simultaneously, but each ~doubles the QMC cost.
+    if channel == "ph":
+        params["measure_G2_iw_ph"] = True
+    elif channel == "pp":
+        params["measure_G2_iw_pp"] = True
+
+    return params
+
 
 def build_g2_config(
     converged_dmft_config: dict,
     grid_params: dict,
     converged_h5_path: str,
+    channel: str = "ph",
 ) -> dict:
     """
     Build a complete solid_dmft configuration for the G² measurement pass.
@@ -187,6 +207,9 @@ def build_g2_config(
       - Sigma is loaded from the converged run (sigma_mix = 0 effectively)
       - G² measurement flags are enabled
       - QMC cycles are increased 5-20×
+
+    Args:
+        channel: "ph" (particle-hole) or "pp" (particle-particle, direct pairing)
     """
     config = dict(converged_dmft_config)  # shallow copy top level
 
@@ -195,10 +218,10 @@ def build_g2_config(
     config["general"]["n_iter_dmft"] = 1  # single-shot measurement
     config["general"]["calc_mode"] = "DMFT"
     seedname = config["general"].get("seedname", "material")
-    config["general"]["jobname"] = f"{seedname}_g2_measurement"
+    config["general"]["jobname"] = f"{seedname}_g2_{channel}_measurement"
 
     # Merge G² solver params
-    solver_params = build_g2_solver_params(grid_params)
+    solver_params = build_g2_solver_params(grid_params, channel=channel)
     config["solver"] = dict(config.get("solver", {}))
     config["solver"].update(solver_params)
 
@@ -211,22 +234,29 @@ def build_g2_config(
 
 # ── G² data extraction ──────────────────────────────────────────────────────
 
-def extract_g2_from_h5(h5_path: str, shell_index: int = 0) -> dict:
+def extract_g2_from_h5(h5_path: str, shell_index: int = 0,
+                        channel: str = "ph") -> dict:
     """
     Extract the measured G²(iν, iν', iΩ) from the CTHYB output HDF5.
 
     TRIQS/CTHYB stores G² as a Block2Gf in:
-      /DMFT_results/it_001/solver/G2_iw_ph
+      /DMFT_results/it_001/solver/G2_iw_{ph,pp}
+
+    Args:
+        h5_path: path to the HDF5 from a G² measurement run
+        shell_index: which correlated shell to extract (for multi-shell systems)
+        channel: "ph" (particle-hole) or "pp" (particle-particle, pairing)
 
     Returns a dict with:
-      - g2_ph: numpy array [2*n_f, 2*n_f, 2*n_b+1, n_orb, n_orb, n_orb, n_orb]
+      - g2_ph or g2_pp: numpy array [2*n_f, 2*n_f, 2*n_b+1, n_orb, n_orb, n_orb, n_orb]
+      - channel: the channel that was extracted
       - g_iw:  single-particle G(iω) [2*n_f, n_orb, n_orb]
       - beta:  inverse temperature
       - n_iw_f, n_iw_b: grid sizes
     """
     import h5py
 
-    result = {}
+    result = {"channel": channel}
 
     with h5py.File(h5_path, "r") as f:
         # Navigate to the measurement iteration
@@ -242,11 +272,14 @@ def extract_g2_from_h5(h5_path: str, shell_index: int = 0) -> dict:
 
         # Try to load G² from the solver output
         # TRIQS stores it in various possible locations depending on version
-        g2_paths = [
-            f"solver/G2_iw_ph",
-            f"G2_iw_ph",
-            f"solver/G2_iw",
-        ]
+        if channel == "pp":
+            g2_paths = [f"solver/G2_iw_pp", f"G2_iw_pp"]
+        else:
+            g2_paths = [
+                f"solver/G2_iw_ph",
+                f"G2_iw_ph",
+                f"solver/G2_iw",
+            ]
 
         g2_data = None
         for gpath in g2_paths:
@@ -269,9 +302,11 @@ def extract_g2_from_h5(h5_path: str, shell_index: int = 0) -> dict:
                     break
 
         if g2_data is None:
-            raise ValueError("G² data not found in HDF5 — check measure_G2_iw_ph was enabled")
+            flag = "measure_G2_iw_pp" if channel == "pp" else "measure_G2_iw_ph"
+            raise ValueError(f"G² data not found in HDF5 — check {flag} was enabled")
 
-        result["g2_ph"] = g2_data
+        # Store under channel-specific key (g2_ph or g2_pp)
+        result[f"g2_{channel}"] = g2_data
 
         # Load single-particle G(iω) for χ⁰ construction
         g_iw_paths = ["solver/G_iw", "G_iw", "solver/Gimp_iw"]
@@ -410,6 +445,83 @@ def compute_chi0_loc_fast(g_iw: np.ndarray, beta: float, n_iw_b: int) -> np.ndar
     return chi0
 
 
+def compute_chi0_loc_pp_fast(g_iw: np.ndarray, beta: float, n_iw_b: int) -> np.ndarray:
+    """
+    Particle-particle channel χ⁰_loc bubble.
+
+      χ⁰_pp_{abcd}(ν, Ω) = -β · G_{ac}(ν) · G_{bd}(Ω - ν)
+
+    The pp bubble describes the bare (non-interacting) pair susceptibility.
+    For uncorrelated Cooper pairs at total energy Ω, one electron has
+    Matsubara frequency ν and the other has Ω-ν.
+
+    This is the DIRECT pairing bubble — using it with the BSE-extracted
+    pp vertex Γ_pp gives the singlet pairing susceptibility without the
+    leading-order crossing approximation needed in the ph channel.
+
+    Args:
+        g_iw: single-particle G(iω), shape [2*n_iw, n_orb, n_orb]
+        beta: inverse temperature
+        n_iw_b: number of bosonic frequencies per side
+
+    Returns:
+        chi0_pp: shape [2*n_iw_f, 2*n_iw_b+1, n_orb, n_orb, n_orb, n_orb]
+    """
+    n_iw_total = g_iw.shape[0]
+    n_orb = g_iw.shape[1]
+    n_iw = n_iw_total // 2
+    n_iw_f = n_iw - n_iw_b
+
+    if n_iw_f < 5:
+        raise ValueError(f"Insufficient fermionic frequencies: n_iw={n_iw}, n_iw_b={n_iw_b}")
+
+    chi0 = np.zeros(
+        (2 * n_iw_f, 2 * n_iw_b + 1, n_orb, n_orb, n_orb, n_orb),
+        dtype=complex,
+    )
+
+    offset = n_iw - n_iw_f
+
+    # For pp: shifted index iv' = (n_iw_total - 1 - iv_full) + m  ↔  Ω - ν
+    # Derivation: Ω-ν = (2m)π/β - (2n+1)π/β = (2(m-n-1)+1)π/β,
+    #   so n' = m - n - 1, and iv' = n' + n_iw = m - (iv_full - n_iw) - 1 + n_iw
+    #         = m + (n_iw_total - 1) - iv_full
+    for iw in range(2 * n_iw_b + 1):
+        m = iw - n_iw_b
+        # iv runs over the vertex window [offset, offset + 2*n_iw_f)
+        # iv_shifted = (n_iw_total - 1) - iv + m must lie in [0, n_iw_total)
+        # → iv ∈ [m + n_iw_total - 1 - (n_iw_total-1), m + n_iw_total - 1]
+        #       = [m, m + n_iw_total - 1]
+        iv_start = max(offset, m)
+        iv_end = min(offset + 2 * n_iw_f, m + n_iw_total)
+
+        if iv_start >= iv_end:
+            continue
+
+        # Build the shifted index array
+        iv_range = np.arange(iv_start, iv_end)
+        iv_shifted_range = (n_iw_total - 1) - iv_range + m
+
+        # Filter to valid shifted indices
+        valid = (iv_shifted_range >= 0) & (iv_shifted_range < n_iw_total)
+        if not np.any(valid):
+            continue
+        iv_range = iv_range[valid]
+        iv_shifted_range = iv_shifted_range[valid]
+
+        g_v = g_iw[iv_range]           # G(ν)
+        g_omega_minus_v = g_iw[iv_shifted_range]  # G(Ω-ν)
+
+        sl_out = iv_range - offset
+
+        # χ⁰_pp_{abcd}(ν, Ω) = -β · G_{ac}(ν) · G_{bd}(Ω-ν)
+        chi0[sl_out, iw, :, :, :, :] = -beta * np.einsum(
+            "vac,vbd->vabcd", g_v, g_omega_minus_v
+        )
+
+    return chi0
+
+
 def compute_chi_loc_from_g2(
     g2_ph: np.ndarray,
     g_iw: np.ndarray,
@@ -484,6 +596,72 @@ def compute_chi_loc_from_g2(
     return chi_loc
 
 
+def compute_chi_loc_from_g2_pp(
+    g2_pp: np.ndarray,
+    g_iw: np.ndarray,
+    beta: float,
+) -> np.ndarray:
+    """
+    Extract connected χ_loc^pp from particle-particle G²:
+
+      χ_pp(ν,ν';Ω) = G²_pp(ν,ν';Ω) - β·G(ν)·G(Ω-ν)·δ_{ν,ν'}
+
+    The pp disconnected has δ_{ν,ν'} structure (not δ_{Ω,0} like ph),
+    so it contributes at ALL bosonic frequencies, only on the diagonal
+    in ν,ν'.
+
+    Args:
+        g2_pp: G²(iν,iν';iΩ) from CTHYB measure_G2_iw_pp
+        g_iw: G(iω) single-particle
+        beta: inverse temperature
+
+    Returns:
+        chi_pp: connected pp susceptibility, same shape as g2_pp
+    """
+    chi_loc = g2_pp.astype(complex, copy=True)
+
+    n_f = g2_pp.shape[0]
+    n_b_total = g2_pp.shape[2]
+    n_iw_b = (n_b_total - 1) // 2
+    n_iw_total = g_iw.shape[0]
+    n_orb = g_iw.shape[1] if g_iw.ndim >= 2 else 1
+    offset = (n_iw_total - n_f) // 2
+
+    if g_iw.ndim >= 2 and g2_pp.ndim >= 5:
+        # Multi-orbital: disconnected_pp{abcd}(ν, ν=ν'; Ω) = β·G_{ac}(ν)·G_{bd}(Ω-ν)
+        for iw in range(n_b_total):
+            m = iw - n_iw_b
+            for iv in range(n_f):
+                iv_g = iv + offset
+                # iv_g_shifted ↔ Ω-ν: index (n_iw_total-1) - iv_g + m
+                iv_g_shifted = (n_iw_total - 1) - iv_g + m
+                if not (0 <= iv_g < n_iw_total and 0 <= iv_g_shifted < n_iw_total):
+                    continue
+                # Diagonal in ν,ν' only (δ_{ν,ν'})
+                ivp = iv  # ν' = ν
+                if g2_pp.ndim == 7:
+                    for a in range(n_orb):
+                        for b in range(n_orb):
+                            for c in range(n_orb):
+                                for d in range(n_orb):
+                                    chi_loc[iv, ivp, iw, a, b, c, d] -= (
+                                        beta * g_iw[iv_g, a, c] * g_iw[iv_g_shifted, b, d]
+                                    )
+    else:
+        # Single-orbital
+        g_flat = g_iw.ravel() if g_iw.ndim > 1 else g_iw
+        for iw in range(n_b_total):
+            m = iw - n_iw_b
+            for iv in range(n_f):
+                iv_g = iv + offset
+                iv_g_shifted = (len(g_flat) - 1) - iv_g + m
+                if not (0 <= iv_g < len(g_flat) and 0 <= iv_g_shifted < len(g_flat)):
+                    continue
+                chi_loc[iv, iv, iw] -= beta * g_flat[iv_g] * g_flat[iv_g_shifted]
+
+    return chi_loc
+
+
 # ── Entrypoint for standalone testing ────────────────────────────────────────
 
 def run_vertex_measurement(
@@ -492,6 +670,7 @@ def run_vertex_measurement(
     converged_config: dict,
     data: dict,
     mpi_ranks: int = 20,
+    channel: str = "ph",
 ) -> dict:
     """
     Run the full G² measurement pass:
@@ -507,9 +686,11 @@ def run_vertex_measurement(
         converged_config: the solid_dmft config dict from the 1P run
         data: bundle data dict (for n_orb, correlation_regime, etc.)
         mpi_ranks: number of MPI ranks for CTHYB
+        channel: "ph" (default, particle-hole) or "pp" (particle-particle,
+                 direct pairing vertex — avoids ph→pp crossing approximation)
 
     Returns:
-        dict with g2_ph, chi0_loc, chi_loc, grid_params, timing
+        dict with g2_{ph,pp}, chi0_loc, chi_loc, grid_params, timing
     """
     import subprocess
 
@@ -534,7 +715,8 @@ def run_vertex_measurement(
           f"estimated={estimated_hours:.1f}h")
 
     # 2. Build measurement config
-    g2_config = build_g2_config(converged_config, grid_params, converged_h5_path)
+    g2_config = build_g2_config(converged_config, grid_params, converged_h5_path,
+                                 channel=channel)
 
     # 3. Write config and run
     import toml
@@ -568,7 +750,7 @@ def run_vertex_measurement(
     g2_h5_path = os.path.join(work_dir, f"{seedname}.h5")
 
     try:
-        g2_data = extract_g2_from_h5(g2_h5_path)
+        g2_data = extract_g2_from_h5(g2_h5_path, channel=channel)
     except Exception as e:
         return {
             "converged": False,
@@ -577,42 +759,52 @@ def run_vertex_measurement(
             "grid_params": grid_params,
         }
 
-    # 5. Compute χ⁰_loc and χ_loc
+    # 5. Compute χ⁰_loc and χ_loc (channel-specific)
     g_iw = g2_data.get("g_iw")
-    g2_ph = g2_data.get("g2_ph")
+    g2_arr = g2_data.get(f"g2_{channel}")
     meas_beta = g2_data.get("beta", beta)
 
     chi0_loc = None
     chi_loc = None
     if g_iw is not None:
         try:
-            chi0_loc = compute_chi0_loc_fast(g_iw, meas_beta, grid_params["n_iw_b"])
+            if channel == "pp":
+                chi0_loc = compute_chi0_loc_pp_fast(g_iw, meas_beta, grid_params["n_iw_b"])
+            else:
+                chi0_loc = compute_chi0_loc_fast(g_iw, meas_beta, grid_params["n_iw_b"])
         except Exception as e:
             print(f"[G2] WARNING: χ⁰_loc computation failed: {e}")
 
-    if g2_ph is not None:
+    if g2_arr is not None:
         try:
-            chi_loc = compute_chi_loc_from_g2(g2_ph, g_iw, meas_beta)
+            if channel == "pp":
+                chi_loc = compute_chi_loc_from_g2_pp(g2_arr, g_iw, meas_beta)
+            else:
+                chi_loc = compute_chi_loc_from_g2(g2_arr, g_iw, meas_beta)
         except Exception as e:
             print(f"[G2] WARNING: χ_loc computation failed: {e}")
 
     # Save intermediate results
     results = {
         "converged": True,
+        "channel": channel,
         "measurement_hours": measurement_time / 3600,
         "grid_params": grid_params,
         "n_orb": n_orb,
         "beta": meas_beta,
-        "g2_shape": list(g2_ph.shape) if g2_ph is not None else None,
+        "g2_shape": list(g2_arr.shape) if g2_arr is not None else None,
         "chi0_available": chi0_loc is not None,
         "chi_loc_available": chi_loc is not None,
     }
 
     # Save numpy arrays for BSE solver
     np_path = os.path.join(work_dir, "vertex_data.npz")
-    save_dict = {"grid_params_json": json.dumps(grid_params)}
-    if g2_ph is not None:
-        save_dict["g2_ph"] = g2_ph
+    save_dict = {
+        "grid_params_json": json.dumps(grid_params),
+        "channel": channel,
+    }
+    if g2_arr is not None:
+        save_dict[f"g2_{channel}"] = g2_arr
     if g_iw is not None:
         save_dict["g_iw"] = g_iw
     if chi0_loc is not None:
@@ -621,6 +813,7 @@ def run_vertex_measurement(
         save_dict["chi_loc"] = chi_loc
     np.savez_compressed(np_path, **save_dict)
     results["vertex_data_path"] = np_path
-    print(f"[G2] Vertex data saved to {np_path} ({os.path.getsize(np_path)/1e6:.0f} MB)")
+    print(f"[G2] Vertex data ({channel} channel) saved to {np_path} "
+          f"({os.path.getsize(np_path)/1e6:.0f} MB)")
 
     return results
