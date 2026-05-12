@@ -662,14 +662,26 @@ class ResourceTracker:
 
 # ── DMFT .win file builder (Python-native, no TS dependency) ─────────────────
 
-# Correlated orbitals for DMFT projector mode — only d or f
+# Correlated orbitals for DMFT projector mode — d-shell for transition metals,
+# f-shell for lanthanides/actinides. Elements not listed are treated as
+# non-correlated (ligands: O, S, Se, As, P, H, etc.)
 _DMFT_PROJS = {
+    # 3d transition metals
     "Sc": "d", "Ti": "d", "V": "d", "Cr": "d", "Mn": "d",
     "Fe": "d", "Co": "d", "Ni": "d", "Cu": "d", "Zn": "d",
-    "Y": "d", "Zr": "d", "Nb": "d", "Mo": "d", "Ru": "d",
-    "Rh": "d", "Pd": "d", "La": "d", "Hf": "d", "Ta": "d",
-    "W": "d", "Re": "d", "Os": "d", "Ir": "d", "Pt": "d",
-    "Ce": "f", "Pr": "f", "Nd": "f", "Th": "f", "U": "f",
+    # 4d transition metals
+    "Y": "d", "Zr": "d", "Nb": "d", "Mo": "d", "Tc": "d",
+    "Ru": "d", "Rh": "d", "Pd": "d", "Ag": "d", "Cd": "d",
+    # 5d transition metals
+    "La": "d", "Hf": "d", "Ta": "d", "W": "d", "Re": "d",
+    "Os": "d", "Ir": "d", "Pt": "d", "Au": "d",
+    # Lanthanides (4f)
+    "Ce": "f", "Pr": "f", "Nd": "f", "Pm": "f", "Sm": "f",
+    "Eu": "f", "Gd": "f", "Tb": "f", "Dy": "f", "Ho": "f",
+    "Er": "f", "Tm": "f", "Yb": "f", "Lu": "f",
+    # Actinides (5f)
+    "Ac": "f", "Th": "f", "Pa": "f", "U": "f", "Np": "f",
+    "Pu": "f", "Am": "f",
 }
 _ORB_DIM = {"s": 1, "p": 3, "d": 5, "f": 7}
 

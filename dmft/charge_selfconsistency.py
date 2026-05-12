@@ -175,6 +175,16 @@ def generate_qe_scf_with_dmft_density(
     lines = base_scf_input.split("\n")
     modified = []
 
+    # Load DMFT density correction if available
+    dmft_occupations = None
+    if density_correction_path and os.path.exists(density_correction_path):
+        try:
+            with open(density_correction_path) as f:
+                dc = json.load(f)
+            dmft_occupations = dc.get("density_matrix_dmft")
+        except Exception:
+            pass
+
     for line in lines:
         stripped = line.strip().lower()
 
@@ -197,6 +207,41 @@ def generate_qe_scf_with_dmft_density(
         for i, line in enumerate(modified):
             if "&CONTROL" in line.upper():
                 modified.insert(i + 1, "  disk_io = 'high',")
+                break
+
+    # Inject DMFT occupations via starting_ns_eigenvalue (DFT+U/Hubbard framework)
+    # This is the standard CSC feedback mechanism: DMFT orbital occupations
+    # override the DFT starting guess for the correlated subspace.
+    if dmft_occupations is not None and iteration > 0:
+        n_orb = len(dmft_occupations)
+        occ_evals = np.linalg.eigvalsh(np.array(dmft_occupations))
+
+        # Ensure lda_plus_u is enabled (required for starting_ns_eigenvalue)
+        has_hubbard = any("lda_plus_u" in l.lower() for l in modified)
+        if not has_hubbard:
+            for i, line in enumerate(modified):
+                if "&SYSTEM" in line.upper():
+                    modified.insert(i + 1, "  lda_plus_u = .true.,")
+                    break
+
+        # Add starting_ns_eigenvalue card after &SYSTEM block
+        # Format: starting_ns_eigenvalue(orbital, spin, atom) = occupation
+        # For paramagnetic: spin 1 = spin 2
+        ns_lines = []
+        for m in range(n_orb):
+            occ = float(np.clip(occ_evals[m], 0.0, 1.0))
+            ns_lines.append(f"  starting_ns_eigenvalue({m+1},1,1) = {occ:.6f},")
+            ns_lines.append(f"  starting_ns_eigenvalue({m+1},2,1) = {occ:.6f},")
+
+        # Insert before the closing / of &SYSTEM
+        for i in range(len(modified) - 1, -1, -1):
+            if modified[i].strip() == "/" and i > 0:
+                # Check if this / closes &SYSTEM (find the preceding & block)
+                for j in range(i - 1, -1, -1):
+                    if "&SYSTEM" in modified[j].upper():
+                        for k, ns_line in enumerate(ns_lines):
+                            modified.insert(i + k, ns_line)
+                        break
                 break
 
     return "\n".join(modified)
@@ -392,7 +437,7 @@ def run_csc_loop(
                 density_matrix_avg = np.eye(n_orb) * 0.5
                 print(f"[CSC] WARNING: Could not extract density matrix, using default")
 
-        # ── Step 4: Compute density correction ───────────────────────
+        # ── Step 4: Compute density correction and mix ────────────────
         if density_matrix_prev is not None:
             delta_density = np.max(np.abs(density_matrix_avg - density_matrix_prev))
         else:
@@ -401,15 +446,7 @@ def run_csc_loop(
         convergence_history.append(float(delta_density))
         density_history.append(density_matrix_avg.tolist())
 
-        # Save correction for QE
-        write_qe_density_correction(
-            density_matrix_avg,
-            density_matrix_prev if density_matrix_prev is not None else np.eye(n_orb) * 0.5,
-            [f"orb_{i}" for i in range(n_orb)],
-            os.path.join(iter_dir, "density_correction.json"),
-        )
-
-        # ── Step 5: Mix densities ────────────────────────────────────
+        # Mix densities FIRST — the mixed density is what gets fed back to QE
         if density_matrix_prev is not None:
             density_matrix_mixed = (
                 csc_params.density_mix * density_matrix_prev +
@@ -419,6 +456,15 @@ def run_csc_loop(
             density_matrix_mixed = density_matrix_avg
 
         density_matrix_prev = density_matrix_mixed
+
+        # Save MIXED density correction for the NEXT iteration's QE callback
+        # (QE reads this via starting_ns_eigenvalue to seed the correlated occupations)
+        write_qe_density_correction(
+            density_matrix_mixed,
+            density_matrix_avg,
+            [f"orb_{i}" for i in range(n_orb)],
+            os.path.join(iter_dir, "density_correction.json"),
+        )
 
         elapsed_iter = time.time() - t_iter
         trace = np.trace(density_matrix_avg)

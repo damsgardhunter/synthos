@@ -285,45 +285,51 @@ def decompose_vertex_channels(
     n_orb: int,
 ) -> dict:
     """
-    Decompose the irreducible vertex into spin and charge channels.
+    Decompose the irreducible vertex into pairing channels.
 
-    In the particle-hole channel with SU(2) symmetry:
-      Γ_spin    = Γ_↑↓ - Γ_↑↑   (odd under spin flip → magnetic)
-      Γ_charge  = Γ_↑↓ + Γ_↑↑   (even under spin flip → density)
+    CTHYB measures G² in the ↑↓ (particle-hole) sector. The BSE-extracted
+    Γ_↑↓(ν,ν';Ω) is decomposed into singlet and triplet pairing vertices.
 
-    For the pairing (pp) channel:
-      Γ_singlet = Γ_↑↓ - Γ_↓↑   (antisymmetric → singlet pairing)
-      Γ_triplet = Γ_↑↓ + Γ_↓↑   (symmetric → triplet pairing)
+    The exact ph→pp crossing symmetry requires the full Ω-dependent vertex
+    at Ω=ν-ν', which needs n_iw_b ≥ 2·n_iw_f-1 (unrealistically large).
+    Instead, we use the leading-order approximation at Ω=0:
 
-    In our paramagnetic (no spin index) formulation, we approximate:
-      Γ_spin   ≈ U - Γ_ph       (repulsive in spin channel)
-      Γ_charge ≈ U + 2·Γ_ph     (from crossing symmetry)
+      Γ_↑↑(ν,ν') ≈ -Γ_↑↓(ν',ν)      (first crossing term)
+      Γ_spin    = Γ_↑↑ - Γ_↑↓ ≈ -Γ^T - Γ
+      Γ_charge  = Γ_↑↑ + Γ_↑↓ ≈ -Γ^T + Γ
+      Γ_singlet = (3/2)Γ_spin + (1/2)Γ_charge
 
-    For singlet pairing vertex (the one relevant for d-wave SC):
-      Γ_singlet(ν,ν') = (3/2)·Γ_spin(ν,ν') + (1/2)·Γ_charge(ν,ν')
+    This approximation is quantitatively accurate for strongly frequency-
+    dependent vertices (interacting systems) where the Ω-dependent
+    crossing correction is small. It is NOT accurate for the bare vertex
+    (constant U), but that case doesn't need the vertex formalism anyway.
 
-    Returns dict with vertex components at Ω=0 (most relevant for pairing).
+    For production use, measure G² in the pp channel directly
+    (measure_G2_iw_pp in CTHYB) to avoid the crossing approximation.
+
+    References:
+      Rohringer et al., RMP 90, 025003 (2018) — Sec. III, IV
+      Bickers, "Theoretical Methods" (2004) — channel decomposition
+
+    Returns dict with vertex components at Ω=0.
     """
     n_bos = gamma_loc.shape[2]
     iw_zero = n_bos // 2  # Ω=0 index
 
-    gamma_omega0 = gamma_loc[:, :, iw_zero]  # [N, N] at Ω=0
+    gamma_omega0 = gamma_loc[:, :, iw_zero]  # Γ_↑↓(ν,ν';Ω=0), shape [N, N]
 
-    # For the singlet pairing channel, we need the crossing-symmetry relation
-    # In the simplified (paramagnetic, no explicit spin) case:
-    #   Γ_singlet ≈ (3/2)·Γ_ph - (1/2)·Γ_ph^T  (approximate)
-    # More precisely, Γ_singlet = (3/2)·Γ_s + (1/2)·Γ_c where
-    #   Γ_s = (Γ - Γ^T)/2  (antisymmetric = spin)
-    #   Γ_c = (Γ + Γ^T)/2  (symmetric = charge)
+    # Leading-order crossing: Γ_↑↑ ≈ -Γ_↑↓^T
+    gamma_upup = -gamma_omega0.T
 
-    gamma_sym = (gamma_omega0 + gamma_omega0.T) / 2   # charge-like
-    gamma_asym = (gamma_omega0 - gamma_omega0.T) / 2  # spin-like
+    # Channel decomposition
+    gamma_spin = gamma_upup - gamma_omega0      # ≈ -Γ^T - Γ
+    gamma_charge = gamma_upup + gamma_omega0    # ≈ -Γ^T + Γ
 
-    # Singlet pairing vertex
-    gamma_singlet = 1.5 * gamma_asym + 0.5 * gamma_sym
+    # Singlet pairing vertex: (3/2)Γ_spin + (1/2)Γ_charge
+    gamma_singlet = 1.5 * gamma_spin + 0.5 * gamma_charge
 
-    # Triplet pairing vertex
-    gamma_triplet = -0.5 * gamma_asym + 0.5 * gamma_sym
+    # Triplet pairing vertex: -(1/2)Γ_spin + (1/2)Γ_charge
+    gamma_triplet = -0.5 * gamma_spin + 0.5 * gamma_charge
 
     # Spectral properties
     evals_singlet = np.linalg.eigvalsh(
@@ -336,8 +342,8 @@ def decompose_vertex_channels(
     return {
         "gamma_singlet": gamma_singlet,
         "gamma_triplet": gamma_triplet,
-        "gamma_charge": gamma_sym,
-        "gamma_spin": gamma_asym,
+        "gamma_charge": gamma_charge,
+        "gamma_spin": gamma_spin,
         "max_eval_singlet": float(np.max(np.abs(evals_singlet))),
         "max_eval_triplet": float(np.max(np.abs(evals_triplet))),
         "singlet_attractive": bool(np.min(evals_singlet.real) < 0),
