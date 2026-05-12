@@ -279,10 +279,51 @@ def solve_bse_local_svd(
 
 # ── Channel decomposition ───────────────────────────────────────────────────
 
+def _build_gamma_crossed(
+    gamma_loc: np.ndarray,
+    n_iw_f: int,
+    n_orb: int,
+    n_iw_b: int,
+) -> np.ndarray:
+    """
+    Build the "crossed" vertex matrix Γ^{cross}[I, J] = Γ_↑↓(ν, ν'; Ω = ν - ν')
+    using the full bosonic-frequency dependence of gamma_loc.
+
+    The proper SU(2) ph→pp crossing relation gives the pp channel vertex at
+    zero pair Matsubara from the ph channel vertex at Ω = ν - ν':
+      Γ^pp_↑↓(ν, ν'; Ω_pp = 0) = Γ^ph_↑↓(ν, ν'; Ω = ν - ν')
+
+    Requires n_iw_b ≥ 2·n_iw_f - 1 (so that |ν - ν'| stays within the grid).
+    """
+    nf = 2 * n_iw_f
+    no2 = n_orb * n_orb
+    N = nf * no2
+
+    gamma_crossed = np.zeros((N, N), dtype=complex)
+
+    # Vectorized fill: each (iv, ivp) block at compound rows [iv*no2:(iv+1)*no2],
+    # cols [ivp*no2:(ivp+1)*no2] gets gamma_loc at bosonic index iv - ivp + n_iw_b.
+    for iv in range(nf):
+        for ivp in range(nf):
+            iw_b = (iv - ivp) + n_iw_b
+            if iw_b < 0 or iw_b >= gamma_loc.shape[2]:
+                # Out-of-range fallback: clamp to nearest available bosonic frequency.
+                iw_b = max(0, min(gamma_loc.shape[2] - 1, iw_b))
+            I0 = iv * no2
+            J0 = ivp * no2
+            gamma_crossed[I0:I0 + no2, J0:J0 + no2] = gamma_loc[
+                I0:I0 + no2, J0:J0 + no2, iw_b
+            ]
+
+    return gamma_crossed
+
+
 def decompose_vertex_channels(
     gamma_loc: np.ndarray,
     n_iw_f: int,
     n_orb: int,
+    n_iw_b: Optional[int] = None,
+    force_method: Optional[str] = None,
 ) -> dict:
     """
     Decompose the irreducible vertex into pairing channels.
@@ -290,40 +331,77 @@ def decompose_vertex_channels(
     CTHYB measures G² in the ↑↓ (particle-hole) sector. The BSE-extracted
     Γ_↑↓(ν,ν';Ω) is decomposed into singlet and triplet pairing vertices.
 
-    The exact ph→pp crossing symmetry requires the full Ω-dependent vertex
-    at Ω=ν-ν', which needs n_iw_b ≥ 2·n_iw_f-1 (unrealistically large).
-    Instead, we use the leading-order approximation at Ω=0:
+    Two methods are supported:
 
-      Γ_↑↑(ν,ν') ≈ -Γ_↑↓(ν',ν)      (first crossing term)
-      Γ_spin    = Γ_↑↑ - Γ_↑↓ ≈ -Γ^T - Γ
-      Γ_charge  = Γ_↑↑ + Γ_↑↓ ≈ -Γ^T + Γ
+      "proper" (used when n_iw_b ≥ 2·n_iw_f-1):
+        Use the full ph→pp crossing at Ω = ν - ν' for each (ν, ν'). Captures
+        the strong frequency dependence of the vertex that determines
+        pairing in correlated systems.
+
+      "leading" (fallback when n_iw_b < 2·n_iw_f-1):
+        Approximate using only Ω=0:
+          Γ_↑↑(ν,ν') ≈ -Γ_↑↓(ν',ν;Ω=0)      (transpose only)
+        This is the historical approximation; it misses Ω-dependence
+        but stays within a small bosonic grid.
+
+    In both cases the SU(2) channel decomposition is:
+      Γ_spin    = Γ_↑↑ - Γ_↑↓
+      Γ_charge  = Γ_↑↑ + Γ_↑↓
       Γ_singlet = (3/2)Γ_spin + (1/2)Γ_charge
+      Γ_triplet = -(1/2)Γ_spin + (1/2)Γ_charge
 
-    This approximation is quantitatively accurate for strongly frequency-
-    dependent vertices (interacting systems) where the Ω-dependent
-    crossing correction is small. It is NOT accurate for the bare vertex
-    (constant U), but that case doesn't need the vertex formalism anyway.
+    Args:
+        gamma_loc: [N, N, n_bos] irreducible ph vertex
+        n_iw_f:    fermionic frequencies per side
+        n_orb:     correlated orbitals
+        n_iw_b:    bosonic frequencies per side; if None, inferred from gamma_loc
+        force_method: "proper" | "leading" — override automatic selection
 
-    For production use, measure G² in the pp channel directly
-    (measure_G2_iw_pp in CTHYB) to avoid the crossing approximation.
+    For pp-channel direct measurement, no crossing is needed and the BSE
+    output is used directly (see run_bse_solver).
 
     References:
       Rohringer et al., RMP 90, 025003 (2018) — Sec. III, IV
       Bickers, "Theoretical Methods" (2004) — channel decomposition
-
-    Returns dict with vertex components at Ω=0.
+      Galler et al., PRB 95, 115107 (2017) — multi-orbital crossing
     """
     n_bos = gamma_loc.shape[2]
+    if n_iw_b is None:
+        n_iw_b = (n_bos - 1) // 2
+
     iw_zero = n_bos // 2  # Ω=0 index
 
-    gamma_omega0 = gamma_loc[:, :, iw_zero]  # Γ_↑↓(ν,ν';Ω=0), shape [N, N]
+    # Decide method
+    supports_proper = n_iw_b >= 2 * n_iw_f - 1
+    if force_method == "proper":
+        method = "proper"
+    elif force_method == "leading":
+        method = "leading"
+    else:
+        method = "proper" if supports_proper else "leading"
 
-    # Leading-order crossing: Γ_↑↑ ≈ -Γ_↑↓^T
-    gamma_upup = -gamma_omega0.T
+    if method == "proper" and not supports_proper:
+        raise ValueError(
+            f"Proper crossing requires n_iw_b ≥ 2·n_iw_f-1 = {2*n_iw_f-1}, "
+            f"but got n_iw_b={n_iw_b}. Increase the bosonic grid via "
+            f"enable_proper_crossing=True in compute_g2_grid_params."
+        )
+
+    if method == "proper":
+        # Full Ω = ν - ν' crossing
+        gamma_ud = _build_gamma_crossed(gamma_loc, n_iw_f, n_orb, n_iw_b)
+    else:
+        # Leading-order: Ω = 0 only
+        gamma_ud = gamma_loc[:, :, iw_zero]
+
+    # Γ_↑↑ from crossing (transpose-based leading approximation in BOTH methods;
+    # the "proper" upgrade is in the Ω-dependence of gamma_ud, not in the
+    # ↑↓ → ↑↑ relation, which would require parquet-level treatment)
+    gamma_uu = -gamma_ud.T
 
     # Channel decomposition
-    gamma_spin = gamma_upup - gamma_omega0      # ≈ -Γ^T - Γ
-    gamma_charge = gamma_upup + gamma_omega0    # ≈ -Γ^T + Γ
+    gamma_spin = gamma_uu - gamma_ud
+    gamma_charge = gamma_uu + gamma_ud
 
     # Singlet pairing vertex: (3/2)Γ_spin + (1/2)Γ_charge
     gamma_singlet = 1.5 * gamma_spin + 0.5 * gamma_charge
@@ -348,6 +426,8 @@ def decompose_vertex_channels(
         "max_eval_triplet": float(np.max(np.abs(evals_triplet))),
         "singlet_attractive": bool(np.min(evals_singlet.real) < 0),
         "triplet_attractive": bool(np.min(evals_triplet.real) < 0),
+        "crossing_method": method,
+        "supports_proper": bool(supports_proper),
     }
 
 
@@ -440,11 +520,16 @@ def run_bse_solver(vertex_data_path: str, work_dir: str) -> dict:
             "triplet_attractive": bool(np.min(evals_triplet.real) < 0),
         }
     else:
-        # ph channel: use leading-order crossing to get singlet vertex
-        print("[BSE] PH channel — applying leading-order ph→pp crossing")
-        channels = decompose_vertex_channels(gamma_loc, n_iw_f, n_orb)
+        # ph channel: dispatch to proper or leading crossing based on grid size
+        supports_proper = n_iw_b >= 2 * n_iw_f - 1
+        method_label = "proper Ω=ν-ν'" if supports_proper else "leading-order Ω=0"
+        print(f"[BSE] PH channel — applying {method_label} ph→pp crossing "
+              f"(n_iw_b={n_iw_b}, 2·n_iw_f-1={2*n_iw_f-1})")
+        channels = decompose_vertex_channels(gamma_loc, n_iw_f, n_orb, n_iw_b=n_iw_b)
 
     elapsed = time.time() - t0
+    if "crossing_method" in channels:
+        print(f"[BSE] Crossing method: {channels['crossing_method']}")
     print(f"[BSE] Singlet attractive: {channels['singlet_attractive']}, "
           f"max eigenvalue: {channels['max_eval_singlet']:.4f}")
     print(f"[BSE] Triplet attractive: {channels['triplet_attractive']}, "
@@ -475,6 +560,8 @@ def run_bse_solver(vertex_data_path: str, work_dir: str) -> dict:
         "triplet_attractive": channels["triplet_attractive"],
         "max_eval_singlet": channels["max_eval_singlet"],
         "max_eval_triplet": channels["max_eval_triplet"],
+        "crossing_method": channels.get("crossing_method", "n/a"),
+        "supports_proper_crossing": channels.get("supports_proper", False),
         "bse_results_path": bse_path,
     }
 

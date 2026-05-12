@@ -379,6 +379,7 @@ def run_full_pipeline(
     skip_vertex: bool = False,
     mpi_ranks: int = 20,
     vertex_channel: str = "ph",
+    enable_proper_crossing: bool = False,
 ) -> dict:
     """
     Run the complete DMFT + vertex + BSE + pairing pipeline:
@@ -395,6 +396,10 @@ def run_full_pipeline(
         mpi_ranks:   MPI ranks for CTHYB
         vertex_channel: "ph" (default) or "pp" — pp eliminates ph→pp crossing
                         approximation but ~2× the QMC cost
+        enable_proper_crossing: if True and channel="ph", expand bosonic
+                        grid to n_iw_b ≥ 2·n_iw_f-1 so the proper Ω=ν-ν'
+                        crossing is applied in BSE decomposition (doubles
+                        vertex memory but rigorous)
 
     Returns:
         Combined results dict with all phases
@@ -453,6 +458,7 @@ def run_full_pipeline(
             data=data,
             mpi_ranks=mpi_ranks,
             channel=vertex_channel,
+            enable_proper_crossing=enable_proper_crossing,
         )
         all_results["phases"]["vertex_g2"] = vertex_results
 

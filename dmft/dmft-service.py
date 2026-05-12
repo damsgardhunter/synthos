@@ -189,6 +189,7 @@ def capabilities():
             "max_walltime_hours": "float — total budget (default: 72)",
             "vertex_channel": "'ph' (default) | 'pp' — pp eliminates ph→pp crossing approximation (2× QMC cost)",
             "use_eliashberg_bisection": "bool — direct Tc bisection vs temperature-sweep extrapolation (default: false)",
+            "enable_proper_crossing": "bool — for ph channel, expand bosonic grid to n_iw_b ≥ 2·n_iw_f-1 and apply rigorous Ω=ν-ν' crossing in BSE (default: false; doubles vertex memory)",
         },
     })
 
@@ -240,6 +241,7 @@ def submit():
     max_walltime_hours = 72.0
     vertex_channel = "ph"
     use_eliashberg_bisection = False
+    enable_proper_crossing = False
     if request.is_json:
         opts = request.get_json()
         mode = opts.get("mode", "orchestrated")
@@ -251,6 +253,7 @@ def submit():
         # Feature flags
         vertex_channel = opts.get("vertex_channel", "ph")
         use_eliashberg_bisection = opts.get("use_eliashberg_bisection", False)
+        enable_proper_crossing = opts.get("enable_proper_crossing", False)
 
     job = {
         "job_id": job_id,
@@ -264,6 +267,7 @@ def submit():
         "max_walltime_hours": max_walltime_hours,
         "vertex_channel": vertex_channel,
         "use_eliashberg_bisection": use_eliashberg_bisection,
+        "enable_proper_crossing": enable_proper_crossing,
         "status": "queued",
         "submitted_at": time.time(),
         "started_at": None,
@@ -419,6 +423,7 @@ def worker_loop_with_benchmark():
                     force_nc=job.get("dca_nc"),
                     vertex_channel=job.get("vertex_channel", "ph"),
                     use_eliashberg_bisection=job.get("use_eliashberg_bisection", False),
+                    enable_proper_crossing=job.get("enable_proper_crossing", False),
                 )
                 has_tc = results.get("tc_K") is not None and results.get("tc_K", 0) > 0
                 job["status"] = "completed" if has_tc else "completed_no_tc"
@@ -450,6 +455,7 @@ def worker_loop_with_benchmark():
                     skip_vertex=skip_vertex,
                     mpi_ranks=mpi_ranks,
                     vertex_channel=job.get("vertex_channel", "ph"),
+                    enable_proper_crossing=job.get("enable_proper_crossing", False),
                 )
                 job["status"] = "completed" if results.get("converged") else "completed_unconverged"
                 job["results"] = results

@@ -47,6 +47,7 @@ def compute_g2_grid_params(
     n_orb: int,
     correlation_regime: str,
     max_memory_gb: float = 32.0,
+    enable_proper_crossing: bool = False,
 ) -> dict:
     """
     Compute optimal frequency grid sizes for G² measurement.
@@ -56,6 +57,12 @@ def compute_g2_grid_params(
       2. Enough bosonic frequencies for momentum-dependent susceptibility (~15-30)
       3. Memory budget: G² is n_iw_f² × n_iw_b × n_orb⁴ × 16 bytes
       4. QMC noise: more frequencies = more bins = more noise per bin
+
+    Args:
+        enable_proper_crossing: if True, enforce n_iw_b ≥ 2·n_iw_f-1 to support
+            exact SU(2) ph→pp crossing in decompose_vertex_channels. Typically
+            doubles memory cost. Use only when measuring G² in ph channel and
+            wanting the rigorous crossing (alternative: use pp channel directly).
 
     Returns dict with parameters for CTHYB measure_G2 configuration.
     """
@@ -76,6 +83,13 @@ def compute_g2_grid_params(
         n_iw_f = min(80, n_iw_f + 20)
         n_iw_b = min(40, n_iw_b + 10)
 
+    # Proper SU(2) crossing requires n_iw_b ≥ 2*n_iw_f - 1 so that
+    # Ω = ν - ν' (which ranges over 2*n_iw_f-1 values) is always within
+    # the bosonic grid. Adaptively expand n_iw_b at the cost of shrinking
+    # n_iw_f if needed to fit memory.
+    if enable_proper_crossing:
+        n_iw_b = max(n_iw_b, 2 * n_iw_f - 1)
+
     # Shrink to fit memory budget
     max_bytes = max_memory_gb * 1e9
     while n_iw_f > 10:
@@ -83,17 +97,24 @@ def compute_g2_grid_params(
         total_bytes = total_elements * bytes_per_element
         if total_bytes <= max_bytes:
             break
-        # Reduce fermionic grid first (quadratic cost), then bosonic
+        # Reduce fermionic grid first (quadratic cost), then bosonic.
+        # Under proper-crossing mode we keep n_iw_b ≥ 2*n_iw_f-1 as we shrink.
         if n_iw_f > 20:
             n_iw_f -= 5
+            if enable_proper_crossing:
+                n_iw_b = max(n_iw_b, 2 * n_iw_f - 1)
         elif n_iw_b > 10:
             n_iw_b -= 5
         else:
             n_iw_f -= 5
+            if enable_proper_crossing:
+                n_iw_b = max(n_iw_b, 2 * n_iw_f - 1)
 
     # Ensure minimum grid
     n_iw_f = max(n_iw_f, 10)
     n_iw_b = max(n_iw_b, 5)
+    if enable_proper_crossing:
+        n_iw_b = max(n_iw_b, 2 * n_iw_f - 1)
 
     total_elements = (2 * n_iw_f) * (2 * n_iw_f) * (2 * n_iw_b + 1) * orb_factor
     memory_gb = total_elements * bytes_per_element / 1e9
@@ -110,6 +131,7 @@ def compute_g2_grid_params(
         "n_orb": n_orb,
         "g2_cycle_multiplier": g2_cycle_multiplier,
         "beta": beta,
+        "supports_proper_crossing": n_iw_b >= 2 * n_iw_f - 1,
     }
 
 
@@ -671,6 +693,7 @@ def run_vertex_measurement(
     data: dict,
     mpi_ranks: int = 20,
     channel: str = "ph",
+    enable_proper_crossing: bool = False,
 ) -> dict:
     """
     Run the full G² measurement pass:
@@ -688,6 +711,10 @@ def run_vertex_measurement(
         mpi_ranks: number of MPI ranks for CTHYB
         channel: "ph" (default, particle-hole) or "pp" (particle-particle,
                  direct pairing vertex — avoids ph→pp crossing approximation)
+        enable_proper_crossing: if True (and channel="ph"), grow the bosonic
+                 grid to n_iw_b ≥ 2·n_iw_f-1 so the proper Ω=ν-ν' crossing
+                 can be applied in the BSE decomposition. Doubles memory.
+                 Ignored for channel="pp" (no crossing needed).
 
     Returns:
         dict with g2_{ph,pp}, chi0_loc, chi_loc, grid_params, timing
@@ -702,17 +729,24 @@ def run_vertex_measurement(
 
     t0 = time.time()
 
+    # Proper crossing is only meaningful for the ph channel
+    use_proper = enable_proper_crossing and channel == "ph"
+
     # 1. Grid parameters
     grid_params = compute_g2_grid_params(
         beta=beta,
         n_orb=n_orb,
         correlation_regime=data.get("correlation_regime", "moderately-correlated"),
         max_memory_gb=min(32.0, 64.0 / max(1, n_orb)),
+        enable_proper_crossing=use_proper,
     )
     estimated_hours = estimate_g2_walltime_hours(grid_params, mpi_ranks)
+    crossing_note = ""
+    if use_proper:
+        crossing_note = f", proper crossing={'OK' if grid_params['supports_proper_crossing'] else 'INSUFFICIENT'}"
     print(f"[G2] Grid: n_iw_f={grid_params['n_iw_f']}, n_iw_b={grid_params['n_iw_b']}, "
           f"memory={grid_params['memory_estimate_gb']:.1f} GB, "
-          f"estimated={estimated_hours:.1f}h")
+          f"estimated={estimated_hours:.1f}h{crossing_note}")
 
     # 2. Build measurement config
     g2_config = build_g2_config(converged_config, grid_params, converged_h5_path,

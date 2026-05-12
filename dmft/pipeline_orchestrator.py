@@ -747,6 +747,7 @@ def run_orchestrated_pipeline(
     wannier_callback=None,
     vertex_channel: str = "ph",
     use_eliashberg_bisection: bool = False,
+    enable_proper_crossing: bool = False,
 ) -> Dict:
     """
     Production DMFT pipeline with full automation.
@@ -767,6 +768,14 @@ def run_orchestrated_pipeline(
         use_eliashberg_bisection: if True, use direct Tc bisection from the
                                   Eliashberg solver instead of λ(T)→1 extrapolation.
                                   Typically 3-5 DMFT calls vs 8-10 for the sweep.
+        enable_proper_crossing: if True and vertex_channel="ph", grow bosonic
+                                grid so the BSE uses the proper SU(2) ph→pp
+                                crossing at Ω=ν-ν' instead of the leading-order
+                                Ω=0 approximation. Doubles vertex memory.
+                                NOTE: orchestrated mode uses DCA temperature
+                                sweeps for Tc; this flag is forwarded to
+                                downstream G²/BSE if the orchestrator decides
+                                to run a vertex pass, otherwise it is a no-op.
 
     Every phase has:
       - Pre-flight resource check
@@ -781,12 +790,23 @@ def run_orchestrated_pipeline(
 
     logger = setup_logger(work_dir)
     tracker = ResourceTracker(budget, logger)
-    all_results: Dict[str, Any] = {"phases": {}, "warnings": []}
+    all_results: Dict[str, Any] = {
+        "phases": {},
+        "warnings": [],
+        "options": {
+            "vertex_channel": vertex_channel,
+            "use_eliashberg_bisection": use_eliashberg_bisection,
+            "enable_proper_crossing": enable_proper_crossing,
+            "run_csc": run_csc,
+        },
+    }
 
     logger.info(f"{'='*60}")
     logger.info(f"DMFT Pipeline Orchestrator — Production Mode")
     logger.info(f"Bundle: {bundle_path}")
     logger.info(f"Budget: {budget.max_walltime_hours}h, {budget.max_memory_gb}GB, {budget.max_cores} cores")
+    logger.info(f"Vertex: channel={vertex_channel}, proper_crossing={enable_proper_crossing}, "
+                f"eliashberg_bisection={use_eliashberg_bisection}")
     logger.info(f"{'='*60}")
 
     # ── Phase 0: Load and analyze ────────────────────────────────────
