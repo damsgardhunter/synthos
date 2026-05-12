@@ -206,10 +206,16 @@ def parse_dcaplus_output(work_dir: str, elapsed: float) -> Dict:
 
     try:
         with h5py.File(output_path, "r") as f:
-            # DCA++ stores results in /DCA-loop/iteration-last/
+            # DCA++ stores results in /DCA-loop/iteration-N/
             if "DCA-loop" in f:
                 dca_grp = f["DCA-loop"]
-                iter_keys = sorted([k for k in dca_grp.keys() if k.startswith("iteration")])
+                import re
+                # Sort numerically (not lexicographically) — "iteration-10" > "iteration-2"
+                iter_keys = [k for k in dca_grp.keys() if k.startswith("iteration")]
+                def _iter_num(k):
+                    m = re.search(r"\d+", k)
+                    return int(m.group()) if m else 0
+                iter_keys = sorted(iter_keys, key=_iter_num)
                 if iter_keys:
                     last = dca_grp[iter_keys[-1]]
 
