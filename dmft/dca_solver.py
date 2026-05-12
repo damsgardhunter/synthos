@@ -67,7 +67,10 @@ def generate_cluster_momenta(nc: int, dim: int = 2) -> np.ndarray:
                   (i.e., (1,0) means (π/a, 0))
     """
     if dim == 2:
-        if nc == 4:
+        if nc == 1:
+            # Single-site DMFT (no cluster) — K = Γ point
+            return np.array([[0.0, 0.0]])
+        elif nc == 4:
             # 2×2 plaquette
             return np.array([
                 [0.0, 0.0],   # Γ
@@ -97,7 +100,9 @@ def generate_cluster_momenta(nc: int, dim: int = 2) -> np.ndarray:
         else:
             raise ValueError(f"Unsupported N_c={nc} for 2D DCA")
     elif dim == 3:
-        if nc == 4:
+        if nc == 1:
+            return np.array([[0.0, 0.0, 0.0]])
+        elif nc == 4:
             # Simple 2×2×1 slab
             return np.array([
                 [0.0, 0.0, 0.0],
