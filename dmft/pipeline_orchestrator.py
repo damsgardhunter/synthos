@@ -674,14 +674,14 @@ _DMFT_PROJS = {
     "Ru": "d", "Rh": "d", "Pd": "d", "Ag": "d", "Cd": "d",
     # 5d transition metals
     "La": "d", "Hf": "d", "Ta": "d", "W": "d", "Re": "d",
-    "Os": "d", "Ir": "d", "Pt": "d", "Au": "d",
+    "Os": "d", "Ir": "d", "Pt": "d", "Au": "d", "Hg": "d",
     # Lanthanides (4f)
     "Ce": "f", "Pr": "f", "Nd": "f", "Pm": "f", "Sm": "f",
     "Eu": "f", "Gd": "f", "Tb": "f", "Dy": "f", "Ho": "f",
     "Er": "f", "Tm": "f", "Yb": "f", "Lu": "f",
     # Actinides (5f)
     "Ac": "f", "Th": "f", "Pa": "f", "U": "f", "Np": "f",
-    "Pu": "f", "Am": "f",
+    "Pu": "f", "Am": "f", "Cm": "f", "Bk": "f", "Cf": "f",
 }
 _ORB_DIM = {"s": 1, "p": 3, "d": 5, "f": 7}
 
