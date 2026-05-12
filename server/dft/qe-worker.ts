@@ -3139,9 +3139,10 @@ function validateFormulaForDFT(formula: string, counts: Record<string, number>):
     const cleanFormula = formula.replace(/\s+/g, "");
     const knownPressure = KNOWN_SUPERHYDRIDE_PRESSURES[cleanFormula];
 
-    if (hCount > 0 && nonHAtoms > 0 && hPerMetal < 0.5 && hasHydrideMetal) {
-      return { valid: false, reason: `Metal-rich hydride (H/metal=${hPerMetal.toFixed(2)}) — unphysical stoichiometry, hydrides should have H/metal >= 0.5` };
-    }
+    // Note: previously rejected low-H/metal materials (H/metal < 0.5) but this
+    // was too aggressive — it caught legitimate trace-H compounds and database
+    // entries with 1 H atom (e.g., Al8Ba2C8HP). Letting them through; CSP and
+    // DFT will catch genuinely unphysical structures downstream.
 
     if (knownPressure) {
       return { valid: true, reason: `Known superhydride ${cleanFormula} — requires ~${knownPressure} GPa`, highPressure: true, estimatedPressureGPa: knownPressure };
