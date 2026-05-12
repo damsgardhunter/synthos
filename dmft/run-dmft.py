@@ -79,9 +79,19 @@ def build_solid_dmft_config(data: dict, work_dir: str) -> dict:
     Build solid_dmft configuration from bundle data.
 
     Returns a dict that maps to solid_dmft's dmft_config.toml structure.
+
+    SOC support: if the bundle has SOC enabled (detected from H(k) shape
+    or metadata flag), enables the SOC-aware solver block structure
+    ([("ud", 2*n_orb)] instead of separate spin blocks) and scales QMC
+    cycles by the SOC sign-problem penalty.
     """
+    from soc_handler import has_soc_metadata, soc_strength, estimate_soc_sign_problem_penalty
+
     n_shells = len(data["corr_shells"])
     n_inequiv = len(set(data["corr_to_inequiv"].tolist()))
+
+    # SOC detection: doubles the orbital basis and applies a sign-problem penalty
+    soc_enabled = has_soc_metadata(data)
 
     # Interaction: Kanamori for multi-orbital d shells, density-density fallback
     interaction_type = "kanamori" if data["hubbard_kind"] >= 1 else "density_density"
@@ -90,6 +100,18 @@ def build_solid_dmft_config(data: dict, work_dir: str) -> dict:
     n_warmup = int(os.environ.get("CTHYB_N_WARMUP", 50000))
     n_cycles = int(os.environ.get("CTHYB_N_CYCLES", 5000000))
     length_cycle = int(os.environ.get("CTHYB_LENGTH_CYCLE", 200))
+
+    # SOC sign-problem penalty: scale QMC cycles up
+    if soc_enabled:
+        n_orb = max((s["dim"] for s in data["corr_shells"]), default=5)
+        try:
+            soc_str = soc_strength(data["hk"])
+        except Exception:
+            soc_str = 0.3  # default to moderate SOC
+        penalty = estimate_soc_sign_problem_penalty(soc_str, n_orb, beta=40.0)
+        n_cycles = int(n_cycles * penalty)
+        print(f"[DMFT] SOC enabled: strength~{soc_str:.2f}, scaling QMC cycles "
+              f"by {penalty:.1f}× to {n_cycles}")
 
     # Temperature: start at 300K (beta ~ 38.7 eV^-1), can be lowered
     beta = 40.0  # eV^-1 (~300K)
@@ -105,7 +127,8 @@ def build_solid_dmft_config(data: dict, work_dir: str) -> dict:
         "general": {
             "seedname": data["formula"],
             "jobname": f"{data['formula']}_{int(data['pressure_gpa'])}GPa_dmft",
-            "enforce_off_diag": True if n_inequiv > 1 else False,
+            # For SOC or multi-shell systems, allow off-diagonal blocks
+            "enforce_off_diag": True if (n_inequiv > 1 or soc_enabled) else False,
             "beta": beta,
             "n_iter_dmft": 30,
             "dc_type": dc_type,
@@ -114,6 +137,10 @@ def build_solid_dmft_config(data: dict, work_dir: str) -> dict:
             "mu_mix": 0.5,
             "sigma_mix": 0.5,
             "prec_mu": 0.001,
+            # SOC flag — solid_dmft uses this to set up the gf_struct with
+            # a single "ud" block of size 2*n_orb (vs separate up/down blocks)
+            "magnetic": False,
+            "h_field": 0.0,
         },
         "solver": {
             "type": "cthyb",
@@ -128,6 +155,11 @@ def build_solid_dmft_config(data: dict, work_dir: str) -> dict:
             "dc_J": [float(j) for j in data["J_values"]],
         },
     }
+
+    # Record SOC status for downstream consumers
+    if soc_enabled:
+        config["general"]["spin_orbit"] = True
+        config["solver"]["off_diag_threshold"] = 1e-4  # keep small off-diag in solver
 
     return config
 
@@ -174,22 +206,30 @@ def write_dfttools_h5(data: dict, h5_path: str):
         bz_weights         — k-point weights (uniform)
         ...
     """
+    from soc_handler import has_soc_metadata
+
     nk = data["hk"].shape[0]
     norb = data["hk"].shape[1]
     corr_shells = data["corr_shells"]
     n_shells = len(corr_shells)
     n_inequiv = len(set(data["corr_to_inequiv"].tolist()))
 
+    # SOC detection: doubles the orbital count and sets SO=1 in DFTTools H5
+    soc_enabled = has_soc_metadata(data)
+
     with h5py.File(h5_path, "w") as f:
         grp = f.create_group("dft_input")
 
-        # H(k) with spin index: shape [nk, 1, norb, norb] for non-spin-polarized
+        # H(k) with spin index:
+        # - Non-SOC: shape [nk, 1, norb, norb] with SP=0, SO=0
+        # - SOC: H(k) is already 2*norb_corr × 2*norb_corr (spin×orbital basis).
+        #   SumkDFT expects SP=1, SO=1 to interpret this as the doubled basis.
         hk_4d = data["hk"][:, np.newaxis, :, :]
         grp.create_dataset("hopping", data=hk_4d)
 
         grp.create_dataset("n_k", data=nk)
-        grp.create_dataset("SP", data=0)  # non-spin-polarized for now
-        grp.create_dataset("SO", data=0)  # no SOC in DMFT (handled by DFT)
+        grp.create_dataset("SP", data=1 if soc_enabled else 0)
+        grp.create_dataset("SO", data=1 if soc_enabled else 0)
         grp.create_dataset("n_shells", data=n_shells)
         grp.create_dataset("n_corr_shells", data=n_shells)
         grp.create_dataset("n_inequiv_shells", data=n_inequiv)
@@ -202,7 +242,7 @@ def write_dfttools_h5(data: dict, h5_path: str):
             sh_grp.create_dataset("l", data=sh["l"])
             sh_grp.create_dataset("dim", data=sh["dim"])
             sh_grp.create_dataset("sort", data=sh.get("sort", i))
-            sh_grp.create_dataset("SO", data=0)
+            sh_grp.create_dataset("SO", data=1 if soc_enabled else 0)
 
         # corr_to_inequiv mapping
         grp.create_dataset("corr_to_inequiv", data=data["corr_to_inequiv"])
