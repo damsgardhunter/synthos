@@ -203,9 +203,16 @@ class KanamoriInteraction:
         for a in range(n_orb):
             for b in range(n_orb):
                 if a != b:
+                    # If either orbital is non-correlated (U=0), no inter-orbital
+                    # Coulomb interaction. Prevents unphysical negative U' when
+                    # mixing correlated d-orbitals with ligand p-orbitals.
+                    if self.U[a] <= 0 or self.U[b] <= 0:
+                        continue
                     U_avg = np.sqrt(self.U[a] * self.U[b])
                     J_avg = (self.J[a] + self.J[b]) / 2
-                    self.U_prime[a, b] = U_avg - 2 * J_avg
+                    # Enforce Kanamori constraint U' >= 0 (J > U/2 breaks
+                    # the rotationally-invariant Kanamori form)
+                    self.U_prime[a, b] = max(0.0, U_avg - 2 * J_avg)
                     self.J_pair[a, b] = J_avg
 
     def build_triqs_h_int(self):
