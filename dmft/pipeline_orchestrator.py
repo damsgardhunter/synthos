@@ -326,13 +326,16 @@ def select_temperature_grid(
     max_points = max(3, int(budget_hours / max(cost_per_T, 0.5)))
     max_points = min(max_points, 10)
 
-    # Material-dependent temperature scale
+    # Material-dependent temperature scale.
+    # Absolute T windows are calibrated to bracket the expected Tc with a
+    # decade of T values on either side (so λ(T) extrapolation has signal).
     if material_class == "cuprate":
         # Cuprate Tc ~ 100-150K → T_c/t ~ 0.02-0.03 for t~0.4 eV
         t_scale = t_hopping_eV if t_hopping_eV > 0 else 0.4
-        T_max = 0.10 * t_scale  # ~ 500K
+        T_max = 0.10 * t_scale   # ~ 500K
         T_min = 0.015 * t_scale  # ~ 70K
-    elif material_class == "pnictide":
+    elif material_class in ("pnictide", "fe_sc"):
+        # Fe-based SCs: Tc ~ 20-60K → cover 20-300K
         t_scale = t_hopping_eV if t_hopping_eV > 0 else 0.3
         T_max = 0.15 * t_scale
         T_min = 0.02 * t_scale
@@ -340,7 +343,27 @@ def select_temperature_grid(
         t_scale = t_hopping_eV if t_hopping_eV > 0 else 0.35
         T_max = 0.12 * t_scale
         T_min = 0.01 * t_scale
+    elif material_class in ("hydride", "high_pressure_hydride"):
+        # Hydrides at high pressure: Tc ~ 50-260K. Window 30-300K
+        # is comfortably above the lambda-->1 crossing.
+        T_max = 0.025  # ~290K
+        T_min = 0.003  # ~35K
+    elif material_class in ("phonon_sc", "a15", "nb3sn", "mgb2", "conventional"):
+        # Conventional / phonon-mediated SCs: Tc ~ 5-50K
+        # (Nb3Sn 18K, MgB2 39K, Pb 7K, V3Si 17K, Al 1.2K)
+        T_max = 0.005   # ~58K
+        T_min = 0.0005  # ~6K
+    elif material_class in ("heavy_fermion", "uranium", "ute2"):
+        # Heavy fermion / actinide SCs: Tc < 5K typically
+        T_max = 0.001   # ~12K
+        T_min = 0.0001  # ~1.2K
     else:
+        # Fallback: span ~70K to 580K — covers most correlated electron SCs.
+        # Warn so the caller knows to set a more specific material_class.
+        logger.warning(
+            f"Unknown material_class={material_class!r} — using generic T grid "
+            f"[116K, 580K]. Specify hydride/phonon_sc/etc. for better coverage."
+        )
         T_max = 0.05  # 580K
         T_min = 0.01  # 116K
 

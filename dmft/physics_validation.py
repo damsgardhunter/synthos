@@ -98,16 +98,46 @@ def test_v1_hubbard_benchmark(quick: bool = True) -> dict:
     if not d_dominant:
         errors.append("FAIL: lam_d not > lam_s at all converged temperatures")
 
-    # Check 2: lam_d magnitude increases with decreasing T
+    # Check 2: lam_d magnitude increases with decreasing T.
+    # Step-by-step we allow 5% backtracking (QMC noise per point), but the
+    # CUMULATIVE trend across all sampled T must show a monotonic gain
+    # (a Spearman correlation with -T > 0.7). The old 20%-per-step
+    # tolerance was loose enough that a flat or even slightly-decreasing
+    # λ_d(T) could pass — three 20% steps compound to 51% total decrease.
     if len(converged) >= 2:
         ld_vals = [abs(r["lambda_d"]) for r in converged]
-        # Allow 20% noise tolerance per step
+        # Strict per-step: <=5% backtracking
         monotonic = all(
-            ld_vals[i+1] >= ld_vals[i] * 0.8
+            ld_vals[i+1] >= ld_vals[i] * 0.95
             for i in range(len(ld_vals) - 1)
         )
         if not monotonic:
-            errors.append(f"FAIL: lam_d not monotonically increasing: {ld_vals}")
+            errors.append(
+                f"FAIL: lam_d not monotonically increasing (per-step): {ld_vals}"
+            )
+
+        # Cumulative trend check via Spearman rank correlation (no scipy
+        # dependence — compute by hand).
+        if len(converged) >= 3:
+            # Temperatures (in eV) sorted by appearance in `converged`
+            T_vals = [float(r.get("T_eV", r.get("T_K", 0) / 11604.5))
+                      for r in converged]
+            # We want λ_d ∝ −T (more negative T → more λ_d), so check that
+            # the ranking of λ_d is anti-correlated with the ranking of T.
+            T_rank = np.argsort(np.argsort(T_vals)).astype(float)
+            l_rank = np.argsort(np.argsort(ld_vals)).astype(float)
+            n = len(T_vals)
+            # Pearson on ranks = Spearman ρ. Mean of ranks 0..n-1 is (n-1)/2.
+            rank_mean = (n - 1) / 2.0
+            cov = float(np.mean((T_rank - rank_mean) * (l_rank - rank_mean)))
+            var_t = float(np.mean((T_rank - rank_mean) ** 2))
+            var_l = float(np.mean((l_rank - rank_mean) ** 2))
+            rho = cov / np.sqrt(var_t * var_l + 1e-30)
+            if rho > -0.7:
+                errors.append(
+                    f"FAIL: λ_d(T) not anti-correlated with T "
+                    f"(Spearman ρ={rho:.2f}, expected ≤ -0.7)"
+                )
 
     # Check 3: lam_d should be nonzero and have consistent sign
     ld_signs = [np.sign(r["lambda_d"]) for r in converged if abs(r["lambda_d"]) > 1e-6]
@@ -211,13 +241,18 @@ def test_v2_bse_svd_sensitivity() -> dict:
     if not sign_stable:
         errors.append(f"FAIL: Gamma_singlet sign flips across cutoffs: {singlet_evals}")
 
-    # Check magnitude stability (within 50% — generous for noisy data)
+    # Check magnitude stability across SVD cutoffs.
+    # Tightened from the original 50%-per-step (which let a 2× systematic
+    # bias slip through) to 20% — for synthetic chi with a known Γ=-U vertex
+    # the SVD-stabilized BSE should give consistent magnitudes at any cutoff
+    # ≥ 1e-12; a factor-2 spread would indicate the inversion is genuinely
+    # broken, not noise.
     if len(singlet_evals) >= 2:
-        ref = singlet_evals[1]  # 1e-8 as reference
+        ref = singlet_evals[1]  # 1e-8 as reference (typical production setting)
         for i, ev in enumerate(singlet_evals):
             if abs(ref) > 1e-8:
                 ratio = abs(ev / ref)
-                if ratio < 0.5 or ratio > 2.0:
+                if ratio < 0.8 or ratio > 1.25:
                     errors.append(
                         f"FAIL: Gamma_singlet unstable at cutoff={cutoffs[i]:.0e}: "
                         f"ev={ev:.4f} vs ref={ref:.4f} (ratio={ratio:.2f})"
