@@ -202,6 +202,7 @@ class KanamoriInteraction:
         # For different orbitals with different U, use geometric mean
         self.U_prime = np.zeros((n_orb, n_orb))
         self.J_pair = np.zeros((n_orb, n_orb))
+        self.kanamori_violations = []  # (a, b, U_avg, J_avg, U_prime_raw)
         for a in range(n_orb):
             for b in range(n_orb):
                 if a != b:
@@ -211,11 +212,33 @@ class KanamoriInteraction:
                     if self.U[a] <= 0 or self.U[b] <= 0:
                         continue
                     U_avg = np.sqrt(self.U[a] * self.U[b])
-                    J_avg = (self.J[a] + self.J[b]) / 2
-                    # Enforce Kanamori constraint U' >= 0 (J > U/2 breaks
-                    # the rotationally-invariant Kanamori form)
-                    self.U_prime[a, b] = max(0.0, U_avg - 2 * J_avg)
+                    J_avg = (self.J[a] + self.J[b]) / 2.0
+                    U_prime_raw = U_avg - 2.0 * J_avg
+
+                    # The Kanamori constraint U' = U - 2J ≥ 0 must hold for
+                    # rotational invariance. If J > U/2, the rotationally-
+                    # invariant Kanamori form is not well-defined — we keep
+                    # U_prime = 0 but FLAG the violation so callers can switch
+                    # to density-density mode or warn the user, instead of
+                    # silently producing a non-invariant Hamiltonian.
+                    if U_prime_raw < 0:
+                        self.kanamori_violations.append(
+                            (int(a), int(b), float(U_avg), float(J_avg),
+                             float(U_prime_raw))
+                        )
+                    self.U_prime[a, b] = max(0.0, U_prime_raw)
                     self.J_pair[a, b] = J_avg
+
+        if self.kanamori_violations:
+            n_viol = len(self.kanamori_violations)
+            worst = min(self.kanamori_violations, key=lambda v: v[4])
+            print(
+                f"[Kanamori] WARNING: J > U/2 for {n_viol} orbital pair(s); "
+                f"worst at (a={worst[0]}, b={worst[1]}) with U_avg={worst[2]:.2f}, "
+                f"J_avg={worst[3]:.2f}, raw U'={worst[4]:.2f}. "
+                f"U' clamped to 0 (rotational invariance broken). "
+                f"Consider using density-density interaction instead."
+            )
 
     def build_triqs_h_int(self):
         """
@@ -836,13 +859,30 @@ def run_multiorbital_dca(
         elif avg_sign < 0.2:
             print(f"[DCA-MO] WARNING: low average sign {avg_sign:.4f}")
 
-        # 5. Extract Σ
-        sigma_new = np.zeros((nc, n_w, no, no), dtype=complex)
+        # 5. Extract Σ.
+        # Skip empty patches (where g0_c is zero from coarse-graining over zero
+        # k-points) so we don't crash on a singular inversion. Carry sigma_c
+        # forward unchanged for those patches.
+        sigma_new = sigma_c.copy() if sigma_c is not None else np.zeros((nc, n_w, no, no), dtype=complex)
+        empty_patches = []
         for ic in range(nc):
+            # A patch is "empty" if its g0_c block is identically zero —
+            # detect once per cluster site (not per frequency) to avoid spam
+            if not np.any(g0_c[ic]):
+                empty_patches.append(ic)
+                continue
             for iw in range(n_w):
-                g0_inv = np.linalg.inv(g0_c[ic, iw])
-                gc_inv = np.linalg.inv(g_c[ic, iw])
-                sigma_new[ic, iw] = g0_inv - gc_inv
+                if not np.any(g0_c[ic, iw]) or not np.any(g_c[ic, iw]):
+                    continue
+                try:
+                    g0_inv = np.linalg.inv(g0_c[ic, iw])
+                    gc_inv = np.linalg.inv(g_c[ic, iw])
+                    sigma_new[ic, iw] = g0_inv - gc_inv
+                except np.linalg.LinAlgError:
+                    # Singular block — keep previous sigma value
+                    pass
+        if empty_patches:
+            print(f"[DCA-MO] WARNING: empty patches {empty_patches} skipped in Σ extraction")
 
         # Check for NaN/Inf
         if np.any(np.isnan(sigma_new)) or np.any(np.isinf(sigma_new)):
