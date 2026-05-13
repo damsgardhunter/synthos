@@ -245,16 +245,25 @@ def _pade_evaluate(z_in: np.ndarray, g_in: np.ndarray, z_out: np.ndarray) -> np.
                 table[i, j] = 0
         a[j] = table[j, j]
 
-    # Evaluate continued fraction at z_out
+    # Evaluate continued fraction at z_out using the recurrence
+    #   F_n = 1                                          (terminator)
+    #   F_p = 1 / (1 + a_p · (z − z_{p−1}) · F_{p+1})    for p = n−1, …, 1
+    #   G(z) ≈ a_0 · F_1
+    #
+    # The previous implementation initialized cf = a[n-1] and looped p from
+    # n-2 down to 1, which skipped the innermost (z - z_{n-2}) factor —
+    # numerically verified to give ~70% error on the test case
+    # G(z) = 1/[z(z-2)] at z=7 (got 0.0485 vs exact 0.0286).
     result = np.zeros(len(z_out), dtype=complex)
     for iz, z in enumerate(z_out):
-        cf = a[-1]
-        for j in range(n - 2, 0, -1):
-            denom = 1.0 + a[j] * (z - z_in[j - 1]) * cf
-            if abs(denom) < 1e-30:
-                cf = 0
+        F_next = 1.0 + 0.0j
+        for p in range(n - 1, 0, -1):
+            A_p = a[p] * (z - z_in[p - 1])
+            D_p = 1.0 + A_p * F_next
+            if abs(D_p) < 1e-30:
+                F_next = 0.0
             else:
-                cf = 1.0 / denom
-        result[iz] = a[0] * cf if abs(cf) > 1e-30 else a[0]
+                F_next = 1.0 / D_p
+        result[iz] = a[0] * F_next
 
     return result
