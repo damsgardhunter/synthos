@@ -174,14 +174,34 @@ def run_dcaplus(
             timeout=int(timeout_hours * 3600),
         )
     except subprocess.TimeoutExpired:
-        return {"converged": False, "error": "DCA++ timeout"}
+        return {
+            "converged": False,
+            "error": "DCA++ timeout",
+            "failure_mode": "timeout",
+        }
 
     elapsed = time.time() - t0
 
     if result.returncode != 0:
+        # Classify the failure mode from stderr so callers can retry with
+        # adjusted parameters (smaller cluster for OOM, different solver
+        # for sign-problem, more sweeps for convergence).
+        stderr_tail = (result.stderr or "")[-2000:]
+        lower = stderr_tail.lower()
+        if "out of memory" in lower or "oom" in lower or "bad_alloc" in lower:
+            failure_mode = "oom"
+        elif "sign" in lower and ("problem" in lower or "small" in lower):
+            failure_mode = "sign_problem"
+        elif "not converg" in lower or "max iter" in lower:
+            failure_mode = "convergence"
+        elif "cuda" in lower or "gpu" in lower:
+            failure_mode = "gpu_error"
+        else:
+            failure_mode = "unknown"
         return {
             "converged": False,
             "error": f"DCA++ exit {result.returncode}",
+            "failure_mode": failure_mode,
             "stderr": result.stderr[-1000:],
             "elapsed_hours": elapsed / 3600,
         }
@@ -190,18 +210,36 @@ def run_dcaplus(
     return parse_dcaplus_output(work_dir, elapsed)
 
 
-def parse_dcaplus_output(work_dir: str, elapsed: float) -> Dict:
-    """Parse DCA++ output HDF5 for key observables."""
+def parse_dcaplus_output(
+    work_dir: str,
+    elapsed: float,
+    expected_n_iw: Optional[int] = None,
+    expected_n_orb: Optional[int] = None,
+) -> Dict:
+    """Parse DCA++ output HDF5 for key observables.
+
+    Args:
+        work_dir: directory containing dca_output.hdf5
+        elapsed: walltime in seconds
+        expected_n_iw: if given, validate Σ has shape compatible with 2*n_iw
+            Matsubara frequencies. Mismatch sets failure_mode="shape_mismatch".
+        expected_n_orb: if given, validate orbital count matches.
+    """
     import h5py
 
     output_path = os.path.join(work_dir, "dca_output.hdf5")
     if not os.path.exists(output_path):
-        return {"converged": False, "error": "Output HDF5 not found"}
+        return {
+            "converged": False,
+            "error": "Output HDF5 not found",
+            "failure_mode": "missing_output",
+        }
 
     results = {
         "converged": False,
         "elapsed_hours": elapsed / 3600,
         "solver": "DCA++/CT-AUX/GPU",
+        "shape_warnings": [],
     }
 
     try:
@@ -223,6 +261,21 @@ def parse_dcaplus_output(work_dir: str, elapsed: float) -> Dict:
                         sigma = last["Sigma"][()]
                         results["sigma_shape"] = list(sigma.shape)
                         results["self_energy_available"] = True
+                        # Validate against the upstream grid if specified
+                        if expected_n_iw is not None:
+                            # DCA++ Σ may be stored as [n_w, n_K, n_orb, n_orb]
+                            # or similar; the Matsubara axis is typically the
+                            # longest and equals 2*n_iw.
+                            if 2 * expected_n_iw not in sigma.shape:
+                                results["shape_warnings"].append(
+                                    f"Σ shape {sigma.shape} has no axis matching "
+                                    f"2·n_iw={2*expected_n_iw}"
+                                )
+                        if expected_n_orb is not None and expected_n_orb not in sigma.shape:
+                            results["shape_warnings"].append(
+                                f"Σ shape {sigma.shape} has no axis matching "
+                                f"n_orb={expected_n_orb}"
+                            )
 
                     if "G-k-w" in last:
                         results["greens_function_available"] = True

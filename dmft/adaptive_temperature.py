@@ -123,14 +123,31 @@ class AdaptiveTemperatureGrid:
 
         # Case 3: λ growing but not yet in refinement range → extend to lower T
         if lambda_growing and lambda_max < self.refine_lo:
-            # Extrapolate: at what T might λ reach 0.5?
-            # Simple linear extrapolation of ln(λ) vs 1/T
-            if len(L_asc) >= 2 and all(abs(l) > 0.01 for l in L_asc):
+            # Pick extrapolation form based on where we are in λ:
+            #   - High λ ∈ [0.5, 0.9): near Tc, use BCS-like 1/(1-λ) ∝ (T-Tc)^-1
+            #   - Low λ < 0.5: far from Tc, use Arrhenius-style ln(λ) vs 1/T
+            if (
+                len(L_asc) >= 2
+                and 0.5 <= max(abs(l) for l in L_asc) < 0.9
+            ):
+                # BCS-like fit: 1/(1-|λ|) = a + b·(1/T)  (1/(1-λ) diverges at Tc)
+                abs_L = np.abs(L_asc)
+                inv_one_minus_L = 1.0 / np.maximum(1.0 - abs_L, 1e-6)
+                inv_T = 1.0 / T_asc
+                slope, intercept = np.polyfit(inv_T, inv_one_minus_L, 1)
+                if slope > 0:
+                    # Find inv_T where 1/(1-λ) = 1/(1-0.5) = 2 (target λ=0.5)
+                    target_inv_one_minus_L = 1.0 / (1.0 - 0.5)
+                    inv_T_target = (target_inv_one_minus_L - intercept) / slope
+                    if inv_T_target > 1.0 / self.T_min:
+                        T_target = max(1.0 / inv_T_target, self.T_min)
+                        suggestions.append(T_target)
+            elif len(L_asc) >= 2 and all(abs(l) > 0.01 for l in L_asc):
+                # Arrhenius-style: ln|λ| vs 1/T (good for the warmup phase)
                 inv_T = 1.0 / T_asc
                 ln_L = np.log(np.abs(L_asc) + 1e-10)
                 slope, intercept = np.polyfit(inv_T, ln_L, 1)
                 if slope > 0:
-                    # Estimate 1/T where ln(λ) = ln(0.5)
                     inv_T_target = (np.log(0.5) - intercept) / slope
                     if inv_T_target > 1.0 / self.T_min:
                         T_target = max(1.0 / inv_T_target, self.T_min)
