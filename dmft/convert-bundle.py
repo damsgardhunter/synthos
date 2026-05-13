@@ -74,6 +74,23 @@ def convert(json_path: str, h5_path: str):
                     for ik3 in range(km[2]):
                         kpts.append([ik1 / km[0], ik2 / km[1], ik3 / km[2]])
             hg.create_dataset("kpoints", data=np.array(kpts))
+
+            # Sanity check: H(k) must be Hermitian for a physical Hamiltonian.
+            # Wannier90 _hr.dat can be subtly corrupted (truncated, missing R-vec
+            # pairs) and the Fourier transform silently propagates the error.
+            herm_residual = np.max(np.abs(hk - hk.conj().transpose(0, 2, 1)))
+            herm_rel = herm_residual / (np.max(np.abs(hk)) + 1e-30)
+            if herm_rel > 1e-6:
+                print(f"  WARNING: H(k) Hermiticity residual {herm_residual:.2e} "
+                      f"(relative {herm_rel:.2e}) — _hr.dat may be incomplete")
+            else:
+                print(f"  H(k) Hermiticity OK (residual {herm_residual:.2e})")
+
+            # Sanity check: degeneracy count must match the number of unique R-vectors
+            if len(r_vecs) != len(degs):
+                print(f"  WARNING: {len(r_vecs)} unique R-vectors vs {len(degs)} "
+                      f"degeneracies — _hr.dat ordering may be mismatched")
+
             print(f"  H(k): {nk} k-points, {nw} Wannier functions")
 
         # ── Correlated subspace ──────────────────────────────────────────
@@ -98,8 +115,31 @@ def convert(json_path: str, h5_path: str):
 
         # ── Interaction ──────────────────────────────────────────────────
         ig = hf.create_group("interaction")
-        ig.create_dataset("U_values", data=np.array(d["interaction"]["U_values"]))
-        ig.create_dataset("J_values", data=np.array(d["interaction"]["J_values"]))
+        U_arr = np.asarray(d["interaction"]["U_values"], dtype=float)
+        J_arr = np.asarray(d["interaction"]["J_values"], dtype=float)
+
+        # Unit sanity check: U is expected in eV. Typical correlated U is
+        # 2-12 eV. Values <0.1 likely mean Hartree (factor 27.2) or Rydberg
+        # (factor 13.6). Values >50 are also suspicious. cRPA codes sometimes
+        # emit in Ry; QAE JSON should always be eV.
+        nonzero_U = U_arr[U_arr > 0]
+        if len(nonzero_U) > 0:
+            U_min, U_max = float(nonzero_U.min()), float(nonzero_U.max())
+            if U_min < 0.1:
+                print(f"  WARNING: smallest U={U_min:.3f} eV suspiciously small "
+                      f"— check if Hartree/Rydberg unit conversion needed")
+            elif U_max > 50.0:
+                print(f"  WARNING: largest U={U_max:.3f} eV suspiciously large")
+        # J should be smaller than U (typically J/U ≈ 0.1-0.2)
+        for a in range(len(U_arr)):
+            if U_arr[a] > 0 and J_arr[a] > 0:
+                ratio = J_arr[a] / U_arr[a]
+                if ratio > 0.5:
+                    print(f"  WARNING: orbital {a} has J/U = {ratio:.2f} "
+                          f"— Kanamori requires J < U/2 for stability")
+
+        ig.create_dataset("U_values", data=U_arr)
+        ig.create_dataset("J_values", data=J_arr)
         ig.create_dataset("hubbard_kind", data=d["interaction"]["hubbard_kind"])
 
         # ── Structure ────────────────────────────────────────────────────

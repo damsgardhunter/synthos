@@ -552,11 +552,26 @@ def run_dca(
 
     t0 = time.time()
 
+    # Structured logging for the DCA loop
+    from dmft_logger import get_logger, log_event
+    log = get_logger("dmft.dca", work_dir)
+    log_event(
+        log, "dca.start",
+        nc=nc, n_k=int(len(eps_k)), n_iw=int(params.n_iw),
+        beta=float(params.beta), U=float(params.U),
+        mu=float(params.mu), mixing=getattr(params, "mixing_method", "linear"),
+    )
+
     # Assign k-points to DCA patches
     patch_assignment = assign_k_to_patches(kpoints, params.K_cluster)
     patch_counts = np.bincount(patch_assignment, minlength=nc)
     print(f"[DCA] N_c={nc}, n_k={len(eps_k)}, patches: {patch_counts}")
     print(f"[DCA] Cluster momenta (π/a): {params.K_cluster.tolist()}")
+    # Warn loudly if any patch is empty — that breaks coarse-graining (NaN)
+    if np.any(patch_counts == 0):
+        empty = [int(i) for i, c in enumerate(patch_counts) if c == 0]
+        log.warning(f"Empty patches: {empty} — coarse-graining will produce NaN")
+        log_event(log, "dca.empty_patches_detected", empty_patches=empty)
 
     # Initialize self-energy
     sigma_c = initial_sigma if initial_sigma is not None else np.zeros((nc, n_w), dtype=complex)
@@ -657,8 +672,25 @@ def run_dca(
               f"||ΔΣ||={diff:.2e}, <n>={density:.4f}, "
               f"<sign>={avg_sign:.4f}, time={elapsed_iter:.1f}s")
 
+        log_event(
+            log, "dca.iter",
+            iteration=int(iteration + 1),
+            residual=float(diff),
+            density=float(density),
+            avg_sign=float(avg_sign),
+            elapsed_s=float(elapsed_iter),
+            mixer=mixer.status() if hasattr(mixer, "status") else None,
+        )
+
         if diff < params.convergence_tol and iteration > 2:
             print(f"[DCA] Converged after {iteration+1} iterations")
+            log_event(
+                log, "dca.converged",
+                iterations=int(iteration + 1),
+                final_residual=float(diff),
+                final_density=float(density),
+                final_avg_sign=float(avg_sign),
+            )
             break
 
     elapsed = time.time() - t0

@@ -457,6 +457,9 @@ def run_bse_solver(vertex_data_path: str, work_dir: str) -> dict:
     import json
     t0 = time.time()
 
+    from dmft_logger import get_logger, log_event
+    log = get_logger("dmft.bse", work_dir)
+
     print(f"[BSE] Loading vertex data from {vertex_data_path}")
     vdata = np.load(vertex_data_path, allow_pickle=True)
 
@@ -480,6 +483,11 @@ def run_bse_solver(vertex_data_path: str, work_dir: str) -> dict:
     print(f"[BSE] {channel.upper()} channel — matrix size N={N} "
           f"({2*n_iw_f} freq × {n_orb}² orbitals), "
           f"{2*n_iw_b+1} bosonic frequencies")
+    log_event(
+        log, "bse.start",
+        channel=channel, matrix_size=int(N), n_iw_f=int(n_iw_f),
+        n_iw_b=int(n_iw_b), n_orb=int(n_orb),
+    )
 
     # SVD-stabilized BSE inversion
     print("[BSE] Running SVD-stabilized BSE inversion...")
@@ -535,6 +543,19 @@ def run_bse_solver(vertex_data_path: str, work_dir: str) -> dict:
     print(f"[BSE] Triplet attractive: {channels['triplet_attractive']}, "
           f"max eigenvalue: {channels['max_eval_triplet']:.4f}")
     print(f"[BSE] Total BSE time: {elapsed:.1f}s")
+
+    log_event(
+        log, "bse.done",
+        channel=channel,
+        singlet_attractive=bool(channels["singlet_attractive"]),
+        triplet_attractive=bool(channels["triplet_attractive"]),
+        max_eval_singlet=float(channels["max_eval_singlet"]),
+        max_eval_triplet=float(channels["max_eval_triplet"]),
+        crossing_method=channels.get("crossing_method"),
+        cond_chi0_mean=float(diagnostics.get("mean_cond_chi0", 0)),
+        cond_chi_mean=float(diagnostics.get("mean_cond_chi", 0)),
+        elapsed_s=float(elapsed),
+    )
 
     # Save results
     os.makedirs(work_dir, exist_ok=True)

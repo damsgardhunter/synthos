@@ -225,6 +225,7 @@ def estimate_soc_sign_problem_penalty(
     soc_strength_val: float,
     n_orb: int,
     beta: float,
+    max_penalty: float = None,
 ) -> float:
     """
     Estimate the additional sign problem penalty from including SOC.
@@ -236,7 +237,22 @@ def estimate_soc_sign_problem_penalty(
       penalty ~ exp(β·U·n_orb·soc_strength) for moderate SOC
 
     Returns a multiplicative factor for QMC cycles (>= 1).
+
+    Args:
+        max_penalty: upper bound on the multiplier. Default reads
+            DMFT_SOC_PENALTY_MAX env var (fallback 50). The previous hard
+            cap of 10 silently undersampled heavy-element materials (Bi,
+            Hg, U, Pu) where the SOC sign problem is genuinely severe.
+            Setting this to a higher value lets the QMC actually resolve
+            the sign at the cost of walltime.
     """
+    import os
+    if max_penalty is None:
+        try:
+            max_penalty = float(os.environ.get("DMFT_SOC_PENALTY_MAX", "50"))
+        except (TypeError, ValueError):
+            max_penalty = 50.0
+
     # Empirical: penalty ~ 1 + 5·soc_strength·β/100·n_orb
     penalty = 1.0 + 5.0 * soc_strength_val * (beta / 100.0) * n_orb
-    return float(max(1.0, min(10.0, penalty)))  # clamp to [1, 10]
+    return float(max(1.0, min(max_penalty, penalty)))

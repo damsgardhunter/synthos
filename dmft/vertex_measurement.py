@@ -747,6 +747,15 @@ def run_vertex_measurement(
     print(f"[G2] Grid: n_iw_f={grid_params['n_iw_f']}, n_iw_b={grid_params['n_iw_b']}, "
           f"memory={grid_params['memory_estimate_gb']:.1f} GB, "
           f"estimated={estimated_hours:.1f}h{crossing_note}")
+    from dmft_logger import get_logger, log_event
+    log = get_logger("dmft.vertex", work_dir)
+    log_event(log, "vertex.start",
+              channel=channel, n_iw_f=int(grid_params["n_iw_f"]),
+              n_iw_b=int(grid_params["n_iw_b"]),
+              memory_gb=float(grid_params["memory_estimate_gb"]),
+              estimated_hours=float(estimated_hours),
+              proper_crossing=bool(use_proper),
+              supports_proper=bool(grid_params.get("supports_proper_crossing", False)))
 
     # 2. Build measurement config
     g2_config = build_g2_config(converged_config, grid_params, converged_h5_path,

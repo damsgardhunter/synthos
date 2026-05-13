@@ -237,6 +237,9 @@ def find_tc_eliashberg(
     """
     history = []
 
+    from dmft_logger import get_logger, log_event
+    log = get_logger("dmft.eliashberg")
+
     def eval_lambda(T):
         gk = gk_iw_at_T(T)
         gamma = gamma_pair_at_T(T)
@@ -247,9 +250,15 @@ def find_tc_eliashberg(
         lam = result["lambda_pair"]
         history.append((T, lam))
         print(f"[Eliashberg] T={T*11604.5:.1f}K (T={T:.4f}eV): λ = {lam:.4f}")
+        log_event(log, "eliashberg.eval",
+                  T_eV=float(T), T_K=float(T * 11604.5), lambda_pair=float(lam))
         return lam
 
     print(f"[Eliashberg] Starting Tc bisection in T ∈ [{T_lo:.4f}, {T_hi:.4f}] eV")
+    log_event(log, "eliashberg.bisect_start",
+              T_lo_eV=float(T_lo), T_hi_eV=float(T_hi),
+              tol_T=float(tol_T), tol_lambda=float(tol_lambda),
+              max_iter=int(max_iter))
 
     # Initial bracket
     lam_lo = eval_lambda(T_lo)
@@ -322,6 +331,10 @@ def find_tc_eliashberg(
 
     print(f"[Eliashberg] Tc = {tc_eV:.5f} eV = {tc_eV*11604.5:.1f} K "
           f"(λ bracket: [{lam_hi:.3f}, {lam_lo:.3f}])")
+    log_event(log, "eliashberg.tc_estimated",
+              tc_eV=float(tc_eV), tc_K=float(tc_eV * 11604.5),
+              lam_lo=float(lam_lo), lam_hi=float(lam_hi),
+              n_evaluations=int(len(history)))
 
     return {
         "tc_eV": tc_eV,
