@@ -428,28 +428,46 @@ with h5py.File(sys.argv[2], 'w') as hf:
         km = h['kmesh']
         nk = km[0] * km[1] * km[2]
         hk = np.zeros((nk, nw, nw), dtype=complex)
-        # Build R-vectors and H(R) matrices
+        # Build R-vectors and H(R) matrices, preserving the INSERTION ORDER
+        # from _hr.dat. The degeneracy array is in file order (Wannier90
+        # writes deg[0] for the first R encountered, deg[1] for the second,
+        # etc.). If we sorted r_vecs.keys() before iterating, the degeneracy
+        # index would no longer align with the R-vector — silently corrupting
+        # H(k) normalization.
         r_vecs = {}
+        r_insertion_order = {}  # R -> file index (matches degeneracy array)
         for row in h['hr_data']:
             rx, ry, rz, i, j, re, im = row[0], row[1], row[2], int(row[3])-1, int(row[4])-1, row[5], row[6]
             key = (int(rx), int(ry), int(rz))
             if key not in r_vecs:
                 r_vecs[key] = np.zeros((nw, nw), dtype=complex)
+                r_insertion_order[key] = len(r_insertion_order)
             r_vecs[key][i, j] = complex(re, im)
 
         # FT: H(k) = sum_R exp(ik.R) H(R) / deg(R)
         degs = h['degeneracies']
-        r_list = sorted(r_vecs.keys())
+        if len(r_vecs) != len(degs):
+            print(f"  WARNING: {len(r_vecs)} unique R-vectors vs {len(degs)} degeneracies — _hr.dat ordering mismatch")
         kidx = 0
         for ik1 in range(km[0]):
             for ik2 in range(km[1]):
                 for ik3 in range(km[2]):
                     kfrac = np.array([ik1/km[0], ik2/km[1], ik3/km[2]])
-                    for ri, R in enumerate(r_list):
+                    # Iterate in INSERTION ORDER so deg-index matches R
+                    for R in r_vecs.keys():
+                        ri = r_insertion_order[R]
                         phase = np.exp(2j * np.pi * np.dot(kfrac, R))
                         deg = degs[ri] if ri < len(degs) else 1
                         hk[kidx] += phase * r_vecs[R] / deg
                     kidx += 1
+
+        # Sanity check: H(k) must be Hermitian for a physical Hamiltonian.
+        herm_residual = float(np.max(np.abs(hk - hk.conj().transpose(0, 2, 1))))
+        herm_rel = herm_residual / (float(np.max(np.abs(hk))) + 1e-30)
+        if herm_rel > 1e-6:
+            print(f"  WARNING: H(k) Hermiticity residual {herm_residual:.2e} "
+                  f"(relative {herm_rel:.2e}) — _hr.dat may be incomplete or "
+                  f"degeneracy alignment is wrong")
 
         hg.create_dataset('hk', data=hk)
         kpts = []

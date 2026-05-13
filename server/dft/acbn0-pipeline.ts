@@ -482,9 +482,23 @@ function computeMuStar(opts: {
     method = "ACBN0-TF-estimate";
   }
 
-  // Clamp muBare to physical range
-  if (muBare < 0.05) muBare = 0.05;
-  if (muBare > 2.0) muBare = 2.0;
+  // Sanity check the bare Coulomb parameter — warn for out-of-range values
+  // but don't silently clamp. μ_bare outside [0.05, 2.0] usually signals
+  // either a numerical issue (cellVolume off, N(E_F)=0 in a gap, etc.) or
+  // an extreme regime (very high screening, very low DOS). Clamping
+  // silently corrupts the ML training signal in either case; warning lets
+  // downstream treat the calculation as out-of-distribution.
+  if (muBare < 0.0) {
+    console.warn(`[ACBN0] μ_bare = ${muBare.toFixed(3)} < 0 — unphysical, ` +
+      `forcing to 0.05 as numerical floor. Check N(E_F) extraction and dielectric inputs.`);
+    muBare = 0.05;
+  } else if (muBare < 0.05) {
+    console.warn(`[ACBN0] μ_bare = ${muBare.toFixed(3)} < 0.05 — very small; ` +
+      `expected range 0.1-1.0 for typical metals. Check ε_eff and N(E_F).`);
+  } else if (muBare > 2.0) {
+    console.warn(`[ACBN0] μ_bare = ${muBare.toFixed(3)} > 2.0 — very large; ` +
+      `expected range 0.1-1.0 for typical metals. Check cellVolume and screening.`);
+  }
 
   // Morel-Anderson retardation
   const logRatio = Math.log(Math.max(fermiEnergy / omegaD_eV, 1.01));
