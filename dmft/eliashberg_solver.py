@@ -327,6 +327,7 @@ def gap_symmetry_from_eigenvector(
     kpoints: np.ndarray,
     n_iw_f: int,
     n_orb: int,
+    full_classification: bool = True,
 ) -> Dict:
     """
     Classify the gap function symmetry from the leading Eliashberg eigenvector.
@@ -335,11 +336,21 @@ def gap_symmetry_from_eigenvector(
     Δ(k, ν, a, b). We project onto the lowest Matsubara frequency (most
     physical for static gap) and trace over orbitals.
 
-    Returns dict with dominant symmetry and overlaps with basis functions.
-    """
-    from pairing_susceptibility import classify_gap_symmetry, SYMMETRY_BASIS
+    Args:
+        full_classification: if True (default), use classify_pairing_full which
+            distinguishes singlet (k-even) vs triplet (k-odd) channels and
+            projects onto the appropriate basis (s, d, g for singlet; p, f
+            for triplet). If False, use the legacy singlet-only classifier.
 
-    # Flatten and call existing classifier
+    Returns dict with dominant symmetry, channel (singlet/triplet/mixed),
+    and basis overlaps.
+    """
     n_k = eigenvector.shape[0]
     flat = eigenvector.ravel()
+
+    if full_classification:
+        from pairing_susceptibility import classify_pairing_full
+        return classify_pairing_full(flat, n_k, n_iw_f, n_orb, kpoints)
+
+    from pairing_susceptibility import classify_gap_symmetry
     return classify_gap_symmetry(flat, n_k, n_iw_f, n_orb, kpoints)

@@ -286,6 +286,204 @@ class KanamoriInteraction:
         return H
 
 
+# ── Slater (full atomic) interaction ────────────────────────────────────────
+
+class SlaterInteraction:
+    """
+    Full Slater-Condon multipole interaction for l-electrons.
+
+    For l=2 (d-shell, 5 orbitals) and l=3 (f-shell, 7 orbitals), the on-site
+    Coulomb interaction can be parameterized by the Slater integrals F^k:
+
+      H_int = (1/2) Σ_{αβγδ,σσ'} U_{αβγδ} c†_{ασ} c†_{βσ'} c_{δσ'} c_{γσ}
+
+    with the Coulomb tensor decomposed as:
+
+      U_{αβγδ} = Σ_k a_k(αβγδ) F^k
+
+    where a_k are angular coefficients built from 3-j (Gaunt) symbols.
+
+    Allowed k values:
+      l=2 (d):  k = 0, 2, 4
+      l=3 (f):  k = 0, 2, 4, 6
+
+    The Slater integrals are related to Hubbard parameters by:
+      l=2:  U = F^0,  J = (F^2 + F^4) / 14
+      l=3:  U = F^0,  J = (286 F^2 + 195 F^4 + 250 F^6) / 6435
+
+    Atomic-physics ratios (defaults if only U, J supplied):
+      l=2: F^4/F^2 ≈ 0.625
+      l=3: F^4/F^2 ≈ 0.668, F^6/F^2 ≈ 0.494
+
+    This is more accurate than Kanamori for 4f/5f systems (Ce, U, Pu actinides
+    and lanthanides) where the full multipole structure of the on-site Coulomb
+    interaction is important — e.g., CeRh2As2, UTe2, UCoGe.
+
+    References:
+      Slater, "Quantum Theory of Atomic Structure" (1960)
+      Cowan, "The Theory of Atomic Structure and Spectra" (1981)
+      Pavarini & Koch in "Crystal-Field Theory" (Modeling and Simulation Vol. 4)
+      Aichhorn et al., PRB 80, 085101 (2009) — DFT+DMFT with Slater
+    """
+
+    def __init__(
+        self,
+        l: int,
+        F0: float,
+        F2: Optional[float] = None,
+        F4: Optional[float] = None,
+        F6: Optional[float] = None,
+        basis: str = "cubic",
+    ):
+        """
+        Args:
+            l: orbital angular momentum (2 for d, 3 for f). l=1 (p) accepted
+                but uncommon — p-shell Slater rarely needed.
+            F0: F^0 Slater integral (eV). Equal to Hubbard U for any shell.
+            F2, F4, F6: higher Slater integrals (eV). For l=3, all four are
+                used; for l=2, only F0/F2/F4 contribute. None means "use
+                atomic-ratio default given F^2".
+            basis: "cubic" (real cubic harmonics; default for solid-state) or
+                "spherical" (complex Y_lm).
+        """
+        if l not in (1, 2, 3):
+            raise ValueError(f"Slater interaction supports l=1,2,3; got l={l}")
+        self.l = int(l)
+        self.n_orb = 2 * l + 1
+        self.basis = basis
+
+        self.F0 = float(F0)
+        # Fill defaults using atomic ratios if higher F^k not specified
+        if l == 2:
+            self.F2 = float(F2) if F2 is not None else 0.0
+            self.F4 = float(F4) if F4 is not None else 0.625 * self.F2
+            self.F6 = 0.0  # not used for d
+        elif l == 3:
+            self.F2 = float(F2) if F2 is not None else 0.0
+            self.F4 = float(F4) if F4 is not None else 0.668 * self.F2
+            self.F6 = float(F6) if F6 is not None else 0.494 * self.F2
+        else:  # l == 1
+            self.F2 = float(F2) if F2 is not None else 0.0
+            self.F4 = 0.0
+            self.F6 = 0.0
+
+        # Compute equivalent Hubbard U, J for reporting
+        self.U_avg = self.F0
+        if l == 2:
+            self.J_avg = (self.F2 + self.F4) / 14.0
+        elif l == 3:
+            self.J_avg = (286 * self.F2 + 195 * self.F4 + 250 * self.F6) / 6435.0
+        else:
+            self.J_avg = self.F2 / 5.0  # l=1 convention
+
+    @classmethod
+    def from_U_J(
+        cls,
+        l: int,
+        U: float,
+        J: float,
+        basis: str = "cubic",
+    ) -> "SlaterInteraction":
+        """
+        Build SlaterInteraction from Hubbard U, J using atomic Slater ratios.
+
+        For l=2 (d): F^0 = U, F^2 = 14·J/(1+0.625), F^4 = 0.625·F^2
+        For l=3 (f): F^0 = U, F^2 from (286+195·0.668+250·0.494) F^2 / 6435 = J
+        """
+        F0 = U
+        if l == 2:
+            # 14 J = F^2 (1 + 0.625)  → F^2 = 14 J / 1.625
+            F2 = 14.0 * J / 1.625
+            F4 = 0.625 * F2
+            return cls(l=2, F0=F0, F2=F2, F4=F4, basis=basis)
+        elif l == 3:
+            # 6435 J = (286 + 195·0.668 + 250·0.494) F^2
+            #        = (286 + 130.26 + 123.5) F^2 = 539.76 F^2
+            F2 = 6435.0 * J / 539.76
+            F4 = 0.668 * F2
+            F6 = 0.494 * F2
+            return cls(l=3, F0=F0, F2=F2, F4=F4, F6=F6, basis=basis)
+        elif l == 1:
+            F2 = 5.0 * J
+            return cls(l=1, F0=F0, F2=F2, basis=basis)
+        else:
+            raise ValueError(f"Unsupported l={l}")
+
+    def build_triqs_h_int(self):
+        """
+        Build the TRIQS Operator for the full Slater interaction.
+
+        Uses triqs.operators.util.U_matrix to compute the multipole-resolved
+        Coulomb tensor and h_int_slater to assemble the operator.
+        """
+        from triqs.operators import Operator
+        from triqs.operators.util import h_int_slater
+        from triqs.operators.util.U_matrix import U_matrix
+
+        # Build the U_4index tensor in the chosen basis
+        radial_integrals = [self.F0, self.F2, self.F4, self.F6][: (self.l + 1)]
+        U_4index = U_matrix(
+            l=self.l,
+            radial_integrals=radial_integrals,
+            basis=self.basis,
+        )
+
+        # h_int_slater wants spin block names + orbital count
+        spin_names = ["up", "down"]
+        H = h_int_slater(
+            spin_names=spin_names,
+            n_orb=self.n_orb,
+            U_matrix=U_4index,
+            off_diag=True,
+            map_operator_structure=None,
+        )
+        return H
+
+    def build_density_density(self):
+        """
+        Build only the density-density part of the Slater Hamiltonian.
+
+        This drops the spin-flip and pair-hop terms (which cause sign problem)
+        but keeps the orbital-dependent Coulomb tensor diagonal in (a,b).
+        """
+        from triqs.operators import n, Operator
+        from triqs.operators.util.U_matrix import U_matrix
+
+        radial_integrals = [self.F0, self.F2, self.F4, self.F6][: (self.l + 1)]
+        U_4index = U_matrix(
+            l=self.l,
+            radial_integrals=radial_integrals,
+            basis=self.basis,
+        )
+
+        # Density-density: H = Σ_{αβ,σσ'} [U_{αββα} n_{ασ} n_{βσ'} (1 - δ_{αβ}δ_{σσ'})] / 2
+        H = Operator()
+        no = self.n_orb
+        # Direct Coulomb tensor: U_dir[a, b] = U_{a,b,b,a}
+        for a in range(no):
+            for b in range(no):
+                U_dir = float(U_4index[a, b, b, a].real)
+                U_ex = float(U_4index[a, b, a, b].real)
+                if a == b:
+                    # Same orbital, opposite spin: U_dir
+                    H += U_dir * n("up", a) * n("down", a)
+                else:
+                    # Different orbitals, opposite spin: U_dir
+                    H += U_dir * n("up", a) * n("down", b)
+                    # Different orbitals, same spin: U_dir - U_ex (only count a<b once)
+                    if a < b:
+                        H += (U_dir - U_ex) * n("up", a) * n("up", b)
+                        H += (U_dir - U_ex) * n("down", a) * n("down", b)
+        return H
+
+    def __repr__(self):
+        return (
+            f"SlaterInteraction(l={self.l}, F0={self.F0:.2f}, "
+            f"F2={self.F2:.2f}, F4={self.F4:.2f}, F6={self.F6:.2f}, "
+            f"U={self.U_avg:.2f}, J={self.J_avg:.3f})"
+        )
+
+
 # ── Multi-orbital DCA solver ────────────────────────────────────────────────
 
 class MultiOrbitalDCAParams(DCAParams):
@@ -585,6 +783,17 @@ def run_multiorbital_dca(
         (nc, n_w, no, no), dtype=complex
     )
 
+    # Mixer (Anderson-accelerated by default)
+    from anderson_mixing import make_mixer
+    mixer = make_mixer(
+        method=getattr(params, "mixing_method", "anderson"),
+        linear_alpha=params.sigma_mix,
+        history_depth=getattr(params, "anderson_depth", 5),
+        beta=getattr(params, "anderson_beta", 1.0),
+    )
+    print(f"[DCA-MO] Mixing: {getattr(params, 'mixing_method', 'anderson')} "
+          f"(K={getattr(params, 'anderson_depth', 5)})")
+
     convergence_history = []
     sign_history = []
 
@@ -640,19 +849,20 @@ def run_multiorbital_dca(
             print(f"[DCA-MO] FATAL: NaN/Inf in self-energy at iteration {iteration+1}")
             break
 
-        # 6. Mix
-        sigma_mixed = params.sigma_mix * sigma_c + (1 - params.sigma_mix) * sigma_new
+        # 6. Mix (Anderson-accelerated)
+        sigma_mixed = mixer.update(sigma_c, sigma_new)
 
-        # 7. Convergence check
-        diff = np.max(np.abs(sigma_mixed - sigma_c))
+        # 7. Convergence check: residual norm ||F(σ) - σ||
+        diff = np.max(np.abs(sigma_new - sigma_c))
         sigma_c = sigma_mixed
 
-        # Density per orbital (both spins, SU(2) symmetry)
-        # n_total(K) = 2×n_↑ = 1 + (2/β) Σ_ω Re G_↑(K,ω), averaged over K
+        # Density per orbital (both spins, SU(2) symmetry) with 2nd-order tail correction
+        from charge_selfconsistency import density_per_spin_with_tail
         density = np.zeros(no)
         for a in range(no):
             for ic in range(nc):
-                density[a] += 1.0 + (2.0 / params.beta) * np.sum(g_c[ic, :, a, a].real)
+                n_up = density_per_spin_with_tail(g_c[ic, :, a, a], params.beta)
+                density[a] += 2.0 * n_up
             density[a] /= nc
 
         elapsed_iter = time.time() - t_iter

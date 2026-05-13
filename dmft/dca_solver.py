@@ -219,6 +219,10 @@ class DCAParams:
         n_warmup: int = 50000,
         n_cycles: int = 5_000_000,
         length_cycle: int = 200,
+        # Mixing method
+        mixing_method: str = "anderson",
+        anderson_depth: int = 5,
+        anderson_beta: float = 1.0,
     ):
         self.nc = nc
         self.dim = dim
@@ -234,6 +238,9 @@ class DCAParams:
         self.n_warmup = n_warmup
         self.n_cycles = n_cycles
         self.length_cycle = length_cycle
+        self.mixing_method = mixing_method
+        self.anderson_depth = anderson_depth
+        self.anderson_beta = anderson_beta
 
         # Derived
         self.K_cluster = generate_cluster_momenta(nc, dim)
@@ -547,6 +554,18 @@ def run_dca(
     # Initialize self-energy
     sigma_c = initial_sigma if initial_sigma is not None else np.zeros((nc, n_w), dtype=complex)
 
+    # Initialize the mixer (Anderson-accelerated by default)
+    from anderson_mixing import make_mixer
+    mixer = make_mixer(
+        method=getattr(params, "mixing_method", "anderson"),
+        linear_alpha=params.sigma_mix,
+        history_depth=getattr(params, "anderson_depth", 5),
+        beta=getattr(params, "anderson_beta", 1.0),
+    )
+    print(f"[DCA] Mixing method: {params.mixing_method} "
+          f"(K={getattr(params, 'anderson_depth', 5)}, "
+          f"β={getattr(params, 'anderson_beta', 1.0)})")
+
     convergence_history = []
     density_history = []
     sign_history = []
@@ -594,18 +613,20 @@ def run_dca(
             print(f"[DCA] FATAL: NaN/Inf in self-energy at iteration {iteration+1}")
             break
 
-        # Step 6: Mix
-        sigma_mixed = params.sigma_mix * sigma_c + (1.0 - params.sigma_mix) * sigma_new
+        # Step 6: Mix (Anderson-accelerated when enabled)
+        sigma_mixed = mixer.update(sigma_c, sigma_new)
 
-        # Step 7: Check convergence
-        diff = np.max(np.abs(sigma_mixed - sigma_c))
+        # Step 7: Check convergence (compare to PREVIOUS sigma, not the mixed one)
+        diff = np.max(np.abs(sigma_new - sigma_c))
         sigma_c = sigma_mixed
 
-        # Compute density (both spins, SU(2) symmetry)
-        # n_total(K) = 2×n_↑ = 1 + (2/β) Σ_ω Re G_↑(K,ω), averaged over K
+        # Compute density (both spins, SU(2) symmetry) with 2nd-order tail correction
+        # n_total(K) = 2·n_↑(K); n_↑ from tail-corrected Matsubara sum
+        from charge_selfconsistency import density_per_spin_with_tail
         density = 0.0
         for ic in range(nc):
-            density += 1.0 + (2.0 / params.beta) * np.sum(g_c[ic].real)
+            n_up = density_per_spin_with_tail(g_c[ic], params.beta)
+            density += 2.0 * n_up
         density /= nc
 
         elapsed_iter = time.time() - t_iter

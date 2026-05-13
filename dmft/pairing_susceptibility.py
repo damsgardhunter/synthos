@@ -426,6 +426,34 @@ SYMMETRY_BASIS = {
     "g-wave":       lambda kx, ky, kz: np.sin(kx) * np.sin(ky) * (np.cos(kx) - np.cos(ky)),
 }
 
+# Singlet (even-parity, k → -k symmetric) basis: spin-anti-symmetric pair
+SINGLET_BASIS = {
+    "s-wave":       lambda kx, ky, kz: np.ones_like(kx),
+    "s±-wave":      lambda kx, ky, kz: np.cos(kx) + np.cos(ky),
+    "extended-s":   lambda kx, ky, kz: np.cos(kx) * np.cos(ky),
+    "d-x2y2-wave":  lambda kx, ky, kz: np.cos(kx) - np.cos(ky),
+    "d-xy-wave":    lambda kx, ky, kz: np.sin(kx) * np.sin(ky),
+    "d-3z2r2":      lambda kx, ky, kz: 2 * np.cos(kz) - np.cos(kx) - np.cos(ky),
+    "g-wave":       lambda kx, ky, kz: np.sin(kx) * np.sin(ky) * (np.cos(kx) - np.cos(ky)),
+}
+
+# Triplet (odd-parity, k → -k antisymmetric) basis: spin-symmetric pair
+# These form the components of the d-vector d(k) such that Δ(k) = i (d·σ) σ_y.
+# Real solid-state SCs of interest:
+#   p-x, p-y, p-z: simple p-wave (3D)
+#   p+ip (chiral): UPt3 A1 phase, Sr2RuO4 candidate
+#   helical p:    UTe2, B-phase of 3He
+#   f-wave:       UPt3 E1u, possibly UCoGe
+TRIPLET_BASIS = {
+    "p-x":          lambda kx, ky, kz: np.sin(kx),
+    "p-y":          lambda kx, ky, kz: np.sin(ky),
+    "p-z":          lambda kx, ky, kz: np.sin(kz),
+    "p+ip (chiral)": lambda kx, ky, kz: np.sin(kx) + 1j * np.sin(ky),
+    "f-wave-x":     lambda kx, ky, kz: np.sin(kx) * (np.cos(kx) - np.cos(ky)),
+    "f-wave-y":     lambda kx, ky, kz: np.sin(ky) * (np.cos(kx) - np.cos(ky)),
+    "f-wave-z":     lambda kx, ky, kz: np.sin(kz) * (np.cos(kx) - np.cos(ky)),
+}
+
 
 def classify_gap_symmetry(
     eigenvector: np.ndarray,
@@ -501,6 +529,150 @@ def classify_gap_symmetry(
         "nodes": nodes,
         "sign_changes": sign_changes,
         "is_unconventional": best_symmetry not in ("s-wave",),
+    }
+
+
+def classify_pairing_full(
+    eigenvector: np.ndarray,
+    n_k: int,
+    n_iw_f: int,
+    n_orb: int,
+    kpoints: np.ndarray,
+    parity_threshold: float = 0.7,
+) -> dict:
+    """
+    Full singlet+triplet classification of a pairing eigenvector.
+
+    Procedure:
+      1. Form Δ(k) = Tr[Δ(k, ν_0)] (orbital-symmetric scalar projection)
+      2. Test parity: even (Δ(k)+Δ(-k))/2 vs odd (Δ(k)-Δ(-k))/2
+      3. Project onto SINGLET basis (even functions) and TRIPLET basis (odd
+         functions)
+      4. Classify as singlet/triplet based on which has dominant overlap
+      5. Sub-classify by best basis function
+
+    For triplet, the eigenvector is interpreted as the dominant d-vector
+    component along z (S_z=0 triplet) by default. Full d-vector reconstruction
+    requires spin-resolved data not stored in the current vertex.
+
+    Args:
+        eigenvector: leading eigenvector of the pairing kernel
+        n_k:    number of k-points
+        n_iw_f: fermionic Matsubara frequencies per side
+        n_orb:  orbital count
+        kpoints: [n_k, 3] k-points (units of π/a)
+        parity_threshold: fraction of norm in even/odd part to call it
+            singlet/triplet (>=0.7 → unambiguous; <0.7 → mixed parity)
+
+    Returns:
+        dict {
+            channel: "singlet" | "triplet" | "mixed",
+            symmetry: best basis function name,
+            overlap: float (squared overlap with dominant basis),
+            d_vector_component: "z" (for S_z=0 default) or "x/y/z" if resolved,
+            even_fraction: how much of Δ is k-even,
+            odd_fraction:  how much of Δ is k-odd,
+            singlet_overlaps: {basis_name: overlap},
+            triplet_overlaps: {basis_name: overlap},
+            nodes: ...,
+        }
+    """
+    # Reshape: [n_k, 2*n_iw_f, n_orb, n_orb]
+    delta = eigenvector.reshape(n_k, 2 * n_iw_f, n_orb, n_orb)
+    # Scalar gap on lowest positive Matsubara
+    delta_v0 = delta[:, n_iw_f, :, :]
+    delta_k = np.trace(delta_v0, axis1=1, axis2=2)
+
+    # Decompose into even + odd in k → -k
+    # Build mapping k → -k by finding nearest neighbor in kpoints
+    kp = np.asarray(kpoints)
+    # For each k, find index of -k via L2 distance
+    neg_k_idx = np.zeros(n_k, dtype=int)
+    for ik in range(n_k):
+        # nearest point to -k (mod BZ): kpoints expected in [-1, 1) in π/a units
+        target = -kp[ik]
+        # Wrap to [-1, 1)
+        target = ((target + 1.0) % 2.0) - 1.0
+        d2 = np.sum((kp - target[np.newaxis, :]) ** 2, axis=1)
+        neg_k_idx[ik] = int(np.argmin(d2))
+
+    delta_neg_k = delta_k[neg_k_idx]
+    delta_even = 0.5 * (delta_k + delta_neg_k)
+    delta_odd = 0.5 * (delta_k - delta_neg_k)
+
+    n_total = float(np.sum(np.abs(delta_k) ** 2))
+    n_even = float(np.sum(np.abs(delta_even) ** 2))
+    n_odd = float(np.sum(np.abs(delta_odd) ** 2))
+
+    if n_total < 1e-30:
+        return {
+            "channel": "unknown",
+            "symmetry": "unknown",
+            "even_fraction": 0.0,
+            "odd_fraction": 0.0,
+        }
+    even_frac = n_even / n_total
+    odd_frac = n_odd / n_total
+
+    # k-space coordinates in [-π, π]
+    kx = np.pi * kp[:, 0]
+    ky = np.pi * kp[:, 1]
+    kz = np.pi * kp[:, 2] if kp.shape[1] >= 3 else np.zeros(n_k)
+
+    # Compute overlaps with both bases
+    def _overlap(delta_proj, basis_fn):
+        b = basis_fn(kx, ky, kz)
+        n_b = np.sqrt(np.sum(np.abs(b) ** 2))
+        n_d = np.sqrt(np.sum(np.abs(delta_proj) ** 2))
+        if n_b < 1e-15 or n_d < 1e-15:
+            return 0.0
+        return float(np.abs(np.sum(delta_proj.conj() * b)) ** 2 / (n_b ** 2 * n_d ** 2))
+
+    singlet_overlaps = {name: _overlap(delta_even, fn) for name, fn in SINGLET_BASIS.items()}
+    triplet_overlaps = {name: _overlap(delta_odd, fn) for name, fn in TRIPLET_BASIS.items()}
+
+    # Pick the channel based on parity fraction
+    if even_frac >= parity_threshold:
+        channel = "singlet"
+        best = max(singlet_overlaps, key=singlet_overlaps.get)
+        overlap = singlet_overlaps[best]
+    elif odd_frac >= parity_threshold:
+        channel = "triplet"
+        best = max(triplet_overlaps, key=triplet_overlaps.get)
+        overlap = triplet_overlaps[best]
+    else:
+        channel = "mixed"
+        # Pick whichever basis has higher overlap
+        best_s = max(singlet_overlaps, key=singlet_overlaps.get)
+        best_t = max(triplet_overlaps, key=triplet_overlaps.get)
+        if singlet_overlaps[best_s] > triplet_overlaps[best_t]:
+            best, overlap = best_s, singlet_overlaps[best_s]
+        else:
+            best, overlap = best_t, triplet_overlaps[best_t]
+
+    # Node classification (rough)
+    sign_changes = _count_sign_changes(delta_k.real, kp)
+    if channel == "singlet" and sign_changes == 0:
+        nodes = "nodeless"
+    elif channel == "triplet" and sign_changes <= 2:
+        nodes = "point_nodes"
+    elif sign_changes <= 2:
+        nodes = "line_nodes"
+    else:
+        nodes = "complex_nodes"
+
+    return {
+        "channel": channel,
+        "symmetry": best,
+        "overlap": overlap,
+        "d_vector_component": "z",  # S_z=0 triplet assumed; needs spin-resolved data for full reconstruction
+        "even_fraction": even_frac,
+        "odd_fraction": odd_frac,
+        "singlet_overlaps": singlet_overlaps,
+        "triplet_overlaps": triplet_overlaps,
+        "nodes": nodes,
+        "sign_changes": sign_changes,
+        "is_unconventional": channel != "singlet" or best != "s-wave",
     }
 
 
