@@ -100,9 +100,17 @@ def _compute_cluster_R(K_cluster, nc, dim):
     max_combos = 200_000  # ~10s search budget
     n_combos = comb(len(candidates), nc)
     if n_combos > max_combos:
-        # Search would take too long — return K-cluster fallback
-        # (not orthogonal, but doesn't crash)
-        return K_cluster.copy()
+        # Search space too large for brute force. Refuse to silently return
+        # a non-orthogonal R-set (previously `K_cluster.copy()`) — that quietly
+        # corrupts periodized Σ(k). The caller should either add a hardcoded
+        # cluster geometry for this N_c (see the precomputed N_c=8 case
+        # above) or use a smaller cluster.
+        raise NotImplementedError(
+            f"No precomputed R-vectors for non-square cluster N_c={nc} in "
+            f"dim={dim}, and brute-force search space "
+            f"({n_combos:.1e} combinations) exceeds budget. Add a "
+            f"hardcoded Betts cluster to _compute_cluster_R."
+        )
 
     for combo in combinations(range(len(candidates)), nc):
         R = np.array([candidates[c] for c in combo], dtype=float)
@@ -111,8 +119,14 @@ def _compute_cluster_R(K_cluster, nc, dim):
         if np.max(np.abs(FtF - np.eye(nc))) < 1e-8:
             return R
 
-    # Fallback: K_cluster itself (may not be orthogonal)
-    return K_cluster.copy()
+    # Brute force completed without finding orthogonal R — refuse to return
+    # K_cluster as a fake R-set. Same reasoning as the timeout branch above.
+    raise RuntimeError(
+        f"_compute_cluster_R: brute-force search over {len(candidates)} "
+        f"candidates for N_c={nc} in dim={dim} found no R-set satisfying "
+        f"||F†F/N_c - I|| < 1e-8. K_cluster may be inconsistent with any "
+        f"orthogonal real-space partition."
+    )
 
 
 def _periodize_nearest(sigma_K, K_cluster, kpoints):

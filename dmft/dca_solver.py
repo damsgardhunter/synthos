@@ -567,10 +567,17 @@ def run_dca(
     patch_counts = np.bincount(patch_assignment, minlength=nc)
     print(f"[DCA] N_c={nc}, n_k={len(eps_k)}, patches: {patch_counts}")
     print(f"[DCA] Cluster momenta (π/a): {params.K_cluster.tolist()}")
-    # Warn loudly if any patch is empty — that breaks coarse-graining (NaN)
+    # Warn loudly if any patch is empty — coarse-graining produces zero
+    # there, which the subsequent Σ extraction (via the 1e-20 divide guard)
+    # then carries forward as Σ=0 for that patch. The pipeline doesn't
+    # crash but the user gets no signal that their k-mesh is too coarse for
+    # the chosen N_c. With this warning they can refine n_k_per_dim.
     if np.any(patch_counts == 0):
         empty = [int(i) for i, c in enumerate(patch_counts) if c == 0]
-        log.warning(f"Empty patches: {empty} — coarse-graining will produce NaN")
+        log.warning(
+            f"Empty patches: {empty} — k-mesh too coarse for N_c={nc}. "
+            f"Σ_c will be 0 there; consider increasing n_k_per_dim."
+        )
         log_event(log, "dca.empty_patches_detected", empty_patches=empty)
 
     # Initialize self-energy

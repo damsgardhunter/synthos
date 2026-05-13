@@ -748,14 +748,49 @@ def _solve_multiorbital_hartree(
 ) -> np.ndarray:
     """
     Hartree (static mean-field) fallback for multi-orbital cluster.
-    Tests loop machinery without requiring TRIQS.
+    Tests loop machinery without requiring TRIQS — NOT for production physics.
+
+    Hartree-Fock for the Kanamori interaction at paramagnetic half-filling:
+
+      Σ_HF[a,a] = U[a]·n_{a,-σ} + Σ_{b≠a} [
+          U'[a,b]·n_{b,-σ}        (inter-orbital, opposite spin)
+        + (U'[a,b]-J[a,b])·n_{b,σ} (inter-orbital, same spin)
+      ]
+
+    With n_σ = n_{-σ} = n/2 (paramagnetic) and n_a = 1 (half-filling):
+
+      Σ_HF[a,a] = U[a]/2 + Σ_{b≠a} [U'[a,b] + (U'[a,b]-J[a,b])]/2
+                = U[a]/2 + Σ_{b≠a} (2·U'[a,b] - J[a,b])/2
+
+    Falls back to the simpler `params.U·n` form if no Kanamori interaction
+    object is attached (e.g., single-band tests). Both forms produce a
+    frequency-independent diagonal Σ as expected of Hartree-Fock.
     """
     nc, n_w, no, _ = g0_iw_cluster.shape
 
-    filling = np.full(no, 0.5)  # assume half-filling per orbital
+    filling = np.full(no, 0.5)  # assume half-filling per orbital (n_σ = 1/2)
     sigma_hartree = np.zeros((no, no), dtype=complex)
-    for a in range(no):
-        sigma_hartree[a, a] = params.U * filling[a]
+
+    interaction = getattr(params, "interaction", None)
+    if interaction is not None and hasattr(interaction, "U_prime"):
+        # Full Kanamori-aware HF (correct for multi-orbital materials)
+        U_arr = np.asarray(interaction.U, dtype=float)
+        Up = np.asarray(interaction.U_prime, dtype=float)
+        J_p = np.asarray(interaction.J_pair, dtype=float)
+        for a in range(no):
+            sigma_hartree[a, a] = U_arr[a] * filling[a]
+            for b in range(no):
+                if a == b:
+                    continue
+                # Opposite-spin and same-spin contributions; n_b for both spins
+                sigma_hartree[a, a] += (
+                    Up[a, b] * filling[b]
+                    + (Up[a, b] - J_p[a, b]) * filling[b]
+                )
+    else:
+        # Single-orbital / no Kanamori metadata: scalar U fallback
+        for a in range(no):
+            sigma_hartree[a, a] = params.U * filling[a]
 
     g_c = np.zeros_like(g0_iw_cluster)
     for ic in range(nc):
