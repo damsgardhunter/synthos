@@ -57,8 +57,10 @@ export interface MagneticTrialResult {
   totalMagnetization: number | null;
   /** Absolute magnetization from QE output */
   absoluteMagnetization: number | null;
-  /** Whether SCF converged */
+  /** Whether SCF strictly converged */
   converged: boolean;
+  /** Last scf accuracy (Ry) — for accepting near-converged trials */
+  lastScfAccuracyRy: number | null;
   /** Wall time for this trial (ms) */
   wallTimeMs: number;
 }
@@ -507,8 +509,19 @@ export function selectMagneticGroundState(
 ): MagneticGroundStateResult {
   const notes: string[] = [];
 
-  // Filter to converged trials with valid energy
-  const convergedTrials = trials.filter(t => t.converged && t.totalEnergy !== null);
+  // Accept strictly-converged OR near-converged trials (accuracy ≤ 1e-4 Ry
+  // is good enough to rank FM vs AFM, which typically differ by tens of meV).
+  // Pre Apr-2026 the filter required strict convergence; BaFe2As2's FM/AFM
+  // trials hit max_seconds at accuracy ~1e-5 Ry — strictly "not converged"
+  // but the energies were already reliable for comparison. Falling back to
+  // FM with broadened seeding wasted hours; now we use the trial energies.
+  const NEAR_CONVERGED_RY = 1e-4;
+  const isUsableTrial = (t: MagneticTrialResult): boolean =>
+    t.totalEnergy !== null && (
+      t.converged
+      || (t.lastScfAccuracyRy !== null && t.lastScfAccuracyRy < NEAR_CONVERGED_RY)
+    );
+  const convergedTrials = trials.filter(isUsableTrial);
 
   if (convergedTrials.length === 0) {
     notes.push("[MagSearch] No magnetic trial converged — falling back to FM with broadened seeding");

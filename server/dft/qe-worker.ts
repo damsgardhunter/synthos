@@ -6038,18 +6038,28 @@ ${cellBlockEos}
             const magSCF = parseSCFOutput(magResult.stdout, 0.02);
             const magMoments = parseMagnetizationFromOutput(magResult.stdout);
 
+            // Keep totalEnergy even when strict convergence wasn't reached —
+            // selectMagneticGroundState accepts near-converged trials (last
+            // accuracy < 1e-4 Ry) since FM/AFM gaps are typically >10× larger.
+            const nearConverged = magSCF.lastScfAccuracyRy !== null && magSCF.lastScfAccuracyRy < 1e-4;
             magTrials.push({
               ordering: config.ordering,
-              totalEnergy: magSCF.converged ? magSCF.totalEnergy : null,
+              totalEnergy: (magSCF.converged || nearConverged) ? magSCF.totalEnergy : null,
               totalMagnetization: magMoments.totalMagnetization,
               absoluteMagnetization: magMoments.absoluteMagnetization,
               converged: magSCF.converged,
+              lastScfAccuracyRy: magSCF.lastScfAccuracyRy,
               wallTimeMs: Date.now() - magStartTime,
             });
 
+            const statusLabel = magSCF.converged
+              ? "converged"
+              : nearConverged
+                ? `near-converged (accuracy=${magSCF.lastScfAccuracyRy?.toExponential(1)} Ry, usable for ranking)`
+                : `FAILED (accuracy=${magSCF.lastScfAccuracyRy?.toExponential(1) ?? "N/A"} Ry)`;
             console.log(`[QE-Worker] Mag trial ${config.ordering}: E=${magSCF.totalEnergy?.toFixed(6) ?? "N/A"} Ry, ` +
               `M=${magMoments.totalMagnetization?.toFixed(2) ?? "N/A"} mu_B, ` +
-              `${magSCF.converged ? "converged" : "FAILED"} (${Date.now() - magStartTime}ms)`);
+              `${statusLabel} (${Date.now() - magStartTime}ms)`);
           } catch (magErr: any) {
             magTrials.push({
               ordering: config.ordering,
@@ -6057,6 +6067,7 @@ ${cellBlockEos}
               totalMagnetization: null,
               absoluteMagnetization: null,
               converged: false,
+              lastScfAccuracyRy: null,
               wallTimeMs: Date.now() - magStartTime,
             });
             console.log(`[QE-Worker] Mag trial ${config.ordering} failed: ${magErr.message?.slice(0, 100)}`);
@@ -6562,9 +6573,38 @@ ${cellBlockEos}
     // Only skip if vc-relax converged AND produced positions (not partial/failed).
     // If vc-relax failed, fall through to the separate SCF loop below.
     let skipSeparateSCF = false;
-    // vcResult is defined inside the vc-relax try block — check if stdout was saved
+    // Pick the LATEST vc-relax output available — smearing-polish > refinement
+    // > initial vc-relax. The initial vc_relax.out can finish at a wildly
+    // overshoot pressure (H3S Apr 26: ended at 38.5 GPa for a 200 GPa target);
+    // the refinement and smearing-polish passes drive both pressure and
+    // smearing to spec, and their .save/ density is what ph.x sees on disk.
+    // Parsing the initial-only file led to result.scf.pressure being wrong
+    // by orders of magnitude in pre-phonon validation.
     const vcRelaxOutPath = path.join(jobDir, "vc_relax.out");
-    const vcRelaxStdout = fs.existsSync(vcRelaxOutPath) ? fs.readFileSync(vcRelaxOutPath, "utf-8") : null;
+    let bestVcOutPath = vcRelaxOutPath;
+    try {
+      const polishOuts = fs.readdirSync(jobDir)
+        .filter(f => /^vc_relax_smearing_polish_\d+\.out$/.test(f))
+        .map(f => path.join(jobDir, f))
+        .filter(p => fs.existsSync(p))
+        .sort();
+      if (polishOuts.length > 0) {
+        bestVcOutPath = polishOuts[polishOuts.length - 1];
+      } else {
+        const refineOuts = fs.readdirSync(jobDir)
+          .filter(f => /^vc_relax_refine\d+\.out$/.test(f))
+          .map(f => path.join(jobDir, f))
+          .filter(p => fs.existsSync(p))
+          .sort();
+        if (refineOuts.length > 0) {
+          bestVcOutPath = refineOuts[refineOuts.length - 1];
+        }
+      }
+    } catch { /* fall back to initial vc_relax.out */ }
+    if (bestVcOutPath !== vcRelaxOutPath) {
+      console.log(`[QE-Worker] Reusing SCF from ${path.basename(bestVcOutPath)} (latest refinement/polish output) instead of vc_relax.out for ${formula}`);
+    }
+    const vcRelaxStdout = fs.existsSync(bestVcOutPath) ? fs.readFileSync(bestVcOutPath, "utf-8") : null;
     if (result.vcRelaxed && vcRelaxStdout) {
       // Parse SCF data from vc-relax output (last SCF in the vc-relax run)
       const vcScfParsed = parseSCFOutput(vcRelaxStdout, 0.015);

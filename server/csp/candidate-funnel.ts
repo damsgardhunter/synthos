@@ -481,6 +481,7 @@ export async function runCandidateFunnel(
         true, // always relax
         maxEval,
         timeoutMs,
+        pressureGPa,
       );
       if (chgnetResult.stats.evaluated > 0) {
         f6Candidates = chgnetResult.rankedCandidates;

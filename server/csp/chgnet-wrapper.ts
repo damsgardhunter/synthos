@@ -249,6 +249,7 @@ export async function runChgnetEvaluation(
   doRelax: boolean = false,
   maxStructures: number = 300,
   timeoutMs: number = 300000, // 5 min default
+  pressureGPa: number = 0,
 ): Promise<{
   rankedCandidates: CSPCandidate[];
   results: ChgnetResult[];
@@ -341,18 +342,25 @@ export async function runChgnetEvaluation(
 
   // Attach MLIP energy + relaxed geometry to candidates and sort by energy.
   // DRIFT GATE: track both raw CSP and CHGNet-relaxed structures.
-  // If CHGNet drifts too far (volume change > 30%, distance collapse, etc.),
-  // keep the raw CSP geometry instead — ML potentials can collapse or bias
-  // structures incorrectly, especially for high-pressure hydrides.
+  // If CHGNet drifts too far (volume change > threshold, distance collapse,
+  // etc.), keep the raw CSP geometry — ML potentials can over-compress or
+  // bias structures, especially outside their training distribution.
+  //
+  // Pressure-aware threshold: CHGNet was trained mostly on ambient-P data
+  // from Materials Project. At high P (>50 GPa) MLIP volumes are unreliable
+  // and we want a TIGHTER threshold (30%) to reject more aggressively. At
+  // ambient P, MLIP relaxation is more trustworthy and a 30% reject was
+  // catching real over-expanded starting structures — loosen to 40%.
+  const driftVolPctThreshold = pressureGPa >= 50 ? 30 : 40;
   const ranked: CSPCandidate[] = [];
   let driftRejected = 0;
+  let totalCompressionPct = 0;
+  let totalExpansionPct = 0;
+  let nCompressions = 0;
+  let nExpansions = 0;
   for (const r of results) {
     const candidate = candidateMap.get(r.file);
     if (candidate) {
-      // Attach relaxed energy (always prefer relaxed over single-point)
-      candidate.enthalpyPerAtom = r.relaxedEnergyPerAtomEv ?? r.energyPerAtomEv;
-      candidate.enthalpy = (r.relaxedEnergyPerAtomEv ?? r.energyPerAtomEv) * r.nAtoms;
-
       // Use relaxed force if available, otherwise single-point force
       const forceEvAng = r.relaxedMaxForce ?? r.maxForceEvAng;
       if (forceEvAng != null) {
@@ -361,6 +369,7 @@ export async function runChgnetEvaluation(
       }
 
       // --- CHGNet drift gate ---
+      let useRelaxedEnergy = true;
       // Save pre-MLIP snapshot before potentially overwriting
       if (r.relaxed && r.relaxedLatticeA != null) {
         candidate.preMLIPLatticeA = candidate.latticeA;
@@ -369,16 +378,18 @@ export async function runChgnetEvaluation(
         candidate.preMLIPVolume = candidate.cellVolume;
         candidate.mlipVolumeChangePct = r.volumeChangePct ?? 0;
 
-        const volChangePct = Math.abs(r.volumeChangePct ?? 0);
+        const volChangePctRaw = r.volumeChangePct ?? 0;
+        const volChangePct = Math.abs(volChangePctRaw);
+        if (volChangePctRaw < 0) { totalCompressionPct += volChangePct; nCompressions++; }
+        else if (volChangePctRaw > 0) { totalExpansionPct += volChangePct; nExpansions++; }
 
         // Check for excessive drift
         let driftTooHigh = false;
         let driftReason = "";
 
-        // Volume change > 30% — MLIP likely collapsed or expanded unreasonably
-        if (volChangePct > 30) {
+        if (volChangePct > driftVolPctThreshold) {
           driftTooHigh = true;
-          driftReason = `volume change ${(r.volumeChangePct ?? 0).toFixed(1)}% > 30%`;
+          driftReason = `volume change ${volChangePctRaw.toFixed(1)}% > ${driftVolPctThreshold}% (P=${pressureGPa} GPa threshold)`;
         }
 
         // Minimum distance collapse check: if relaxed lattice is very small,
@@ -389,11 +400,13 @@ export async function runChgnetEvaluation(
         }
 
         if (driftTooHigh) {
-          // Keep raw CSP geometry, mark as drift-rejected
+          // Keep raw CSP geometry — and use SINGLE-POINT energy to match
+          // (the relaxed energy doesn't correspond to a geometry we kept).
           candidate.mlipDriftRejected = true;
           candidate.relaxationLevel = "raw";
+          useRelaxedEnergy = false;
           driftRejected++;
-          console.log(`[CHGNet] Drift gate REJECTED for ${r.file}: ${driftReason} — keeping raw CSP geometry`);
+          console.log(`[CHGNet] Drift gate REJECTED for ${r.file}: ${driftReason} — keeping raw CSP geometry, using single-point energy`);
         } else {
           // Accept CHGNet-relaxed geometry
           candidate.latticeA = r.relaxedLatticeA;
@@ -405,12 +418,32 @@ export async function runChgnetEvaluation(
         }
       }
 
+      // Attach energy: use single-point when drift-rejected (matches the raw
+      // geometry we kept); otherwise use relaxed.
+      const energyToUse = useRelaxedEnergy
+        ? (r.relaxedEnergyPerAtomEv ?? r.energyPerAtomEv)
+        : r.energyPerAtomEv;
+      candidate.enthalpyPerAtom = energyToUse;
+      candidate.enthalpy = energyToUse * r.nAtoms;
+
       ranked.push(candidate);
     }
   }
 
   if (driftRejected > 0) {
     console.log(`[CHGNet] Drift gate: ${driftRejected}/${results.length} candidates had excessive MLIP drift — raw CSP geometry preserved`);
+  }
+  // Systematic-volume-bias hint: if most candidates are compressing or
+  // expanding by similar amounts, the candidate generators' volume prior is
+  // off and the prototype's TARGVOL needs adjustment.
+  if (nCompressions + nExpansions >= 10) {
+    const avgComp = nCompressions > 0 ? totalCompressionPct / nCompressions : 0;
+    const avgExp = nExpansions > 0 ? totalExpansionPct / nExpansions : 0;
+    if (nCompressions > 0.7 * (nCompressions + nExpansions) && avgComp > 15) {
+      console.log(`[CHGNet] Volume-bias hint: ${nCompressions}/${nCompressions + nExpansions} candidates compressed by avg ${avgComp.toFixed(1)}% — CSP starting volumes look systematically too expanded`);
+    } else if (nExpansions > 0.7 * (nCompressions + nExpansions) && avgExp > 15) {
+      console.log(`[CHGNet] Volume-bias hint: ${nExpansions}/${nCompressions + nExpansions} candidates expanded by avg ${avgExp.toFixed(1)}% — CSP starting volumes look systematically too compressed`);
+    }
   }
 
   // Add unevaluated candidates at the end (worst rank)
