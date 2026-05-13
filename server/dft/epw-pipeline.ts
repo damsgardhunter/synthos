@@ -836,9 +836,39 @@ export async function runEPWPipeline(
     warnings.push("Wannier90 minimization failed");
     return makePartialResult(warnings, grids);
   }
-  // Check for convergence in Wannier90 output
+  // Check for convergence in Wannier90 output AND validate spread magnitude.
+  // For EPW interpolation, well-localized Wannier functions are essential:
+  //   spread < 3 Å² — excellent, suitable for high-fidelity α²F(ω)
+  //   spread 3-8 Å² — acceptable; LO-TO splitting and acoustic modes may smear
+  //   spread > 10 Å² — Wannier functions are delocalized; interpolation will
+  //                    give wrong α²F(ω) and λ. Likely poor disentanglement,
+  //                    wrong projection windows, or num_iter too small.
   if (w90Result.stdout.includes("Spread")) {
-    console.log(`[EPW] wannier90 completed (.chk written)`);
+    // Parse the FINAL spread line: "Omega Total =   <value> Angstroms^2"
+    const spreadRegex = /Omega\s+Total\s*=\s*([\d.]+)\s*Angstroms\^2/gi;
+    let lastMatch: RegExpExecArray | null = null;
+    let m: RegExpExecArray | null;
+    while ((m = spreadRegex.exec(w90Result.stdout)) !== null) {
+      lastMatch = m;
+    }
+    if (lastMatch) {
+      const finalSpread = parseFloat(lastMatch[1]);
+      const spreadPerWF = finalSpread / Math.max(1, numWann);
+      console.log(`[EPW] wannier90 completed: total spread Ω=${finalSpread.toFixed(2)} Å² (${spreadPerWF.toFixed(2)} Å²/WF, ${numWann} WFs)`);
+      if (spreadPerWF > 10) {
+        warnings.push(
+          `Wannier spread ${spreadPerWF.toFixed(1)} Å²/WF > 10 — delocalized WFs ` +
+          `will give unreliable α²F(ω). Check disentanglement windows and num_iter.`,
+        );
+      } else if (spreadPerWF > 5) {
+        warnings.push(
+          `Wannier spread ${spreadPerWF.toFixed(1)} Å²/WF > 5 — moderately delocalized; ` +
+          `EPW interpolation accuracy may be reduced.`,
+        );
+      }
+    } else {
+      console.log(`[EPW] wannier90 completed (.chk written; spread line not parsed)`);
+    }
   } else {
     warnings.push("Wannier90 may not have converged — no spread data found");
   }

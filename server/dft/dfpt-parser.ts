@@ -349,7 +349,16 @@ export function parseLambdaOutput(stdout: string): {
       const exponent = -1.04 * (1 + lambda) / denom;
       if (exponent < -50) { tcCorrected.push(0); continue; }
       let tcAD = (omegaLog / 1.2) * f1 * Math.exp(exponent);
-      tcAD = Math.max(0, Math.min(500, tcAD));
+      // Don't cap Tc — theoretical hydrides at extreme pressure can predict
+      // > 500 K from Allen-Dynes. A hard cap silently corrupts the ML training
+      // signal for the exact materials we care about discovering. Only filter
+      // negative (unphysical denominator) values.
+      tcAD = Math.max(0, tcAD);
+      if (tcAD > 500) {
+        console.warn(`[Allen-Dynes] Tc = ${tcAD.toFixed(1)} K > 500 K predicted ` +
+          `(λ=${lambda.toFixed(2)}, ω_log=${omegaLog.toFixed(0)} K, μ*=${muStar}) — ` +
+          `likely a strong-coupling extreme; verify by Eliashberg if available.`);
+      }
       tcCorrected.push(Number(tcAD.toFixed(2)));
     }
   }
