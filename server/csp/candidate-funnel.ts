@@ -427,14 +427,24 @@ export async function runCandidateFunnel(
   stats.f5_scored = f5.length;
 
   // F6: CHGNet MLIP full relaxation (if available)
-  // Relaxes ALL post-F5 candidates to find deep energy basins.
-  // Ranks by relaxed MLIP energy so DFT only sees lowest-energy structures.
-  let f6Candidates = f5.map(s => s.candidate);
+  // Relaxes the top-scored post-F5 candidates to find deep energy basins.
+  // Sort by F5 preScore DESCENDING so when CHGNet's internal slice(0, maxEval)
+  // truncates, it keeps the highest-confidence structures, not generation-order
+  // first-N. Before this sort, AIRSS-buildcell candidates dominated the head of
+  // the array purely because they were produced first, not because they scored
+  // highest.
+  const f5Sorted = [...f5].sort((a, b) => (b.preScore ?? 0) - (a.preScore ?? 0));
+  let f6Candidates = f5Sorted.map(s => s.candidate);
   if (isChgnetAvailable() && f6Candidates.length > 3) {
     try {
       // Preview: 50 candidates max (full relaxation of 100 at 15+ atoms hits 30 min cap)
       // Standard/deep: 150-300 (more budget, more candidates worth screening)
       const maxEval = Math.min(f6Candidates.length, tier === "preview" ? 50 : tier === "standard" ? 150 : 300);
+      // Diagnostic: show score range of what's about to be evaluated
+      const headScore = f5Sorted[0]?.preScore ?? NaN;
+      const cutoffScore = f5Sorted[Math.min(f5Sorted.length - 1, maxEval - 1)]?.preScore ?? NaN;
+      const tailScore = f5Sorted[f5Sorted.length - 1]?.preScore ?? NaN;
+      console.log(`[CSP-Funnel] F6 preScore window for ${formula}: top=${headScore.toFixed(3)}, cutoff@${maxEval}=${cutoffScore.toFixed(3)}, tail=${tailScore.toFixed(3)} (${f6Candidates.length - maxEval} below cutoff dropped)`);
 
       // Scale timeout with number of structures and estimated atom count.
       // Non-hydrides (V3Si, BaFe2As2) finish in 7-14 min for 50 candidates.
