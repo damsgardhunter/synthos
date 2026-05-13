@@ -374,15 +374,15 @@ def solve_pairing_eigenvalue(
                 maxiter=2000, tol=1e-4,
             )
     else:
-        # Dense eigensolver — compute all and take largest
-        eigenvalues_all = np.linalg.eigvals(kernel)
+        # Dense eigensolver — eigenvalues AND eigenvectors from the same
+        # diagonalization. Using eigvals(kernel) for evals and eigh(kernel_h)
+        # for evecs gives inconsistent (λ, ψ) pairs — the hermitianized
+        # eigvecs do not solve K·ψ = λ·ψ for the non-Hermitian K, so the
+        # gap-symmetry classification would be wrong.
+        eigenvalues_all, eigenvectors_all = np.linalg.eig(kernel)
         idx = np.argsort(-eigenvalues_all.real)[:n_evals]
         eigenvalues = eigenvalues_all[idx]
-        # For eigenvectors of top eigenvalues, use eigh on hermitianized kernel
-        kernel_h = (kernel + kernel.conj().T) / 2
-        evals_h, evecs_h = np.linalg.eigh(kernel_h)
-        idx_h = np.argsort(-evals_h)[:n_evals]
-        eigenvectors = evecs_h[:, idx_h]
+        eigenvectors = eigenvectors_all[:, idx]
 
     elapsed = time.time() - t0
     print(f"[Pairing] Eigenvalue solve took {elapsed:.1f}s")

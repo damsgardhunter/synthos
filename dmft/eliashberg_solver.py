@@ -124,12 +124,22 @@ def eliashberg_eigenvalue(
         op = LinearOperator(
             shape=(total_dim, total_dim), matvec=matvec, dtype=complex,
         )
+        # which="LR" = "largest real". The pairing instability is signalled by
+        # Re(λ) crossing 1, so "LR" is the physically correct selection (NOT
+        # "LM" which would pick complex modes with large magnitude but no real
+        # SC instability).
         try:
             evals, evecs = eigs(op, k=n_evals, which="LR", maxiter=1000, tol=1e-6)
         except Exception:
             evals, evecs = eigs(op, k=min(3, n_evals), which="LR", maxiter=2000, tol=1e-4)
     else:
-        # Dense construction
+        # Dense construction.
+        # The kernel K is k-row-independent for a local DMFT vertex (Γ has no
+        # row-k dependence), so kernel[ik·N_v + I_v, ikp·N_v + J_v] is filled
+        # identically for every ik. This is the correct embedding into the
+        # n_k·N_v block-structured space — the eigenvalue ladder is degenerate
+        # by N_k, and the leading eigenvalue is the same as for the reduced
+        # N_v×N_v sum-over-k' kernel (the N_k cancels with prefactor's 1/N_k).
         kernel = np.zeros((total_dim, total_dim), dtype=complex)
         for ikp in range(n_k):
             ik_minus = minus_k_map[ikp]
@@ -151,17 +161,19 @@ def eliashberg_eigenvalue(
                                     val = prefactor * gamma_val * g_kp * g_mkp
                                     for ik in range(n_k):
                                         kernel[ik * N_v + I_v, ikp * N_v + J_v] += val
-        all_evals = np.linalg.eigvals(kernel)
-        idx = np.argsort(-np.abs(all_evals))[:n_evals]
-        evals = all_evals[idx]
-        # Get eigenvectors of hermitianized kernel
-        kernel_h = (kernel + kernel.conj().T) / 2
-        evals_h, evecs_h = np.linalg.eigh(kernel_h)
-        idx_h = np.argsort(-evals_h)[:n_evals]
-        evecs = evecs_h[:, idx_h]
 
-    # Sort by descending Re(λ)
-    idx_sort = np.argsort(-np.abs(evals))
+        # Use ONE consistent diagonalization for both eigenvalues and
+        # eigenvectors. The kernel is generally non-Hermitian, so eig() not
+        # eigh(). The pairing instability is at largest Re(λ), not |λ|:
+        # for purely repulsive systems, all λ<0 and |λ|-sorting picks the
+        # MOST repulsive mode (wrong); Re-sorting picks the most attractive.
+        all_evals, all_evecs = np.linalg.eig(kernel)
+        idx = np.argsort(-np.real(all_evals))[:n_evals]
+        evals = all_evals[idx]
+        evecs = all_evecs[:, idx]
+
+    # Sort by descending Re(λ) — physical pairing instability ordering
+    idx_sort = np.argsort(-np.real(evals))
     evals = evals[idx_sort]
     evecs = evecs[:, idx_sort]
 

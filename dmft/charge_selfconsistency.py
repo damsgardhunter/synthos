@@ -614,6 +614,27 @@ def run_csc_loop(
     density_history = []
     density_matrix_prev = None
 
+    # Reference DFT density matrix for the double-counting correction
+    # Δn = n_DMFT - n_DFT. We keep this FIXED across iterations so the
+    # diagnostic delta_n actually measures the DMFT-vs-DFT discrepancy
+    # (not the iteration-to-iteration mixing residual).
+    #
+    # Priority for the reference:
+    #   1. bundle_data["density_matrix_dft"] if provided (best — from
+    #      DFT/Wannier projection of the initial SCF)
+    #   2. Identity * (filling/2) as a non-informative fallback
+    #
+    # If the bundle didn't carry an explicit DFT density (older bundles),
+    # we capture the FIRST iteration's DMFT density as the reference — this
+    # is not the true DFT density but it stabilizes the diagnostic; the
+    # zeroth iteration's DMFT-from-DFT-Σ₀ is the closest available proxy.
+    density_matrix_dft_ref = bundle_data.get("density_matrix_dft")
+    if density_matrix_dft_ref is not None:
+        density_matrix_dft_ref = np.asarray(density_matrix_dft_ref)
+        print(f"[CSC] Using bundle DFT density as reference for Δn (trace={float(np.trace(density_matrix_dft_ref).real):.3f})")
+    else:
+        print("[CSC] No DFT density in bundle — will capture iteration-0 DMFT density as proxy reference")
+
     print(f"\n{'='*60}")
     print(f"[CSC] Charge Self-Consistent DFT+DMFT Loop")
     print(f"[CSC] n_orb={n_orb}, max_iter={csc_params.max_iterations}, "
@@ -754,13 +775,21 @@ def run_csc_loop(
 
         density_matrix_prev = density_matrix_mixed
 
+        # Capture the iteration-0 DMFT density as DFT-proxy reference if the
+        # bundle didn't supply a true DFT density (older bundles).
+        if density_matrix_dft_ref is None:
+            density_matrix_dft_ref = density_matrix_avg.copy()
+
         # Save MIXED density correction for the NEXT iteration's QE callback
         # (QE reads this via starting_ns_eigenvalue to seed the correlated occupations)
         # Pass corr_shells for multi-atom CSC: each correlated atom gets its own
         # starting_ns_eigenvalue block instead of all collapsing to atom=1.
+        # The DFT reference is fixed across iterations so Δn = n_DMFT - n_DFT
+        # is a meaningful diagnostic of double-counting drift (not just the
+        # iteration mixing residual).
         write_qe_density_correction(
             density_matrix_mixed,
-            density_matrix_avg,
+            density_matrix_dft_ref,
             [f"orb_{i}" for i in range(n_orb)],
             os.path.join(iter_dir, "density_correction.json"),
             corr_shells=bundle_data.get("corr_shells"),
