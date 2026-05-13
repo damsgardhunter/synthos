@@ -456,6 +456,65 @@ function detectPPType(element: string): "paw" | "uspp" | "nc" {
   return "paw";
 }
 
+/**
+ * Whether the pseudopotential for `element` includes spin-orbit data.
+ *
+ * QE's `lspinorb = .true.` requires fully-relativistic (FR) pseudos that
+ * carry the `has_so="T"` flag. Scalar-relativistic pseudos (`has_so="F"`)
+ * will cause `lspinorb=.true.` to silently produce wrong physics: the
+ * Dirac kinetic correction is included but the SO coupling between l ± 1/2
+ * channels is absent.
+ *
+ * Returns `false` on read errors (conservative: assume no SO data).
+ */
+function detectPPHasSOC(element: string): boolean {
+  const ppPath = path.join(QE_PSEUDO_DIR, resolvePPFilename(element));
+  try {
+    const head = fs.readFileSync(ppPath, "utf-8").slice(0, 4000);
+    if (head.includes('has_so="T"') || head.includes("has_so='.true.'")) return true;
+    if (head.match(/relativistic\s*[:=]\s*['"]?full/i)) return true;
+  } catch {}
+  return false;
+}
+
+/**
+ * Filter `qeSystemFlags` from analyzeSOCRequirement to remove lspinorb
+ * (and noncolin if no spin-orbit element has FR pseudo) when the
+ * available pseudopotentials don't actually carry SO data.
+ *
+ * Returns the (possibly downgraded) flag string plus a diagnostic note
+ * for the caller to surface in logs.
+ */
+function applySOCPseudoConstraint(
+  qeFlags: string,
+  socElements: Array<{ element: string }>,
+): { flags: string; note: string | null } {
+  if (!qeFlags.includes("lspinorb")) {
+    return { flags: qeFlags, note: null };
+  }
+  const elementsWithSO = socElements
+    .map(e => e.element)
+    .filter(el => detectPPHasSOC(el));
+  if (elementsWithSO.length > 0) {
+    // At least one SOC-relevant element has FR pseudo — proceed with SOC
+    return { flags: qeFlags, note: null };
+  }
+  // Downgrade: drop lspinorb (keep noncolin if magnetism is the reason),
+  // but here lspinorb without FR pseudos = wrong physics, so strip it.
+  const downgraded = qeFlags
+    .replace(/\s*lspinorb\s*=\s*\.true\.,?\s*\n?/g, "")
+    .replace(/\s*noncolin\s*=\s*\.true\.,?\s*\n?/g, "");
+  const elList = socElements.map(e => e.element).join(",");
+  return {
+    flags: downgraded,
+    note:
+      `[SOC] lspinorb=.true. requested but no FR pseudo (has_so="T") found ` +
+      `for SOC elements: ${elList}. Downgraded to scalar-relativistic — ` +
+      `SO splitting in pseudo is NOT included. To enable full SOC, replace ` +
+      `pseudos with FR variants (e.g., from PseudoDojo NC-SR-FR or ONCV FR).`,
+  };
+}
+
 function ecutrhoMultiplier(elements: string[]): number {
   // USPP requires 8x cutoff due to augmentation charges.
   // PAW and NC only need 4x — using 8x for PAW causes FFT grid memory overflow
@@ -4198,6 +4257,28 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
         `(max SOC=${socAnalysis.maxSOCEnergy.toFixed(2)} eV, elements: ${socAnalysis.socElements.map(e => e.element).join(",")})`);
     }
 
+    // --- SOC pseudopotential availability check ---
+    // analyzeSOCRequirement emits lspinorb=.true. based on element chemistry
+    // alone, but the actual pseudo files in QE_PSEUDO_DIR may be scalar-
+    // relativistic (has_so="F"). Running QE with lspinorb=.true. on SR
+    // pseudos produces wrong physics silently. Downgrade if necessary.
+    if (socAnalysis.enableFullSOC && socAnalysis.qeSystemFlags) {
+      const { flags: gatedFlags, note: socNote } = applySOCPseudoConstraint(
+        socAnalysis.qeSystemFlags,
+        socAnalysis.socElements,
+      );
+      if (socNote) {
+        console.warn(`[QE-Worker] ${socNote}`);
+        socAnalysis.notes.push(socNote);
+        socAnalysis.qeSystemFlags = gatedFlags;
+        // If we stripped lspinorb entirely, mark enableFullSOC as false so
+        // downstream knows SOC was not actually applied
+        if (!gatedFlags.includes("lspinorb")) {
+          socAnalysis.enableFullSOC = false;
+        }
+      }
+    }
+
     // --- Magnetic ground-state search decision ---
     const magSearchDecision = shouldSearchMagneticGS(elements, counts);
     if (magSearchDecision.shouldSearch) {
@@ -5719,9 +5800,29 @@ ${cellBlockEos}
       // Parse SCF data from vc-relax output (last SCF in the vc-relax run)
       const vcScfParsed = parseSCFOutput(vcRelaxStdout, 0.015);
       if (vcScfParsed.totalEnergy !== 0 && vcScfParsed.converged) {
-        result.scf = vcScfParsed;
-        skipSeparateSCF = true;
-        console.log(`[QE-Worker] Using vc-relax SCF results for ${formula} (E=${vcScfParsed.totalEnergy.toFixed(4)} eV, Ef=${vcScfParsed.fermiEnergy ?? "N/A"}, force=${vcScfParsed.totalForce?.toFixed(4) ?? "N/A"}) — skipping redundant separate SCF`);
+        // Verify the .save/ directory has the collected wavefunctions that
+        // downstream tools (ph.x, bands, pw2wannier90) require. vc-relax with
+        // disk_io='high' is supposed to write collected wfc<ik>.dat files,
+        // but in practice some runs (Nb3Sn Apr 28: only charge-density.dat +
+        // data-file-schema.xml + paw.txt) skip the final flush. Without the
+        // wfc files ph.x aborts with "Wavefunctions in collected format not
+        // available" — so fall through to a fresh SCF instead of skipping.
+        const savePrefix = formula.replace(/[^a-zA-Z0-9]/g, "");
+        const saveDirCheck = path.join(jobDir, "tmp", `${savePrefix}.save`);
+        let hasCollectedWfcs = false;
+        if (fs.existsSync(saveDirCheck)) {
+          try {
+            const entries = fs.readdirSync(saveDirCheck);
+            hasCollectedWfcs = entries.some(f => /^wfc\d+\.(dat|hdf5)$/.test(f));
+          } catch { /* ignore */ }
+        }
+        if (hasCollectedWfcs) {
+          result.scf = vcScfParsed;
+          skipSeparateSCF = true;
+          console.log(`[QE-Worker] Using vc-relax SCF results for ${formula} (E=${vcScfParsed.totalEnergy.toFixed(4)} eV, Ef=${vcScfParsed.fermiEnergy ?? "N/A"}, force=${vcScfParsed.totalForce?.toFixed(4) ?? "N/A"}) — skipping redundant separate SCF`);
+        } else {
+          console.log(`[QE-Worker] vc-relax converged but ${saveDirCheck} lacks collected wfc*.dat — running separate SCF to generate wavefunctions ph.x needs`);
+        }
       }
     }
 
@@ -6123,8 +6224,12 @@ ${cellBlockEos}
             break;
           }
         } else if (classifier === " [SCF_NOT_CONVERGED]") {
-          // Halve mixing_beta (floor 0.03), bump maxSteps, force local-TF if still plain.
-          nextOverride.mixingBeta = Math.max(0.03, (params.mixingBeta ?? 0.3) * 0.5);
+          // Halve mixing_beta, bump maxSteps, force local-TF if still plain.
+          // Floor was previously 0.03 — but the retry ladder's extreme-config
+          // path uses 0.01 (line 5864) and some all-heavy quaternaries
+          // (BaBiLaTe3, certain hydrides) need < 0.03 to converge. Drop the
+          // floor to 0.01 so SCF can decay further when needed.
+          nextOverride.mixingBeta = Math.max(0.01, (params.mixingBeta ?? 0.3) * 0.5);
           nextOverride.maxSteps = Math.max(params.maxSteps, (params.maxSteps ?? 300) + 200);
           if ((params.mixingMode ?? "plain") === "plain") nextOverride.mixingMode = "local-TF";
           nextOverride.mixingNdim = Math.max(params.mixingNdim ?? 8, 16);
@@ -6137,9 +6242,11 @@ ${cellBlockEos}
         } else if (classifier === " [CHARGE_WRONG]") {
           // Restart wavefunctions/potential from atomic superposition.
           // Force clean on next attempt — bad charge density is poison.
+          // Floor lowered from 0.05 to 0.02 for the same reason as the
+          // SCF_NOT_CONVERGED branch above (stubborn heavy systems).
           nextOverride.startingwfc = "random";
           nextOverride.startingpot = "atomic";
-          nextOverride.mixingBeta = Math.max(0.05, (params.mixingBeta ?? 0.3) * 0.5);
+          nextOverride.mixingBeta = Math.max(0.02, (params.mixingBeta ?? 0.3) * 0.5);
           (nextOverride as any)._forceClean = true;
         } else if (classifier === " [SMEARING_NEEDED]") {
           // Metal mis-detected as insulator: widen smearing + force MV.
