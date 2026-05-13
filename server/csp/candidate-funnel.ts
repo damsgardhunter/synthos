@@ -141,9 +141,21 @@ function f1_geometry(
 ): ScoredCandidate[] {
   const passed: ScoredCandidate[] = [];
 
+  // Absolute floor for any atom-pair separation, regardless of element pair or
+  // pressure. Below this, physics breaks before relaxation can recover (Stage 1
+  // sees Ry/bohr forces in the hundreds and bounces atoms violently before
+  // the PP repulsion catches them, polluting the structure). Calibrated from
+  // CaFe2As2 cand 1 (Apr 2026): passed F1 at the 0.5× minsep threshold and
+  // showed F=177 Ry/bohr at Stage 1, wasting ~50 min before failure.
+  const ABS_MIN_DIST_ANG = 0.6;
+
   for (const c of candidates) {
     const a = c.latticeA;
     const cOverA = c.cOverA ?? 1.0;
+    // Use b/a too — previous version dropped it from the y-axis and
+    // underestimated distances for non-cubic cells, letting close pairs slip
+    // through. Pull from candidate fields if available.
+    const bOverA_dist = c.latticeB && c.latticeA ? c.latticeB / c.latticeA : 1.0;
     const n = c.positions.length;
     const vol = c.cellVolume ?? (a * a * a * cOverA);
     const volPerAtom = vol / Math.max(1, n);
@@ -152,18 +164,22 @@ function f1_geometry(
     let geometryScore = 1.0;
     const elements = [...new Set(c.positions.map(p => p.element))];
 
-    // Check minimum pair distances (pressure-aware)
+    // Check minimum pair distances (pressure-aware) with full cell-axes scaling.
+    // Threshold raised from 0.5× minsep → 0.65× because 50% was tuned for
+    // overlap detection but missed near-overlap pairs that survive F1 and then
+    // explode in Stage 1 relax (CaFe2As2 cand 1: F=177 Ry/bohr).
     for (let i = 0; i < n && !rejected; i++) {
       for (let j = i + 1; j < n; j++) {
         let dx = c.positions[i].x - c.positions[j].x;
         let dy = c.positions[i].y - c.positions[j].y;
         let dz = c.positions[i].z - c.positions[j].z;
         dx -= Math.round(dx); dy -= Math.round(dy); dz -= Math.round(dz);
-        const dist = Math.sqrt((dx * a) ** 2 + (dy * a) ** 2 + (dz * a * cOverA) ** 2);
+        const dist = Math.sqrt((dx * a) ** 2 + (dy * a * bOverA_dist) ** 2 + (dz * a * cOverA) ** 2);
         const minsep = getPairMinsep(c.positions[i].element, c.positions[j].element, pressureGPa);
 
-        if (dist < minsep * 0.5) {
-          // Hard reject: atoms WAY too close (< half minsep)
+        if (dist < ABS_MIN_DIST_ANG || dist < minsep * 0.65) {
+          // Hard reject: catastrophic atomic overlap (absolute floor) OR
+          // below 65% of per-pair minsep
           rejected = true;
           stats.rejectionReasons["f1_atom_overlap"] = (stats.rejectionReasons["f1_atom_overlap"] ?? 0) + 1;
           break;

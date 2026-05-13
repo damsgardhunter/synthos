@@ -4089,7 +4089,7 @@ function generateSCFInputWithParams(
   counts: Record<string, number>,
   latticeA: number,
   positions: Array<{ element: string; x: number; y: number; z: number }>,
-  params: { mixingBeta: number; maxSteps: number; diag: string; smearing?: string; degauss?: number; ecutwfcBoost?: number; ecutrhoMultiplierOverride?: number; convThr?: string; forcConvThr?: string; etotConvThr?: string; dftPlusULines?: string; dftPlusUNspin2?: boolean; mixingMode?: string; mixingNdim?: number; startingwfc?: string; startingpot?: string; diagoThrInit?: string; restartFromScratch?: boolean; maxSecondsOverride?: number; socFlags?: string; forceNspin?: 1 | 2; forceMagBlock?: string; forceNoncolin?: boolean; hubbardCard?: string },
+  params: { mixingBeta: number; maxSteps: number; diag: string; smearing?: string; degauss?: number; ecutwfcBoost?: number; ecutrhoMultiplierOverride?: number; convThr?: string; forcConvThr?: string; etotConvThr?: string; dftPlusULines?: string; dftPlusUNspin2?: boolean; mixingMode?: string; mixingNdim?: number; startingwfc?: string; startingpot?: string; diagoThrInit?: string; restartFromScratch?: boolean; maxSecondsOverride?: number; socFlags?: string; forceNspin?: 1 | 2; forceMagBlock?: string; forceNoncolin?: boolean; hubbardCard?: string; nbndOverride?: number; nbndScale?: number },
 ): string {
   const totalAtoms = positions.length;
   const nTypes = elements.length;
@@ -4159,7 +4159,12 @@ function generateSCFInputWithParams(
   // behaves same as SOC noncolin — 4-component spinors, angle1/angle2 format.
   const nspinOut = (hasSOC || hasNoncolin) ? 1 : (useNspin2 ? 2 : (params.forceNspin ?? 1));
   const noncolinBlock = hasNoncolin ? "  noncolin = .true.,\n" : "";
-  const nbnd = computeNbnd(elements, counts, nspinOut, positions, hasSOC || hasNoncolin);
+  // nbnd: usually computed from element/position electron counts. nbndOverride
+  // is an absolute override for retries that hit "too few bands"; nbndScale is
+  // a multiplicative bump applied on top of the auto value (e.g. 1.5 = +50%).
+  // Floor at the computed value so a retry can only ever expand the band set.
+  const nbndAuto = computeNbnd(elements, counts, nspinOut, positions, hasSOC || hasNoncolin);
+  const nbnd = params.nbndOverride ?? (params.nbndScale ? Math.ceil(nbndAuto * Math.max(1.0, params.nbndScale)) : nbndAuto);
   // restart_mode='restart' on retry attempts 2+ preserves the partial SCF
   // charge density from the previous wall-time-killed attempt instead of
   // throwing it away — aiida's standard move for ElectronicMaxStep /
@@ -6694,7 +6699,7 @@ ${cellBlockEos}
       console.log(`[QE-Worker] ${formula}: complex system (${elements.length} el, halogen=${hasHalogen}, highP-H=${isHighPHydride}) — using local-TF SCF schedule`);
     }
 
-    type RetryConfig = { mixingBeta: number; maxSteps: number; diag: string; smearing?: string; degauss?: number; ecutwfcBoost?: number; convThr?: string; forcConvThr?: string; etotConvThr?: string; mixingMode?: string; mixingNdim?: number; startingwfc?: string; startingpot?: string; diagoThrInit?: string; restartFromScratch?: boolean };
+    type RetryConfig = { mixingBeta: number; maxSteps: number; diag: string; smearing?: string; degauss?: number; ecutwfcBoost?: number; convThr?: string; forcConvThr?: string; etotConvThr?: string; mixingMode?: string; mixingNdim?: number; startingwfc?: string; startingpot?: string; diagoThrInit?: string; restartFromScratch?: boolean; nbndOverride?: number; nbndScale?: number };
 
     // Extreme systems (all-heavy quaternary+: BaBiLaTe3 class).
     // Start with very gentle mixing (beta=0.07), wide smearing (degauss=0.03),
@@ -6948,6 +6953,7 @@ ${cellBlockEos}
           else if (combined.includes("wrong number of electrons")) classifier = " [WRONG_NELEC]";
           else if (combined.includes("dE0s is positive")) classifier = " [BFGS_UPHILL]";
           else if (combined.includes("smearing is needed")) classifier = " [SMEARING_NEEDED]";
+          else if (combined.includes("too few bands")) classifier = " [TOO_FEW_BANDS]";
         }
         result.scf.error = `pw.x exited with code ${scfResult.exitCode}${classifier}: ${errSummary}`;
         console.log(`[QE-Worker] SCF attempt ${attempt + 1} failed for ${formula}${classifier}: ${errSummary.slice(-200)}`);
@@ -7016,6 +7022,21 @@ ${cellBlockEos}
           // Metal mis-detected as insulator: widen smearing + force MV.
           nextOverride.smearing = "mv";
           nextOverride.degauss = Math.max(params.degauss ?? 0.005, 0.03);
+        } else if (classifier === " [TOO_FEW_BANDS]") {
+          // QE rejected the SCF before iterating because computeNbnd returned
+          // too few bands for the actual electron count. This happens when:
+          //  (a) positions array isn't representative of the SCF cell
+          //     (supercell mismatch after vc-relax produces no positions)
+          //  (b) the PP has more semicore valence than the table assumes
+          //  (c) magnetic d-block metals near van Hove need extra empty bands
+          // Bump nbnd multiplicatively each retry: 1.5× → 2.0× → 3.0×. Pure
+          // additive (e.g. +20) wouldn't keep up when nbnd is already high.
+          const prevScale = params.nbndScale ?? 1.0;
+          const nextScale = prevScale < 1.5 ? 1.5 : prevScale < 2.0 ? 2.0 : 3.0;
+          nextOverride.nbndScale = nextScale;
+          // Clear any prior absolute override so the scale takes effect
+          (nextOverride as any).nbndOverride = undefined;
+          console.log(`[QE-Worker] TOO_FEW_BANDS for ${formula}: bumping nbnd scale ${prevScale.toFixed(1)} → ${nextScale.toFixed(1)}×`);
         }
         if (Object.keys(nextOverride).length > Object.keys(handlerOverride).length) {
           const changed = Object.entries(nextOverride)
