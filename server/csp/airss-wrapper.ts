@@ -26,6 +26,23 @@ const BUILDCELL_BIN = process.env.AIRSS_BIN
   ?? process.env.BUILDCELL_BIN
   ?? "/usr/local/bin/buildcell";
 
+// Deduplication cache for noisy logs: AIRSS calls generateCellInput once per
+// (Z, volume) combination per formula (≈20× per material), and the LLM-advised
+// MINSEP computation is identical for every call. Track emitted messages so we
+// log each unique line once per process. Capped at 256 entries; oldest evicted.
+const LOGGED_MESSAGES = new Set<string>();
+const LOGGED_MESSAGE_ORDER: string[] = [];
+function logOnce(message: string): void {
+  if (LOGGED_MESSAGES.has(message)) return;
+  LOGGED_MESSAGES.add(message);
+  LOGGED_MESSAGE_ORDER.push(message);
+  if (LOGGED_MESSAGE_ORDER.length > 256) {
+    const evicted = LOGGED_MESSAGE_ORDER.shift();
+    if (evicted) LOGGED_MESSAGES.delete(evicted);
+  }
+  console.log(message);
+}
+
 // Volume per atom estimates (Angstrom^3/atom)
 const VOL_PER_ATOM: Record<string, number> = {
   H: 3.5, Li: 21.3, Be: 8.1, B: 7.3, C: 5.7, N: 6.0, O: 5.5,
@@ -92,7 +109,7 @@ function generateCellInput(
       const advisedMinsep = advisedMin * 0.75;
       const oldMin = globalMin;
       globalMin = Math.max(globalMin, advisedMinsep);
-      console.log(`[AIRSS] LLM-advised MINSEP: smallest pair=${advisedMin.toFixed(2)} Å × 0.75 = ${advisedMinsep.toFixed(2)} Å, heuristic=${oldMin.toFixed(2)} Å → using ${globalMin.toFixed(2)} Å`);
+      logOnce(`[AIRSS] LLM-advised MINSEP: smallest pair=${advisedMin.toFixed(2)} Å × 0.75 = ${advisedMinsep.toFixed(2)} Å, heuristic=${oldMin.toFixed(2)} Å → using ${globalMin.toFixed(2)} Å`);
     }
   }
 

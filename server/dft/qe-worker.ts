@@ -515,14 +515,45 @@ function applySOCPseudoConstraint(
   };
 }
 
+// "Hard PAW" elements: pseudos with semicore states in valence (s/p-semicore for
+// early TMs and alkaline-earth d-block, p-semicore for lanthanides/actinides).
+// Their valence charge density has sharp features that need ecutrho ≥ 8×ecutwfc
+// for the FFT grid to represent without negative-rho artifacts. CaH6 with
+// ecutrho/ecutwfc=4 produced negative rho = 0.296 e- → -9770 cm⁻¹ phonon modes;
+// bumping to 8 brings negative rho below 1e-3 and recovers physical frequencies.
+const HARD_PAW_ELEMENTS = new Set<string>([
+  // Alkaline earths with semicore p (3s+3p, 4s+4p, 5s+5p in valence)
+  "Ca", "Sr", "Ba", "Ra",
+  // Group 3 + lanthanides (semicore 5s+5p in valence)
+  "Sc", "Y", "La",
+  "Ce", "Pr", "Nd", "Pm", "Sm", "Eu", "Gd", "Tb", "Dy", "Ho", "Er", "Tm", "Yb", "Lu",
+  // Actinides (semicore 6s+6p in valence)
+  "Ac", "Th", "Pa", "U", "Np", "Pu",
+  // Early/mid 3d transition metals (semicore 3s+3p in valence for most PSL pseudos)
+  "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn",
+  // 4d transition metals (semicore 4s+4p in valence)
+  "Zr", "Nb", "Mo", "Tc", "Ru", "Rh", "Pd", "Ag", "Cd",
+  // 5d transition metals (semicore 5s+5p in valence)
+  "Hf", "Ta", "W", "Re", "Os", "Ir", "Pt", "Au", "Hg",
+  // Heavy alkalis (semicore p in valence on better PSL pseudos)
+  "K", "Rb", "Cs",
+]);
+
 function ecutrhoMultiplier(elements: string[]): number {
-  // USPP requires 8x cutoff due to augmentation charges.
-  // PAW and NC only need 4x — using 8x for PAW causes FFT grid memory overflow
-  // for large hydrides like LaH10 (ecutrho = 100 * 8 = 800 Ry → OOM → code 6 crash).
+  // USPP requires ≥8x cutoff due to augmentation charges (any element).
+  // PAW with semicore valence ("hard PAW") also needs 8x: charge density has
+  // sharp core-region features that the dense grid must resolve. Without it,
+  // the FFT charge density wraps to negative values (e.g. CaH6: -0.3 e-),
+  // breaking DFPT derivatives and giving thousands-of-cm⁻¹ imaginary modes.
+  // Plain PAW / NC for light elements is fine at 4x.
+  let hasUSPP = false;
+  let hasHardPAW = false;
   for (const el of elements) {
     const ppType = detectPPType(el);
-    if (ppType === "uspp") return 8;
+    if (ppType === "uspp") hasUSPP = true;
+    if (ppType === "paw" && HARD_PAW_ELEMENTS.has(el)) hasHardPAW = true;
   }
+  if (hasUSPP || hasHardPAW) return 8;
   return 4;
 }
 
@@ -2828,6 +2859,13 @@ function generatePhononInput(formula: string, elements: string[] = [], totalAtom
   // binary/numerical format that dynmat.x must post-process, and the various
   // parsers fail to match dynmat.x's tabular output → "0 modes" bug.
   const isGammaOnly = nq1 === 1 && nq2 === 1 && nq3 === 1;
+  // Born effective charges Z*_αβ and high-frequency dielectric ε∞.
+  // Required for LO-TO splitting at q=Γ in any system with non-zero ionic
+  // character. ph.x auto-skips Z*/ε∞ if the system is metallic at Ef, so
+  // we can set it unconditionally — cost is only paid for insulators.
+  // Only active when q=Γ is in the q-mesh, which is true for both the
+  // ldisp=.false. (Γ-only) and ldisp=.true. (Γ-included grids) paths.
+  const epsilFlags = "  epsil = .true.,\n  trans = .true.,\n";
   if (isGammaOnly) {
     // QE ph.x with ldisp=.false. REQUIRES an explicit q-point card after the
     // namelist. Without it, some QE versions read garbage or crash. Specify
@@ -2841,7 +2879,7 @@ function generatePhononInput(formula: string, elements: string[] = [], totalAtom
   alpha_mix(1) = ${alphaMix},
   reduce_io = .true.,
   ldisp = .false.,
-${recoverLine}${maxSecLine}/
+${epsilFlags}${recoverLine}${maxSecLine}/
 0.0 0.0 0.0
 `;
   }
@@ -2855,8 +2893,598 @@ ${recoverLine}${maxSecLine}/
   reduce_io = .true.,
   ldisp = .true.,
   nq1 = ${nq1}, nq2 = ${nq2}, nq3 = ${nq3},
-${recoverLine}${maxSecLine}/
+${epsilFlags}${recoverLine}${maxSecLine}/
 `;
+}
+
+/**
+ * Parse "negative rho (up, down): 2.959E-01 0.000E+00" from QE SCF output.
+ * Returns the larger magnitude across spin channels. Above ~1e-3 e- the FFT
+ * density grid is too coarse for the chosen pseudopotential — DFPT derivatives
+ * become garbage and phonon frequencies blow up by orders of magnitude.
+ */
+function parseNegativeRho(stdout: string): { max: number; allValues: number[] } {
+  const matches = [...stdout.matchAll(/negative rho\s*\(up,\s*down\)\s*:\s*(-?[\d.E+-]+)\s+(-?[\d.E+-]+)/gi)];
+  const values: number[] = [];
+  let maxAbs = 0;
+  for (const m of matches) {
+    const up = parseFloat(m[1]);
+    const dn = parseFloat(m[2]);
+    if (Number.isFinite(up)) {
+      values.push(up);
+      if (Math.abs(up) > maxAbs) maxAbs = Math.abs(up);
+    }
+    if (Number.isFinite(dn)) {
+      values.push(dn);
+      if (Math.abs(dn) > maxAbs) maxAbs = Math.abs(dn);
+    }
+  }
+  return { max: maxAbs, allValues: values };
+}
+
+/**
+ * Count "c_bands: N eigenvalues not converged" warnings in the last `tailLines`
+ * lines of SCF output. A handful is normal at the start of a run; >5 in the
+ * tail means Davidson failed to converge bands at the converged density, and
+ * phonon will inherit broken eigenvectors.
+ */
+function countEigvalWarningsInTail(stdout: string, tailLines: number = 60): number {
+  const lines = stdout.split("\n");
+  const tail = lines.slice(-tailLines).join("\n");
+  return (tail.match(/c_bands:\s*\d+\s+eigenvalues not converged/g) || []).length;
+}
+
+/**
+ * Generate a phonon-prep SCF input. Strict-quality settings: conv_thr=1e-12,
+ * degauss=0.005, +20 Ry ecutwfc boost, mixing_beta=0.3. This SCF runs on the
+ * vc-relaxed geometry to produce the clean charge density that ph.x reads from
+ * .save/. Without it, ph.x inherits the loose density from vc-relax (conv_thr
+ * 1e-7, degauss 0.015) and produces wrong dynamical matrices.
+ *
+ * The k-grid is set tight enough to satisfy k-q commensurability for the
+ * downstream phonon q-grid (k_grid must be an integer multiple of q_grid).
+ */
+function generatePhononPrepSCFInput(
+  formula: string,
+  elements: string[],
+  counts: Record<string, number>,
+  latticeA: number,
+  positions: Array<{ element: string; x: number; y: number; z: number }>,
+  opts: {
+    kPointsCard: string;
+    ecutrhoMultiplierOverride?: number;
+    forceNspin?: 1 | 2;
+    forceMagBlock?: string;
+    dftPlusULines?: string;
+    dftPlusUNspin2?: boolean;
+    hubbardCard?: string;
+    socFlags?: string;
+    forceNoncolin?: boolean;
+    maxSecondsOverride?: number;
+  },
+): string {
+  return generateSCFInputWithParams(formula, elements, counts, latticeA, positions, {
+    mixingBeta: 0.3,
+    maxSteps: 250,
+    diag: "david",
+    smearing: "mv",
+    degauss: 0.005,
+    ecutwfcBoost: 20,
+    ecutrhoMultiplierOverride: opts.ecutrhoMultiplierOverride,
+    convThr: "1.0d-12",
+    forcConvThr: "1.0d-4",
+    etotConvThr: "1.0d-7",
+    mixingMode: "plain",
+    mixingNdim: 12,
+    diagoThrInit: "1.0d-6",
+    restartFromScratch: true,
+    maxSecondsOverride: opts.maxSecondsOverride,
+    forceNspin: opts.forceNspin,
+    forceMagBlock: opts.forceMagBlock,
+    dftPlusULines: opts.dftPlusULines,
+    dftPlusUNspin2: opts.dftPlusUNspin2,
+    hubbardCard: opts.hubbardCard,
+    socFlags: opts.socFlags,
+    forceNoncolin: opts.forceNoncolin,
+  }).replace(
+    /K_POINTS \{automatic\}\s*\n\s*\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+/,
+    opts.kPointsCard,
+  );
+}
+
+/**
+ * Build a k-points card that satisfies k-q commensurability: each k-dimension
+ * is at least 2 × q_dim. For a 4×4×4 q-grid we want k ≥ 8×8×8. q2r.x / matdyn.x
+ * Fourier interpolation between k-mesh and q-mesh requires k_grid to be an
+ * integer multiple of q_grid; phonon-prep uses 2× for noise margin.
+ */
+function kPointsCardForPhononPrep(
+  latticeA: number,
+  cOverA: number,
+  _bOverA: number,
+  isMetallic: boolean | undefined,
+  totalAtoms: number,
+  qGrid: [number, number, number],
+): string {
+  // Phonon-prep uses a denser k-grid than production SCF (kspacing 0.20 vs 0.25).
+  // autoKPoints returns just the numeric row "  Nx Ny Nz  0 0 0" — we wrap it
+  // ourselves and apply the k≥2q commensurability bump.
+  const baseLine = autoKPoints(
+    latticeA, cOverA, 1.0, undefined, 0.20,
+    { stage: "scf", isMetallic, totalAtoms },
+  ).trim();
+  const match = baseLine.match(/^(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*$/);
+  if (!match) return `K_POINTS {automatic}\n${baseLine}`;
+  const [, ks1, ks2, ks3, sh1, sh2, sh3] = match;
+  const k1 = Math.max(parseInt(ks1, 10), 2 * qGrid[0]);
+  const k2 = Math.max(parseInt(ks2, 10), 2 * qGrid[1]);
+  const k3 = Math.max(parseInt(ks3, 10), 2 * qGrid[2]);
+  return `K_POINTS {automatic}\n  ${k1} ${k2} ${k3}  ${sh1} ${sh2} ${sh3}`;
+}
+
+// ============================================================================
+// Pre-phonon structure-quality validation (publication-grade pre-checks).
+// These are diagnostic — they log warnings about likely-wrong structures, but
+// do NOT block the pipeline. The intent is to surface "this phonon will be
+// garbage" early, not to reject candidates.
+// ============================================================================
+
+interface StressTensorKbar {
+  xx: number; yy: number; zz: number;
+  xy: number; xz: number; yz: number;
+  pressureKbar: number;
+}
+
+/**
+ * Parse the final 3×3 stress tensor in kbar from vc-relax / SCF stdout.
+ * QE prints two side-by-side 3×3 matrices: the first 3 columns are stress in
+ * Ry/bohr³, the last 3 are the same tensor in kbar. We use the kbar columns.
+ *
+ * Block format:
+ *     total   stress  (Ry/bohr**3)                   (kbar)     P=  1999.79
+ *  0.01356632  -0.00000004   0.00000003          1995.92    -0.01     0.01
+ * -0.00000004   0.01359412   0.00000005           -0.01  1999.50     0.01
+ *  0.00000003   0.00000005   0.01362487           0.01      0.01  2004.03
+ */
+function parseFinalStressTensor(stdout: string): StressTensorKbar | null {
+  const headerRegex = /total\s+stress\s+\(Ry\/bohr\*\*3\)\s+\(kbar\)\s+P=\s*(-?[\d.]+)\s*\n((?:[\s\S]*?\n){3})/g;
+  let last: { p: string; rows: string } | null = null;
+  let m: RegExpExecArray | null;
+  while ((m = headerRegex.exec(stdout)) !== null) {
+    last = { p: m[1], rows: m[2] };
+  }
+  if (!last) return null;
+  const rowLines = last.rows.split("\n").filter(l => l.trim().length > 0).slice(0, 3);
+  if (rowLines.length !== 3) return null;
+  const kbarRows: number[][] = [];
+  for (const line of rowLines) {
+    const nums = line.trim().split(/\s+/).map(parseFloat).filter(n => Number.isFinite(n));
+    if (nums.length < 6) return null;
+    kbarRows.push(nums.slice(3, 6));
+  }
+  return {
+    xx: kbarRows[0][0], xy: kbarRows[0][1], xz: kbarRows[0][2],
+    yy: kbarRows[1][1], yz: kbarRows[1][2],
+    zz: kbarRows[2][2],
+    pressureKbar: parseFloat(last.p),
+  };
+}
+
+interface SymmetryCheck {
+  expectedClass: "cubic" | "tetragonal" | "orthorhombic" | "lower";
+  diagonalSpread: number;       // max diagonal − min diagonal
+  offDiagonalMax: number;       // max |σ_ij| for i≠j
+  isConsistent: boolean;
+  warning?: string;
+}
+
+/**
+ * Classify the expected stress-tensor symmetry from the input cell shape, then
+ * verify the actual stress tensor matches it. The space group constrains which
+ * stress components must be equal (cubic: σ_xx=σ_yy=σ_zz; tetragonal:
+ * σ_xx=σ_yy≠σ_zz; etc.) and which must vanish (all off-diagonals in
+ * orthorhombic+).
+ *
+ * Tolerance is 0.5% of |P| or 5 kbar (whichever is larger) — at 2000 kbar
+ * target this is 10 kbar; at ambient ~5 kbar.
+ */
+function checkStressSymmetry(
+  stress: StressTensorKbar,
+  cOverA: number,
+  bOverA: number,
+): SymmetryCheck {
+  // Symmetric Cauchy stress: average i,j and j,i (numerical noise breaks
+  // exact symmetry but they should match to many decimals).
+  const sxx = stress.xx, syy = stress.yy, szz = stress.zz;
+  const sxy = stress.xy, sxz = stress.xz, syz = stress.yz;
+  const diagMin = Math.min(sxx, syy, szz);
+  const diagMax = Math.max(sxx, syy, szz);
+  const diagonalSpread = diagMax - diagMin;
+  const offDiagonalMax = Math.max(Math.abs(sxy), Math.abs(sxz), Math.abs(syz));
+  const absP = Math.abs(stress.pressureKbar);
+  const tol = Math.max(absP * 0.005, 5.0);
+  // Classify expected symmetry from input cell shape (within 1% tolerance)
+  const isAEqB = Math.abs(bOverA - 1.0) < 0.01;
+  const isAEqC = Math.abs(cOverA - 1.0) < 0.01;
+  let expectedClass: SymmetryCheck["expectedClass"];
+  if (isAEqB && isAEqC) expectedClass = "cubic";
+  else if (isAEqB || isAEqC || Math.abs(bOverA - cOverA) < 0.01) expectedClass = "tetragonal";
+  else expectedClass = "orthorhombic";
+  let isConsistent = offDiagonalMax < tol;
+  let warning: string | undefined;
+  if (expectedClass === "cubic" && diagonalSpread > tol) {
+    isConsistent = false;
+    warning = `stress diagonal spread ${diagonalSpread.toFixed(1)} kbar exceeds cubic tolerance ${tol.toFixed(1)} — input cell is cubic (b/a=c/a=1) but stress shows distortion; vc-relax may have settled to a lower-symmetry minimum (Jahn-Teller, AFM, structural transition)`;
+  } else if (expectedClass === "tetragonal" && offDiagonalMax > tol) {
+    isConsistent = false;
+    warning = `stress off-diagonals up to ${offDiagonalMax.toFixed(1)} kbar exceed tetragonal tolerance ${tol.toFixed(1)} — cell is tetragonal but stress shows monoclinic shear`;
+  } else if (offDiagonalMax > tol) {
+    isConsistent = false;
+    warning = `stress off-diagonals up to ${offDiagonalMax.toFixed(1)} kbar exceed tolerance ${tol.toFixed(1)} — cell did not relax to its symmetry`;
+  }
+  return { expectedClass, diagonalSpread, offDiagonalMax, isConsistent, warning };
+}
+
+/**
+ * RMS and max atomic displacement between initial and final positions, in
+ * fractional coordinates with minimum-image convention.
+ *
+ * > 0.10 frac RMS: structure has likely transformed into a different one
+ * > 0.20 frac max: a single atom moved >20% of a lattice vector — probable
+ *   reorganization (atom hopped to new site).
+ */
+function computeRMSDisplacement(
+  initial: Array<{ element: string; x: number; y: number; z: number }>,
+  final: Array<{ element: string; x: number; y: number; z: number }>,
+): { rms: number; max: number; maxAtomIdx: number } {
+  if (initial.length !== final.length || initial.length === 0) {
+    return { rms: 0, max: 0, maxAtomIdx: -1 };
+  }
+  let sumSq = 0;
+  let maxAbs = 0;
+  let maxIdx = -1;
+  for (let i = 0; i < initial.length; i++) {
+    let dx = final[i].x - initial[i].x;
+    let dy = final[i].y - initial[i].y;
+    let dz = final[i].z - initial[i].z;
+    dx -= Math.round(dx);
+    dy -= Math.round(dy);
+    dz -= Math.round(dz);
+    const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    sumSq += d * d;
+    if (d > maxAbs) { maxAbs = d; maxIdx = i; }
+  }
+  return { rms: Math.sqrt(sumSq / initial.length), max: maxAbs, maxAtomIdx: maxIdx };
+}
+
+/**
+ * Find the minimum interatomic distance in the cell (with PBC). Compare to
+ * a reference distance derived from atomic radii. If the minimum is below 70%
+ * of the radius sum, the cell has collapsed and phonon will be unphysical.
+ */
+function findMinBondLength(
+  positions: Array<{ element: string; x: number; y: number; z: number }>,
+  latticeA: number,
+  cOverA: number,
+  bOverA: number,
+  gammaRad: number,
+): { minDistAng: number; pair: string; expectedAng: number; ratio: number } {
+  let minDist = Infinity;
+  let minPair = "?";
+  let expectedForMin = 0;
+  for (let i = 0; i < positions.length; i++) {
+    const pi = positions[i];
+    for (let j = i + 1; j < positions.length; j++) {
+      const pj = positions[j];
+      let fdx = pi.x - pj.x;
+      let fdy = pi.y - pj.y;
+      let fdz = pi.z - pj.z;
+      fdx -= Math.round(fdx);
+      fdy -= Math.round(fdy);
+      fdz -= Math.round(fdz);
+      const d = fracDistAngstrom(fdx, fdy, fdz, latticeA, cOverA, bOverA, gammaRad);
+      if (d < minDist) {
+        minDist = d;
+        const [a, b] = [pi.element, pj.element].sort();
+        minPair = `${a}-${b}`;
+        // Atomic radius via getElementData (pm → Å)
+        const da = getElementData(pi.element);
+        const db = getElementData(pj.element);
+        const ra = (da && da.atomicRadius > 0) ? da.atomicRadius / 100 : 1.0;
+        const rb = (db && db.atomicRadius > 0) ? db.atomicRadius / 100 : 1.0;
+        expectedForMin = ra + rb;
+      }
+    }
+  }
+  const ratio = expectedForMin > 0 ? minDist / expectedForMin : NaN;
+  return { minDistAng: minDist, pair: minPair, expectedAng: expectedForMin, ratio };
+}
+
+/**
+ * Run all structure-quality pre-phonon validations and log a single structured
+ * report. Returns warnings array but does NOT block — per project policy, the
+ * pipeline accepts the structure and lets phonon happen even with warnings.
+ */
+function runPrePhononValidation(opts: {
+  formula: string;
+  elements: string[];
+  counts: Record<string, number>;
+  initialPositions: Array<{ element: string; x: number; y: number; z: number }>;
+  finalPositions: Array<{ element: string; x: number; y: number; z: number }>;
+  latticeA: number;
+  cOverA: number;
+  bOverA: number;
+  gammaRad: number;
+  vcRelaxStdout: string | null;
+  phononPrepScfStdout: string | null;
+  isMetallic: boolean | undefined;
+  totalEnergyRy: number | null;
+  targetPressureKbar: number;
+}): { warnings: string[]; severeCount: number } {
+  const warnings: string[] = [];
+  let severeCount = 0;
+  const { formula } = opts;
+
+  // (1) Stress symmetry vs expected space-group class
+  if (opts.vcRelaxStdout) {
+    const stress = parseFinalStressTensor(opts.vcRelaxStdout);
+    if (stress) {
+      const sym = checkStressSymmetry(stress, opts.cOverA, opts.bOverA);
+      console.log(`[Pre-Phonon] ${formula} stress symmetry: expect=${sym.expectedClass}, diagonalSpread=${sym.diagonalSpread.toFixed(2)} kbar, offDiagMax=${sym.offDiagonalMax.toFixed(2)} kbar → ${sym.isConsistent ? "CONSISTENT" : "INCONSISTENT"}`);
+      if (sym.warning) {
+        warnings.push(`stress-symmetry: ${sym.warning}`);
+        severeCount++;
+      }
+    } else {
+      console.log(`[Pre-Phonon] ${formula} stress symmetry: could not parse final stress tensor`);
+    }
+
+    // (4) Pressure tolerance
+    if (stress && opts.targetPressureKbar > 0) {
+      const target = opts.targetPressureKbar;
+      const actual = stress.pressureKbar;
+      const fracErr = Math.abs(actual - target) / Math.max(target, 1);
+      console.log(`[Pre-Phonon] ${formula} pressure: target=${target.toFixed(1)} kbar, final=${actual.toFixed(1)} kbar, error=${(fracErr * 100).toFixed(2)}%`);
+      if (fracErr > 0.05) {
+        warnings.push(`pressure mismatch: final ${actual.toFixed(1)} kbar deviates from target ${target.toFixed(1)} kbar by ${(fracErr * 100).toFixed(1)}% (>5%); structure is at the wrong P — phonons will report the wrong phase`);
+        severeCount++;
+      }
+    }
+  }
+
+  // (2) RMS displacement (initial vs final)
+  const rms = computeRMSDisplacement(opts.initialPositions, opts.finalPositions);
+  console.log(`[Pre-Phonon] ${formula} atomic displacement: RMS=${rms.rms.toFixed(4)} frac, max=${rms.max.toFixed(4)} frac (atom #${rms.maxAtomIdx})`);
+  if (rms.rms > 0.10) {
+    warnings.push(`large displacement: RMS=${rms.rms.toFixed(3)} frac (>0.10) — vc-relax probably landed in a DIFFERENT structure than the input; verify space group with spglib before trusting the phonon`);
+    severeCount++;
+  } else if (rms.max > 0.20) {
+    warnings.push(`atomic reorganization: atom #${rms.maxAtomIdx} moved ${rms.max.toFixed(3)} frac (>0.20) — likely hopped to a new Wyckoff site`);
+  }
+
+  // (3) Bond-length sanity
+  const bond = findMinBondLength(
+    opts.finalPositions, opts.latticeA, opts.cOverA, opts.bOverA, opts.gammaRad,
+  );
+  console.log(`[Pre-Phonon] ${formula} min bond: ${bond.pair}=${bond.minDistAng.toFixed(3)} Å (expect ~${bond.expectedAng.toFixed(3)} Å from atomic radii, ratio=${bond.ratio.toFixed(2)})`);
+  if (bond.ratio < 0.70) {
+    warnings.push(`collapsed cell: shortest ${bond.pair} contact is ${bond.minDistAng.toFixed(3)} Å, only ${(bond.ratio * 100).toFixed(0)}% of sum of atomic radii — cell has overcompressed; phonon will be unphysical`);
+    severeCount++;
+  } else if (bond.ratio > 2.5) {
+    warnings.push(`unusually loose ${bond.pair} contact at ${bond.minDistAng.toFixed(3)} Å (${(bond.ratio * 100).toFixed(0)}% of radius sum) — likely a wrong/missing bond in the structure`);
+  }
+
+  // (5) Symmetry preservation through relaxation
+  if (opts.vcRelaxStdout) {
+    const sym = parseSymmetryOperations(opts.vcRelaxStdout);
+    if (sym.initial != null && sym.final != null) {
+      console.log(`[Pre-Phonon] ${formula} symmetry ops: input=${sym.initial}, final=${sym.final}`);
+      if (sym.final < sym.initial) {
+        const dropPct = ((sym.initial - sym.final) / sym.initial) * 100;
+        const msg = `symmetry broken during relaxation: ${sym.initial} → ${sym.final} ops (${dropPct.toFixed(0)}% drop) — vc-relax found a lower-symmetry minimum (Jahn-Teller / AFM / structural distortion). For ambient-T phonon, this is the correct ground state; for the parent phase, the input space group was wrong`;
+        warnings.push(msg);
+        // Severe only if drop is large (>50%); small drops can be physical
+        if (dropPct > 50) severeCount++;
+      }
+    } else {
+      console.log(`[Pre-Phonon] ${formula} symmetry ops: could not parse from vc-relax output`);
+    }
+  }
+
+  // (6) Metallicity sanity vs composition heuristic
+  const expectedChar = predictMetallicCharacter(opts.elements, opts.counts);
+  if (opts.isMetallic != null && expectedChar !== "ambiguous") {
+    const actualChar = opts.isMetallic ? "metal" : "insulator";
+    console.log(`[Pre-Phonon] ${formula} metallicity: predicted=${expectedChar}, SCF=${actualChar}`);
+    if (expectedChar !== actualChar) {
+      const msg = `metallic-character mismatch: composition predicts ${expectedChar}, SCF gave ${actualChar} — ${expectedChar === "metal" ? "expected DOS at Ef but got a gap; vc-relax may have over-compressed or hit a wrong-phase minimum" : "expected a band gap but SCF is metallic; smearing may be hiding the gap, or input is wrong stoichiometry"}`;
+      warnings.push(msg);
+      severeCount++;
+    }
+  } else if (expectedChar === "ambiguous") {
+    console.log(`[Pre-Phonon] ${formula} metallicity: ambiguous composition — skipping cross-check`);
+  }
+
+  // (7) Smearing entropy: is -T·S/atom under the publication budget?
+  // Read from the phonon-prep SCF output (already at degauss=0.005). If
+  // entropy/atom is still >1 mRy, the system is heavily smeared and the
+  // geometry/frequencies will be smearing-dependent — the full smearing-
+  // polish vc-relax phase should already have driven this down.
+  if (opts.phononPrepScfStdout) {
+    const tsRy = parseSmearingEntropy(opts.phononPrepScfStdout);
+    if (tsRy != null) {
+      const tsRyPerAtom = Math.abs(tsRy) / opts.finalPositions.length;
+      const tsMevPerAtom = tsRyPerAtom * 13605.7;  // Ry → meV
+      console.log(`[Pre-Phonon] ${formula} smearing entropy: |T·S|=${Math.abs(tsRy).toExponential(2)} Ry total, ${tsMevPerAtom.toFixed(2)} meV/atom`);
+      if (tsRyPerAtom > 1e-3) {
+        warnings.push(`large smearing entropy: |T·S|=${tsMevPerAtom.toFixed(1)} meV/atom (>13.6 meV) — phonon-prep SCF still smearing-dominated; relax may not be at the T→0 minimum`);
+        severeCount++;
+      }
+    }
+  }
+
+  // (8) Magnetic state consistency: vc-relax → phonon-prep SCF
+  // QE prints `total magnetization` and `absolute magnetization` after each
+  // SCF cycle. We compare the last value from vc-relax against the last value
+  // from the phonon-prep SCF. If vc-relax converged to a magnetic ground
+  // state but phonon-prep collapsed to non-magnetic (or vice versa), the
+  // .save/ density fed to ph.x represents a different phase than the relaxed
+  // structure — phonons will be wrong even though the geometry is right.
+  if (opts.vcRelaxStdout && opts.phononPrepScfStdout) {
+    const magVc = parseFinalMagnetization(opts.vcRelaxStdout);
+    const magPp = parseFinalMagnetization(opts.phononPrepScfStdout);
+    if (magVc.absolute != null && magPp.absolute != null) {
+      const absVc = magVc.absolute;
+      const absPp = magPp.absolute;
+      const totVc = magVc.total ?? 0;
+      const totPp = magPp.total ?? 0;
+      const absDelta = Math.abs(absVc - absPp);
+      console.log(`[Pre-Phonon] ${formula} magnetization: vc-relax total=${totVc.toFixed(3)} |abs|=${absVc.toFixed(3)} μB, phonon-prep total=${totPp.toFixed(3)} |abs|=${absPp.toFixed(3)} μB, Δ|abs|=${absDelta.toFixed(3)} μB`);
+
+      // Severe: vc-relax was clearly magnetic (>0.1 μB) but phonon-prep
+      // collapsed below 0.01 μB → the ground-state moment was thrown away.
+      if (absVc > 0.1 && absPp < 0.01) {
+        warnings.push(`magnetic state lost: vc-relax had |M|=${absVc.toFixed(2)} μB but phonon-prep SCF collapsed to |M|=${absPp.toFixed(3)} μB — likely nspin=1 in phonon-prep when it should have been nspin=2; ph.x .save/ does not represent the relaxed phase`);
+        severeCount++;
+      }
+      // Severe: phonon-prep formed a moment that vc-relax didn't see → vc-relax
+      // probably ran at nspin=1 and missed the FM/AFM ground state.
+      else if (absVc < 0.01 && absPp > 0.1) {
+        warnings.push(`magnetic state appeared post-relax: vc-relax had |M|=${absVc.toFixed(3)} μB but phonon-prep gave |M|=${absPp.toFixed(2)} μB — vc-relax likely ran at nspin=1; geometry is from the wrong phase`);
+        severeCount++;
+      }
+      // Moderate: both magnetic but moments shifted by > 0.5 μB (e.g.
+      // a different occupation pattern or AFM↔FM transition).
+      else if (absDelta > 0.5) {
+        const fmAfmFlip = Math.sign(totVc) !== Math.sign(totPp) && Math.abs(totVc) > 0.1 && Math.abs(totPp) > 0.1;
+        const flipMsg = fmAfmFlip ? " (sign flip — FM↔AFM)" : "";
+        warnings.push(`magnetization shifted between stages: vc-relax |M|=${absVc.toFixed(2)} μB → phonon-prep |M|=${absPp.toFixed(2)} μB (Δ=${absDelta.toFixed(2)} μB)${flipMsg} — phonon-prep settled in a different magnetic configuration`);
+      }
+    } else if (magVc.absolute != null && magPp.absolute == null) {
+      // phonon-prep ran at nspin=1 (no magnetization printed) but vc-relax had moments
+      if (magVc.absolute > 0.1) {
+        warnings.push(`magnetic state lost: vc-relax had |M|=${magVc.absolute.toFixed(2)} μB but phonon-prep SCF ran without spin polarization (no magnetization in output) — feeding ph.x a non-magnetic density for a magnetic ground state`);
+        severeCount++;
+      }
+    }
+  }
+
+  if (warnings.length === 0) {
+    console.log(`[Pre-Phonon] ${formula} validation: PASS (all 8 checks)`);
+  } else {
+    console.log(`[Pre-Phonon] ${formula} validation: ${severeCount} severe warning(s), ${warnings.length} total — proceeding to phonon (no hard cap)`);
+    for (const w of warnings) {
+      console.log(`[Pre-Phonon]   WARN: ${w}`);
+    }
+  }
+
+  return { warnings, severeCount };
+}
+
+/**
+ * Parse "Found N symmetry operations" (or "Found N point group operations")
+ * from pw.x output. Returns the FIRST and LAST values found — first is the
+ * input-geometry symmetry, last is the relaxed-geometry symmetry (vc-relax
+ * re-detects symmetry at every cell change).
+ *
+ * A decrease (e.g. 48 → 8) means relaxation broke symmetry: Jahn-Teller
+ * distortion, magnetic ordering, structural transition. Sometimes intended
+ * (AFM cuprate); often a sign the input space group was wrong.
+ */
+function parseSymmetryOperations(stdout: string): { initial: number | null; final: number | null } {
+  const matches = [...stdout.matchAll(/Found\s+(\d+)\s+symmetry\s+operations/gi)];
+  if (matches.length === 0) return { initial: null, final: null };
+  const initial = parseInt(matches[0][1], 10);
+  const final = parseInt(matches[matches.length - 1][1], 10);
+  return { initial, final };
+}
+
+/**
+ * Parse "smearing contrib. (-TS) = X.XXXX Ry" from SCF output.
+ * |T·S|/atom > 1 mRy (~13.6 meV) means smearing entropy is contaminating
+ * the total energy and forces — the geometry was relaxed against the
+ * smearing-broadened energy surface, not the T→0 minimum.
+ */
+function parseSmearingEntropy(stdout: string): number | null {
+  const matches = [...stdout.matchAll(/smearing contrib\.\s*\(-?TS\)\s*=\s*(-?[\d.E+-]+)/gi)];
+  if (matches.length === 0) return null;
+  const ts = parseFloat(matches[matches.length - 1][1]);
+  return Number.isFinite(ts) ? ts : null;
+}
+
+/**
+ * Parse the FINAL total and absolute magnetization from a QE pw.x stdout.
+ *
+ * QE prints two values per SCF cycle:
+ *   total magnetization       =     X.XX Bohr mag/cell   (sum over cell)
+ *   absolute magnetization    =     Y.YY Bohr mag/cell   (∫|m(r)| d³r)
+ *
+ * Total can be ≈0 for AFM systems even when individual sites carry large
+ * moments — only `absolute` captures that. For FM/Pauli-paramagnetic systems
+ * the two agree. We need both: total tracks net spin (FM vs AFM), absolute
+ * tracks whether any local moment formed at all.
+ */
+function parseFinalMagnetization(stdout: string): { total: number | null; absolute: number | null } {
+  const totalMatches = [...stdout.matchAll(/total magnetization\s+=\s+(-?[\d.]+)/g)];
+  const absMatches = [...stdout.matchAll(/absolute magnetization\s+=\s+(-?[\d.]+)/g)];
+  const total = totalMatches.length > 0 ? parseFloat(totalMatches[totalMatches.length - 1][1]) : null;
+  const absolute = absMatches.length > 0 ? parseFloat(absMatches[absMatches.length - 1][1]) : null;
+  return {
+    total: total != null && Number.isFinite(total) ? total : null,
+    absolute: absolute != null && Number.isFinite(absolute) ? absolute : null,
+  };
+}
+
+/**
+ * Heuristic for whether a composition should be metallic. Used to cross-check
+ * the SCF parser's `isMetallic` flag and catch wrong-phase results (e.g. an
+ * undoped cuprate that came out metallic = vc-relax failed to find the AFM
+ * ground state). Returns:
+ *   "metal"      — all-metal alloy, intermetallic, conducting hydride
+ *   "insulator"  — has halogen / closed-shell ionic + no transition metal
+ *   "ambiguous"  — could be either (correlated, charge-transfer, etc.)
+ */
+function predictMetallicCharacter(
+  elements: string[],
+  counts: Record<string, number>,
+): "metal" | "insulator" | "ambiguous" {
+  const HALOGENS = new Set(["F", "Cl", "Br", "I"]);
+  const ALKALI = new Set(["Li", "Na", "K", "Rb", "Cs"]);
+  const ALKALINE_EARTH = new Set(["Be", "Mg", "Ca", "Sr", "Ba"]);
+  const TRANSITION = new Set([
+    "Sc","Ti","V","Cr","Mn","Fe","Co","Ni","Cu","Zn",
+    "Y","Zr","Nb","Mo","Tc","Ru","Rh","Pd","Ag","Cd",
+    "Hf","Ta","W","Re","Os","Ir","Pt","Au","Hg",
+  ]);
+  const LANTHANIDE_ACTINIDE = new Set([
+    "La","Ce","Pr","Nd","Pm","Sm","Eu","Gd","Tb","Dy","Ho","Er","Tm","Yb","Lu",
+    "Ac","Th","Pa","U","Np","Pu",
+  ]);
+  const hasHalogen = elements.some(e => HALOGENS.has(e));
+  const hasO = elements.includes("O");
+  const hasH = elements.includes("H");
+  const hasN = elements.includes("N");
+  const hasTM = elements.some(e => TRANSITION.has(e) || LANTHANIDE_ACTINIDE.has(e));
+  const hasMetallic = elements.some(e =>
+    TRANSITION.has(e) || LANTHANIDE_ACTINIDE.has(e) || ALKALI.has(e) || ALKALINE_EARTH.has(e),
+  );
+  // Cuprate / pnictide / ruthenate / iridate / nickelate: correlated, undoped form
+  // is typically Mott-insulating but emerges metallic on doping. DFT (PBE) gives
+  // metal almost always. Flag as ambiguous — these go to DMFT anyway.
+  const hasCu = elements.includes("Cu");
+  const hasFe = elements.includes("Fe");
+  if (hasCu && hasO && counts["O"] >= 2) return "ambiguous";
+  if (hasFe && (elements.includes("As") || elements.includes("P") || elements.includes("Se"))) return "ambiguous";
+  // High-symmetry binary halide / oxide with closed-shell cation = insulator
+  if (hasHalogen && !hasTM) return "insulator";
+  if (hasO && !hasTM && !hasMetallic) return "insulator";
+  if (hasN && !hasTM && !hasMetallic && elements.length <= 2) return "insulator";
+  // Pure metal alloy or intermetallic
+  if (elements.every(e => TRANSITION.has(e) || LANTHANIDE_ACTINIDE.has(e) || ALKALI.has(e) || ALKALINE_EARTH.has(e))) return "metal";
+  // Hydride with metallic cation → typically metallic at high P
+  if (hasH && hasMetallic && !hasHalogen) return "metal";
+  // Everything else (semiconductor-like, multinaries): ambiguous
+  return "ambiguous";
 }
 
 function parseSCFOutput(stdout: string, degaussRy: number = 0.005): QESCFResult {
@@ -3461,7 +4089,7 @@ function generateSCFInputWithParams(
   counts: Record<string, number>,
   latticeA: number,
   positions: Array<{ element: string; x: number; y: number; z: number }>,
-  params: { mixingBeta: number; maxSteps: number; diag: string; smearing?: string; degauss?: number; ecutwfcBoost?: number; convThr?: string; forcConvThr?: string; etotConvThr?: string; dftPlusULines?: string; dftPlusUNspin2?: boolean; mixingMode?: string; mixingNdim?: number; startingwfc?: string; startingpot?: string; diagoThrInit?: string; restartFromScratch?: boolean; maxSecondsOverride?: number; socFlags?: string; forceNspin?: 1 | 2; forceMagBlock?: string; forceNoncolin?: boolean; hubbardCard?: string },
+  params: { mixingBeta: number; maxSteps: number; diag: string; smearing?: string; degauss?: number; ecutwfcBoost?: number; ecutrhoMultiplierOverride?: number; convThr?: string; forcConvThr?: string; etotConvThr?: string; dftPlusULines?: string; dftPlusUNspin2?: boolean; mixingMode?: string; mixingNdim?: number; startingwfc?: string; startingpot?: string; diagoThrInit?: string; restartFromScratch?: boolean; maxSecondsOverride?: number; socFlags?: string; forceNspin?: 1 | 2; forceMagBlock?: string; forceNoncolin?: boolean; hubbardCard?: string },
 ): string {
   const totalAtoms = positions.length;
   const nTypes = elements.length;
@@ -3470,7 +4098,11 @@ function generateSCFInputWithParams(
   // comes from the retry ladder to escalate cutoff on non-convergence.
   const baseEcutwfc = computeEcutwfc(elements, 0, 80, 45);
   const ecutwfc = baseEcutwfc + (params.ecutwfcBoost ?? 0);
-  const ecutrho = ecutwfc * ecutrhoMultiplier(elements);
+  // ecutrhoMultiplierOverride lets the phonon-prep SCF retry loop bump the
+  // density cutoff when negative-rho artifacts appear (e.g. CaH6 with hard
+  // PAW Ca needed 8× and 12× variants to drive negative rho below 1e-3 e-).
+  const ecutrhoMult = params.ecutrhoMultiplierOverride ?? ecutrhoMultiplier(elements);
+  const ecutrho = ecutwfc * ecutrhoMult;
   const smearing = params.smearing || "mv";
   const degauss = params.degauss || 0.005;
   const convThr = params.convThr ?? "1.0d-4";
@@ -3588,7 +4220,7 @@ function generateVCRelaxInput(
   positions: Array<{ element: string; x: number; y: number; z: number }>,
   pressureGPa: number = 0,
   nstepOverride?: number,
-  opts?: { socFlags?: string; forceNspin?: 1 | 2; forceMagBlock?: string; hubbardBlock?: string; hubbardCard?: string; pressurePriority?: boolean },
+  opts?: { socFlags?: string; forceNspin?: 1 | 2; forceMagBlock?: string; hubbardBlock?: string; hubbardCard?: string; pressurePriority?: boolean; degaussOverride?: number; convThrOverride?: string; ecutwfcBoost?: number; ecutrhoMultiplierOverride?: number; maxSecondsOverride?: number },
 ): string {
   const totalAtoms = positions.length;
   const nTypes = elements.length;
@@ -3597,8 +4229,9 @@ function generateVCRelaxInput(
   // unknown elements fall through to the 45 Ry default.
   const hasHydrogen = elements.includes("H");
   const baseEcutwfc = computeEcutwfc(elements, 0, 80, 45);
-  const ecutwfc = Math.max(baseEcutwfc, hasHydrogen ? 100 : 60);
-  const ecutrho = ecutwfc * ecutrhoMultiplier(elements);
+  const ecutwfc = Math.max(baseEcutwfc, hasHydrogen ? 100 : 60) + (opts?.ecutwfcBoost ?? 0);
+  const ecutrhoMultVcr = opts?.ecutrhoMultiplierOverride ?? ecutrhoMultiplier(elements);
+  const ecutrho = ecutwfc * ecutrhoMultVcr;
 
   const hasMagnetic = elements.some(el => el in MAGNETIC_ELEMENTS);
   const broadMagnetic = mayHaveMagneticMoment(elements);
@@ -3631,7 +4264,11 @@ function generateVCRelaxInput(
   const bOverAVcr = estimateBOverA(elements, counts);
   const cellBlock = `\n${generateCellParameters(latticeA, cOverA, 0, bOverAVcr, elements, counts)}`;
   const hasMagneticEl = elements.some(el => el in MAGNETIC_ELEMENTS);
-  const vcRelaxDegauss = hasMagneticEl ? 0.02 : 0.015;
+  // degaussOverride lets the smearing-polish refinement phase progressively
+  // tighten degauss (0.015 → 0.005 → 0.0025) so the relaxed geometry tracks
+  // the true T→0 minimum, not the smearing-broadened one. Without this,
+  // metallic systems get a geometry that's correct only at degauss=0.015.
+  const vcRelaxDegauss = opts?.degaussOverride ?? (hasMagneticEl ? 0.02 : 0.015);
 
   // vc-relax wall-time cap — scaled by system complexity and atom count.
   const hasHVcr = elements.includes("H");
@@ -3673,7 +4310,7 @@ function generateVCRelaxInput(
   forc_conv_thr = ${opts?.pressurePriority ? "1.0d-5" : "1.0d-3"},
   etot_conv_thr = 1.0d-5,
   nstep = ${nstepOverride ?? (isHighPHydride ? 600 : 400)},
-  max_seconds = ${VC_RELAX_MAX_SECONDS},
+  max_seconds = ${opts?.maxSecondsOverride ?? VC_RELAX_MAX_SECONDS},
 /
 &SYSTEM
   ibrav = 0,
@@ -3689,7 +4326,7 @@ function generateVCRelaxInput(
 ${socLinesVcr}${magLines}/
 &ELECTRONS
   electron_maxstep = 300,
-  conv_thr = 1.0d-7,
+  conv_thr = ${opts?.convThrOverride ?? "1.0d-7"},
   mixing_beta = ${vcMixingBeta},
   mixing_mode = '${vcMixingMode}',
   diagonalization = 'david',
@@ -5760,6 +6397,122 @@ ${cellBlockEos}
       }
     }
 
+    // --- Smearing-polish vc-relax phase ---
+    // After force/pressure refinement, re-relax at progressively tighter
+    // degauss (0.005 → 0.0025) so the geometry tracks the T→0 minimum, not
+    // the smearing-broadened one. The energy surface shifts when degauss
+    // narrows — particularly for metallic systems near van Hove singularities.
+    // ΔE/atom < 0.5 meV across consecutive passes is the publication gate.
+    //
+    // Each polish pass uses small nstep (200) since geometry is already close
+    // and the goal is energy convergence, not geometry overhaul. Timeout is
+    // 1.5× the refinement budget to accommodate slower SCF at tight smearing.
+    if (result.vcRelaxed && positions.length > 0) {
+      const polishLadder: Array<{ degauss: number; convThr: string }> = [
+        { degauss: 0.005,  convThr: "1.0d-9"  },
+        { degauss: 0.0025, convThr: "1.0d-10" },
+      ];
+      const hasHPolish = elements.includes("H");
+      const hasMagPolish = elements.some(el => el in MAGNETIC_ELEMENTS);
+      const isHighPHPolish = hasHPolish && workerPressure >= 50 && positions.length >= 7;
+      const polishAtomScale = positions.length > 7 ? Math.pow(positions.length / 7, 1.2) : 1.0;
+      // Base 30/60/180 min × 1.5 for tight smearing × atom-scale
+      const polishMaxSec = Math.round(
+        (isHighPHPolish ? 16200 : hasMagPolish ? 3600 : 1800) * polishAtomScale,
+      );
+
+      // Reference energy: parse from latest vc-relax / refinement output
+      // (so we can compute ΔE/atom across the first polish pass too).
+      let prevEnergyEvPerAtom: number | null = null;
+      const refineFiles = fs.readdirSync(jobDir)
+        .filter(f => /^vc_relax(_refine\d+)?\.out$/.test(f))
+        .sort();
+      if (refineFiles.length > 0) {
+        const latestOut = fs.readFileSync(path.join(jobDir, refineFiles[refineFiles.length - 1]), "utf-8");
+        const latestParsed = parseVCRelaxOutput(latestOut);
+        if (latestParsed.totalEnergy !== 0) {
+          prevEnergyEvPerAtom = latestParsed.totalEnergy / positions.length;
+        }
+      }
+
+      let polishConverged = false;
+      let totalPolishWallSec = 0;
+      for (let pi = 0; pi < polishLadder.length; pi++) {
+        const { degauss, convThr } = polishLadder[pi];
+        try {
+          cleanQETmpScratch(path.join(jobDir, "tmp"));
+
+          const polishInput = generateVCRelaxInput(
+            formula, elements, counts, latticeA, positions, workerPressure, 200,
+            {
+              socFlags: socAnalysis?.enableFullSOC ? socAnalysis.qeSystemFlags : undefined,
+              forceNspin: result.magneticGroundState?.winningNspin,
+              forceMagBlock: result.magneticGroundState?.winningMagBlock || undefined,
+              hubbardCard: hubbardResult?.applyToVCRelax ? hubbardResult.qeHubbardCard : undefined,
+              degaussOverride: degauss,
+              convThrOverride: convThr,
+              maxSecondsOverride: polishMaxSec,
+            },
+          );
+          const polishFile = path.join(jobDir, `vc_relax_smearing_polish_${pi + 1}.in`);
+          fs.writeFileSync(polishFile, polishInput);
+          console.log(`[QE-Worker] Smearing-polish vc-relax pass ${pi + 1}/${polishLadder.length} for ${formula}: degauss=${degauss}, conv_thr=${convThr}, nstep=200, timeout=${polishMaxSec}s (${(polishMaxSec / 60).toFixed(0)} min)`);
+
+          const polishResult = await runQECommand(
+            path.posix.join(getQEBinDir(), "pw.x"),
+            polishFile, jobDir, polishMaxSec * 1000 + 60_000,
+          );
+          fs.writeFileSync(path.join(jobDir, `vc_relax_smearing_polish_${pi + 1}.out`), polishResult.stdout);
+          const polishParsed = parseVCRelaxOutput(polishResult.stdout);
+          totalPolishWallSec += polishParsed.wallTimeSeconds;
+
+          if (!polishParsed.finalPositions || polishParsed.finalPositions.length === 0) {
+            console.log(`[QE-Worker] Smearing-polish pass ${pi + 1} for ${formula} produced no positions (exit=${polishResult.exitCode}) — keeping previous geometry, stopping polish loop`);
+            break;
+          }
+
+          const newPos = polishParsed.finalPositions;
+          const newLat = polishParsed.finalLatticeAng && polishParsed.finalLatticeAng > 0.5
+            ? polishParsed.finalLatticeAng : latticeA;
+          const energyEvPerAtom = polishParsed.totalEnergy / Math.max(1, newPos.length);
+          const dEMevPerAtom = prevEnergyEvPerAtom != null
+            ? Math.abs(energyEvPerAtom - prevEnergyEvPerAtom) * 1000.0
+            : NaN;
+          const polishForceMatches = [...polishResult.stdout.matchAll(/Total force\s*=\s*([\d.]+)/g)];
+          const polishForce = polishForceMatches.length > 0
+            ? parseFloat(polishForceMatches[polishForceMatches.length - 1][1])
+            : null;
+          const polishPressMatches = [...polishResult.stdout.matchAll(/P=\s*([-\d.]+)/g)];
+          const polishPress = polishPressMatches.length > 0
+            ? parseFloat(polishPressMatches[polishPressMatches.length - 1][1])
+            : null;
+          console.log(`[QE-Worker] Smearing-polish pass ${pi + 1} for ${formula}: ΔE/atom=${Number.isFinite(dEMevPerAtom) ? dEMevPerAtom.toFixed(3) + " meV" : "N/A (no reference)"}, force=${polishForce?.toFixed(6) ?? "N/A"} Ry/bohr, P=${polishPress?.toFixed(1) ?? "N/A"} kbar, a=${newLat.toFixed(3)} Å, wall=${polishParsed.wallTimeSeconds.toFixed(0)}s`);
+
+          positions = newPos;
+          latticeA = newLat;
+          result.relaxedLatticeA = latticeA;
+          // Update parsed SCF results so downstream code sees polished numbers
+          const polishedScf = parseSCFOutput(polishResult.stdout, polishLadder[pi].degauss);
+          if (polishedScf.totalEnergy !== 0) result.scf = polishedScf;
+
+          prevEnergyEvPerAtom = energyEvPerAtom;
+          if (Number.isFinite(dEMevPerAtom) && dEMevPerAtom < 0.5) {
+            polishConverged = true;
+            console.log(`[QE-Worker] Smearing convergence MET for ${formula} at degauss=${degauss}: ΔE/atom=${dEMevPerAtom.toFixed(3)} meV < 0.5 meV — stopping polish loop after pass ${pi + 1}`);
+            break;
+          }
+        } catch (polishErr: any) {
+          console.log(`[QE-Worker] Smearing-polish pass ${pi + 1} crashed for ${formula}: ${polishErr.message?.slice(0, 200)} — keeping previous geometry, stopping polish loop`);
+          break;
+        }
+      }
+
+      const polishStatus = polishConverged
+        ? "CONVERGED"
+        : (totalPolishWallSec > 0 ? "INCOMPLETE (proceeding with best polished geometry)" : "SKIPPED (no successful pass)");
+      console.log(`[QE-Worker] Smearing-polish phase ${polishStatus} for ${formula}: total wall=${totalPolishWallSec.toFixed(0)}s (${(totalPolishWallSec / 60).toFixed(1)} min)`);
+    }
+
     // --- Cache best DFT structure for future runs ---
     if (result.vcRelaxed && positions.length > 0) {
       const cacheForceMatches = [...(fs.existsSync(path.join(jobDir, "vc_relax.out"))
@@ -5775,6 +6528,17 @@ ${cellBlockEos}
         if (refMatches.length > 0) {
           const refF = parseFloat(refMatches[refMatches.length - 1][1]);
           if (refF < bestCacheForce) bestCacheForce = refF;
+        }
+      }
+      // Also consider the smearing-polish outputs — they're typically the best
+      // force we have since they use the tightest degauss.
+      for (let pi = 1; pi <= 4; pi++) {
+        const polishOut = path.join(jobDir, `vc_relax_smearing_polish_${pi}.out`);
+        if (!fs.existsSync(polishOut)) break;
+        const polishMatches = [...fs.readFileSync(polishOut, "utf-8").matchAll(/Total force\s*=\s*([\d.]+)/g)];
+        if (polishMatches.length > 0) {
+          const polishF = parseFloat(polishMatches[polishMatches.length - 1][1]);
+          if (polishF < bestCacheForce) bestCacheForce = polishF;
         }
       }
       saveDFTStructureCache(formula, latticeA, positions, bestCacheForce, null, result.scf?.totalEnergy ?? 0);
@@ -6625,6 +7389,125 @@ ${r2Cell}
       }
       if (positions.length > posToLog) {
         console.log(`[QE-Worker]   ... and ${positions.length - posToLog} more atoms`);
+      }
+
+      // --- Phonon-prep SCF (tight charge density for ph.x) ---
+      // The SCF density inherited from vc-relax (conv_thr=1e-7, degauss=0.015)
+      // and even from the production SCF retry loop (conv_thr=1e-10) is too
+      // loose for DFPT. ph.x reads .save/ and differentiates that density w.r.t.
+      // atomic displacements; loose density → noisy derivatives → spurious
+      // imaginary modes. CaH6 at vc-relax-density showed negative rho = 0.296 e-
+      // and -9770 cm⁻¹ phonon modes; tight phonon-prep SCF drives both to spec.
+      //
+      // Adaptive retry: start with the default ecutrho multiplier (8 for hard
+      // PAW / USPP, 4 for soft PAW); if negative rho > 1e-3 e-, bump to 12,
+      // then 16. Hard cap at 16× to stay within memory on c2-standard workers.
+      try {
+        const pgTargetQGrid = autoPhononQGrid(elements, positions.length, result.scf?.totalForce ?? undefined);
+        const pgKCard = kPointsCardForPhononPrep(
+          latticeA, cOverA, bOverAFull,
+          vegardResult?.isMetallic ?? undefined,
+          positions.length,
+          pgTargetQGrid,
+        );
+        const baseMult = ecutrhoMultiplier(elements);
+        const multLadder = Array.from(new Set([baseMult, 8, 12, 16])).sort((a, b) => a - b);
+        const pgMaxSeconds = Math.max(1800, Math.min(QE_MAX_SECONDS, 7200));
+        let pgConverged = false;
+        let pgNegRho = Infinity;
+        let pgFinalMult = baseMult;
+        let pgFinalScf: QESCFResult | null = null;
+
+        for (let pgAttempt = 0; pgAttempt < multLadder.length; pgAttempt++) {
+          const mult = multLadder[pgAttempt];
+          const pgInput = generatePhononPrepSCFInput(formula, elements, counts, latticeA, positions, {
+            kPointsCard: pgKCard,
+            ecutrhoMultiplierOverride: mult,
+            forceNspin: result.magneticGroundState?.winningNspin
+              ?? (result.scf?.magnetization != null && Math.abs(result.scf.magnetization) > 0.05 ? 2 : undefined),
+            forceMagBlock: result.magneticGroundState?.winningMagBlock || undefined,
+            dftPlusULines: dftPlusULines || undefined,
+            dftPlusUNspin2: dftPlusUNspin2 || undefined,
+            hubbardCard: scfHubbardCard || undefined,
+            socFlags: socAnalysis?.enableFullSOC ? socAnalysis.qeSystemFlags : undefined,
+            maxSecondsOverride: pgMaxSeconds,
+          });
+          const pgInputFile = path.join(jobDir, `phonon_prep_scf_mult${mult}.in`);
+          fs.writeFileSync(pgInputFile, pgInput);
+          console.log(`[QE-Worker] Phonon-prep SCF for ${formula} attempt ${pgAttempt + 1}/${multLadder.length} (ecutrho/ecutwfc=${mult}, k-grid commensurate with ${pgTargetQGrid.join("×")} q-grid)`);
+
+          const pgResult = await runQECommand(
+            path.posix.join(getQEBinDir(), "pw.x"),
+            pgInputFile,
+            jobDir,
+            pgMaxSeconds * 1000 + 60_000,
+          );
+          fs.writeFileSync(path.join(jobDir, `phonon_prep_scf_mult${mult}.out`), pgResult.stdout);
+
+          const negRhoInfo = parseNegativeRho(pgResult.stdout);
+          const eigvalWarnings = countEigvalWarningsInTail(pgResult.stdout, 60);
+          const pgScf = parseSCFOutput(pgResult.stdout, 0.005);
+          pgNegRho = negRhoInfo.max;
+          pgFinalMult = mult;
+          pgFinalScf = pgScf;
+          pgConverged = pgScf.converged;
+          console.log(`[QE-Worker] Phonon-prep SCF result for ${formula} (mult=${mult}): converged=${pgConverged}, |neg rho|=${pgNegRho.toExponential(2)} e-, eigval warnings in tail=${eigvalWarnings}, E=${pgScf.totalEnergy.toFixed(4)} eV`);
+
+          // negative rho < 1e-3 AND clean eigenvalue tail AND converged → done
+          if (pgConverged && pgNegRho < 1e-3 && eigvalWarnings <= 2) break;
+          if (pgAttempt < multLadder.length - 1) {
+            console.log(`[QE-Worker] Phonon-prep SCF for ${formula} retrying with higher ecutrho ratio (neg rho ${pgNegRho.toExponential(2)} >= 1e-3 or eigval warnings ${eigvalWarnings} > 2)`);
+          }
+        }
+
+        if (pgFinalScf && pgConverged) {
+          // Update the result.scf to reflect phonon-prep quality numbers — these
+          // are what downstream phonon code will actually be working against.
+          result.scf = pgFinalScf;
+          console.log(`[QE-Worker] Phonon-prep SCF for ${formula} settled at ecutrho/ecutwfc=${pgFinalMult} (|neg rho|=${pgNegRho.toExponential(2)} e-)`);
+        } else {
+          console.log(`[QE-Worker] Phonon-prep SCF for ${formula} did NOT fully converge after ${multLadder.length} attempts (|neg rho|=${pgNegRho.toExponential(2)} e-) — proceeding to phonon anyway; expect noisy frequencies if neg rho > 1e-2`);
+        }
+      } catch (pgErr: any) {
+        console.log(`[QE-Worker] Phonon-prep SCF crashed for ${formula}: ${pgErr.message?.slice(0, 200)} — falling back to vc-relax/SCF .save/ density (results may be noisy)`);
+      }
+
+      // --- Structure-quality validation (diagnostic) ---
+      // Four cheap checks that catch "phonon will be garbage" cases the force
+      // and pressure numbers alone miss: stress symmetry vs cell shape, RMS
+      // atomic displacement from input, minimum bond length sanity, and final
+      // pressure tolerance. These are logged warnings — they do not block.
+      try {
+        if (result.initialPositions && result.initialPositions.length > 0) {
+          // Read latest phonon-prep SCF stdout for smearing entropy check
+          let phononPrepScfStdout: string | null = null;
+          try {
+            const pgOuts = fs.readdirSync(jobDir)
+              .filter(f => /^phonon_prep_scf_mult\d+\.out$/.test(f))
+              .sort();
+            if (pgOuts.length > 0) {
+              phononPrepScfStdout = fs.readFileSync(path.join(jobDir, pgOuts[pgOuts.length - 1]), "utf-8");
+            }
+          } catch { /* best effort */ }
+          runPrePhononValidation({
+            formula,
+            elements,
+            counts,
+            initialPositions: result.initialPositions,
+            finalPositions: positions,
+            latticeA,
+            cOverA,
+            bOverA: bOverAFull,
+            gammaRad: Math.PI / 2,
+            vcRelaxStdout,
+            phononPrepScfStdout,
+            isMetallic: result.scf?.isMetallic,
+            totalEnergyRy: result.scf?.totalEnergy != null ? result.scf.totalEnergy / 13.605693 : null,
+            targetPressureKbar: workerPressure * 10.0,
+          });
+        }
+      } catch (vErr: any) {
+        console.log(`[QE-Worker] Pre-phonon validation crashed for ${formula}: ${vErr.message?.slice(0, 200)}`);
       }
 
       // --- Pre-phonon force gate ---

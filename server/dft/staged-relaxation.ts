@@ -892,24 +892,17 @@ export async function runStage4GammaPhonon(opts: Stage4Opts): Promise<StageResul
   const phTimeoutS = Math.round(Math.max(1800, Math.min(estimatedPhSeconds + 600, 28800)));
   const phTimeoutMs = phTimeoutS * 1000;
 
-  const phInput = `Gamma-only phonon calculation
-&INPUTPH
-  prefix = '${prefix}',
-  outdir = './tmp',
-  fildyn = '${prefix}.dyn',
-  tr2_ph = 1.0d-10,
-  alpha_mix(1) = 0.5,
-  reduce_io = .true.,
-  ldisp = .false.,
-  max_seconds = ${phTimeoutS - 60},
-/
-0.0 0.0 0.0
-`;
-
   console.log(`[Staged-Relax] ${formula} Stage 4 cost model: ${nReps} reps, ${phElectrons} e-, ${phNkpts} kpts, nspin=${phNspin} → cost/rep=${costPerRep.toFixed(0)}, est=${estimatedPhSeconds.toFixed(0)}s, timeout=${phTimeoutS.toFixed(0)}s (${(phTimeoutS/60).toFixed(0)} min)`);
 
+  // Born effective charges + macroscopic dielectric: required for LO-TO
+  // splitting at Γ in any ionic/polar system (hydrides, oxides, fluorides,
+  // pnictides). ph.x auto-skips if Ef is inside the conduction manifold
+  // (metallic), so this is unconditionally safe and only costs compute on
+  // insulators where it's mandatory for correct frequencies.
+  const epsilFlags = "  epsil = .true.,\n  trans = .true.,\n";
+
   // 2-attempt retry matching production phonon pipeline (qe-worker.ts lines 4580-4644):
-  //   Attempt 1: tr2_ph=1e-12, alpha_mix=0.3 (production defaults)
+  //   Attempt 1: tr2_ph=1e-12, alpha_mix=0.5 (production defaults)
   //   Attempt 2 (on crash): tr2_ph=1e-10, alpha_mix=0.1 (loosened, matches production retry)
   // On timeout: attempt 2 with recover=.true. (resume from checkpoint)
   const expectedModes = 3 * totalAtoms;
@@ -932,8 +925,10 @@ export async function runStage4GammaPhonon(opts: Stage4Opts): Promise<StageResul
     const prevCrashed = prevHasUnderflow; // Crash = underflow/stop1
 
     // On crash: loosen convergence (production retry behavior)
-    // On timeout (no crash): use recover=.true. to resume from checkpoint
-    const retryTr2 = prevCrashed ? "1.0d-8" : "1.0d-10";  // Loosen further on crash
+    // On timeout (no crash): use recover=.true. to resume from checkpoint.
+    // Attempt 1 uses tr2_ph=1e-12 (matches publication-grade tier in
+    // generatePhononInput); attempt 2 on crash drops to 1e-10 with α=0.1.
+    const retryTr2 = prevCrashed ? "1.0d-10" : "1.0d-12";
     const retryAlpha = prevCrashed ? 0.1 : 0.5;
     const recoverLine = (prevTimedOut || prevExternalKill) && !prevCrashed ? "  recover = .true.,\n" : "";
 
@@ -947,7 +942,7 @@ export async function runStage4GammaPhonon(opts: Stage4Opts): Promise<StageResul
   reduce_io = .true.,
   ldisp = .false.,
   max_seconds = ${phTimeoutS - 60},
-${recoverLine}/
+${epsilFlags}${recoverLine}/
 0.0 0.0 0.0
 `;
 
@@ -1002,52 +997,80 @@ ${recoverLine}/
     // it to get eigenvalues (frequencies).
     if (frequencies.length === 0 && result.exitCode === 0) {
       try {
-        const dynFile = path.join(opts.jobDir, `${prefix}.dyn`);
-        if (fs.existsSync(dynFile)) {
-          console.log(`[Staged-Relax] ${formula} Stage 4: ph.x wrote .dyn but no freqs in stdout — running dynmat.x`);
+        // ph.x writes either <prefix>.dyn (ldisp=.false. single q-point) or
+        // <prefix>.dyn1 (newer QE versions append the q-point index even when
+        // there's only one). Probe both.
+        const dynCandidates = [
+          path.join(opts.jobDir, `${prefix}.dyn`),
+          path.join(opts.jobDir, `${prefix}.dyn1`),
+        ];
+        const dynFile = dynCandidates.find(p => fs.existsSync(p));
+        const dynBasename = dynFile ? path.basename(dynFile) : null;
+        if (dynFile && dynBasename) {
+          console.log(`[Staged-Relax] ${formula} Stage 4: ph.x wrote ${dynBasename} but no freqs in stdout — running dynmat.x`);
 
-          // Write dynmat.x input
-          const dynmatInput = `&INPUT\n  fildyn = '${prefix}.dyn',\n  asr = 'simple'\n/\n`;
-          const dynmatFile = path.join(opts.jobDir, "dynmat_gamma.in");
-          fs.writeFileSync(dynmatFile, dynmatInput);
+          // ASR ladder: 'crystal' is the general formulation that works on any
+          // Bravais lattice; 'simple' is the original 1970s code path and only
+          // converges on high-symmetry cubic crystals (SrCaH12 with 14 atoms /
+          // 42 reps fails). 'no' is the last-resort: skip ASR entirely so the
+          // diagonalization still happens — the 3 acoustic modes won't be
+          // pinned to ω=0, but that doesn't change the pass/fail screen.
+          const asrLadder: Array<"crystal" | "simple" | "no"> = ["crystal", "simple", "no"];
+          let dynmatSucceeded = false;
+          let lastExit = -1;
+          let lastStderr = "";
 
-          // Run dynmat.x
-          if (opts.callbacks.runQEBinary) {
+          if (!opts.callbacks.runQEBinary) {
+            console.log(`[Staged-Relax] ${formula} Stage 4: dynmat.x not available (runQEBinary callback missing)`);
+          } else for (const asr of asrLadder) {
+            const dynmatInput = `&INPUT\n  fildyn = '${dynBasename}',\n  asr = '${asr}'\n/\n`;
+            const dynmatFile = path.join(opts.jobDir, "dynmat_gamma.in");
+            fs.writeFileSync(dynmatFile, dynmatInput);
+
             const dynmatResult = await opts.callbacks.runQEBinary("dynmat.x", dynmatFile, opts.jobDir, 60000);
-            fs.writeFileSync(path.join(opts.jobDir, "dynmat_gamma.out"), dynmatResult.stdout);
+            fs.writeFileSync(path.join(opts.jobDir, `dynmat_gamma_asr_${asr}.out`), dynmatResult.stdout);
+            lastExit = dynmatResult.exitCode;
+            lastStderr = dynmatResult.stderr;
 
-            if (dynmatResult.exitCode === 0) {
-              // Parse frequencies from dynmat.x output
-              // Format: "# mode   [cm-1]   [THz]  IR\n   1   123.45   3.678   0.123"
-              const dynmatFreqs = parseGammaPhononFrequencies(dynmatResult.stdout);
-              if (dynmatFreqs.length > 0) {
-                frequencies = dynmatFreqs;
-                console.log(`[Staged-Relax] ${formula} Stage 4: dynmat.x extracted ${dynmatFreqs.length} frequencies from .dyn`);
-              } else {
-                // Try tabular format: "   1   123.45   3.678   0.123"
-                let inTable = false;
-                for (const line of dynmatResult.stdout.split("\n")) {
-                  if (line.match(/#\s*mode\s+\[cm-1\]/i)) { inTable = true; continue; }
-                  if (inTable) {
-                    const parts = line.trim().split(/\s+/);
-                    if (parts.length >= 2 && !isNaN(parseFloat(parts[1]))) {
-                      frequencies.push(parseFloat(parts[1]));
-                    } else if (parts.length < 2 || line.trim() === "") {
-                      break;
-                    }
-                  }
-                }
-                if (frequencies.length > 0) {
-                  console.log(`[Staged-Relax] ${formula} Stage 4: dynmat.x tabular parse got ${frequencies.length} frequencies`);
-                } else {
-                  console.log(`[Staged-Relax] ${formula} Stage 4: dynmat.x ran but couldn't parse frequencies. Output tail: ${dynmatResult.stdout.slice(-300)}`);
+            if (dynmatResult.exitCode !== 0) {
+              console.log(`[Staged-Relax] ${formula} Stage 4: dynmat.x asr='${asr}' exit=${dynmatResult.exitCode}: ${dynmatResult.stderr.slice(-200)}`);
+              continue;
+            }
+
+            // Parse frequencies from dynmat.x output
+            // Format: "# mode   [cm-1]   [THz]  IR\n   1   123.45   3.678   0.123"
+            const dynmatFreqs = parseGammaPhononFrequencies(dynmatResult.stdout);
+            if (dynmatFreqs.length > 0) {
+              frequencies = dynmatFreqs;
+              console.log(`[Staged-Relax] ${formula} Stage 4: dynmat.x asr='${asr}' extracted ${dynmatFreqs.length} frequencies from ${dynBasename}`);
+              dynmatSucceeded = true;
+              break;
+            }
+
+            // Try tabular format: "   1   123.45   3.678   0.123"
+            let inTable = false;
+            for (const line of dynmatResult.stdout.split("\n")) {
+              if (line.match(/#\s*mode\s+\[cm-1\]/i)) { inTable = true; continue; }
+              if (inTable) {
+                const parts = line.trim().split(/\s+/);
+                if (parts.length >= 2 && !isNaN(parseFloat(parts[1]))) {
+                  frequencies.push(parseFloat(parts[1]));
+                } else if (parts.length < 2 || line.trim() === "") {
+                  break;
                 }
               }
-            } else {
-              console.log(`[Staged-Relax] ${formula} Stage 4: dynmat.x exit=${dynmatResult.exitCode}: ${dynmatResult.stderr.slice(-200)}`);
             }
-          } else {
-            console.log(`[Staged-Relax] ${formula} Stage 4: dynmat.x not available (runQEBinary callback missing)`);
+            if (frequencies.length > 0) {
+              console.log(`[Staged-Relax] ${formula} Stage 4: dynmat.x asr='${asr}' tabular parse got ${frequencies.length} frequencies`);
+              dynmatSucceeded = true;
+              break;
+            }
+
+            console.log(`[Staged-Relax] ${formula} Stage 4: dynmat.x asr='${asr}' ran but produced no parseable frequencies. Output tail: ${dynmatResult.stdout.slice(-300)}`);
+          }
+
+          if (!dynmatSucceeded) {
+            console.log(`[Staged-Relax] ${formula} Stage 4: all dynmat.x ASR variants failed (last exit=${lastExit}, stderr=${lastStderr.slice(-150)})`);
           }
         }
       } catch (dynErr: any) {
