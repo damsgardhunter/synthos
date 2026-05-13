@@ -223,6 +223,10 @@ class DCAParams:
         mixing_method: str = "anderson",
         anderson_depth: int = 5,
         anderson_beta: float = 1.0,
+        # Density extraction method
+        use_dlr_density: bool = False,
+        dlr_wmax: float = 8.0,
+        dlr_eps: float = 1e-7,
     ):
         self.nc = nc
         self.dim = dim
@@ -241,6 +245,9 @@ class DCAParams:
         self.mixing_method = mixing_method
         self.anderson_depth = anderson_depth
         self.anderson_beta = anderson_beta
+        self.use_dlr_density = use_dlr_density
+        self.dlr_wmax = dlr_wmax
+        self.dlr_eps = dlr_eps
 
         # Derived
         self.K_cluster = generate_cluster_momenta(nc, dim)
@@ -620,14 +627,27 @@ def run_dca(
         diff = np.max(np.abs(sigma_new - sigma_c))
         sigma_c = sigma_mixed
 
-        # Compute density (both spins, SU(2) symmetry) with 2nd-order tail correction
-        # n_total(K) = 2·n_↑(K); n_↑ from tail-corrected Matsubara sum
-        from charge_selfconsistency import density_per_spin_with_tail
-        density = 0.0
-        for ic in range(nc):
-            n_up = density_per_spin_with_tail(g_c[ic], params.beta)
-            density += 2.0 * n_up
-        density /= nc
+        # Compute density (both spins, SU(2) symmetry) with tail correction.
+        # If use_dlr_density is True, use the DLR/IR-basis exact extraction;
+        # otherwise use the analytical 2nd-order Matsubara tail correction.
+        if getattr(params, "use_dlr_density", False):
+            from charge_selfconsistency import density_per_spin_dlr
+            density = 0.0
+            for ic in range(nc):
+                n_up = density_per_spin_dlr(
+                    g_c[ic], params.beta,
+                    wmax=getattr(params, "dlr_wmax", 8.0),
+                    eps=getattr(params, "dlr_eps", 1e-7),
+                )
+                density += 2.0 * n_up
+            density /= nc
+        else:
+            from charge_selfconsistency import density_per_spin_with_tail
+            density = 0.0
+            for ic in range(nc):
+                n_up = density_per_spin_with_tail(g_c[ic], params.beta)
+                density += 2.0 * n_up
+            density /= nc
 
         elapsed_iter = time.time() - t_iter
         convergence_history.append(float(diff))

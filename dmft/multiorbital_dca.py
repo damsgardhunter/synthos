@@ -856,14 +856,28 @@ def run_multiorbital_dca(
         diff = np.max(np.abs(sigma_new - sigma_c))
         sigma_c = sigma_mixed
 
-        # Density per orbital (both spins, SU(2) symmetry) with 2nd-order tail correction
-        from charge_selfconsistency import density_per_spin_with_tail
-        density = np.zeros(no)
-        for a in range(no):
-            for ic in range(nc):
-                n_up = density_per_spin_with_tail(g_c[ic, :, a, a], params.beta)
-                density[a] += 2.0 * n_up
-            density[a] /= nc
+        # Density per orbital (both spins, SU(2) symmetry).
+        # DLR/IR-basis exact extraction if enabled, else 2nd-order tail correction.
+        if getattr(params, "use_dlr_density", False):
+            from charge_selfconsistency import density_per_spin_dlr
+            density = np.zeros(no)
+            for a in range(no):
+                for ic in range(nc):
+                    n_up = density_per_spin_dlr(
+                        g_c[ic, :, a, a], params.beta,
+                        wmax=getattr(params, "dlr_wmax", 8.0),
+                        eps=getattr(params, "dlr_eps", 1e-7),
+                    )
+                    density[a] += 2.0 * n_up
+                density[a] /= nc
+        else:
+            from charge_selfconsistency import density_per_spin_with_tail
+            density = np.zeros(no)
+            for a in range(no):
+                for ic in range(nc):
+                    n_up = density_per_spin_with_tail(g_c[ic, :, a, a], params.beta)
+                    density[a] += 2.0 * n_up
+                density[a] /= nc
 
         elapsed_iter = time.time() - t_iter
         convergence_history.append(float(diff))

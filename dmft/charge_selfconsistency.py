@@ -253,6 +253,57 @@ def density_per_spin_with_tail(
     return float(naive + c2_correction)
 
 
+def density_per_spin_dlr(
+    g_diag: np.ndarray,
+    beta: float,
+    wmax: float = 8.0,
+    eps: float = 1e-7,
+) -> float:
+    """
+    Density extraction via Discrete Lehmann Representation (DLR/IR basis).
+
+    Fits G(iω_n) into the IR basis, then evaluates G(τ=β⁻) which directly
+    gives n_↑ = -G(β⁻) WITHOUT any Matsubara truncation error or tail-fit
+    approximation. The IR basis spans the full analytic structure of a
+    physical fermionic Green's function.
+
+    This is the "gold-standard" density calculation when sparse_ir is
+    available. Falls back to density_per_spin_with_tail if it's not.
+
+    Args:
+        g_diag: 1-D array of G_{aa}(iω_n) on the canonical fermionic
+            Matsubara grid: ω_n = (2(n-n_iw)+1)π/β for n=0..2*n_iw-1
+        beta:   inverse temperature
+        wmax:   spectral support cutoff (must contain all of G's spectral weight)
+        eps:    IR basis accuracy (smaller → larger basis, more precise)
+
+    Returns:
+        n_↑ as a float.
+    """
+    try:
+        from dlr_basis import DLRBasis, is_available
+    except ImportError:
+        return density_per_spin_with_tail(g_diag, beta)
+
+    if not is_available():
+        return density_per_spin_with_tail(g_diag, beta)
+
+    g_diag = np.asarray(g_diag).ravel()
+    n_iw_total = g_diag.shape[0]
+    n_iw = n_iw_total // 2
+    matsu_idx = np.array(
+        [2 * (n - n_iw) + 1 for n in range(n_iw_total)], dtype=int
+    )
+
+    try:
+        dlr = DLRBasis(beta=beta, wmax=wmax, eps=eps)
+        n_up = dlr.density_from_matsubara(g_diag, matsu_idx)
+        return float(n_up)
+    except Exception:
+        # Any DLR failure → fall back to the analytical tail correction
+        return density_per_spin_with_tail(g_diag, beta)
+
+
 # ── QE density update ───────────────────────────────────────────────────────
 
 def split_density_by_corr_shells(
