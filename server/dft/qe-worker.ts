@@ -161,22 +161,65 @@ function fracDistAngstrom(
   return Math.sqrt(dx * dx + dy * dy + dz * dz);
 }
 
-function estimateBulkModulus(elements: string[]): number {
-  let totalB = 0;
-  let count = 0;
+function estimateBulkModulus(elements: string[], counts?: Record<string, number>): number {
+  // Non-hydride (or no count data): legacy simple element-table average.
+  if (!elements.includes("H") || !counts) {
+    let totalB = 0;
+    let count = 0;
+    for (const el of elements) {
+      const data = getElementData(el);
+      if (data && data.bulkModulus != null && data.bulkModulus > 0) {
+        totalB += data.bulkModulus;
+        count++;
+      }
+    }
+    return count > 0 ? totalB / count : 100;
+  }
+
+  // Hydride path. The naive average produced B0 ≈ 13–14 GPa for LaH10 / LaH12
+  // / LaH11Li2 because H's tabulated bulk modulus is tiny — that made the
+  // Murnaghan pre-compression a near-no-op, leaving vc-relax to compress
+  // 70% on its own (root cause of the H3S overshoot pattern).
+  //
+  // Real physics: high-P clathrate hydrides have ambient-extrapolated bulk
+  // moduli of ~50–120 GPa (LaH10 ~80 GPa, CaH6 ~100 GPa, Li-doped hydrides
+  // softer). At target pressure they stiffen to 250–400 GPa, but Murnaghan
+  // wants the AMBIENT B0 and applies the pressure correction itself.
+  //
+  // Model: (1) take the H-mole-weighted average of metal B0s, NOT the
+  // element-set average — so binary alloys with Li (B0=11) and La (B0=28)
+  // give a stoichiometry-correct base; (2) apply a cage-stiffening factor
+  // that scales with H fraction (cage networks are stiffer than the metal
+  // lattice alone, with empirical slope ~6×); (3) floor at 30 GPa so soft
+  // alkali hydrides at high P still get a sane pre-compression.
+  let metalB0Sum = 0;
+  let metalCountForB0 = 0;
+  let hCount = 0;
+  let totalAtoms = 0;
   for (const el of elements) {
+    const n = Math.round(counts[el] ?? 0);
+    if (n <= 0) continue;
+    totalAtoms += n;
+    if (el === "H") { hCount += n; continue; }
     const data = getElementData(el);
     if (data && data.bulkModulus != null && data.bulkModulus > 0) {
-      totalB += data.bulkModulus;
-      count++;
+      metalB0Sum += data.bulkModulus * n;
+      metalCountForB0 += n;
     }
   }
-  return count > 0 ? totalB / count : 100;
+  if (metalCountForB0 === 0 || totalAtoms === 0) return 50; // pure H or no data
+  const baseMetalB0 = metalB0Sum / metalCountForB0;
+  const hFraction = hCount / totalAtoms;
+  // Cage-stiffening factor: 1.0 at H_frac=0, ~6× at H_frac=10/11 (LaH10).
+  // Tuned so LaH10 (B0_metal=28, hFrac=0.91) → 28 × 6.5 = 182 GPa, close
+  // to the ~150 GPa ambient-extrapolated literature value.
+  const cageFactor = 1.0 + 6.0 * hFraction;
+  return Math.max(30, baseMetalB0 * cageFactor);
 }
 
-function computePressureScale(pressureGpa: number, elements?: string[]): number {
+function computePressureScale(pressureGpa: number, elements?: string[], counts?: Record<string, number>): number {
   if (pressureGpa <= 0) return 1.0;
-  const B0 = elements ? estimateBulkModulus(elements) : 100;
+  const B0 = elements ? estimateBulkModulus(elements, counts) : 100;
   const B0p = 4.0;
   const inner = 1 + B0p * (pressureGpa / B0);
   const eta = inner > 0 ? Math.pow(inner, -1 / B0p) : 0.5;
@@ -978,7 +1021,7 @@ function estimateLatticeConstant(elements: string[], counts?: Record<string, num
   }
 
   if (pressureGPa > 0) {
-    const B0 = estimateBulkModulus(elements);
+    const B0 = estimateBulkModulus(elements, effectiveCounts);
     const B0p = 4.0;
     const eta = 1 + B0p * (pressureGPa / B0);
     const volRatio = eta > 0 ? Math.pow(eta, -1 / B0p) : 0.5;
@@ -5189,6 +5232,9 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
           workerPressure,
           3, // nDFT fallback (overridden by tier-based budget inside funnel)
           tierDecision.tier,
+          {
+            prefilterMinsepMultiplier: structureAdvice?.prefilterMinsepMultiplier,
+          },
         );
 
         if (funnelResult.selected.length > 0) {
@@ -5225,15 +5271,34 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     // fractional coordinates from the known-structure database assume the real cell
     // (a=3.81, c=30.89 Å). Using the wrong lattice with the right positions = atom overlaps.
     const ksOverride = lookupKnownStructure(formula);
+    let usedKnownStructureLattice = false;
     if (ksOverride && ksOverride.latticeA > 0) {
       const vegardA = latticeA;
       latticeA = ksOverride.latticeA;
+      usedKnownStructureLattice = true;
       console.log(`[QE-Worker] Using known structure for ${formula} (${ksOverride.atoms.length} atoms, ${ksOverride.spaceGroup}, a=${ksOverride.latticeA.toFixed(2)} Å${ksOverride.latticeC ? `, c=${ksOverride.latticeC.toFixed(2)} Å` : ""}) — overrides Vegard a=${vegardA.toFixed(3)} Å`);
     }
     result.initialLatticeA = latticeA;
 
-    if (workerPressure > 0) {
-      console.log(`[QE-Worker] Lattice for ${formula} Murnaghan-compressed for ${workerPressure} GPa: ${latticeA.toFixed(3)} A (B0=${estimateBulkModulus(elements).toFixed(0)} GPa)`);
+    // Apply Murnaghan compression ONLY when we just overrode with a literature-
+    // ambient lattice from the known-structure database. The Vegard path
+    // (estimateLatticeConstant) already does pressure compression internally,
+    // so applying it here when Vegard was kept would double-compress.
+    //
+    // Without this step, vc-relax for known-structure hydrides at 100+ GPa
+    // had to do all 30%+ cell compression itself and frequently overshot
+    // (H3S 200 GPa: a=5.43 → 2.44 Å, ended at 38 GPa instead of 200).
+    if (workerPressure > 0 && usedKnownStructureLattice) {
+      const B0 = estimateBulkModulus(elements, counts);
+      const B0p = 4.0;
+      const eta = 1 + B0p * (workerPressure / B0);
+      const volRatio = eta > 0 ? Math.pow(eta, -1 / B0p) : 0.5;
+      const linearScale = Math.pow(Math.max(0.45, Math.min(1.0, volRatio)), 1 / 3);
+      const preMurnA = latticeA;
+      latticeA = latticeA * linearScale;
+      console.log(`[QE-Worker] Murnaghan-compressed known-structure lattice for ${formula} at ${workerPressure} GPa: ${preMurnA.toFixed(3)} → ${latticeA.toFixed(3)} Å (scale=${linearScale.toFixed(3)}, B0=${B0.toFixed(0)} GPa)`);
+    } else if (workerPressure > 0) {
+      console.log(`[QE-Worker] Lattice for ${formula} (Vegard path, compression already applied): ${latticeA.toFixed(3)} Å at ${workerPressure} GPa (B0=${estimateBulkModulus(elements, counts).toFixed(0)} GPa)`);
     }
 
     let positions = generateAtomicPositions(elements, counts, formula, latticeA);

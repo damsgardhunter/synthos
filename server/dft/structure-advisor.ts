@@ -37,6 +37,13 @@ export interface StructureAdvice {
   estimatedLattice: { a: number; b: number; c: number };
   /** Per-pair minimum distances in Å (for MINSEP) */
   pairDistances: Record<string, number>;
+  /** F1 pre-filter cut multiplier on the per-pair minsep. The pre-filter
+   *  rejects candidates with any pair distance below `multiplier × minsep`.
+   *  Should be in [0.40, 0.85]; ~0.55 for dense cage hydrides (allow tight
+   *  H-H contacts), ~0.70 for ionic / non-cage compounds (stricter). The
+   *  same model that advises pairDistances picks this so the two stay
+   *  coherent: tight minsep + loose multiplier = same effective floor. */
+  prefilterMinsepMultiplier: number;
   /** Element coordination hints */
   coordinationHints: Record<string, {
     role: string;
@@ -57,6 +64,7 @@ const EMPTY_ADVICE: StructureAdvice = {
   alternativeSpaceGroups: [],
   estimatedLattice: { a: 0, b: 0, c: 0 },
   pairDistances: {},
+  prefilterMinsepMultiplier: 0.65, // global default (matches former hardcode)
   coordinationHints: {},
   reasoning: "",
   fromCache: false,
@@ -114,6 +122,7 @@ Return ONLY valid JSON with these fields:
   "alternativeSpaceGroups": [<up to 3 alternative SG numbers>],
   "estimatedLattice": { "a": <Å>, "b": <Å>, "c": <Å> },
   "pairDistances": { "${elements.map((a, i) => elements.slice(i).map(b => `${a}-${b}`)).flat().join('": <Å>, "')}": <Å> },
+  "prefilterMinsepMultiplier": <0.40–0.85>,
   "coordinationHints": {
     ${elements.map(el => `"${el}": { "role": "<cage-center|cage-vertex|cage-network|framework|interstitial|layer-atom|chain-atom>", "typicalCoordination": <integer>, "nearestNeighbor": "<element>" }`).join(",\n    ")}
   },
@@ -122,6 +131,11 @@ Return ONLY valid JSON with these fields:
 }
 
 Be specific about pair distances — these will be used as minimum interatomic distances for structure generation. For hydrides under pressure, H-H distances are typically 1.0-1.5 Å in cage structures, 0.74 Å in H₂ molecules. Metal-H distances depend on the metal size and pressure.
+
+The "prefilterMinsepMultiplier" controls how strict the pre-DFT geometry filter is: it rejects any candidate where some atom pair is closer than (multiplier × pairDistances[that-pair]). Pick values that stay coherent with the pairDistances you reported:
+- 0.50–0.60 for dense cage hydrides at high pressure (H-H contacts can legitimately approach the pair minimum)
+- 0.60–0.70 for normal metallic / intermetallic compounds
+- 0.70–0.80 for ionic, layered, or molecular compounds (clean separations expected)
 
 For space groups: use the international number (1-230). Common hydride space groups: 225 (Fm-3m, clathrate), 229 (Im-3m, sodalite/BCC), 194 (P63/mmc, hex), 139 (I4/mmm), 221 (Pm-3m, perovskite).`;
 }
@@ -193,6 +207,11 @@ export async function getStructureAdvice(
         : [],
       estimatedLattice: validateLattice(parsed.estimatedLattice),
       pairDistances: validatePairDistances(parsed.pairDistances),
+      prefilterMinsepMultiplier: (() => {
+        const m = parsed.prefilterMinsepMultiplier;
+        if (typeof m === "number" && m >= 0.40 && m <= 0.85) return m;
+        return 0.65; // default if missing / out-of-range
+      })(),
       coordinationHints: typeof parsed.coordinationHints === "object" && parsed.coordinationHints
         ? parsed.coordinationHints : {},
       reasoning: typeof parsed.reasoning === "string" ? parsed.reasoning.slice(0, 500) : "",

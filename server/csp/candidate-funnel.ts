@@ -138,6 +138,7 @@ function f1_geometry(
   candidates: CSPCandidate[],
   pressureGPa: number,
   stats: FunnelStats,
+  minsepMultiplier: number = 0.65,
 ): ScoredCandidate[] {
   const passed: ScoredCandidate[] = [];
 
@@ -165,9 +166,10 @@ function f1_geometry(
     const elements = [...new Set(c.positions.map(p => p.element))];
 
     // Check minimum pair distances (pressure-aware) with full cell-axes scaling.
-    // Threshold raised from 0.5× minsep → 0.65× because 50% was tuned for
-    // overlap detection but missed near-overlap pairs that survive F1 and then
-    // explode in Stage 1 relax (CaFe2As2 cand 1: F=177 Ry/bohr).
+    // Multiplier defaults to 0.65 but the LLM structure-advisor can supply a
+    // material-class-specific value: looser (~0.55) for dense cage hydrides
+    // where H-H legitimately approaches the pair minimum, stricter (~0.75) for
+    // ionic / non-cage compounds.
     for (let i = 0; i < n && !rejected; i++) {
       for (let j = i + 1; j < n; j++) {
         let dx = c.positions[i].x - c.positions[j].x;
@@ -177,9 +179,9 @@ function f1_geometry(
         const dist = Math.sqrt((dx * a) ** 2 + (dy * a * bOverA_dist) ** 2 + (dz * a * cOverA) ** 2);
         const minsep = getPairMinsep(c.positions[i].element, c.positions[j].element, pressureGPa);
 
-        if (dist < ABS_MIN_DIST_ANG || dist < minsep * 0.65) {
+        if (dist < ABS_MIN_DIST_ANG || dist < minsep * minsepMultiplier) {
           // Hard reject: catastrophic atomic overlap (absolute floor) OR
-          // below 65% of per-pair minsep
+          // below multiplier × per-pair minsep (LLM-advised or default)
           rejected = true;
           stats.rejectionReasons["f1_atom_overlap"] = (stats.rejectionReasons["f1_atom_overlap"] ?? 0) + 1;
           break;
@@ -408,6 +410,7 @@ export async function runCandidateFunnel(
   pressureGPa: number,
   nDFT: number = 3,
   tier: ScreeningTier = "preview",
+  opts: { prefilterMinsepMultiplier?: number } = {},
 ): Promise<FunnelResult> {
   const stats: FunnelStats = {
     f0_input: 0, f0_rejected: 0,
@@ -420,8 +423,13 @@ export async function runCandidateFunnel(
   // F0: Parse + normalize
   const f0 = f0_parse(rawCandidates, stats);
 
-  // F1: Geometry hard filter
-  const f1 = f1_geometry(f0, pressureGPa, stats);
+  // F1: Geometry hard filter. Use LLM-advised multiplier when present so the
+  // pre-filter stays coherent with the LLM-advised MINSEP that AIRSS used
+  // upstream — tight MINSEP + loose multiplier and loose MINSEP + tight
+  // multiplier produce the same effective floor.
+  const f1MinsepMult = opts.prefilterMinsepMultiplier ?? 0.65;
+  console.log(`[CSP-Funnel] F1 pre-filter using minsep multiplier ${f1MinsepMult.toFixed(2)} for ${formula}${opts.prefilterMinsepMultiplier != null ? " (LLM-advised)" : " (default)"}`);
+  const f1 = f1_geometry(f0, pressureGPa, stats, f1MinsepMult);
 
   // F2: Chemistry sanity
   const f2 = f2_chemistry(f1, stats);
@@ -469,7 +477,13 @@ export async function runCandidateFunnel(
       const hasH = elements.includes("H");
       const avgAtoms = f6Candidates.reduce((sum, c) => sum + (c.positions?.length ?? 10), 0) / f6Candidates.length;
       const perStructureMs = Math.max(15000, Math.round(avgAtoms * (hasH ? 4000 : 2500))); // hydrides: 4s/atom, others: 2.5s/atom
-      const hardCapMs = hasH ? 7200000 : 3600000; // hydrides: 120 min, others: 60 min (scaled for 24-atom cells)
+      // Hard caps: large ternary hydride batches at deep tier (96 candidates ×
+      // 35-atom cells × 4s/atom × 1.5 safety = 5h) were exceeding the 2h cap
+      // and ETIMEDOUTing the whole spawn, losing ALL ranking data and cascading
+      // to random DFT selection. Bumped to 8h for hydrides / 3h for non-H so
+      // the spawn doesn't get killed mid-batch. Per-material budget still
+      // protected by the size-scaled `perStructureMs` × maxEval calculation.
+      const hardCapMs = hasH ? 28800000 : 10800000; // hydrides: 480 min, others: 180 min
       const timeoutMs = Math.round(Math.min(
         hardCapMs,
         Math.max(600000, Math.round(maxEval * perStructureMs * 1.5) + 120000) // 50% safety margin + 120s overhead

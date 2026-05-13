@@ -192,7 +192,12 @@ const HEAVY_ELEMENTS = new Set([
 ]);
 
 // Magnetic elements need nspin=2 which doubles the SCF cost
-const MAGNETIC_ELS = new Set(["Fe", "Co", "Ni", "Mn", "Cr", "V", "Gd", "Eu", "Nd"]);
+// Elements that benefit from a magnetic-search Stage 1 budget. Cu/Ag/Rh
+// included for cuprate-class compounds (Cu²⁺ AFM in HgBa2CuO4 etc.) — they
+// trigger the magnetic ground-state search downstream, but the cost model
+// previously didn't see them as magnetic and used the default 90-min cap,
+// timing out before atomic relax converged.
+const MAGNETIC_ELS = new Set(["Fe", "Co", "Ni", "Mn", "Cr", "V", "Gd", "Eu", "Nd", "Cu", "Ag", "Rh", "Ru", "Ir"]);
 
 // Valence electron counts per element (from QE pseudopotential zValence).
 // Used to estimate SCF cost: more valence electrons = larger basis set = more expensive.
@@ -309,9 +314,16 @@ function computeStage1Params(elements: string[], totalAtoms: number, counts?: Re
   const hasH = elements.includes("H");
   const isHighPressureHydride = hasH && totalAtoms >= 7;
   const stageAtomScale = totalAtoms > 7 ? Math.pow(totalAtoms / 7, 1.2) : 1.0;
+  // Heavy-electron-rich systems (cuprates HgBa2CuO4, perovskites with TM+heavy,
+  // bismuth oxides) need more iterations per ionic step due to large basis +
+  // partially-filled d shells. ≥70 valence electrons OR ≥2 heavy elements puts
+  // the system into this class. HgBa2CuO4 (8 atoms, 83 e-, Hg+Ba heavy, Cu d⁹)
+  // hit the default 90-min cap before atomic relax converged in the May-2026 run.
+  const isHeavyElectronRich = cellElectrons >= 70 || heavyCount >= 2;
   const maxTimeoutS = Math.round((hasMagnetic
     ? (heavyCount >= 1 ? 10800 : 9000)
     : isHighPressureHydride ? 9000
+    : isHeavyElectronRich ? 9000
     : 5400) * stageAtomScale);
   // FLOOR by system type — the cost model underestimates for magnetic systems
   // because spin-polarized SCF on Fe/Mn/Cr is intrinsically much harder than
