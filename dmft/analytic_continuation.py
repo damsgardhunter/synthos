@@ -157,7 +157,12 @@ def run_pade(
     t0 = time.time()
     n_iw = g_iw.shape[0] // 2
     omega_grid = np.linspace(omega_min, omega_max, n_omega)
-    delta = 0.03  # broadening (eV)
+    # Real-frequency broadening δ. The hardcoded 0.03 eV was correct for
+    # β≈40 (T≈290K) but over-smoothed cold runs (β=1000 → T=12K, where
+    # Matsubara spacing π/β ≈ 0.003 eV) and under-smoothed hot runs.
+    # Track the Matsubara spacing with a numerical floor to keep Padé
+    # numerically stable.
+    delta = max(np.pi / beta, 0.005)  # broadening (eV)
 
     results = {
         "method": "pade",
