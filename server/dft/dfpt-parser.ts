@@ -277,13 +277,24 @@ export function parseAlpha2FOutput(content: string): DFPTAlpha2FParsed {
     }
     omegaLog = Math.exp((2 / lambda) * logSum);
     if (!Number.isFinite(omegaLog) || omegaLog < 0) omegaLog = 0;
+    // Convert from cm⁻¹ (the unit of `frequencies` parsed from .a2f) to K
+    // so the returned ω_log matches the project-wide convention. The
+    // consumer at qe-worker:4774 overwrites `omegaLog` with this value
+    // and then plugs it directly into Allen-Dynes (Tc[K] = ω_log[K]/1.2 ·…),
+    // which only gives Tc in K if ω_log is in K. Previously this was in
+    // cm⁻¹, so the fallback Allen-Dynes Tc was off by a factor of 1/1.4388
+    // (~30% under-predict) whenever the a2f file path was used.
+    if (omegaLog > 0) {
+      const CM1_TO_K = 1.4387768775039338;  // hc/k_B in K·cm
+      omegaLog *= CM1_TO_K;
+    }
   }
 
   return {
     frequencies,
     alpha2F,
     lambda: Number(lambda.toFixed(4)),
-    omegaLog: Number(omegaLog.toFixed(2)),
+    omegaLog: Number(omegaLog.toFixed(2)),  // in K (project convention)
     nqPoints,
     source: frequencies.length > 0 ? "lambda.x" : "reconstructed",
   };
