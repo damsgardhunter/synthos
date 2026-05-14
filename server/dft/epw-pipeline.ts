@@ -12,6 +12,7 @@
  * coarse-grid dynamical matrices (.dyn files) and .dvscf potentials.
  */
 
+import { getElementData } from "../learning/elemental-data";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -197,8 +198,19 @@ export function generateNSCFInput(opts: {
   const ntyp = elements.length;
   const nat = positions.length;
 
+  // ATOMIC_SPECIES requires the actual atomic mass per element.
+  // The old code hardcoded `1.0` for every species. That's largely a no-op
+  // for epw.x's interpolation step (which inherits ω from upstream .dyn
+  // files computed with correct masses), but pw.x's consistency check
+  // against the .save directory can mark the run as mismatched, and any
+  // post-processing tool that re-reads this input would see uniform unit
+  // masses — producing wrong frequencies if it ever recomputes phonons.
   const speciesBlock = elements
-    .map(el => `  ${el}  1.0  ${ppFilenames[el]}`)
+    .map(el => {
+      const data = getElementData(el);
+      const mass = (data as any)?.atomicMass ?? (data as any)?.mass ?? 1.0;
+      return `  ${el}  ${mass.toFixed(4)}  ${ppFilenames[el]}`;
+    })
     .join("\n");
 
   const posBlock = positions
@@ -462,8 +474,19 @@ export function generateEPWInput(opts: {
   const ntyp = elements.length;
   const nat = positions.length;
 
+  // ATOMIC_SPECIES requires the actual atomic mass per element.
+  // The old code hardcoded `1.0` for every species. That's largely a no-op
+  // for epw.x's interpolation step (which inherits ω from upstream .dyn
+  // files computed with correct masses), but pw.x's consistency check
+  // against the .save directory can mark the run as mismatched, and any
+  // post-processing tool that re-reads this input would see uniform unit
+  // masses — producing wrong frequencies if it ever recomputes phonons.
   const speciesBlock = elements
-    .map(el => `  ${el}  1.0  ${ppFilenames[el]}`)
+    .map(el => {
+      const data = getElementData(el);
+      const mass = (data as any)?.atomicMass ?? (data as any)?.mass ?? 1.0;
+      return `  ${el}  ${mass.toFixed(4)}  ${ppFilenames[el]}`;
+    })
     .join("\n");
 
   const posBlock = positions
