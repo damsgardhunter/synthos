@@ -62,6 +62,11 @@ export interface SSCHAPipelineOptions {
   prefix: string;
   mpiNp?: number;                // MPI ranks, 0 = serial
   mpiLauncher?: string;          // default "mpirun"
+  /** Harmonic electron-phonon coupling λ from EPW. Used as a fallback for
+   *  the anharmonic-Tc estimate inside the worker. Without it, Tc uses
+   *  λ=1.0 as a placeholder — which under-predicts Tc by 2-3× for strong-
+   *  coupling hydrides. Pass the EPW λ here whenever it's available. */
+  lambdaHarmonic?: number;
 }
 
 export interface SSCHAPipelineCallbacks {
@@ -391,6 +396,21 @@ export async function runSSCHAPipeline(
   if (mpiNp >= 2) {
     workerArgs.push("--mpi-np", String(mpiNp));
     workerArgs.push("--mpi-launcher", mpiLauncher);
+  }
+
+  // Pass harmonic λ if known — lets the worker compute a meaningful
+  // anharmonic Tc estimate instead of falling back to its λ=1.0 placeholder
+  // (which under-predicts hydride Tc by 2-3×). Caller may supply via the
+  // positional `harmonicLambda` arg (typical EPW workflow) OR via
+  // `options.lambdaHarmonic` (manual override). Positional wins.
+  const lambdaForTc =
+    typeof harmonicLambda === "number" && harmonicLambda > 0
+      ? harmonicLambda
+      : (typeof options.lambdaHarmonic === "number" && options.lambdaHarmonic > 0
+        ? options.lambdaHarmonic
+        : null);
+  if (lambdaForTc !== null) {
+    workerArgs.push("--lambda-harmonic", String(lambdaForTc));
   }
 
   // Determine pw.x path

@@ -112,6 +112,10 @@ def parse_args():
                    help="Number of MPI ranks (0 = no MPI)")
     p.add_argument("--mpi-launcher", default="mpirun",
                    help="MPI launcher command (default: mpirun)")
+    p.add_argument("--lambda-harmonic", type=float, default=None,
+                   help="Harmonic electron-phonon coupling λ from EPW (used as "
+                        "fallback for anharmonic Tc estimate when SSCHA doesn't "
+                        "re-run EPW). Without it, Tc uses λ=1.0 as a placeholder.")
     return p.parse_args()
 
 
@@ -333,8 +337,11 @@ def allen_dynes_tc(lambda_ep: float, omega_log_meV: float, mu_star: float = 0.10
     """Allen-Dynes Tc formula. Returns Tc in K."""
     if lambda_ep < 0.01 or omega_log_meV < 0.01:
         return 0.0
-    omega_log_K = omega_log_meV / K_BOLTZMANN_EV  # meV -> K: divide by k_B in meV/K
-    omega_log_K = omega_log_meV / 0.08617  # meV to K
+    # k_B = 0.08617 meV/K, so omega_log[meV] / k_B[meV/K] = omega_log[K].
+    # (The earlier line `omega_log_K = omega_log_meV / K_BOLTZMANN_EV` was
+    # both wrong by a factor of 1000 — K_BOLTZMANN_EV is in eV/K, not meV/K —
+    # AND dead code, overwritten on the next line. Now consolidated.)
+    omega_log_K = omega_log_meV / 0.08617
     exponent = -1.04 * (1 + lambda_ep) / (lambda_ep - mu_star * (1 + 0.62 * lambda_ep))
     if exponent > 0 or exponent < -100:
         return 0.0
@@ -900,14 +907,25 @@ def main():
         else:
             result = run_sscha_fallback(args)
 
-        # Compute Tc correction if we have omega_log
+        # Compute Tc correction if we have omega_log.
+        # Use the harmonic λ from EPW as the fallback for the anharmonic-Tc
+        # estimate. The proper value is λ_anh from a re-run EPW with the
+        # anharmonic phonons; absent that, harmonic λ is a far better proxy
+        # than the old hardcoded 1.0 (which underestimated Tc for strong-
+        # coupling hydrides by ~2-3×).
         omega_log = result.get("omegaLogAnharmonic", 0.0)
         if omega_log and omega_log > 0:
-            # Estimate Tc with default mu* = 0.10 and lambda ~ 1.0 (placeholder)
-            # The real lambda_anharmonic should come from EPW re-run
+            lambda_for_tc = args.lambda_harmonic if args.lambda_harmonic is not None else 1.0
+            if args.lambda_harmonic is None:
+                log("[SSCHA] WARNING: --lambda-harmonic not provided; using λ=1.0 "
+                    "placeholder for Tc estimate. For strong-coupling systems "
+                    "(hydrides) this can under-predict Tc by 2-3×. Pass the EPW "
+                    "harmonic λ via --lambda-harmonic for a better estimate.")
             for mu_star in [0.10, 0.13, 0.15]:
-                tc = allen_dynes_tc(1.0, omega_log, mu_star)  # lambda=1.0 placeholder
+                tc = allen_dynes_tc(lambda_for_tc, omega_log, mu_star)
                 result[f"tcEstimate_mustar{mu_star:.2f}"] = round(tc, 2)
+            result["lambdaUsedForTcEstimate"] = lambda_for_tc
+            result["lambdaUsedSource"] = "harmonic-from-EPW" if args.lambda_harmonic is not None else "placeholder-1.0"
 
         result["success"] = True
 
