@@ -757,6 +757,19 @@ async function runStage2VcRelax(
   const prefix = formula.replace(/[^a-zA-Z0-9]/g, "");
   const cellBlock = cb.generateCellParameters(latticeA, cOverA, 0, 1.0, elements, counts);
 
+  // Stage 2 SCF physics — adopt the same magnetic-aware tuning that
+  // Stage 1 uses (see comment at runStage1AtomicRelax). The previous
+  // hardcoded params (degauss=0.015, mixing_beta=0.25, conv_thr=1e-6,
+  // scf_must_converge=.false.) were calibrated for non-magnetic vc-relax;
+  // for magnetic systems they let BFGS use forces from a still-oscillating
+  // SCF, producing wrong relaxed geometries (e.g., BaFe2As2 cell volume
+  // drifting because the AFM-FM mixing hadn't converged).
+  const s2ConvThr = hasMag ? "1.0d-7" : "1.0d-6";
+  const s2MixingBeta = hasMag ? 0.20 : 0.25;
+  const s2Degauss = hasMag ? 0.005 : 0.015;
+  const s2ElectronMaxStep = hasMag ? 400 : 300;
+  const s2ScfMustConvergeLine = hasMag ? "" : "  scf_must_converge = .false.,\n";
+
   const input = `&CONTROL
   calculation = 'vc-relax',
   restart_mode = 'from_scratch',
@@ -780,17 +793,16 @@ async function runStage2VcRelax(
   input_dft = 'PBE',
   occupations = 'smearing',
   smearing = 'mv',
-  degauss = 0.015,
+  degauss = ${s2Degauss},
   nspin = ${nspin},
 ${magLines}/
 &ELECTRONS
-  electron_maxstep = 300,
-  conv_thr = 1.0d-6,
-  mixing_beta = 0.25,
+  electron_maxstep = ${s2ElectronMaxStep},
+  conv_thr = ${s2ConvThr},
+  mixing_beta = ${s2MixingBeta},
   mixing_mode = 'local-TF',
   diagonalization = 'david',
-  scf_must_converge = .false.,
-/
+${s2ScfMustConvergeLine}/
 &IONS
   ion_dynamics = 'bfgs',
 /
@@ -836,8 +848,20 @@ ${cellBlock}
   if (parsed.volumeDriftPercent != null && parsed.volumeDriftPercent > 5) {
     failReasons.push(`cell volume still drifting (${parsed.volumeDriftPercent.toFixed(1)}% over last 3 steps)`);
   }
-  if (pressureGPa === 0 && parsed.pressure != null && Math.abs(parsed.pressure) > 2) {
-    failReasons.push(`residual pressure ${parsed.pressure.toFixed(1)} kbar (> 2 kbar for ambient calc)`);
+  // Residual pressure check. For ambient (P=0), absolute |P| must be small.
+  // For finite-pressure calcs, the residual must be close to the TARGET
+  // (QE's press_conv_thr handles this internally but we double-check the
+  // parsed value). 5 kbar tolerance for high-P; tightens to 2 kbar ambient.
+  if (parsed.pressure != null) {
+    const targetKbar = pressureGPa * 10.0;
+    const residualKbar = Math.abs(parsed.pressure - targetKbar);
+    const tolKbar = pressureGPa === 0 ? 2.0 : Math.max(5.0, 0.02 * targetKbar);
+    if (residualKbar > tolKbar) {
+      failReasons.push(
+        `residual pressure ${parsed.pressure.toFixed(1)} kbar deviates from target ` +
+        `${targetKbar.toFixed(1)} kbar by ${residualKbar.toFixed(1)} kbar (tol ${tolKbar.toFixed(1)})`,
+      );
+    }
   }
 
   return {
