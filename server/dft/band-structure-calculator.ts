@@ -745,8 +745,22 @@ function estimateAnisotropicMass(
     Math.abs(dkVec[2] / dkMag),
   ];
 
-  const clamp = (v: number) => Math.sign(v) * Math.max(0.01, Math.min(50, Math.abs(v)));
-  const clampedPath = clamp(pathMass);
+  // Effective mass m*/m_e from band curvature. The previous code clamped
+  // |m*| to [0.01, 50] m_e, but real materials span a wider range:
+  //   - Dirac/Weyl bands (graphene, ZrTe5): |m*| → 0
+  //   - Heavy fermion / flat-band (kagome, twisted bilayer): |m*| > 100 m_e
+  // The clamp silently flattened both regimes — exactly the physics signal
+  // we want to capture for superconductor screening (low m* → high v_F,
+  // narrow bands → flat-band SC). Loosen the bounds substantially; only
+  // guard against truly pathological numerical outputs (Inf, |m*| > 10⁴).
+  const sanitizeMass = (v: number) => {
+    if (!Number.isFinite(v)) return NaN;
+    const abs = Math.abs(v);
+    if (abs > 10000) return Math.sign(v) * 10000;  // numerical sanity only
+    if (abs < 1e-6) return Math.sign(v) * 1e-6;     // avoid divide-by-zero downstream
+    return v;
+  };
+  const clampedPath = sanitizeMass(pathMass);
 
   return [
     dirFrac[0] > 0.3 ? clampedPath : NaN,
