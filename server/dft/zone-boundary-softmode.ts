@@ -46,6 +46,13 @@ export interface SoftModeInfo {
   frequency: number;
   /** Eigenvector: displacement per atom [atom_index][x,y,z] (real part) */
   eigenvector: Array<[number, number, number]>;
+  /** Imaginary part of eigenvector per atom [x,y,z]. Often zero for
+   *  high-symmetry q-points (Γ, zone-boundary M/X/R on commensurate
+   *  grids), but non-trivial for general q (e.g., q=(1/3,0,0) on a 3×3×3
+   *  grid). When present, the proper displacement is
+   *     u_n = ε_real·cos(2πq·R) − ε_imag·sin(2πq·R)
+   *  rather than just ε_real·cos(2πq·R). */
+  eigenvectorImag?: Array<[number, number, number]>;
 }
 
 export interface ZoneBoundarySoftModeResult {
@@ -185,12 +192,12 @@ export function generateMatdynEigenvectorInput(
 export function parseEigenvectors(
   vecPath: string,
   nAtoms: number,
-): Array<{ frequency: number; eigenvector: Array<[number, number, number]> }> {
+): Array<{ frequency: number; eigenvector: Array<[number, number, number]>; eigenvectorImag: Array<[number, number, number]> }> {
   if (!fs.existsSync(vecPath)) return [];
   const content = fs.readFileSync(vecPath, "utf-8");
   const lines = content.split("\n");
 
-  const modes: Array<{ frequency: number; eigenvector: Array<[number, number, number]> }> = [];
+  const modes: Array<{ frequency: number; eigenvector: Array<[number, number, number]>; eigenvectorImag: Array<[number, number, number]> }> = [];
   let i = 0;
 
   while (i < lines.length) {
@@ -205,23 +212,34 @@ export function parseEigenvectors(
     const freq = parseFloat((freqMatch ?? lines[i]?.match(/=\s*([-\d.]+)\s*\[cm-1\]/))?.[1] ?? "0");
     i++;
 
-    // Read nAtoms lines of eigenvector data
-    const eigvec: Array<[number, number, number]> = [];
+    // Read nAtoms lines of eigenvector data — parse BOTH real and imaginary
+    // parts. matdyn.x writes "(re imag) (re imag) (re imag)" per atom; the
+    // imag parts are usually small but non-trivial at general (non-high-
+    // symmetry) q-points like q=(1/3,0,0) on a 3×3×3 grid.
+    const eigvecRe: Array<[number, number, number]> = [];
+    const eigvecIm: Array<[number, number, number]> = [];
     for (let a = 0; a < nAtoms && i < lines.length; a++, i++) {
       // Parse "( dx_real  dx_imag ) ( dy_real  dy_imag ) ( dz_real  dz_imag )"
-      const nums = lines[i]?.match(/\(\s*([-\d.]+)\s+[-\d.]+\s*\)/g);
-      if (nums && nums.length >= 3) {
-        const dx = parseFloat(nums[0].match(/([-\d.]+)/)?.[1] ?? "0");
-        const dy = parseFloat(nums[1].match(/([-\d.]+)/)?.[1] ?? "0");
-        const dz = parseFloat(nums[2].match(/([-\d.]+)/)?.[1] ?? "0");
-        eigvec.push([dx, dy, dz]);
+      // Capture both numbers inside each parenthesized pair.
+      const pairRegex = /\(\s*([-\d.]+)\s+([-\d.]+)\s*\)/g;
+      const pairs: Array<[number, number]> = [];
+      let pm: RegExpExecArray | null;
+      while ((pm = pairRegex.exec(lines[i] ?? "")) !== null) {
+        const re = parseFloat(pm[1]);
+        const im = parseFloat(pm[2]);
+        pairs.push([Number.isFinite(re) ? re : 0, Number.isFinite(im) ? im : 0]);
+      }
+      if (pairs.length >= 3) {
+        eigvecRe.push([pairs[0][0], pairs[1][0], pairs[2][0]]);
+        eigvecIm.push([pairs[0][1], pairs[1][1], pairs[2][1]]);
       } else {
-        eigvec.push([0, 0, 0]);
+        eigvecRe.push([0, 0, 0]);
+        eigvecIm.push([0, 0, 0]);
       }
     }
 
-    if (eigvec.length === nAtoms) {
-      modes.push({ frequency: freq, eigenvector: eigvec });
+    if (eigvecRe.length === nAtoms) {
+      modes.push({ frequency: freq, eigenvector: eigvecRe, eigenvectorImag: eigvecIm });
     }
   }
 
@@ -250,20 +268,30 @@ export function applySoftModeDistortion(
   eigenvector: Array<[number, number, number]>,
   qPoint: [number, number, number],
   amplitude: number,
+  eigenvectorImag?: Array<[number, number, number]>,
 ): Array<{ element: string; x: number; y: number; z: number }> {
   if (eigenvector.length !== positions.length) return positions;
 
   return positions.map((pos, i) => {
-    const [ex, ey, ez] = eigenvector[i];
-    // Phase factor: exp(i * 2π * q · R) — take real part
+    const [exRe, eyRe, ezRe] = eigenvector[i];
+    const [exIm, eyIm, ezIm] = eigenvectorImag?.[i] ?? [0, 0, 0];
+    // Proper real-valued displacement for a complex eigenvector ε = ε_real + iε_imag
+    // at q-point q with atomic position R (in fractional coords):
+    //   u = Re[ε · exp(2πi q·R)]
+    //     = ε_real · cos(2πq·R) - ε_imag · sin(2πq·R)
+    // For high-symmetry q on commensurate grids (q=(1/2,0,0) on 2×2×2 etc.)
+    // the imaginary part vanishes and this reduces to ε_real·cos(2πq·R).
+    // For general q (e.g., 3×3×3 grid q=(1/3,0,0)) the −ε_imag·sin(...) term
+    // matters.
     const phase = 2 * Math.PI * (qPoint[0] * pos.x + qPoint[1] * pos.y + qPoint[2] * pos.z);
     const cosPhase = Math.cos(phase);
+    const sinPhase = Math.sin(phase);
 
     return {
       element: pos.element,
-      x: pos.x + ex * cosPhase * amplitude,
-      y: pos.y + ey * cosPhase * amplitude,
-      z: pos.z + ez * cosPhase * amplitude,
+      x: pos.x + (exRe * cosPhase - exIm * sinPhase) * amplitude,
+      y: pos.y + (eyRe * cosPhase - eyIm * sinPhase) * amplitude,
+      z: pos.z + (ezRe * cosPhase - ezIm * sinPhase) * amplitude,
     };
   });
 }
@@ -369,7 +397,7 @@ export async function followZoneBoundarySoftMode(
   const matdynFile = path.join(jobDir, `${prefix}_softmode_matdyn.in`);
   fs.writeFileSync(matdynFile, matdynInput);
 
-  let eigModes: Array<{ frequency: number; eigenvector: Array<[number, number, number]> }> = [];
+  let eigModes: Array<{ frequency: number; eigenvector: Array<[number, number, number]>; eigenvectorImag: Array<[number, number, number]> }> = [];
   try {
     const matdynResult = await callbacks.runQEBinary(
       "matdyn.x", matdynFile, jobDir, 120_000, // 2 min timeout
@@ -420,6 +448,7 @@ export async function followZoneBoundarySoftMode(
     modeIndex: worst.modeIndex,
     frequency: softModeEig.frequency,
     eigenvector: softModeEig.eigenvector,
+    eigenvectorImag: softModeEig.eigenvectorImag,
   };
 
   // Step 4: Iterate — try different amplitudes
@@ -438,9 +467,13 @@ export async function followZoneBoundarySoftMode(
       `distorting along q=(${worst.qPoint.join(",")}) mode freq=${softMode.frequency.toFixed(1)} cm⁻¹`
     );
 
-    // Apply distortion
+    // Apply distortion — pass imag part of eigenvector so non-high-symmetry
+    // q-points (e.g., 3×3×3 grid q=(1/3,0,0)) get the correct
+    //   u = ε_real·cos(2πq·R) − ε_imag·sin(2πq·R)
+    // instead of just the real-only approximation.
     const displaced = applySoftModeDistortion(
       bestPositions, softMode.eigenvector, worst.qPoint, amplitude,
+      softMode.eigenvectorImag,
     );
 
     // Re-relax
