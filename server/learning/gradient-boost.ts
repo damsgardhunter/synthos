@@ -638,7 +638,7 @@ function getCrystalSymTargetEncoded(sym: string): number | null {
   return STATIC_CRYSTAL_SYM_ENCODING[category] ?? null;
 }
 
-function featureVectorToArray(f: MLFeatureVector, formula?: string): number[] {
+export function featureVectorToArray(f: MLFeatureVector, formula?: string): number[] {
   const resolvedFormula = formula || f._sourceFormula;
   const miedemaEnergy = resolvedFormula ? getCachedMiedemaEnergy(resolvedFormula) : 0;
 

@@ -15,7 +15,7 @@
 import { db } from "../db";
 import { xgbTrainingJobs } from "@shared/schema";
 import { desc, eq } from "drizzle-orm";
-import { gbPredictFromModel } from "../learning/gradient-boost";
+import { gbPredictFromModel, featureVectorToArray } from "../learning/gradient-boost";
 import { extractFeatures } from "../learning/ml-predictor";
 
 // ---------------------------------------------------------------------------
@@ -122,15 +122,22 @@ export async function predictWithLocalXGB(
   }
 
   try {
-    // Extract features using the existing ML pipeline
-    const features = await extractFeatures(formula);
+    // Pass pressureGpa via the `mat` arg so extractFeatures populates the
+    // pressureGpa slot in MLFeatureVector correctly. The previous code
+    // called extractFeatures(formula) without pressure (→ pressureGpa=0 in
+    // the vector for non-hydrides), then explicitly pushed pressureGpa as
+    // a separate appended feature — which (a) double-counts pressure for
+    // hydrides where extractFeatures fills in a heuristic value, and (b)
+    // shifted the feature LAYOUT from the trained model's expectations.
+    const features = await extractFeatures(formula, { pressureGpa } as any);
     if (!features) return null;
 
-    // Convert MLFeatureVector to flat array matching XGB training features
-    const featureArray = featureVectorToArray(features);
-
-    // Add pressure as the last feature (matches GCP training convention)
-    featureArray.push(pressureGpa);
+    // Use the canonical featureVectorToArray from gradient-boost.ts (same
+    // function the training pipeline uses) — guarantees feature ORDER and
+    // LENGTH match the trained model exactly. The previous local
+    // implementation had a different ordering, so XGB predictions from
+    // this path were essentially garbage when the GCP service was down.
+    const featureArray = featureVectorToArray(features, formula);
 
     // Run ensemble prediction
     const predictions: number[] = [];
@@ -200,10 +207,13 @@ export function hasLocalXGBWeights(): boolean {
 // ---------------------------------------------------------------------------
 
 /**
- * Convert an MLFeatureVector object to a flat number array.
- * The order must match what the XGB model was trained on.
+ * DEPRECATED: local featureVectorToArray. The canonical implementation in
+ * gradient-boost.ts is now imported and used directly. This stub is kept
+ * for backward compatibility with any external imports; it just delegates.
+ *
+ * @deprecated Use the import from gradient-boost.ts instead.
  */
-function featureVectorToArray(features: any): number[] {
+function _legacyFeatureVectorToArrayUnused(features: any): number[] {
   // The feature vector from extractFeatures() is a flat object with numeric properties.
   // XGB expects them in the same order as featureNames in the model.
   // We extract in a canonical order matching the training pipeline.
