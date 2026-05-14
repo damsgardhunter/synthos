@@ -4796,7 +4796,18 @@ async function runDFPTEPC(
       if (exp >= -50) {
         const lambdaBar = 2.46 * (1 + 3.8 * muStar);
         const f1 = Math.pow(1 + Math.pow(lambda / lambdaBar, 1.5), 1 / 3);
-        tcAllenDynes = Number(Math.max(0, Math.min(500, (omegaLog / 1.2) * f1 * Math.exp(exp))).toFixed(2));
+        // Don't cap Tc at 500 K — theoretical hydrides at extreme P can
+        // predict >500 K from Allen-Dynes (matches the fix in
+        // dfpt-parser.ts). Only floor at 0 (negative is the unphysical
+        // denom-divergent regime). Warn loudly when above 500 K so the
+        // user knows it's an extreme strong-coupling prediction.
+        const rawTc = (omegaLog / 1.2) * f1 * Math.exp(exp);
+        tcAllenDynes = Number(Math.max(0, rawTc).toFixed(2));
+        if (tcAllenDynes > 500) {
+          console.warn(`[QE-Worker] ${formula}: Allen-Dynes Tc=${tcAllenDynes.toFixed(0)} K > 500 K ` +
+            `(λ=${lambda.toFixed(2)}, ω_log=${omegaLog.toFixed(0)} K) — extreme strong-coupling; ` +
+            `verify via Eliashberg if available.`);
+        }
       }
     }
     source = "ph.x-stdout";
