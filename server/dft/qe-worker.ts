@@ -4192,14 +4192,30 @@ function generateSCFInputWithParams(
   // because QE requires it to be absent or 1 when noncolin is set.
   const hasSOC = !!(params.socFlags);
   const hasNoncolin = !!(params.forceNoncolin);
-  const useNspin2 = !hasSOC && !hasNoncolin && ((params.dftPlusUNspin2 ?? false) || (params.forceNspin === 2) || broadMagnetic);
+  // forceNspin precedence: an EXPLICIT forceNspin=1 must override broadMagnetic
+  // detection. Previously the OR-chain treated forceNspin=1 the same as missing
+  // (since `params.forceNspin === 2` is false) and broadMagnetic alone set
+  // useNspin2=true, so the NM trial (forceNspin=1) of the magnetic ground-state
+  // search silently ran with nspin=2. That's why BaFe2As2's "NM" trial reported
+  // M=10.32 μB — the trial was spin-polarized despite the ordering label.
+  const useNspin2 = !hasSOC && !hasNoncolin && (
+    params.forceNspin === 2
+      ? true                                                        // explicit nspin=2
+      : params.forceNspin === 1
+        ? false                                                     // explicit nspin=1 — overrides broadMagnetic
+        : ((params.dftPlusUNspin2 ?? false) || broadMagnetic)       // implicit detection
+  );
   // When DFT+U nspin2 is set, starting_magnetization is already embedded in dftPlusULines
   // When forceMagBlock is provided (from magnetic ground-state search), use it directly
-  const magBlock = params.forceMagBlock
-    ? params.forceMagBlock
-    : (params.dftPlusUNspin2 ?? false)
-      ? ""
-      : (broadMagnetic ? generateMagnetizationLines(elements, counts, isAFMCandidate(elements, counts), !hasMagEl) : "");
+  // Also: if forceNspin=1 (NM trial), suppress magBlock entirely — nspin=1 cannot
+  // accept starting_magnetization without QE complaining.
+  const magBlock = params.forceNspin === 1
+    ? ""
+    : params.forceMagBlock
+      ? params.forceMagBlock
+      : (params.dftPlusUNspin2 ?? false)
+        ? ""
+        : (broadMagnetic ? generateMagnetizationLines(elements, counts, isAFMCandidate(elements, counts), !hasMagEl) : "");
   const hubbardBlock = params.dftPlusULines ?? "";
   const socBlock = params.socFlags ?? "";
 

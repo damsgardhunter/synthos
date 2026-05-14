@@ -577,6 +577,22 @@ async function runStage1AtomicRelax(
   const prefix = formula.replace(/[^a-zA-Z0-9]/g, "");
   const cellBlock = cb.generateCellParameters(latticeA, cOverA, 0, 1.0, elements, counts);
 
+  // Stage 1 SCF physics — tightened for magnetic systems. The previous params
+  // (conv_thr=1e-4, scf_must_converge=.false., mixing_beta=0.4, degauss=0.015)
+  // were calibrated for non-magnetic screening but broke magnetic systems:
+  // - BaFe2As2 cand 2: force=0.84 Ry/bohr after 3.4h (FM/AFM SCF oscillation)
+  // - TlBa2CaCu2O7 cand 1: force=0.39 Ry/bohr at 3.4h
+  // For nspin=2 the FM-AFM energy gap is ~few meV/atom; a 1e-4 Ry SCF tolerance
+  // (1.4 meV/atom) cannot resolve the magnetic minimum. scf_must_converge=.false.
+  // let BFGS use forces from a still-oscillating SCF — the "directionally
+  // correct" comment was wrong for magnetic systems. Now we tighten everything
+  // when hasMag and let SCF converge before each ionic step.
+  const scfConvThr = hasMag ? "1.0d-7" : "1.0d-4";        // tighter for magnetic
+  const mixingBeta = hasMag ? 0.2 : 0.4;                  // gentler nspin=2 mixing
+  const degauss = hasMag ? 0.005 : 0.015;                 // narrower smearing for metallic magnets
+  const electronMaxstep = hasMag ? 300 : 200;             // give magnetic SCF more room
+  const scfMustConvergeLine = hasMag ? "" : "  scf_must_converge = .false.,\n"; // require convergence for magnetic
+
   const input = `&CONTROL
   calculation = 'relax',
   restart_mode = 'from_scratch',
@@ -600,17 +616,16 @@ async function runStage1AtomicRelax(
   input_dft = 'PBE',
   occupations = 'smearing',
   smearing = 'mv',
-  degauss = 0.015,
+  degauss = ${degauss},
   nspin = ${nspin},
 ${magLines}/
 &ELECTRONS
-  electron_maxstep = 200,
-  conv_thr = 1.0d-4,
-  mixing_beta = 0.4,
+  electron_maxstep = ${electronMaxstep},
+  conv_thr = ${scfConvThr},
+  mixing_beta = ${mixingBeta},
   mixing_mode = 'local-TF',
   diagonalization = 'david',
-  scf_must_converge = .false.,
-/
+${scfMustConvergeLine}/
 &IONS
   ion_dynamics = 'bfgs',
 /
