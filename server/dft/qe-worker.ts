@@ -244,7 +244,9 @@ const ELEMENT_DATA: Record<string, { mass: number; zValence: number }> = {
   V:  { mass: 50.942,  zValence: 13 }, Cr: { mass: 51.996,  zValence: 14 },
   Mn: { mass: 54.938,  zValence: 15 }, Fe: { mass: 55.845,  zValence: 16 },
   Co: { mass: 58.933,  zValence: 17 }, Ni: { mass: 58.693,  zValence: 18 },
-  Cu: { mass: 63.546,  zValence: 11 }, Zn: { mass: 65.380,  zValence: 12 },
+  // Cu pseudo includes the semicore 3s²3p⁶ shell explicitly →
+  // z_valence=19 (3s²3p⁶3d¹⁰4s¹). Verified against server/dft/pseudo/Cu.UPF.
+  Cu: { mass: 63.546,  zValence: 19 }, Zn: { mass: 65.380,  zValence: 12 },
   Ga: { mass: 69.723,  zValence: 13 }, Ge: { mass: 72.640,  zValence: 4  },
   As: { mass: 74.922,  zValence: 5  }, Se: { mass: 78.960,  zValence: 6  },
   Rb: { mass: 85.468,  zValence: 9  }, Sr: { mass: 87.620,  zValence: 10 },
@@ -256,7 +258,9 @@ const ELEMENT_DATA: Record<string, { mass: number; zValence: number }> = {
   Sn: { mass: 118.71,  zValence: 4  }, Sb: { mass: 121.76,  zValence: 5  },
   Te: { mass: 127.60,  zValence: 6  }, I:  { mass: 126.90,  zValence: 7  },
   Cs: { mass: 132.91,  zValence: 9  }, Ba: { mass: 137.33,  zValence: 10 },
-  La: { mass: 138.91,  zValence: 11 }, Ce: { mass: 140.12,  zValence: 12 },
+  // Ce pseudo treats 4f¹5d¹6s² as valence → z_valence=11 (no semicore 5s5p).
+  // Was 12 (matched Pr's count) — verified against server/dft/pseudo/Ce.UPF.
+  La: { mass: 138.91,  zValence: 11 }, Ce: { mass: 140.12,  zValence: 11 },
   Hf: { mass: 178.49,  zValence: 12 }, Ta: { mass: 180.95,  zValence: 13 },
   W:  { mass: 183.84,  zValence: 14 }, Re: { mass: 186.21,  zValence: 15 },
   Os: { mass: 190.23,  zValence: 16 }, Ir: { mass: 192.22,  zValence: 17 },
