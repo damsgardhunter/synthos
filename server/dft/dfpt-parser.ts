@@ -335,17 +335,22 @@ export function parseLambdaOutput(stdout: string): {
     }
   }
 
+  // "strongCoupling" is a user-facing classification only (λ > 1.5 = clearly
+  // beyond McMillan regime). It does NOT gate whether the Allen-Dynes f1
+  // correction is applied — f1 is well-defined and reduces continuously to 1
+  // for small λ, so always computing it is safe and more accurate than
+  // returning the McMillan result from lambda.x for marginal coupling
+  // (1.0 < λ < 1.5), where f1 contributes a 5-10% Tc boost that was
+  // previously being suppressed.
   const strongCoupling = lambda > 1.5;
   const tcCorrected: number[] = [];
 
   // omegaLog from QE is always in Kelvin — no unit conversion needed.
-  if (strongCoupling && omegaLog > 0) {
+  if (omegaLog > 0 && lambda > 0.01) {
     for (const muStar of muStarValues) {
       // Allen-Dynes f1 prefactor with the μ*-dependent Λ₁ = 2.46·(1 + 3.8·μ*).
-      // Previously this was computed ONCE outside the loop with a hardcoded
-      // μ* = 0.13, then reused for every μ* in muStarValues — giving ~1-2%
-      // wrong f1 for μ* ≠ 0.13. The proper formula has Λ₁ depend on μ*
-      // (Allen & Dynes, PRB 12, 905 (1975), Eq. 3.3).
+      // Λ₁ depends on μ* (Allen & Dynes, PRB 12, 905 (1975), Eq. 3.3) so it
+      // must be computed inside the μ* loop, not once outside.
       const lambdaBar = 2.46 * (1 + 3.8 * muStar);
       const f1 = Math.pow(1 + Math.pow(lambda / lambdaBar, 1.5), 1 / 3);
 
@@ -372,7 +377,11 @@ export function parseLambdaOutput(stdout: string): {
     lambda: Number(lambda.toFixed(4)),
     omegaLog: Number(omegaLog.toFixed(2)),
     tc,
-    tcCorrected: strongCoupling ? tcCorrected : tc,
+    // Always return the f1-corrected Allen-Dynes Tc when available — it
+    // is strictly more accurate than the McMillan Tc that lambda.x prints
+    // (which is what `tc` holds). For very small λ the two are
+    // numerically nearly identical.
+    tcCorrected: tcCorrected.length > 0 ? tcCorrected : tc,
     muStarValues,
     strongCoupling,
   };
