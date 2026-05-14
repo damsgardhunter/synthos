@@ -711,7 +711,7 @@ ${cellBlock}
     positions: parsed.positions.length > 0 ? parsed.positions : positions,
     latticeA,
     totalEnergy: parsed.totalEnergy,
-    maxForce: parsed.maxForce,
+    maxForce: parsed.maxForce ?? undefined,
     wallTimeSeconds: wallTime,
     scfConverged: parsed.scfConverged,
   };
@@ -848,8 +848,8 @@ ${cellBlock}
     latticeA: parsed.latticeA > 0 ? parsed.latticeA : latticeA,
     cellVectors: parsed.cellVectors,
     totalEnergy: parsed.totalEnergy,
-    maxForce: parsed.maxForce,
-    pressure: parsed.pressure,
+    maxForce: parsed.maxForce ?? undefined,
+    pressure: parsed.pressure ?? undefined,
     wallTimeSeconds: wallTime,
   };
 }
@@ -1203,6 +1203,42 @@ interface RelaxParsed {
   positions: Array<{ element: string; x: number; y: number; z: number }>;
 }
 
+/**
+ * Extract the LAST ionic-step "max per-atom |F|" from QE pw.x output.
+ *
+ * QE prints (after each ionic step):
+ *
+ *     Forces acting on atoms (cartesian axes, Ry/au):
+ *
+ *         atom    1 type  1   force =     0.00012345    0.00023456   -0.00001234
+ *         atom    2 type  2   force =    -0.00005678    0.00009876    0.00004321
+ *         ...
+ *         Total force =     0.00045678     Total SCF correction =     ...
+ *
+ * Returns max_i sqrt(Fx² + Fy² + Fz²) for the last block; null if absent.
+ * Units: Ry/Bohr.
+ */
+function parseMaxPerAtomForce(stdout: string): number | null {
+  const idx = stdout.lastIndexOf("Forces acting on atoms");
+  if (idx < 0) return null;
+  // Scan forward until "Total force" (end of the block)
+  const end = stdout.indexOf("Total force", idx);
+  const block = end > idx ? stdout.slice(idx, end) : stdout.slice(idx);
+
+  const atomLineRe = /atom\s+\d+\s+type\s+\d+\s+force\s*=\s*([-\d.E+]+)\s+([-\d.E+]+)\s+([-\d.E+]+)/gi;
+  let m: RegExpExecArray | null;
+  let maxMag = 0;
+  while ((m = atomLineRe.exec(block)) !== null) {
+    const fx = parseFloat(m[1]);
+    const fy = parseFloat(m[2]);
+    const fz = parseFloat(m[3]);
+    if (!Number.isFinite(fx) || !Number.isFinite(fy) || !Number.isFinite(fz)) continue;
+    const mag = Math.sqrt(fx * fx + fy * fy + fz * fz);
+    if (mag > maxMag) maxMag = mag;
+  }
+  return maxMag > 0 ? maxMag : null;
+}
+
 function parseRelaxOutput(stdout: string): RelaxParsed {
   const result: RelaxParsed = {
     scfConverged: false,
@@ -1228,12 +1264,30 @@ function parseRelaxOutput(stdout: string): RelaxParsed {
     if (val) result.totalEnergy = parseFloat(val[1]) * 13.6057; // Ry -> eV
   }
 
-  // Parse forces — look for "Total force ="
-  const forceMatch = stdout.match(/Total force\s*=\s*([\d.]+)/g);
-  if (forceMatch && forceMatch.length > 0) {
-    const last = forceMatch[forceMatch.length - 1];
-    const val = last.match(/([\d.]+)/);
-    if (val) result.maxForce = parseFloat(val[0]);
+  // Parse forces. QE prints two related but DIFFERENT quantities each ionic
+  // step:
+  //   (a) per-atom force vectors in "Forces acting on atoms (cartesian axes)"
+  //       — each "atom N type T   force = Fx Fy Fz" line in Ry/Bohr units
+  //   (b) "Total force = X" — L2 norm of the full 3N-dimensional force vector
+  //
+  // The BFGS forc_conv_thr in QE compares against the LARGEST per-atom
+  // |F| (i.e., max_i sqrt(Fx²+Fy²+Fz²)). For an N-atom cell with similar
+  // forces on every atom, the L2 norm is ≈ √N · max_per_atom — so reading
+  // the "Total force" and comparing against forc_conv_thr fails the
+  // Stage 1 check even when QE actually converged.
+  //
+  // Parse the per-atom block first; fall back to "Total force" if absent
+  // (some QE versions omit the per-atom block when only printing summary).
+  const maxPerAtom = parseMaxPerAtomForce(stdout);
+  if (maxPerAtom != null) {
+    result.maxForce = maxPerAtom;
+  } else {
+    const forceMatch = stdout.match(/Total force\s*=\s*([\d.]+)/g);
+    if (forceMatch && forceMatch.length > 0) {
+      const last = forceMatch[forceMatch.length - 1];
+      const val = last.match(/([\d.]+)/);
+      if (val) result.maxForce = parseFloat(val[0]);
+    }
   }
 
   // Parse final ATOMIC_POSITIONS block — QE uses both {crystal} and (crystal) formats
@@ -1310,12 +1364,20 @@ function parseVcRelaxOutput(stdout: string): VcRelaxParsed {
     if (val) result.totalEnergy = parseFloat(val[1]) * 13.6057;
   }
 
-  // Total force
-  const forceMatch = stdout.match(/Total force\s*=\s*([\d.]+)/g);
-  if (forceMatch && forceMatch.length > 0) {
-    const last = forceMatch[forceMatch.length - 1];
-    const val = last.match(/([\d.]+)/);
-    if (val) result.maxForce = parseFloat(val[0]);
+  // Forces: prefer max per-atom |F| from the "Forces acting on atoms" block;
+  // fall back to L2-norm "Total force" only if the per-atom block is absent.
+  // QE's BFGS forc_conv_thr is per-atom max, so comparing against per-atom is
+  // the physically correct test (see parseMaxPerAtomForce docstring).
+  const maxPerAtomVcrelax = parseMaxPerAtomForce(stdout);
+  if (maxPerAtomVcrelax != null) {
+    result.maxForce = maxPerAtomVcrelax;
+  } else {
+    const forceMatch = stdout.match(/Total force\s*=\s*([\d.]+)/g);
+    if (forceMatch && forceMatch.length > 0) {
+      const last = forceMatch[forceMatch.length - 1];
+      const val = last.match(/([\d.]+)/);
+      if (val) result.maxForce = parseFloat(val[0]);
+    }
   }
 
   // Pressure (from stress tensor output)
