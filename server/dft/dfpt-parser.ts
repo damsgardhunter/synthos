@@ -340,10 +340,15 @@ export function parseLambdaOutput(stdout: string): {
 
   // omegaLog from QE is always in Kelvin — no unit conversion needed.
   if (strongCoupling && omegaLog > 0) {
-    const lambdaBar = 2.46 * (1 + 3.8 * 0.13);
-    const f1 = Math.pow(1 + Math.pow(lambda / lambdaBar, 1.5), 1 / 3);
-
     for (const muStar of muStarValues) {
+      // Allen-Dynes f1 prefactor with the μ*-dependent Λ₁ = 2.46·(1 + 3.8·μ*).
+      // Previously this was computed ONCE outside the loop with a hardcoded
+      // μ* = 0.13, then reused for every μ* in muStarValues — giving ~1-2%
+      // wrong f1 for μ* ≠ 0.13. The proper formula has Λ₁ depend on μ*
+      // (Allen & Dynes, PRB 12, 905 (1975), Eq. 3.3).
+      const lambdaBar = 2.46 * (1 + 3.8 * muStar);
+      const f1 = Math.pow(1 + Math.pow(lambda / lambdaBar, 1.5), 1 / 3);
+
       const denom = lambda - muStar * (1 + 0.62 * lambda);
       if (denom <= 0) { tcCorrected.push(0); continue; }
       const exponent = -1.04 * (1 + lambda) / denom;
