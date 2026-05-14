@@ -530,6 +530,40 @@ export function selectMagneticGroundState(
   const convergedTrials = trials.filter(isUsableTrial);
 
   if (convergedTrials.length === 0) {
+    // Distinguish two failure modes:
+    //   (a) "ran but didn't converge" — at least one trial got past SCF parse
+    //       and produced an accuracy reading. Magnetic ordering is hard but
+    //       the binary works; falling back to FM with broadened seeding is
+    //       reasonable.
+    //   (b) "trials crashed instantly" — every trial returned with totalEnergy
+    //       null AND lastScfAccuracyRy null AND short wallTime. The SCF
+    //       infrastructure is broken (e.g. La4Ni3O10 May-2026: ylmr2 error
+    //       from missing lmaxx=6 in QE binary). Falling back to FM and
+    //       continuing wastes another hour of downstream compute on a
+    //       material the worker physically can't handle.
+    const everyTrialCrashedInstantly = trials.length > 0 && trials.every(t =>
+      t.totalEnergy === null
+      && t.lastScfAccuracyRy === null
+      && t.wallTimeMs < 60_000  // < 60s = crashed before SCF could start
+    );
+    if (everyTrialCrashedInstantly) {
+      notes.push(`[MagSearch] All ${trials.length} mag trials crashed instantly (< 60s each, no SCF accuracy) — magnetic search infrastructure broken; not falling back to FM`);
+      return {
+        searchPerformed: true,
+        groundState: "NM",       // safest default — downstream can refuse to spin-polarize
+        trials,
+        energyGapPerAtom: 0,
+        wellSeparated: false,
+        winningMagBlock: "",
+        winningNspin: 1,         // tell downstream NOT to spin-polarize
+        winningNoncolin: false,
+        tightConvergenceRerun: false,
+        noncollinearTestTriggered: false,
+        spiralMagnetFlagged: false,
+        groundStateMagnetization: null,
+        notes,
+      };
+    }
     notes.push("[MagSearch] No magnetic trial converged — falling back to FM with broadened seeding");
     const fmConfig = configs.find(c => c.ordering === "FM") ?? configs[0];
     return {

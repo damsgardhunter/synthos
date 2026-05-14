@@ -486,13 +486,35 @@ export async function runStagedRelaxation(opts: StagedRelaxationOpts): Promise<S
         console.log(`[Staged-Relax]   #${ki + 1}: ${kept[ki].candidate.source} (E=${kept[ki].result.totalEnergy.toFixed(4)} eV, ${nAtoms} atoms, E/atom=${perAtomEnergy(kept[ki]).toFixed(4)} eV)`);
       }
     } else if (stage1Results.length > 0) {
-      // No candidate passed — use the one with lowest energy anyway (best effort)
+      // No candidate passed — use the one with lowest energy anyway (best effort).
+      // GUARD: if the best "best-effort" candidate has catastrophic forces
+      // (>10 Ry/bohr), the structure is physically broken — atoms essentially
+      // overlapping, wrong topology, or stage-1 SCF gave garbage forces. Passing
+      // this to vc-relax + magnetic search is hours of wasted compute (YBa2Cu3O7
+      // May-2026: force=415 Ry/bohr accepted as best-effort, then mag search
+      // burned 1h/trial on broken geometry). Mark Stage 1 as fully failed in
+      // that case so the downstream pipeline skips this material.
       const best = allS1Sorted[0];
-      bestPositions = best.result.positions.length > 0 ? best.result.positions : best.candidate.positions;
-      bestLatticeA = best.result.latticeA > 0 ? best.result.latticeA : best.candidate.latticeA;
-      candidateSource = best.candidate.source;
-      stages.push(best.result);
-      console.log(`[Staged-Relax] ${formula} Stage 1: NO candidate passed, using best-effort from ${candidateSource}`);
+      const bestForce = best.result.maxForce ?? Infinity;
+      const CATASTROPHIC_FORCE_RYBOHR = 10.0;
+      if (bestForce > CATASTROPHIC_FORCE_RYBOHR) {
+        console.log(`[Staged-Relax] ${formula} Stage 1: best candidate has catastrophic force ${bestForce.toExponential(2)} Ry/bohr > ${CATASTROPHIC_FORCE_RYBOHR} — refusing best-effort fallback; structure is physically broken`);
+        stages.push({
+          stage: 1, passed: false,
+          failReason: `all candidates failed; best had F=${bestForce.toExponential(2)} Ry/bohr (catastrophic)`,
+          positions: bestPositions, latticeA: bestLatticeA, totalEnergy: 0, wallTimeSeconds: 0,
+          maxForce: bestForce,
+        });
+        // Return Stage 1 result as failed without overwriting bestPositions/bestLatticeA
+        // so the caller still has the original candidate's geometry as a fallback
+        // signal, but Stage 1 is flagged as failed.
+      } else {
+        bestPositions = best.result.positions.length > 0 ? best.result.positions : best.candidate.positions;
+        bestLatticeA = best.result.latticeA > 0 ? best.result.latticeA : best.candidate.latticeA;
+        candidateSource = best.candidate.source;
+        stages.push(best.result);
+        console.log(`[Staged-Relax] ${formula} Stage 1: NO candidate passed, using best-effort from ${candidateSource} (F=${bestForce < 100 ? bestForce.toExponential(2) : "N/A"} Ry/bohr)`);
+      }
     } else {
       // All crashed — use first candidate as-is
       console.log(`[Staged-Relax] ${formula} Stage 1: all candidates crashed, using raw candidate`);
