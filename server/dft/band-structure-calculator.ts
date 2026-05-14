@@ -1178,7 +1178,25 @@ export async function computeDFTBandStructure(
       console.log(`[BandCalc] bands.x warning for ${formula}: exit code ${bandsXResult.exitCode} (continuing with pw.x output)`);
     }
 
-    const bandsDatPath = path.join(jobDir, "bands.dat");
+    // For nspin=2, QE's bands.x writes "bands.dat.spinup" and
+    // "bands.dat.spindown" instead of "bands.dat". Try the spin-resolved
+    // files first; if absent fall back to the non-spin-polarized name.
+    // (Properly merging spin-up + spin-down into a single tagged band
+    // structure is a larger refactor — for now we read spin-up as the
+    // representative path, which is correct for non-magnetic systems
+    // and for systems where the two spin channels are similar.)
+    const bandsDatCandidates = [
+      path.join(jobDir, "bands.dat"),
+      path.join(jobDir, "bands.dat.spinup"),
+    ];
+    const bandsDatPath = bandsDatCandidates.find(p => fs.existsSync(p))
+      ?? bandsDatCandidates[0];
+    const bandsDatSpinDownPath = path.join(jobDir, "bands.dat.spindown");
+    if (fs.existsSync(bandsDatSpinDownPath) && !bandsDatPath.endsWith("bands.dat")) {
+      console.log(`[BandCalc] nspin=2 detected — reading spin-up bands from ` +
+        `bands.dat.spinup. Spin-down channel not currently merged into the ` +
+        `returned band structure; gap/metallicity reflect spin-up only.`);
+    }
     const parsed = parseBandsOutput(pwResult.stdout, bandsDatPath, kPath, fermiEnergy);
 
     result.eigenvalues = parsed.eigenvalues;
