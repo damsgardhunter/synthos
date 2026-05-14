@@ -4004,7 +4004,13 @@ function tryXTBPreRelaxation(
 
     const optPath = path.join(workDir, "xtbopt.xyz");
     const MAX_FRAC_DISPLACEMENT = 0.35;
-    const ABS_MIN_DIST = 0.5;
+    // Match the F1 funnel-filter floor (0.6 Å). With xTB's old 0.5 Å threshold,
+    // borderline-collapsed results (TlBa2Ca2Cu3O9 Ba-Cu=0.594 Å) passed xTB,
+    // then F1 / softValidateGeometry rejected, and a "repair" call inflated
+    // the lattice to compensate — producing a totally wrong-shape cell. Now
+    // xTB rejects at the same threshold and we keep the original Vegard /
+    // prototype geometry instead of the wreckage.
+    const ABS_MIN_DIST = 0.6;
     let relaxed: Array<{ element: string; x: number; y: number; z: number }> | null = null;
 
     // ---- Strategy 1: Constrained GFN-FF (pressure-aware) ----
@@ -5013,10 +5019,33 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     let structureCandidates: StructureCandidate[] = [];
     try {
       const vegardT0 = Date.now();
-      [vegardResult, structureCandidates] = await Promise.all([
-        vegardEstimate(elements, counts, workerPressure).catch(() => null),
-        generateStructureCandidates(formula, elements, counts, workerPressure, 5).catch(() => []),
+      // Bounded wait: AFLOW + MP API can stall indefinitely (observed 15–55
+      // min waits for TlBa2Ca2Cu3O9 / La4Ni3O10 / LaH11Li2 in May 2026).
+      // 90s is enough for cached lookups and a few uncached fetches; past
+      // that we fall back to the volume-sum estimator rather than block the
+      // pipeline.
+      const VEGARD_TIMEOUT_MS = 90_000;
+      const timeoutSentinel = Symbol("vegard-timeout");
+      const timed = <T>(p: Promise<T>): Promise<T | typeof timeoutSentinel> => Promise.race([
+        p,
+        new Promise<typeof timeoutSentinel>(res => setTimeout(() => res(timeoutSentinel), VEGARD_TIMEOUT_MS)),
       ]);
+      const [veg, cand] = await Promise.all([
+        timed(vegardEstimate(elements, counts, workerPressure).catch(() => null)),
+        timed(generateStructureCandidates(formula, elements, counts, workerPressure, 5).catch(() => [])),
+      ]);
+      if (veg === timeoutSentinel) {
+        console.log(`[QE-Worker] Vegard estimate for ${formula} timed out after ${(VEGARD_TIMEOUT_MS / 1000).toFixed(0)}s — proceeding without (will use volume-sum fallback)`);
+        vegardResult = null;
+      } else {
+        vegardResult = veg as VegardEstimate | null;
+      }
+      if (cand === timeoutSentinel) {
+        console.log(`[QE-Worker] Structure-candidate fetch for ${formula} timed out after ${(VEGARD_TIMEOUT_MS / 1000).toFixed(0)}s — proceeding without`);
+        structureCandidates = [];
+      } else {
+        structureCandidates = cand as StructureCandidate[];
+      }
       const vegardMs = Date.now() - vegardT0;
       if (vegardResult && vegardResult.confidence > 0.2) {
         console.log(`[QE-Worker] Vegard estimate for ${formula}: a=${vegardResult.latticeA.toFixed(3)} A (conf=${vegardResult.confidence.toFixed(2)}, method=${vegardResult.method}, ${vegardResult.endpointsUsed.length} endpoints, ${vegardMs}ms)`);
@@ -5388,7 +5417,25 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       }
     }
 
+    // Skip xTB pre-relax for ionic / layered / perovskite structure classes.
+    // xTB (GFN-FF/GFN2) is parameterized for covalent + metallic systems and
+    // produces nonsense geometries for cuprates, nickelates, layered oxides,
+    // perovskites, etc. TlBa2Ca2Cu3O9 ran xTB at a=13.82 Å, hit Ba-Cu=0.594 Å
+    // (below our 0.6 Å floor), then "repair" inflated lattice to 16.95 Å —
+    // resulting structure was nowhere near the real Tl-1223 cell (a≈3.86 Å,
+    // c≈15.85 Å). vc-relax then has to undo all that work.
+    const ionicLikeTypes = new Set([
+      "perovskite", "rocksalt", "fluorite", "spinel", "pyrochlore",
+      "layered", "hexagonal-layered", "molecular",
+    ]);
+    const skipXtbForType = structureAdvice
+      && typeof structureAdvice.structureType === "string"
+      && ionicLikeTypes.has(structureAdvice.structureType);
     let relaxed: Array<{ element: string; x: number; y: number; z: number }> | null = null;
+    if (skipXtbForType) {
+      console.log(`[QE-Worker] Skipping xTB for ${formula}: LLM advised structureType='${structureAdvice!.structureType}' (xTB not parameterized for ionic/layered systems — lets vc-relax start from DFT-grade Vegard/prototype geometry)`);
+      skipXtb = true;
+    }
     if (!skipXtb) {
       relaxed = tryXTBPreRelaxation(positions, latticeA, jobDir, workerPressure);
     }

@@ -320,11 +320,18 @@ function computeStage1Params(elements: string[], totalAtoms: number, counts?: Re
   // the system into this class. HgBa2CuO4 (8 atoms, 83 e-, Hg+Ba heavy, Cu d⁹)
   // hit the default 90-min cap before atomic relax converged in the May-2026 run.
   const isHeavyElectronRich = cellElectrons >= 70 || heavyCount >= 2;
-  const maxTimeoutS = Math.round((hasMagnetic
+  const rawMaxTimeoutS = Math.round((hasMagnetic
     ? (heavyCount >= 1 ? 10800 : 9000)
     : isHighPressureHydride ? 9000
     : isHeavyElectronRich ? 9000
     : 5400) * stageAtomScale);
+  // Hard ceiling: Stage 1 is screening — it shouldn't burn more than 4 hours
+  // on a single candidate. TlBa2Ca2Cu3O9 (34-atom magnetic cuprate) was
+  // getting 71958s = 20h via stageAtomScale=6.65. If a structure genuinely
+  // needs more, that's a sign it should be downgraded to a cheaper tier or
+  // dropped entirely, not blocked for a day.
+  const STAGE1_HARD_CEILING_S = 14400; // 4h
+  const maxTimeoutS = Math.min(rawMaxTimeoutS, STAGE1_HARD_CEILING_S);
   // FLOOR by system type — the cost model underestimates for magnetic systems
   // because spin-polarized SCF on Fe/Mn/Cr is intrinsically much harder than
   // the atom-count-based model predicts. FeSe (4 atoms) and LiFeAs (3 atoms)
