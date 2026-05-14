@@ -51,7 +51,11 @@ export interface MagneticTrialConfig {
 export interface MagneticTrialResult {
   /** Which ordering was tried */
   ordering: MagneticOrdering;
-  /** Total energy (Ry) — the comparison metric */
+  /** Total energy (eV) — the comparison metric. The docstring previously
+   *  said Ry, but parseSCFOutput converts Ry→eV before returning, and
+   *  qe-worker.ts:6386 passes that value here unchanged. See line 636
+   *  below for the unit-conversion that was using RY_TO_MEV instead of
+   *  EV_TO_MEV — wrong by 13605× until fixed. */
   totalEnergy: number | null;
   /** Total magnetization from QE output (Bohr magneton) */
   totalMagnetization: number | null;
@@ -72,9 +76,14 @@ export interface MagneticGroundStateResult {
   groundState: MagneticOrdering;
   /** All trial results, sorted by energy */
   trials: MagneticTrialResult[];
-  /** Energy difference between ground state and next-best (Ry/atom) */
+  /** Energy difference between ground state and next-best (eV/atom).
+   *  Docstring previously claimed Ry/atom, but the value is actually in
+   *  eV/atom because MagneticTrialResult.totalEnergy is in eV. Consumers
+   *  at qe-worker.ts:6422 that multiplied by 13605.7 (Ry→meV) were also
+   *  buggy — see that fix below. */
   energyGapPerAtom: number;
-  /** Whether the ground state is clearly separated (gap > 1 mRy/atom) */
+  /** Whether the ground state is clearly separated (gap > 5 meV/atom).
+   *  Threshold defined by NEAR_DEGENERATE_THRESHOLD_MEV. */
   wellSeparated: boolean;
   /** QE magnetization block for the winning state */
   winningMagBlock: string;
@@ -96,16 +105,27 @@ export interface MagneticGroundStateResult {
 
 // ─── Magnetic element classification ─────────────────────────────────
 
-/** Elements with established magnetic moments in compounds */
+/** Elements with established magnetic moments in compounds (μB per atom).
+ *  Lanthanides Pr/Tb/Dy/Ho/Er/Tm moved here from WEAK_MAGNETIC — their Ln³⁺
+ *  free-ion moments are 3-11 μB (Ho³⁺ is 10.6 μB, the largest of any element).
+ *  Previously classified as "weak" → started SCF with mag=0.3 μB which was
+ *  too small to break symmetry, often converging to the wrong magnetic state.
+ *  Actinides U/Np/Pu/Am/Cm have large 5f moments in compounds (heavy-fermion
+ *  SC parent compounds like UPt3, NpBe13, PuCoGa5 are all magnetic).  */
 const STRONG_MAGNETIC: Record<string, number> = {
-  Fe: 2.2, Co: 1.7, Ni: 0.6, Mn: 3.0, Cr: 1.5,
-  V: 0.5, Gd: 7.0, Eu: 7.0, Nd: 3.0, Sm: 1.0,
+  // 3d
+  Fe: 2.2, Co: 1.7, Ni: 0.6, Mn: 3.0, Cr: 1.5, V: 0.5,
+  // 4f (Ln³⁺ effective moments)
+  Pr: 3.6, Nd: 3.0, Sm: 1.0, Eu: 7.0, Gd: 7.0,
+  Tb: 9.7, Dy: 10.6, Ho: 10.6, Er: 9.6, Tm: 7.6,
+  // 5f
+  U: 3.0, Np: 2.5, Pu: 4.0, Am: 5.0, Cm: 7.0,
 };
 
 /** Elements that can develop induced moments in compounds */
 const WEAK_MAGNETIC = new Set([
   "Ti", "Sc", "Cu", "Ru", "Rh", "Pd", "Os", "Ir", "Pt",
-  "Ce", "Pr", "Tb", "Dy", "Ho", "Er", "Tm",
+  "Ce", "Yb",  // 4f¹ and 4f¹³/¹⁴ — moments depend on valence; small intrinsic
 ]);
 
 /** Anion/ligand elements that mediate superexchange */
@@ -340,7 +360,36 @@ export function classifyMagneticLandscape(
     }
   }
 
-  return configs;
+  // QE's `starting_magnetization(i)` is per-species, not per-atom. For a cell
+  // with only ONE strong-magnetic species (e.g., BaFe2As2 → species Ba, Fe,
+  // As — only Fe is magnetic), every collinear AFM-* trial produces the
+  // identical FM input because all Fe atoms share `starting_magnetization(Fe)`
+  // and there's nothing to alternate against. Without species-splitting (Fe1,
+  // Fe2 pointing to the same pseudo with opposite signs — not implemented
+  // here yet), running 3 AFM-* trials wastes 3× SCF time and returns
+  // identical energies. Deduplicate by magnetization-block content; keep
+  // only the first occurrence and mark the duplicates as dropped.
+  const seenBlocks = new Set<string>();
+  const dedupedConfigs: MagneticTrialConfig[] = [];
+  const droppedOrderings: MagneticOrdering[] = [];
+  for (const cfg of configs) {
+    // Non-collinear blocks legitimately differ in angle1/angle2 and should
+    // not be deduplicated on the collinear magnetization line alone.
+    const key = cfg.noncolin ? `nc:${cfg.magnetizationBlock}` : cfg.magnetizationBlock;
+    if (seenBlocks.has(key)) {
+      droppedOrderings.push(cfg.ordering);
+      continue;
+    }
+    seenBlocks.add(key);
+    dedupedConfigs.push(cfg);
+  }
+  if (droppedOrderings.length > 0 && strongMagElements.length <= 1) {
+    console.warn(`[MagSearch] Single magnetic species (${strongMagElements.join(",") || "weak-mag only"}): ` +
+      `AFM trials ${droppedOrderings.join(", ")} collapse to FM (QE starting_magnetization is per-species). ` +
+      `True AFM requires species-splitting (e.g. Fe1/Fe2 → opposite signs); skipped duplicates to save SCF time.`);
+  }
+
+  return dedupedConfigs;
 }
 
 /**
@@ -515,13 +564,15 @@ export function selectMagneticGroundState(
 ): MagneticGroundStateResult {
   const notes: string[] = [];
 
-  // Accept strictly-converged OR near-converged trials (accuracy ≤ 1e-4 Ry
-  // is good enough to rank FM vs AFM, which typically differ by tens of meV).
-  // Pre Apr-2026 the filter required strict convergence; BaFe2As2's FM/AFM
-  // trials hit max_seconds at accuracy ~1e-5 Ry — strictly "not converged"
-  // but the energies were already reliable for comparison. Falling back to
-  // FM with broadened seeding wasted hours; now we use the trial energies.
-  const NEAR_CONVERGED_RY = 1e-4;
+  // Accept strictly-converged OR near-converged trials (accuracy ≤ 1e-3 Ry
+  // is good enough to rank FM vs AFM, which typically differ by tens of meV
+  // — 1e-3 Ry ≈ 13.6 meV, still well under realistic FM-AFM gaps).
+  // Originally set to 1e-4 (May 2026), but observed HgBa2CuO4 NM trial
+  // landing at accuracy=8.8e-4 (just above 1e-4) and being rejected, forcing
+  // a fallback to FM-with-broadened-seed even though NM was clearly the
+  // best result. 1e-3 is the right threshold for trial RANKING (we'd still
+  // require tighter convergence for the WINNING state's full vc-relax).
+  const NEAR_CONVERGED_RY = 1e-3;
   const isUsableTrial = (t: MagneticTrialResult): boolean =>
     t.totalEnergy !== null && (
       t.converged
@@ -588,12 +639,23 @@ export function selectMagneticGroundState(
   const winner = sorted[0];
   const winnerConfig = configs.find(c => c.ordering === winner.ordering)!;
 
-  // Energy gap to next-best
+  // Energy gap to next-best. totalEnergy is in eV (per MagneticTrialResult
+  // docstring above), so eV→meV is ×1000, NOT ×RY_TO_MEV (13605.7).
+  // The previous Ry→meV conversion reported every gap 13605× too large,
+  // breaking ALL three downstream gates:
+  //   (1) wellSeparated (gap > 5 meV/atom) was always true — even truly
+  //       degenerate FM/AFM trials looked "clearly separated"
+  //   (2) needsTightRerun (gap < 3 meV/atom) was always false — tight
+  //       reruns never triggered for near-degenerate magnetic states
+  //   (3) needsNoncollinearTest (gap < 5 meV/atom) was always false —
+  //       non-collinear / spiral candidates never got that test
+  // For BaFe2As2 with real FM-AFM gap ~10 meV/atom, the bug reported
+  // ~136 eV/atom — clearly absurd if anyone had spot-checked the log.
   let energyGap = 0;
   let energyGapMeV = 0;
   if (sorted.length >= 2) {
     energyGap = ((sorted[1].totalEnergy ?? 0) - (sorted[0].totalEnergy ?? 0)) / totalAtoms;
-    energyGapMeV = energyGap * RY_TO_MEV;
+    energyGapMeV = energyGap * 1000;  // eV → meV
   }
   const wellSeparated = energyGapMeV > NEAR_DEGENERATE_THRESHOLD_MEV;
 
@@ -613,7 +675,7 @@ export function selectMagneticGroundState(
 
   notes.push(
     `[MagSearch] Magnetic ground state: ${winner.ordering} ` +
-    `(E = ${winner.totalEnergy?.toFixed(6)} Ry)`
+    `(E = ${winner.totalEnergy?.toFixed(6)} eV)`
   );
 
   if (sorted.length >= 2) {
@@ -667,7 +729,7 @@ export function selectMagneticGroundState(
 
   // Summary of all trials
   for (const trial of sorted) {
-    const eStr = trial.totalEnergy !== null ? `${trial.totalEnergy.toFixed(6)} Ry` : "N/A";
+    const eStr = trial.totalEnergy !== null ? `${trial.totalEnergy.toFixed(6)} eV` : "N/A";
     const mStr = trial.totalMagnetization !== null ? `M=${trial.totalMagnetization.toFixed(2)}` : "";
     notes.push(
       `  Trial ${trial.ordering}: E=${eStr} ${mStr} ` +

@@ -15,6 +15,11 @@ import * as fs from "fs";
 import * as path from "path";
 import type { StructureCandidate } from "./vegard-lattice";
 
+// CODATA 2018 Rydberg → eV. Several inline `13.6057` rounded constants were
+// scattered across this file; consolidated to a single precise constant
+// matching qe-worker.ts / acbn0-pipeline.ts / sscha-worker.py.
+const RY_TO_EV = 13.605693122994;
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -188,7 +193,10 @@ const HEAVY_ELEMENTS = new Set([
   "Hf", "Ta", "W", "Re", "Os", "Ir", "Pt", "Au", "Hg",
   "Tl", "Pb", "Bi", "Po",
   "Ba", "Cs",
-  "Th", "U", "Pa",
+  // Actinides — full series, matched to qe-worker.ts:HEAVY_ELEMENTS.
+  // Without these, Np/Pu/Am/Cm-containing Stage 1 calcs got the
+  // light-element cost model → wrong timeout estimate → ran out of time.
+  "Ac", "Th", "Pa", "U", "Np", "Pu", "Am", "Cm", "Bk", "Cf",
 ]);
 
 // Magnetic elements need nspin=2 which doubles the SCF cost
@@ -201,18 +209,25 @@ const MAGNETIC_ELS = new Set(["Fe", "Co", "Ni", "Mn", "Cr", "V", "Gd", "Eu", "Nd
 
 // Valence electron counts per element (from QE pseudopotential zValence).
 // Used to estimate SCF cost: more valence electrons = larger basis set = more expensive.
+// Kept in sync with ELEMENT_DATA in qe-worker.ts (which is the canonical
+// reference, verified against server/dft/pseudo/*.UPF z_valence attributes).
+// Discrepancies here cause timeout cost-model errors, not SCF correctness bugs.
 const Z_VALENCE: Record<string, number> = {
   H: 1, He: 2, Li: 3, Be: 4, B: 3, C: 4, N: 5, O: 6, F: 7,
   Na: 9, Mg: 10, Al: 3, Si: 4, P: 5, S: 6, Cl: 7,
   K: 9, Ca: 10, Sc: 11, Ti: 12, V: 13, Cr: 14, Mn: 15,
-  Fe: 16, Co: 17, Ni: 18, Cu: 19, Zn: 20, Ga: 13, Ge: 14,
-  As: 15, Se: 16, Br: 7, Rb: 9, Sr: 10, Y: 11, Zr: 12,
-  Nb: 13, Mo: 14, Ru: 14, Rh: 15, Pd: 16, Ag: 19, Cd: 20,
-  In: 13, Sn: 14, Sb: 15, Te: 16, I: 7, Cs: 9, Ba: 10,
-  La: 11, Ce: 12, Pr: 13, Nd: 14, Sm: 16, Eu: 17, Gd: 18,
-  Hf: 12, Ta: 13, W: 14, Re: 15, Os: 14, Ir: 15, Pt: 16,
-  Au: 19, Hg: 20, Tl: 13, Pb: 14, Bi: 15,
-  Th: 12, U: 14,
+  Fe: 16, Co: 17, Ni: 18, Cu: 19, Zn: 20, Ga: 13, Ge: 4,
+  As: 5, Se: 6, Br: 7, Rb: 9, Sr: 10, Y: 11, Zr: 12,
+  Nb: 13, Mo: 14, Tc: 15, Ru: 16, Rh: 17, Pd: 18, Ag: 19, Cd: 12,
+  In: 13, Sn: 4, Sb: 5, Te: 6, I: 7, Cs: 9, Ba: 10,
+  La: 11, Ce: 11, Pr: 13, Nd: 14, Pm: 15, Sm: 16, Eu: 17, Gd: 18,
+  Tb: 19, Dy: 20, Ho: 21, Er: 22, Tm: 23, Yb: 24, Lu: 25,
+  Hf: 12, Ta: 13, W: 14, Re: 15, Os: 16, Ir: 15, Pt: 16,
+  Au: 19, Hg: 20, Tl: 13, Pb: 4, Bi: 5,
+  // Actinides — added Ac, Np, Pu, Am, Cm. Without these the cost model
+  // saw actinide compounds as low-electron (fell through to a default),
+  // underestimated SCF cost, and timed out before convergence on Np/Pu/Am/Cm.
+  Ac: 11, Th: 12, Pa: 13, U: 14, Np: 15, Pu: 16, Am: 17, Cm: 18,
 };
 
 /**
@@ -239,15 +254,33 @@ function computeStage1Params(elements: string[], totalAtoms: number, counts?: Re
   const heavyCount = elements.filter(e => HEAVY_ELEMENTS.has(e)).length;
   const hasMagnetic = elements.some(e => MAGNETIC_ELS.has(e));
 
+  // Cuprate detection: Cu + ≥2 O + (heavy alkaline-earth Ba/Sr OR rare-earth La/Y/Nd).
+  // Cuprate-class compounds have Cu d⁹ electrons whose forces are extremely
+  // sensitive to ecutwfc convergence. The default `heavyCount ≥ 3 → ecutwfcScale
+  // = 0.75` rule cut HgBa2CuO4's effective cutoff to ~37 Ry, well below the
+  // 70-80 Ry that Cu d-electron forces require. Result: La2CuO4 Stage 1 ended
+  // at force=0.125 Ry/bohr (50× the 2.5e-3 publication threshold). Skip the
+  // cutoff reduction for cuprates and use a denser k-grid (Cu Fermi surface
+  // near van Hove singularity needs more k-points than coarse kspacing gives).
+  const cuprateAnions = (counts?.["Cu"] ?? 0) >= 1 && (counts?.["O"] ?? 0) >= 2;
+  const cuprateCations = elements.some(e => ["Ba", "Sr", "La", "Y", "Nd", "Pr", "Sm", "Ca"].includes(e));
+  const isCuprate = cuprateAnions && cuprateCations;
+
   // --- Ecutwfc and kspacing first (needed for cost estimate) ---
   let ecutwfcScale = 1.0;
   if (heavyCount >= 2 || totalAtoms >= 6) ecutwfcScale = 0.85;
   if (heavyCount >= 3 || totalAtoms >= 10) ecutwfcScale = 0.75;
+  if (isCuprate) ecutwfcScale = 1.10; // bump above default — Cu d needs full cutoff + headroom
 
   let kspacing = KSPACING_RELAX; // 0.40 base
   if (heavyCount >= 1 || totalAtoms >= 5) kspacing = 0.50;
   if (heavyCount >= 2 || totalAtoms >= 8) kspacing = 0.55;
   if (totalAtoms >= 12) kspacing = 0.65;
+  if (isCuprate) kspacing = Math.min(kspacing, 0.45); // tighter for Cu Fermi surface
+
+  if (isCuprate) {
+    console.log(`[Staged-Relax] Cuprate detected (Cu + ${counts?.O ?? "?"}O + heavy cation): bumping ecutwfcScale=1.10, kspacing=${kspacing}`);
+  }
 
   // --- Physics-based cost model ---
   // Step 1: Count total valence electrons in the unit cell
@@ -624,7 +657,7 @@ async function runStage1AtomicRelax(
   pseudo_dir = '${cb.getPseudoDirInput()}',
   tprnfor = .true.,
   tstress = .true.,
-  forc_conv_thr = ${STAGE1_FORCE_THR.toExponential(1).replace("e+0", "d+").replace("e-", "d-").replace("e+", "d+")},
+  forc_conv_thr = ${STAGE1_FORCE_THR.toExponential(1).replace(/e([+-])/, "d$1")},
   etot_conv_thr = 1.0d-4,
   nstep = 100,
   max_seconds = ${s1Params.maxSeconds},
@@ -666,7 +699,7 @@ ${cellBlock}
   const inputFile = path.join(stageDir, "relax.in");
   fs.writeFileSync(inputFile, input);
 
-  console.log(`[Staged-Relax] ${formula} S1 params: timeout=${Math.round(s1Params.timeoutMs/1000)}s, ecutwfc=${ecutwfc}Ry, kspacing=${s1Params.kspacingOverride}`);
+  console.log(`[Staged-Relax] ${formula} S1 params: timeout=${Math.round(s1Params.timeoutMs/1000)}s, ecutwfc=${ecutwfc}Ry, kspacing=${s1Params.kspacingOverride}, lattice=${latticeA.toFixed(3)} Å, P=${pressureGPa} GPa`);
   const result = await cb.runPwx(inputFile, stageDir, s1Params.timeoutMs);
   fs.writeFileSync(path.join(stageDir, "relax.out"), result.stdout);
 
@@ -779,7 +812,7 @@ async function runStage2VcRelax(
   pseudo_dir = '${cb.getPseudoDirInput()}',
   tprnfor = .true.,
   tstress = .true.,
-  forc_conv_thr = ${STAGE2_FORCE_THR.toExponential(1).replace("e+0", "d+").replace("e-", "d-").replace("e+", "d+")},
+  forc_conv_thr = ${STAGE2_FORCE_THR.toExponential(1).replace(/e([+-])/, "d$1")},
   etot_conv_thr = 1.0d-5,
   nstep = 200,
   max_seconds = ${Math.floor(STAGE2_TIMEOUT_MS / 1000) - 60},
@@ -1285,7 +1318,7 @@ function parseRelaxOutput(stdout: string): RelaxParsed {
   if (energyMatch && energyMatch.length > 0) {
     const last = energyMatch[energyMatch.length - 1];
     const val = last.match(/([-\d.]+)\s+Ry/);
-    if (val) result.totalEnergy = parseFloat(val[1]) * 13.6057; // Ry -> eV
+    if (val) result.totalEnergy = parseFloat(val[1]) * RY_TO_EV; // Ry -> eV
   }
 
   // Parse forces. QE prints two related but DIFFERENT quantities each ionic
@@ -1385,7 +1418,7 @@ function parseVcRelaxOutput(stdout: string): VcRelaxParsed {
   if (energyMatch && energyMatch.length > 0) {
     const last = energyMatch[energyMatch.length - 1];
     const val = last.match(/([-\d.]+)\s+Ry/);
-    if (val) result.totalEnergy = parseFloat(val[1]) * 13.6057;
+    if (val) result.totalEnergy = parseFloat(val[1]) * RY_TO_EV; // Ry -> eV
   }
 
   // Forces: prefer max per-atom |F| from the "Forces acting on atoms" block;
@@ -1412,10 +1445,18 @@ function parseVcRelaxOutput(stdout: string): VcRelaxParsed {
     if (val) result.pressure = parseFloat(val[0]);
   }
 
-  // Parse final CELL_PARAMETERS block
-  const cellBlocks = stdout.match(/CELL_PARAMETERS\s*[{(]?\s*(?:angstrom|bohr|alat)?\s*[})]?\s*\n([\s\S]*?)(?=\n\s*(?:ATOMIC_POSITIONS|End|$|\n\s*\n))/gi);
+  // Parse final CELL_PARAMETERS block. QE writes one of three forms:
+  //   CELL_PARAMETERS (alat=  7.50000000)  ← vectors are multiples of celldm(1) (in Bohr)
+  //   CELL_PARAMETERS (bohr)
+  //   CELL_PARAMETERS (angstrom)
+  // The previous parser only checked for "bohr" and treated everything else
+  // as angstrom — for the common alat case (default for vc-relax), it would
+  // return latticeA = 1.0 Å for a cubic cell (vectors are unit-fractions
+  // of celldm(1)) instead of the actual celldm(1)·BOHR_TO_ANG Å.
+  const cellBlocks = stdout.match(/CELL_PARAMETERS\s*[{(]?\s*(?:angstrom|bohr|alat\s*=?\s*[-\d.]*)?\s*[})]?\s*\n([\s\S]*?)(?=\n\s*(?:ATOMIC_POSITIONS|End|$|\n\s*\n))/gi);
   if (cellBlocks && cellBlocks.length > 0) {
     const lastCell = cellBlocks[cellBlocks.length - 1];
+    const header = lastCell.split("\n")[0] ?? "";
     const lines = lastCell.split("\n").slice(1);
     const vectors: number[][] = [];
     for (const line of lines) {
@@ -1423,12 +1464,28 @@ function parseVcRelaxOutput(stdout: string): VcRelaxParsed {
       if (nums.length === 3) vectors.push(nums);
     }
     if (vectors.length === 3) {
-      result.cellVectors = vectors;
-      // Estimate lattice constant from cell vector magnitude
-      const a = Math.sqrt(vectors[0][0] ** 2 + vectors[0][1] ** 2 + vectors[0][2] ** 2);
-      // Check if vectors are in bohr and convert
-      const isBohr = lastCell.toLowerCase().includes("bohr");
-      result.latticeA = isBohr ? a * 0.529177 : a;
+      // Detect unit from the header
+      const headerLc = header.toLowerCase();
+      const isBohr = headerLc.includes("bohr");
+      // "alat= X.XX" — capture the celldm(1) value (in Bohr).
+      const alatMatch = header.match(/alat\s*=?\s*([\d.]+)/i);
+      const isAlat = alatMatch != null || (headerLc.includes("alat") && !headerLc.includes("angstrom"));
+      const BOHR_TO_ANG = 0.529177210903;  // CODATA 2018, matches qe-worker.ts / phonon-calculator.ts / acbn0-pipeline.ts
+
+      let cellVectorsAng: number[][];
+      if (isAlat && alatMatch) {
+        const alatBohr = parseFloat(alatMatch[1]);
+        const alatAng = alatBohr * BOHR_TO_ANG;
+        cellVectorsAng = vectors.map(v => v.map(x => x * alatAng));
+      } else if (isBohr) {
+        cellVectorsAng = vectors.map(v => v.map(x => x * BOHR_TO_ANG));
+      } else {
+        // angstrom (explicit or default for newer QE)
+        cellVectorsAng = vectors;
+      }
+      result.cellVectors = cellVectorsAng;
+      const aVec = cellVectorsAng[0];
+      result.latticeA = Math.sqrt(aVec[0] ** 2 + aVec[1] ** 2 + aVec[2] ** 2);
     }
   }
 
@@ -1472,22 +1529,40 @@ function parseVcRelaxOutput(stdout: string): VcRelaxParsed {
 function parseGammaPhononFrequencies(stdout: string): number[] {
   const frequencies: number[] = [];
 
-  // QE ph.x Gamma-point output format:
-  //     freq (    1) =      -2.345678 [cm-1]   =      -0.000291 [THz]
-  // or:
-  //     omega( 1) =       1.234567 cm-1
-  const freqPattern = /(?:freq|omega)\s*\(\s*\d+\)\s*=\s*([-\d.]+)\s*(?:\[?\s*cm-1|\[?\s*cm\^-1)/gi;
+  // QE ph.x Gamma-point dual-unit form (standard):
+  //     freq (    1) =     -2.345678 [THz] =    -78.123456 [cm-1]
+  //     omega( 1) =      -2.345678 [THz] =    -78.123456 [cm-1]
+  //     omega(1-3) = ...    (QE 7.x degenerate-mode range form)
+  // The previous regex `freq(N) = ([-\d.]+) ... cm-1` captured the FIRST
+  // number on the line, which is the THz value (off by 33.36× from cm-1),
+  // and then required "cm-1" immediately after — so for this format the
+  // regex failed to match at all and frequencies came back empty.
+  // The `(?:\s*-\s*\d+)?` clause handles QE 7.x range form `omega(1-3)`
+  // emitted for degenerate modes in cubic/high-symmetry crystals — without
+  // it those phonons silently dropped from the parsed set.
+  const dualUnitPattern = /(?:freq|omega)\s*\(\s*\d+(?:\s*-\s*\d+)?\s*\)\s*=\s*[-\d.eE+]+\s*\[THz\]\s*=\s*([-\d.eE+]+)\s*\[?\s*cm\^?-?1\]?/gi;
   let match: RegExpExecArray | null;
-  while ((match = freqPattern.exec(stdout)) !== null) {
-    frequencies.push(parseFloat(match[1]));
+  while ((match = dualUnitPattern.exec(stdout)) !== null) {
+    const v = parseFloat(match[1]);
+    if (Number.isFinite(v)) frequencies.push(v);
   }
 
-  // Also try the tabular format at end of ph.x output:
-  //     Mode   1  frequency =    -23.456 cm-1
-  const modePattern = /Mode\s+\d+\s+frequency\s*=\s*([-\d.]+)\s*cm/gi;
+  // Fallback: simple "freq( N) = X cm-1" or "omega( N) = X cm-1" (no THz)
   if (frequencies.length === 0) {
+    const simplePattern = /(?:freq|omega)\s*\(\s*\d+(?:\s*-\s*\d+)?\s*\)\s*=\s*([-\d.eE+]+)\s*\[?\s*cm\^?-?1\]?/gi;
+    while ((match = simplePattern.exec(stdout)) !== null) {
+      const v = parseFloat(match[1]);
+      if (Number.isFinite(v)) frequencies.push(v);
+    }
+  }
+
+  // Final fallback — tabular format some QE versions emit:
+  //     Mode   1  frequency =    -23.456 cm-1
+  if (frequencies.length === 0) {
+    const modePattern = /Mode\s+\d+\s+frequency\s*=\s*([-\d.eE+]+)\s*cm/gi;
     while ((match = modePattern.exec(stdout)) !== null) {
-      frequencies.push(parseFloat(match[1]));
+      const v = parseFloat(match[1]);
+      if (Number.isFinite(v)) frequencies.push(v);
     }
   }
 

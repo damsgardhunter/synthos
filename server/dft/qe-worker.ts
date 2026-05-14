@@ -7,7 +7,7 @@ import * as crypto from "crypto";
 import { IS_WINDOWS, binaryPath, getTempSubdir, toWslPath, killProcessGracefully, spawnQE } from "./platform-utils";
 import { selectPrototype } from "../learning/crystal-prototypes";
 import { matchPrototype } from "../learning/structure-predictor";
-import { isTransitionMetal, isRareEarth, ELEMENTAL_DATA, getElementData, getHubbardU } from "../learning/elemental-data";
+import { isTransitionMetal, isRareEarth, isActinide, ELEMENTAL_DATA, getElementData, getHubbardU } from "../learning/elemental-data";
 import { estimateCorrelationEffects } from "../physics/correlation-engine";
 import { generatePrototypeFreeStructure } from "../crystal/lattice-generator";
 import { getAllDistributions, getElementSitePreference, type CrystalSystemDistribution } from "../ai/crystal-distribution-db";
@@ -246,14 +246,14 @@ const ELEMENT_DATA: Record<string, { mass: number; zValence: number }> = {
   Co: { mass: 58.933,  zValence: 17 }, Ni: { mass: 58.693,  zValence: 18 },
   // Cu pseudo includes the semicore 3s²3p⁶ shell explicitly →
   // z_valence=19 (3s²3p⁶3d¹⁰4s¹). Verified against server/dft/pseudo/Cu.UPF.
-  Cu: { mass: 63.546,  zValence: 19 }, Zn: { mass: 65.380,  zValence: 12 },
+  Cu: { mass: 63.546,  zValence: 19 }, Zn: { mass: 65.380,  zValence: 20 },
   Ga: { mass: 69.723,  zValence: 13 }, Ge: { mass: 72.640,  zValence: 4  },
   As: { mass: 74.922,  zValence: 5  }, Se: { mass: 78.960,  zValence: 6  },
   Rb: { mass: 85.468,  zValence: 9  }, Sr: { mass: 87.620,  zValence: 10 },
   Y:  { mass: 88.906,  zValence: 11 }, Zr: { mass: 91.224,  zValence: 12 },
   Nb: { mass: 92.906,  zValence: 13 }, Mo: { mass: 95.960,  zValence: 14 },
   Ru: { mass: 101.07,  zValence: 16 }, Rh: { mass: 102.91,  zValence: 17 },
-  Pd: { mass: 106.42,  zValence: 18 }, Ag: { mass: 107.87,  zValence: 11 },
+  Pd: { mass: 106.42,  zValence: 18 }, Ag: { mass: 107.87,  zValence: 19 },
   Cd: { mass: 112.41,  zValence: 12 }, In: { mass: 114.82,  zValence: 13 },
   Sn: { mass: 118.71,  zValence: 4  }, Sb: { mass: 121.76,  zValence: 5  },
   Te: { mass: 127.60,  zValence: 6  }, I:  { mass: 126.90,  zValence: 7  },
@@ -263,15 +263,19 @@ const ELEMENT_DATA: Record<string, { mass: number; zValence: number }> = {
   La: { mass: 138.91,  zValence: 11 }, Ce: { mass: 140.12,  zValence: 11 },
   Hf: { mass: 178.49,  zValence: 12 }, Ta: { mass: 180.95,  zValence: 13 },
   W:  { mass: 183.84,  zValence: 14 }, Re: { mass: 186.21,  zValence: 15 },
-  Os: { mass: 190.23,  zValence: 16 }, Ir: { mass: 192.22,  zValence: 17 },
-  Pt: { mass: 195.08,  zValence: 18 }, Au: { mass: 196.97,  zValence: 11 },
-  Hg: { mass: 200.59,  zValence: 12 },
+  Os: { mass: 190.23,  zValence: 16 }, Ir: { mass: 192.22,  zValence: 15 },
+  Pt: { mass: 195.08,  zValence: 16 }, Au: { mass: 196.97,  zValence: 19 },
+  Hg: { mass: 200.59,  zValence: 20 },
   Tl: { mass: 204.38,  zValence: 13 }, Pb: { mass: 207.2,   zValence: 4  },
   Bi: { mass: 208.98,  zValence: 5  },
   Br: { mass: 79.904,  zValence: 7  },
-  Tc: { mass: 98.0,    zValence: 7  },
+  Tc: { mass: 98.0,    zValence: 15 },
   Pr: { mass: 140.91,  zValence: 13 },
   Nd: { mass: 144.24,  zValence: 14 },
+  // Pm (5s²5p⁶4f⁵6s² with semicore) was missing — fell through to
+  // elemental-data's non-semicore value 7, bypassing the validateSemicorePP
+  // semicore-presence check.
+  Pm: { mass: 145.0,   zValence: 15 },
   Sm: { mass: 150.36,  zValence: 16 },
   Eu: { mass: 151.96,  zValence: 17 },
   Gd: { mass: 157.25,  zValence: 18 },
@@ -282,9 +286,21 @@ const ELEMENT_DATA: Record<string, { mass: number; zValence: number }> = {
   Tm: { mass: 168.93,  zValence: 23 },
   Yb: { mass: 173.04,  zValence: 24 },
   Lu: { mass: 174.97,  zValence: 25 },
-  Th: { mass: 232.04,  zValence: 12 },
-  U:  { mass: 238.03,  zValence: 14 },
-  Pa: { mass: 231.04,  zValence: 13 },
+  // Actinide z_valence values include the 6s²6p⁶ semicore shell (8e⁻) plus the
+  // chemistry-active 5f/6d/7s. These match the standard PSLibrary/PAW PPs and
+  // are needed by validateSemicorePP — without them the function falls back
+  // to elemental-data's non-semicore valence (Np=7, Pu=8, etc.), so the
+  // threshold check `ppZVal < expectedZ * 0.5` would always pass even when
+  // the downloaded PP lacks the semicore shell, silently producing wrong
+  // forces and density convergence.
+  Ac: { mass: 227.0,   zValence: 11 },  // 6s²6p⁶6d¹7s²
+  Th: { mass: 232.04,  zValence: 12 },  // 6s²6p⁶6d²7s²
+  Pa: { mass: 231.04,  zValence: 13 },  // 6s²6p⁶5f²6d¹7s²
+  U:  { mass: 238.03,  zValence: 14 },  // 6s²6p⁶5f³6d¹7s²
+  Np: { mass: 237.0,   zValence: 15 },  // 6s²6p⁶5f⁴6d¹7s²
+  Pu: { mass: 244.0,   zValence: 16 },  // 6s²6p⁶5f⁶7s²
+  Am: { mass: 243.0,   zValence: 17 },  // 6s²6p⁶5f⁷7s²
+  Cm: { mass: 247.0,   zValence: 18 },  // 6s²6p⁶5f⁷6d¹7s²
 };
 
 
@@ -301,7 +317,13 @@ export interface QESCFResult {
   lastScfAccuracyRy: number | null;
   nscfIterations: number;
   wallTimeSeconds: number;
+  /** Signed total magnetization in Bohr magneton/cell (sum over cell).
+   *  ≈0 for antiferromagnetic systems even when local moments are large. */
   magnetization: number | null;
+  /** Absolute magnetization in Bohr magneton/cell (∫|m(r)| d³r).
+   *  Non-zero whenever any local moment formed — captures AFM systems
+   *  that `magnetization` (total) misses. */
+  absoluteMagnetization: number | null;
   error: string | null;
 }
 
@@ -318,7 +340,7 @@ export interface QEPhononResult {
 
 export interface QEDFPTResult {
   lambda: number;
-  omegaLog: number;        // cm⁻¹ (log-average phonon frequency)
+  omegaLog: number;        // K (log-average phonon frequency in Kelvin — parseLambdaOutput in dfpt-parser.ts converts cm⁻¹→K via hc/k_B before returning)
   tcAllenDynes: number;    // K via Allen-Dynes
   tcEliashberg: number;    // K via full Eliashberg gap equation
   tcBest: number;          // K — best estimate (max of Allen-Dynes and Eliashberg)
@@ -574,8 +596,11 @@ const HARD_PAW_ELEMENTS = new Set<string>([
   // Group 3 + lanthanides (semicore 5s+5p in valence)
   "Sc", "Y", "La",
   "Ce", "Pr", "Nd", "Pm", "Sm", "Eu", "Gd", "Tb", "Dy", "Ho", "Er", "Tm", "Yb", "Lu",
-  // Actinides (semicore 6s+6p in valence)
-  "Ac", "Th", "Pa", "U", "Np", "Pu",
+  // Actinides (semicore 6s+6p in valence). Added Am, Cm, Bk, Cf — without
+  // these, Am/Cm compounds detected the PAW PP correctly but used the
+  // 4× ecutrho multiplier (not 8×), giving under-resolved density grids
+  // and negative-rho artifacts that broke DFPT derivatives.
+  "Ac", "Th", "Pa", "U", "Np", "Pu", "Am", "Cm", "Bk", "Cf",
   // Early/mid 3d transition metals (semicore 3s+3p in valence for most PSL pseudos)
   "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn",
   // 4d transition metals (semicore 4s+4p in valence)
@@ -1004,7 +1029,7 @@ function estimateLatticeConstant(elements: string[], counts?: Record<string, num
   const metalCount = totalAtoms - hCount;
   const hMetalRatio = metalCount > 0 ? hCount / metalCount : 0;
   const hasMetals = elements.some(e => e !== "H" && (
-    isTransitionMetal(e) || isRareEarth(e) || ["Ca", "Sr", "Ba", "Mg", "Na", "K", "Al"].includes(e)
+    isTransitionMetal(e) || isRareEarth(e) || isActinide(e) || ["Ca", "Sr", "Ba", "Mg", "Na", "K", "Al"].includes(e)
   ));
 
   let cellVolume: number;
@@ -1084,7 +1109,10 @@ const SEMICORE_REQUIRED: Set<string> = new Set([
   "Y", "Zr", "Nb", "Mo", "Tc", "Ru", "Rh", "Pd", "Ag",
   "Hf", "Ta", "W", "Re", "Os", "Ir", "Pt", "Au",
   "Ba", "Sr", "Ca", "K", "Na",
-  "Th", "U", "Pu",
+  // Actinides — 5f systems need semicore (6s,6p) just like the 4f lanthanides
+  // need semicore (5s,5p). Without semicore the PP misses ~8 electrons in
+  // the actinide outer-core, breaking density convergence and forces.
+  "Ac", "Th", "Pa", "U", "Np", "Pu", "Am", "Cm",
 ]);
 
 // Elements whose best-available PPs include f-orbital projectors that exceed
@@ -1801,11 +1829,24 @@ const DEFAULT_KSPACING = (() => {
 function autoKPoints(
   latticeA: number,
   cOverA?: number,
-  minK: number = 4,
+  // Third positional arg is heuristically treated as bOverA OR minK:
+  //   - Fractional or near-1 values (≤ 3): interpreted as bOverA (b/a ratio).
+  //     Most call sites pass `bOverA` here, e.g. 0.95 for slightly-orthorhombic.
+  //   - Integer values ≥ 4: interpreted as minK (legacy k-point floor convention).
+  //     Used by the QERunnerCallbacks wrapper at line 5050 (passes 4) and the
+  //     proto-screening at line 5744 (passes 12).
+  // Previously this was declared as `minK` with default 4 — but the bOverA-
+  // passing callers silently had their kb forced to ka (no b-axis honoring).
+  // The mixed interpretation here is backwards-compat for both groups.
+  bOverAOrMinK: number = 1.0,
   dimensionality?: string,
   kspacing: number = DEFAULT_KSPACING,
   adaptiveOpts?: { stage?: "relax" | "vc-relax" | "scf" | "phonon"; isMetallic?: boolean; totalAtoms?: number; publicationReady?: boolean },
 ): string {
+  // Disambiguate: integer ≥ 4 → minK; everything else → bOverA.
+  const treatAsMinK = Number.isInteger(bOverAOrMinK) && bOverAOrMinK >= 4;
+  const minKOverride = treatAsMinK ? bOverAOrMinK : 4;
+  const bOverA = treatAsMinK ? 1.0 : bOverAOrMinK;
   // Density-based k-point grid: n_i = ceil(2π / (kspacing * a_i)).
   // kspacing=0.157 Å⁻¹ ≈ densityFactor=40 (legacy); aiida's "fast" protocol
   // uses 0.15 (screening), "moderate" 0.125, "precise" 0.10.
@@ -1844,16 +1885,30 @@ function autoKPoints(
   const isLayered = dimensionality === "quasi-2D" || dimensionality === "2D";
   const layeredBoost = isLayered ? 1.5 : 1.0;
   const effCOverA = cOverA ?? 1.0;
-  const ka = Math.max(Math.ceil(minK), Math.ceil(densityFactor / latticeA));
-  const kb = ka;
+  const effBOverA = bOverA > 0 ? bOverA : 1.0;
+  const ka = Math.max(minKOverride, Math.ceil(densityFactor / latticeA));
+  // Honor b-axis lattice length: kb = ceil(2π / (kspacing * b)) where b = a·(b/a).
+  // Previously kb was forced to ka regardless of bOverA — over-sampled b for
+  // orthorhombic cells with b > a (e.g., layered systems), under-sampled for b < a.
+  const kb = Math.max(minKOverride, Math.ceil(densityFactor / (latticeA * effBOverA)));
   const baseKc = Math.ceil(densityFactor / (latticeA * effCOverA));
-  const kc = Math.max(Math.ceil(minK), isLayered ? Math.ceil(baseKc * layeredBoost) : baseKc);
+  const kc = Math.max(minKOverride, isLayered ? Math.ceil(baseKc * layeredBoost) : baseKc);
   return `  ${ka} ${kb} ${kc}  0 0 0`;
 }
 
 const MAGNETIC_ELEMENTS: Record<string, number> = {
+  // 3d ferromagnets and antiferromagnets (μB per atom)
   Fe: 2.0, Co: 1.5, Ni: 0.8, Mn: 3.0, Cr: 1.5,
-  V: 0.5, Gd: 7.0, Eu: 7.0, Nd: 3.0, Sm: 1.0,
+  V: 0.5,
+  // 4f lanthanides (Ln³⁺ effective moments — only Gd/Eu/Nd/Sm were listed
+  // before, missing the strongly-magnetic Pr-Tm series. Ho³⁺ has the largest
+  // local moment of ANY element (10.6 μB) — omitting it forced nspin=1 SCF
+  // for HoH9 / HoNi / etc., missing the magnetic ground state entirely).
+  Pr: 3.6, Nd: 3.0, Sm: 1.0, Eu: 7.0, Gd: 7.0,
+  Tb: 9.7, Dy: 10.6, Ho: 10.6, Er: 9.6, Tm: 7.6,
+  // 5f actinides (partially-filled 5f systems carry large moments in
+  // compounds — U/Np/Pu heavy fermions, Am/Cm magnetic insulators).
+  U: 3.0, Np: 2.5, Pu: 4.0, Am: 5.0, Cm: 7.0,
 };
 
 // Full d-block. Used to detect systems where moments may form even when
@@ -1880,12 +1935,39 @@ const INDUCED_TM_SEED = 0.5;
 // consistently and the canonical source is obvious.
 // Callers: use computeEcutwfc(elements, extraBoost) — it applies the
 // hydrogen-presence floor and caller-specified boost.
+// Recommended ecutwfc per element (Ry). Calibrated against the "Suggested
+// minimum cutoff for wavefunctions" attribute in server/dft/pseudo/*.UPF
+// with a ~15-20% production safety margin on top of the pseudo minimum.
+// Under-converging ecutwfc gives wrong total energies (100+ meV/atom),
+// wrong forces (bad relaxation), and 5-15% phonon frequency errors —
+// catastrophic for the SC-relevant 3d/4d transition metals where the
+// pseudos include semicore states (Fe pseudo min: 71 Ry, Ni: 75 Ry,
+// Cu: 71 Ry, Li: 103 Ry, La: 75 Ry).
 const SPECIES_ECUTWFC: Record<string, number> = {
+  // Light p-block & H — H pseudo only needs 46 but we keep 100 because
+  // pressurised hydride structures benefit from extra plane waves in the
+  // small unit cell.
   H: 100, O: 70, F: 80, N: 60, Cl: 60, S: 55, P: 55, Se: 50, Br: 50,
-  Li: 60, Be: 60, B: 55, C: 60, Na: 60, Mg: 55, Al: 50, Si: 50,
-  La: 55, Ce: 55, Pr: 55, Nd: 55, Sm: 55, Eu: 55, Gd: 55, Tb: 55,
-  Dy: 55, Ho: 55, Er: 55, Tm: 55, Yb: 55, Lu: 55, Sc: 50, Y: 50,
-  Th: 55,
+  // s-/p-block (Li pseudo recommends 103 Ry — this was missing entirely)
+  Li: 120, Be: 60, B: 55, C: 60, Na: 60, Mg: 70, Al: 50, Si: 50,
+  K: 50, Ca: 55, Rb: 50, Sr: 50, Cs: 50, Ba: 50,
+  // 3d transition metals (pseudo minimums are 48-75 Ry; production needs ~+15%)
+  Sc: 60, Ti: 65, V: 60, Cr: 60, Mn: 90, Fe: 90, Co: 90,
+  Ni: 90, Cu: 85, Zn: 75,
+  // 4d transition metals (pseudo minimums are 38-49 Ry)
+  Y: 55, Zr: 60, Nb: 60, Mo: 60, Tc: 60, Ru: 55, Rh: 55, Pd: 55, Ag: 55, Cd: 55,
+  // 5d transition metals (pseudo minimums are 43-50 Ry)
+  Hf: 60, Ta: 55, W: 60, Re: 55, Os: 55, Ir: 55, Pt: 55, Au: 55, Hg: 55,
+  // Lanthanides — La pseudo min is 75 Ry; assume similar for the series.
+  // Pm added (was missing → fell through to 45 Ry default, way too low for
+  // semicore 5s²5p⁶4f⁵6s² PP).
+  La: 90, Ce: 75, Pr: 75, Nd: 75, Pm: 75, Sm: 75, Eu: 75, Gd: 75, Tb: 75,
+  Dy: 75, Ho: 75, Er: 75, Tm: 75, Yb: 75, Lu: 75,
+  // Actinides — full series. Without Ac/Np/Pu/Am/Cm entries, heavy actinide
+  // pure-metal calcs used ecutwfc=45 Ry (the default fallback) which is far
+  // below the 70+ Ry needed for semicore 6s²6p⁶5f^n PPs. Production runs
+  // got under-converged density grids → wrong forces and false phonons.
+  Ac: 70, Th: 70, Pa: 70, U: 70, Np: 75, Pu: 75, Am: 75, Cm: 75,
 };
 
 // Returns the recommended ecutwfc (Ry) for a composition. Applies a floor
@@ -1948,8 +2030,11 @@ const HEAVY_ELEMENTS = new Set([
   "Hf", "Ta", "W", "Re", "Os", "Ir", "Pt", "Au", "Hg",
   // 6p metals (Z=81-86)
   "Tl", "Pb", "Bi", "Po",
-  // Actinides commonly used
-  "Th", "U",
+  // Actinides — full series. Previously only Th and U were listed; missing
+  // Ac/Pa/Np/Pu/Am/Cm/Bk/Cf compounds were treated as light-element systems
+  // → simple-retry ladder (insufficient for 5f correlation) AND base
+  // max_seconds budget (timed out before SCF converged for Np/Pu compounds).
+  "Ac", "Th", "Pa", "U", "Np", "Pu", "Am", "Cm", "Bk", "Cf",
   // Heavy alkaline/alkaline-earth (large core, expensive PPs)
   "Cs", "Ba",
 ]);
@@ -3063,7 +3148,7 @@ function generatePhononPrepSCFInput(
 function kPointsCardForPhononPrep(
   latticeA: number,
   cOverA: number,
-  _bOverA: number,
+  bOverA: number,
   isMetallic: boolean | undefined,
   totalAtoms: number,
   qGrid: [number, number, number],
@@ -3071,8 +3156,11 @@ function kPointsCardForPhononPrep(
   // Phonon-prep uses a denser k-grid than production SCF (kspacing 0.20 vs 0.25).
   // autoKPoints returns just the numeric row "  Nx Ny Nz  0 0 0" — we wrap it
   // ourselves and apply the k≥2q commensurability bump.
+  // Pass bOverA (was previously `_bOverA` and ignored, with 1.0 hardcoded)
+  // so the b-axis k-density follows the actual lattice for orthorhombic cells.
+  // For cubic cells bOverA=1.0 and this is a no-op.
   const baseLine = autoKPoints(
-    latticeA, cOverA, 1.0, undefined, 0.20,
+    latticeA, cOverA, bOverA > 0 ? bOverA : 1.0, undefined, 0.20,
     { stage: "scf", isMetallic, totalAtoms },
   ).trim();
   const match = baseLine.match(/^(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*$/);
@@ -3418,8 +3506,20 @@ function runPrePhononValidation(opts: {
       // Moderate: both magnetic but moments shifted by > 0.5 μB (e.g.
       // a different occupation pattern or AFM↔FM transition).
       else if (absDelta > 0.5) {
-        const fmAfmFlip = Math.sign(totVc) !== Math.sign(totPp) && Math.abs(totVc) > 0.1 && Math.abs(totPp) > 0.1;
-        const flipMsg = fmAfmFlip ? " (sign flip — FM↔AFM)" : "";
+        // Distinguish FM↔AFM character change from a generic magnitude shift.
+        // FM has total ≈ |abs| (ratio ≈ 1), AFM has total ≈ 0 while |abs|
+        // nonzero (ratio ≈ 0). A ratio change > 0.4 between stages is the
+        // signature of a true FM↔AFM transition — phonons will differ
+        // qualitatively. Previously the code labeled any signed-total sign
+        // flip as "FM↔AFM" even when |total| stayed large on both sides
+        // (which is actually a spin-direction flip / time-reversed FM, NOT
+        // an FM↔AFM transition).
+        const ratioVc = absVc > 0.01 ? Math.abs(totVc) / absVc : 0;
+        const ratioPp = absPp > 0.01 ? Math.abs(totPp) / absPp : 0;
+        const ratioDelta = Math.abs(ratioVc - ratioPp);
+        const flipMsg = ratioDelta > 0.4
+          ? ` (FM/AFM character changed: total/|abs| ratio ${ratioVc.toFixed(2)}→${ratioPp.toFixed(2)})`
+          : "";
         warnings.push(`magnetization shifted between stages: vc-relax |M|=${absVc.toFixed(2)} μB → phonon-prep |M|=${absPp.toFixed(2)} μB (Δ=${absDelta.toFixed(2)} μB)${flipMsg} — phonon-prep settled in a different magnetic configuration`);
       }
     } else if (magVc.absolute != null && magPp.absolute == null) {
@@ -3520,7 +3620,11 @@ function predictMetallicCharacter(
   ]);
   const LANTHANIDE_ACTINIDE = new Set([
     "La","Ce","Pr","Nd","Pm","Sm","Eu","Gd","Tb","Dy","Ho","Er","Tm","Yb","Lu",
-    "Ac","Th","Pa","U","Np","Pu",
+    // Am, Cm, Bk, Cf added — without them, AmO2/CmO2/etc. matched the
+    // `hasO && !hasTM && !hasMetallic` branch and were misclassified as
+    // "insulator", producing wrong metallicity-mismatch warnings against the
+    // (correctly metallic-like) SCF result for half-filled 5f systems.
+    "Ac","Th","Pa","U","Np","Pu","Am","Cm","Bk","Cf",
   ]);
   const hasHalogen = elements.some(e => HALOGENS.has(e));
   const hasO = elements.includes("O");
@@ -3564,6 +3668,7 @@ function parseSCFOutput(stdout: string, degaussRy: number = 0.005): QESCFResult 
     nscfIterations: 0,
     wallTimeSeconds: 0,
     magnetization: null,
+    absoluteMagnetization: null,
     error: null,
   };
 
@@ -3611,16 +3716,39 @@ function parseSCFOutput(stdout: string, degaussRy: number = 0.005): QESCFResult 
   }
 
   // Use LAST band gap — changes between ionic steps in vc-relax.
-  const gapMatches = [...stdout.matchAll(/band gap\s*=\s*([\d.]+)\s+eV/gi)];
-  const holoMatches = [...stdout.matchAll(/highest occupied.*lowest unoccupied.*\n.*\s+([\d.]+)\s+([\d.]+)/g)];
-  const gapMatch = gapMatches.length > 0 ? gapMatches[gapMatches.length - 1] :
-                   holoMatches.length > 0 ? holoMatches[holoMatches.length - 1] : null;
-  if (gapMatch) {
-    if (gapMatch[2]) {
-      result.bandGap = parseFloat(gapMatch[2]) - parseFloat(gapMatch[1]);
-    } else {
-      result.bandGap = parseFloat(gapMatch[1]);
-    }
+  // QE writes the gap in one of three forms depending on version + verbosity:
+  //   (a) "band gap =     X.XXX eV"                           ← explicit gap
+  //   (b) "highest occupied, lowest unoccupied level (ev):    X.XXX    Y.YYY"  (single line)
+  //   (c) "highest occupied, lowest unoccupied levels (ev):\n        X.XXX   Y.YYY"  (two-line)
+  // The previous regex for (b)/(c) required the numbers on the *next* line
+  // after the header, which only matches (c). For (b) — the most common
+  // format — it captured nothing, and the bandGap stayed null, defaulting
+  // isMetallic=true for every insulator with HOMO/LUMO output.
+  const gapMatches = [...stdout.matchAll(/band gap\s*=\s*([-\d.]+)\s+eV/gi)];
+  // Single-line form: numbers immediately follow "(ev):" on the same line.
+  const holoInlineMatches = [...stdout.matchAll(/highest occupied[^\n]*?lowest unoccupied[^:\n]*\(ev\)\s*:\s*(-?[\d.]+)\s+(-?[\d.]+)/gi)];
+  // Two-line form: numbers on the next line after the header.
+  const holoMultilineMatches = [...stdout.matchAll(/highest occupied[^\n]*?lowest unoccupied[^\n]*\n\s*(-?[\d.]+)\s+(-?[\d.]+)/gi)];
+
+  let gapHomo: number | null = null;
+  let gapLumo: number | null = null;
+  if (holoInlineMatches.length > 0) {
+    const m = holoInlineMatches[holoInlineMatches.length - 1];
+    gapHomo = parseFloat(m[1]);
+    gapLumo = parseFloat(m[2]);
+  } else if (holoMultilineMatches.length > 0) {
+    const m = holoMultilineMatches[holoMultilineMatches.length - 1];
+    gapHomo = parseFloat(m[1]);
+    gapLumo = parseFloat(m[2]);
+  }
+
+  if (gapMatches.length > 0) {
+    result.bandGap = parseFloat(gapMatches[gapMatches.length - 1][1]);
+  } else if (gapHomo != null && gapLumo != null && Number.isFinite(gapHomo) && Number.isFinite(gapLumo)) {
+    result.bandGap = Math.max(0, gapLumo - gapHomo);
+  }
+
+  if (result.bandGap != null) {
     const degaussEv = degaussRy * RY_TO_EV;
     const metallicThreshold = Math.max(0.01, degaussEv * 1.5);
     result.isMetallic = result.bandGap < metallicThreshold;
@@ -3640,22 +3768,40 @@ function parseSCFOutput(stdout: string, degaussRy: number = 0.005): QESCFResult 
   }
 
   // Use LAST WALL time — the final "PWSCF : ... WALL" line is the total.
-  const wallMatches = [...stdout.matchAll(/WALL\s*:\s*(\d+)h?\s*(\d+)m\s*([\d.]+)s/g)];
-  const wallMatchesSec = [...stdout.matchAll(/WALL\s*:\s*([\d.]+)s\b/g)];
-  const wallMatch = wallMatches.length > 0 ? wallMatches[wallMatches.length - 1] :
-                    wallMatchesSec.length > 0 ? wallMatchesSec[wallMatchesSec.length - 1] : null;
-  if (wallMatch) {
-    if (wallMatch[3]) {
-      result.wallTimeSeconds = parseInt(wallMatch[1]) * 3600 + parseInt(wallMatch[2]) * 60 + parseFloat(wallMatch[3]);
-    } else {
-      result.wallTimeSeconds = parseFloat(wallMatch[1]);
-    }
+  // QE writes wall time BEFORE the "WALL" suffix, in the format:
+  //   PWSCF        :     1m17.21s CPU     1m20.43s WALL          (Xm Y.Ys)
+  //   PWSCF        :  1h12m18.27s CPU  1h13m45.32s WALL          (XhXmY.Ys)
+  //   PWSCF        :     45.32s CPU     46.10s WALL               (Y.Ys)
+  // The previous regex looked for "WALL : <time>" (WALL first, time after) —
+  // a pattern QE never emits — so wallTimeSeconds stayed 0 for every SCF run.
+  const wallHmsMatches = [...stdout.matchAll(/(\d+)h\s*(\d+)m\s*([\d.]+)s\s+WALL/g)];
+  const wallMsMatches = [...stdout.matchAll(/(\d+)m\s*([\d.]+)s\s+WALL/g)];
+  const wallSecMatches = [...stdout.matchAll(/([\d.]+)s\s+WALL/g)];
+  if (wallHmsMatches.length > 0) {
+    const m = wallHmsMatches[wallHmsMatches.length - 1];
+    result.wallTimeSeconds = parseInt(m[1]) * 3600 + parseInt(m[2]) * 60 + parseFloat(m[3]);
+  } else if (wallMsMatches.length > 0) {
+    const m = wallMsMatches[wallMsMatches.length - 1];
+    result.wallTimeSeconds = parseInt(m[1]) * 60 + parseFloat(m[2]);
+  } else if (wallSecMatches.length > 0) {
+    const m = wallSecMatches[wallSecMatches.length - 1];
+    result.wallTimeSeconds = parseFloat(m[1]);
   }
 
   // Use LAST magnetization — changes between ionic steps in vc-relax.
-  const magMatches = [...stdout.matchAll(/total magnetization\s+=\s+([-\d.]+)/g)];
+  // total magnetization = signed net moment (≈0 for AFM); absolute = ∫|m(r)| d³r.
+  // Capturing both lets downstream distinguish FM (total ~ |abs|) from
+  // AFM (|total| << |abs|) from NM (both ≈ 0). The old code only kept the
+  // signed total, so AFM cuprates / Fe-pnictides looked non-magnetic to
+  // dft-job-queue's `qeIsMagnetic` flag (`abs(total) > 0.5`) and bypassed
+  // the magnetic ML feature path.
+  const magMatches = [...stdout.matchAll(/total magnetization\s+=\s+(-?[\d.]+)/g)];
   if (magMatches.length > 0) {
     result.magnetization = parseFloat(magMatches[magMatches.length - 1][1]);
+  }
+  const absMagMatches = [...stdout.matchAll(/absolute magnetization\s+=\s+(-?[\d.]+)/g)];
+  if (absMagMatches.length > 0) {
+    result.absoluteMagnetization = parseFloat(absMagMatches[absMagMatches.length - 1][1]);
   }
 
   return result;
@@ -3726,7 +3872,14 @@ function parsePhononOutput(stdout: string): QEPhononResult {
   if (result.frequencies.length > 0) {
     result.lowestFrequency = Math.min(...result.frequencies);
     result.highestFrequency = Math.max(...result.frequencies);
-    result.imaginaryCount = result.frequencies.filter(f => f < -20).length;
+    // Threshold -10 cm⁻¹ matches dft-job-queue.ts:IMAGINARY_PHONON_THRESHOLD_CM1
+    // and the Stage 4 gamma-check at line 8048. The previous -20 threshold
+    // here was inconsistent with both — same -15 cm⁻¹ mode was "not imaginary"
+    // per parsePhononOutput but "not physically stable" per queue gate,
+    // producing contradictory result.hasImaginary vs qePhononStable flags
+    // in the DB. -10 is the QE acoustic-noise floor (3 Goldstone modes at Γ
+    // typically have |f| < 5 cm⁻¹); real soft modes start at -30 cm⁻¹+.
+    result.imaginaryCount = result.frequencies.filter(f => f < -10).length;
     result.hasImaginary = result.imaginaryCount > 0;
   }
 
@@ -3739,22 +3892,23 @@ function parsePhononOutput(stdout: string): QEPhononResult {
   );
 
   // QE wall time format: "PHONON       :   2m39.47s CPU   2m52.16s WALL"
-  // Pattern: optional "Xh" then "Xm" then "Y.Ys" then "WALL" (WALL is a suffix, not prefix)
-  const wallMatch =
-    stdout.match(/(\d+)h\s*(\d+)m\s*([\d.]+)s\s+WALL/) ||
-    stdout.match(/(\d+)m\s*([\d.]+)s\s+WALL/) ||
-    stdout.match(/([\d.]+)s\s+WALL/);
-  if (wallMatch) {
-    if (wallMatch.length >= 4 && wallMatch[3]) {
-      // Xh Xm Ys form
-      result.wallTimeSeconds = parseInt(wallMatch[1]) * 3600 + parseInt(wallMatch[2]) * 60 + parseFloat(wallMatch[3]);
-    } else if (wallMatch.length >= 3 && wallMatch[2]) {
-      // Xm Ys form
-      result.wallTimeSeconds = parseInt(wallMatch[1]) * 60 + parseFloat(wallMatch[2]);
-    } else {
-      // Ys form
-      result.wallTimeSeconds = parseFloat(wallMatch[1]);
-    }
+  // Pattern: optional "Xh" then "Xm" then "Y.Ys" then "WALL" (WALL is a suffix).
+  // Use matchAll + LAST occurrence to pick the PHONON total at the end of
+  // stdout. The previous code used .match() (first match) which for short
+  // runs (<1 min) returned init_run's 1-2s in the seconds-only fallback
+  // instead of the actual phonon calculation time.
+  const phWallHmsMatches = [...stdout.matchAll(/(\d+)h\s*(\d+)m\s*([\d.]+)s\s+WALL/g)];
+  const phWallMsMatches = [...stdout.matchAll(/(\d+)m\s*([\d.]+)s\s+WALL/g)];
+  const phWallSecMatches = [...stdout.matchAll(/([\d.]+)s\s+WALL/g)];
+  if (phWallHmsMatches.length > 0) {
+    const m = phWallHmsMatches[phWallHmsMatches.length - 1];
+    result.wallTimeSeconds = parseInt(m[1]) * 3600 + parseInt(m[2]) * 60 + parseFloat(m[3]);
+  } else if (phWallMsMatches.length > 0) {
+    const m = phWallMsMatches[phWallMsMatches.length - 1];
+    result.wallTimeSeconds = parseInt(m[1]) * 60 + parseFloat(m[2]);
+  } else if (phWallSecMatches.length > 0) {
+    const m = phWallSecMatches[phWallSecMatches.length - 1];
+    result.wallTimeSeconds = parseFloat(m[1]);
   }
 
   return result;
@@ -3767,10 +3921,15 @@ const COVALENT_RADIUS: Record<string, number> = {
   Fe: 1.32, Co: 1.26, Ni: 1.24, Cu: 1.32, Zn: 1.22, Ga: 1.22, Ge: 1.20, As: 1.19, Se: 1.20, Br: 1.20, Kr: 1.16,
   Rb: 2.20, Sr: 1.95, Y: 1.90, Zr: 1.75, Nb: 1.64, Mo: 1.54, Tc: 1.47, Ru: 1.46, Rh: 1.42, Pd: 1.39,
   Ag: 1.45, Cd: 1.44, In: 1.42, Sn: 1.39, Sb: 1.39, Te: 1.38, I: 1.39, Xe: 1.40,
-  Cs: 2.44, Ba: 2.15, La: 2.07, Ce: 2.04, Pr: 2.03, Nd: 2.01, Sm: 1.98, Eu: 1.98, Gd: 1.96,
+  Cs: 2.44, Ba: 2.15, La: 2.07, Ce: 2.04, Pr: 2.03, Nd: 2.01, Pm: 1.99, Sm: 1.98, Eu: 1.98, Gd: 1.96,
   Tb: 1.94, Dy: 1.92, Ho: 1.92, Er: 1.89, Tm: 1.90, Yb: 1.87, Lu: 1.87,
   Hf: 1.75, Ta: 1.70, W: 1.62, Re: 1.51, Os: 1.44, Ir: 1.41, Pt: 1.36, Au: 1.36,
-  Hg: 1.32, Tl: 1.45, Pb: 1.46, Bi: 1.48, Th: 2.06, Pa: 2.00, U: 1.96,
+  Hg: 1.32, Tl: 1.45, Pb: 1.46, Bi: 1.48,
+  // Actinides — without these, Np/Pu/Am/Cm-containing structures fell through
+  // to the 1.4 Å fallback at minPairDistance, which gave a min-pair distance
+  // of ~0.7·(1.4+rOther) < 2 Å — well below the actual 2.5-3 Å bonds in real
+  // actinide compounds. Valid structures got rejected as "atoms too close".
+  Ac: 2.15, Th: 2.06, Pa: 2.00, U: 1.96, Np: 1.90, Pu: 1.87, Am: 1.80, Cm: 1.69, Bk: 1.68, Cf: 1.68,
 };
 
 function minPairDistance(elA: string, elB: string): number {
@@ -3876,7 +4035,7 @@ function validateFormulaForDFT(formula: string, counts: Record<string, number>):
   if (hCount > 0 && totalAtoms > 2) {
     const hRatio = hCount / totalAtoms;
     const hasHydrideMetal = elements.some(el => el !== "H" && (
-      isTransitionMetal(el) || isRareEarth(el) || ALKALINE_EARTH_SYMBOLS.has(el)
+      isTransitionMetal(el) || isRareEarth(el) || isActinide(el) || ALKALINE_EARTH_SYMBOLS.has(el)
     ));
 
     if (hRatio > 0.95 && !hasHydrideMetal) {
@@ -4349,9 +4508,20 @@ function generateVCRelaxInput(
   }
 
   const prefix = formula.replace(/[^a-zA-Z0-9]/g, "");
-  const cOverA = estimateCOverA(elements, counts);
-  const bOverAVcr = estimateBOverA(elements, counts);
-  const cellBlock = `\n${generateCellParameters(latticeA, cOverA, 0, bOverAVcr, elements, counts)}`;
+  // Honor known-structure angles (alpha, beta, gamma) when available — for
+  // monoclinic crystals β ≠ 90° (typically 95-115°). Without this, vc-relax
+  // started from an orthorhombic cell (all 90°), and damp-w cell dynamics
+  // either wasted iterations searching for the correct β or got trapped in
+  // an orthorhombic minimum that's not the true ground state. The SCF input
+  // generator at line 4360 already does this; vc-relax was missing the same
+  // treatment. defaults to 90° (cubic/tetragonal/orthorhombic) when unknown.
+  const knownStructVcr = lookupKnownStructure(formula);
+  const cOverA = knownStructVcr?.latticeC ? knownStructVcr.latticeC / knownStructVcr.latticeA : estimateCOverA(elements, counts);
+  const bOverAVcr = knownStructVcr?.latticeB ? knownStructVcr.latticeB / knownStructVcr.latticeA : estimateBOverA(elements, counts);
+  const vcAlpha = knownStructVcr?.alpha ?? 90;
+  const vcBeta = knownStructVcr?.beta ?? 90;
+  const vcGamma = knownStructVcr?.gamma ?? 90;
+  const cellBlock = `\n${generateCellParameters(latticeA, cOverA, 0, bOverAVcr, elements, counts, vcAlpha, vcBeta, vcGamma)}`;
   const hasMagneticEl = elements.some(el => el in MAGNETIC_ELEMENTS);
   // degaussOverride lets the smearing-polish refinement phase progressively
   // tighten degauss (0.015 → 0.005 → 0.0025) so the relaxed geometry tracks
@@ -4481,13 +4651,23 @@ function parseVCRelaxOutput(stdout: string): VCRelaxResult {
     result.totalEnergy = parseFloat(energyMatch[1]) * RY_TO_EV;
   }
 
-  const wallMatch = stdout.match(/WALL\s*:\s*(\d+)m?\s*([\d.]+)s/i) || stdout.match(/PWSCF\s*:\s*(?:(\d+)h)?(\d+)m\s*([\d.]+)s/i);
-  if (wallMatch) {
-    if (wallMatch[3]) {
-      result.wallTimeSeconds = (parseInt(wallMatch[1] || "0") * 3600) + (parseInt(wallMatch[2]) * 60) + parseFloat(wallMatch[3]);
-    } else {
-      result.wallTimeSeconds = (parseInt(wallMatch[1] || "0") * 60) + parseFloat(wallMatch[2]);
-    }
+  // QE wall time format: "PWSCF : 1m17.21s CPU 1m20.43s WALL"
+  // The previous regex `WALL\s*:\s*<time>` does not exist in QE output, and
+  // the fallback `PWSCF : XmY.Ys` would capture the CPU time (which appears
+  // BEFORE the WALL time on the same line). Use WALL-as-suffix with
+  // matchAll + last to grab the PWSCF total at the end of stdout.
+  const vcWallHmsMatches = [...stdout.matchAll(/(\d+)h\s*(\d+)m\s*([\d.]+)s\s+WALL/g)];
+  const vcWallMsMatches = [...stdout.matchAll(/(\d+)m\s*([\d.]+)s\s+WALL/g)];
+  const vcWallSecMatches = [...stdout.matchAll(/([\d.]+)s\s+WALL/g)];
+  if (vcWallHmsMatches.length > 0) {
+    const m = vcWallHmsMatches[vcWallHmsMatches.length - 1];
+    result.wallTimeSeconds = parseInt(m[1]) * 3600 + parseInt(m[2]) * 60 + parseFloat(m[3]);
+  } else if (vcWallMsMatches.length > 0) {
+    const m = vcWallMsMatches[vcWallMsMatches.length - 1];
+    result.wallTimeSeconds = parseInt(m[1]) * 60 + parseFloat(m[2]);
+  } else if (vcWallSecMatches.length > 0) {
+    const m = vcWallSecMatches[vcWallSecMatches.length - 1];
+    result.wallTimeSeconds = parseFloat(m[1]);
   }
 
   // Match the LAST CELL_PARAMETERS block (damped dynamics outputs many)
@@ -4815,12 +4995,27 @@ async function runDFPTEPC(
       if (exp >= -50) {
         const lambdaBar = 2.46 * (1 + 3.8 * muStar);
         const f1 = Math.pow(1 + Math.pow(lambda / lambdaBar, 1.5), 1 / 3);
+        // f₂ spectral-moment correction (Allen-Dynes 1975 eq 3.4). Available
+        // only when the a2F.dat parse provided ⟨ω²⟩ (in (cm⁻¹)²); falls back
+        // to f₂=1 (pure McMillan-style). For strong-coupling hydrides
+        // √⟨ω²⟩/ω_log can reach 1.3–1.5 → f₂ adds 5–15% to Tc.
+        let f2 = 1.0;
+        const omega2AvgCm2 = dfptFiles.alpha2F?.omega2Avg ?? 0;
+        if (omega2AvgCm2 > 0) {
+          const CM1_TO_K = 1.4387768775039338;
+          const omegaLogCm = omegaLog / CM1_TO_K;  // back to cm⁻¹ for the ratio
+          const sqrtOmega2Cm = Math.sqrt(omega2AvgCm2);
+          const omegaRatio = sqrtOmega2Cm / omegaLogCm;
+          const Lambda2 = 1.82 * (1 + 6.3 * muStar) * omegaRatio;
+          f2 = 1 + (omegaRatio - 1) * lambda * lambda / (lambda * lambda + Lambda2 * Lambda2);
+          if (!Number.isFinite(f2) || f2 <= 0) f2 = 1.0;
+        }
         // Don't cap Tc at 500 K — theoretical hydrides at extreme P can
         // predict >500 K from Allen-Dynes (matches the fix in
         // dfpt-parser.ts). Only floor at 0 (negative is the unphysical
         // denom-divergent regime). Warn loudly when above 500 K so the
         // user knows it's an extreme strong-coupling prediction.
-        const rawTc = (omegaLog / 1.2) * f1 * Math.exp(exp);
+        const rawTc = (omegaLog / 1.2) * f1 * f2 * Math.exp(exp);
         tcAllenDynes = Number(Math.max(0, rawTc).toFixed(2));
         if (tcAllenDynes > 500) {
           console.warn(`[QE-Worker] ${formula}: Allen-Dynes Tc=${tcAllenDynes.toFixed(0)} K > 500 K ` +
@@ -6198,8 +6393,10 @@ ${cellBlockEos}
 
             // Keep totalEnergy even when strict convergence wasn't reached —
             // selectMagneticGroundState accepts near-converged trials (last
-            // accuracy < 1e-4 Ry) since FM/AFM gaps are typically >10× larger.
-            const nearConverged = magSCF.lastScfAccuracyRy !== null && magSCF.lastScfAccuracyRy < 1e-4;
+            // accuracy < 1e-3 Ry ≈ 13.6 meV) since FM/AFM gaps are typically
+            // 10×+ larger. Originally 1e-4 but HgBa2CuO4 NM landed at 8.8e-4
+            // and was wasted; 1e-3 is enough to RANK orderings reliably.
+            const nearConverged = magSCF.lastScfAccuracyRy !== null && magSCF.lastScfAccuracyRy < 1e-3;
             magTrials.push({
               ordering: config.ordering,
               totalEnergy: (magSCF.converged || nearConverged) ? magSCF.totalEnergy : null,
@@ -6215,7 +6412,7 @@ ${cellBlockEos}
               : nearConverged
                 ? `near-converged (accuracy=${magSCF.lastScfAccuracyRy?.toExponential(1)} Ry, usable for ranking)`
                 : `FAILED (accuracy=${magSCF.lastScfAccuracyRy?.toExponential(1) ?? "N/A"} Ry)`;
-            console.log(`[QE-Worker] Mag trial ${config.ordering}: E=${magSCF.totalEnergy?.toFixed(6) ?? "N/A"} Ry, ` +
+            console.log(`[QE-Worker] Mag trial ${config.ordering}: E=${magSCF.totalEnergy?.toFixed(6) ?? "N/A"} eV, ` +
               `M=${magMoments.totalMagnetization?.toFixed(2) ?? "N/A"} mu_B, ` +
               `${statusLabel} (${Date.now() - magStartTime}ms)`);
           } catch (magErr: any) {
@@ -6237,8 +6434,12 @@ ${cellBlockEos}
 
         const magGS = selectMagneticGroundState(magTrials, magConfigs, positions.length);
         result.magneticGroundState = magGS;
+        // energyGapPerAtom is in eV/atom (see MagneticGroundStateResult
+        // docstring); convert eV→meV via ×1000, NOT Ry→meV via ×13605.7.
+        // Previous ×13605.7 reported every gap 13605× too large, making
+        // "well-separated" look like 100s of eV/atom in logs.
         console.log(`[QE-Worker] Magnetic ground state for ${formula}: ${magGS.groundState} ` +
-          `(gap=${(magGS.energyGapPerAtom * 13605.7).toFixed(1)} meV/atom, ` +
+          `(gap=${(magGS.energyGapPerAtom * 1000).toFixed(1)} meV/atom, ` +
           `${magGS.wellSeparated ? "well-separated" : "nearly degenerate"})`);
       }
     }
@@ -7138,9 +7339,16 @@ ${cellBlockEos}
           // iteration). Detect wall-time by checking if the parsed SCF
           // wall time is within 15% of QE_MAX_SECONDS, or QE's explicit
           // "Maximum CPU time exceeded" banner.
+          //
+          // The previous `combined.includes("max_seconds")` substring match
+          // was ALWAYS true — every pw.x stdout echoes the input parameter
+          // `max_seconds = N` at the start, so EVERY non-zero-exit crash
+          // was misclassified as WALL_TIME_EXHAUSTED. That suppressed the
+          // proper retry handlers for SCF_NOT_CONVERGED / CHARGE_WRONG /
+          // S_NOT_POSITIVE / DIAG_NOT_CONVERGED etc. Use only the explicit
+          // banner and the wall-time heuristic.
           const scfWall = result.scf?.wallTimeSeconds ?? 0;
           const isWallTimeKill = combined.includes("Maximum CPU time exceeded") ||
-            combined.includes("max_seconds") ||
             (scfWall > 0 && scfWall >= QE_MAX_SECONDS * 0.85);
           if (isWallTimeKill) classifier = " [WALL_TIME_EXHAUSTED]";
           else if (combined.includes("convergence NOT achieved")) classifier = " [SCF_NOT_CONVERGED]";
@@ -7284,8 +7492,13 @@ ${cellBlockEos}
       if (scfForce != null && scfForce > 0.05) {
         console.log(`[QE-Worker] Stage 3 diagnostic: ${formula} residual force ${scfForce.toFixed(4)} Ry/bohr > 0.05 — structure may benefit from better relaxation`);
       }
-      if (scfPressure != null && Math.abs(scfPressure) > 5) {
-        console.log(`[QE-Worker] Stage 3 diagnostic: ${formula} residual pressure ${scfPressure.toFixed(1)} kbar > 5 — cell may not be fully relaxed`);
+      // parseSCFOutput already converts kbar → GPa (line 3722: /10). The
+      // previous label "kbar" was wrong, and the >5 threshold (5 GPa = 50 kbar)
+      // was 10× looser than the message suggested — a vc-relaxed cell normally
+      // has residual pressure < 0.5 GPa (5 kbar). Use the proper 0.5 GPa
+      // threshold and label the unit honestly.
+      if (scfPressure != null && Math.abs(scfPressure) > 0.5) {
+        console.log(`[QE-Worker] Stage 3 diagnostic: ${formula} residual pressure ${scfPressure.toFixed(2)} GPa > 0.5 — cell may not be fully relaxed`);
       }
       if (result.scf.isMetallic === false && result.scf.bandGap != null && result.scf.bandGap > 0.5) {
         const metalExpected = vegardResult?.isMetallic;
@@ -7527,7 +7740,7 @@ ${r2Cell}
                 if (r2EnergyMatch) {
                   const r2LastE = r2EnergyMatch[r2EnergyMatch.length - 1].match(/([-\d.]+)\s+Ry/);
                   if (r2LastE) {
-                    const r2Energy = parseFloat(r2LastE[1]) * 13.6057; // Ry → eV
+                    const r2Energy = parseFloat(r2LastE[1]) * RY_TO_EV; // Ry → eV
                     console.log(`[QE-Worker] Round 2 DFT result: E=${r2Energy.toFixed(4)} eV (Round 1: ${result.scf!.totalEnergy.toFixed(4)} eV, diff=${(r2Energy - result.scf!.totalEnergy).toFixed(4)} eV)`);
 
                     if (r2Energy < result.scf!.totalEnergy - 0.01) {
@@ -7599,7 +7812,7 @@ ${r2Cell}
       const scfAccuracy = result.scf.lastScfAccuracyRy ?? null;
       console.log(`[QE-Worker] Pre-phonon state for ${formula}:`);
       console.log(`[QE-Worker]   SCF: converged=${scfConverged}, accuracy=${scfAccuracy?.toExponential(2) ?? "N/A"} Ry, E=${result.scf.totalEnergy.toFixed(4)} eV, Ef=${result.scf.fermiEnergy ?? "N/A"}`);
-      console.log(`[QE-Worker]   Structure: ${positions.length} atoms, a=${latticeA.toFixed(3)} Å, force=${scfForce?.toFixed(4) ?? "N/A"} Ry/bohr, pressure=${scfPressure?.toFixed(1) ?? "N/A"} kbar`);
+      console.log(`[QE-Worker]   Structure: ${positions.length} atoms, a=${latticeA.toFixed(3)} Å, force=${scfForce?.toFixed(4) ?? "N/A"} Ry/bohr, pressure=${scfPressure?.toFixed(2) ?? "N/A"} GPa`);
       // Log first few atomic positions for diagnosis
       const posToLog = Math.min(positions.length, 8);
       for (let pi = 0; pi < posToLog; pi++) {
@@ -7642,8 +7855,15 @@ ${r2Cell}
           const pgInput = generatePhononPrepSCFInput(formula, elements, counts, latticeA, positions, {
             kPointsCard: pgKCard,
             ecutrhoMultiplierOverride: mult,
+            // nspin heuristic when magnetic-GS search was skipped: prefer
+            // |absoluteMagnetization| since AFM systems have signed total ≈ 0
+            // even when local moments are large (e.g., spin-density-wave Cr).
             forceNspin: result.magneticGroundState?.winningNspin
-              ?? (result.scf?.magnetization != null && Math.abs(result.scf.magnetization) > 0.05 ? 2 : undefined),
+              ?? (result.scf?.absoluteMagnetization != null && result.scf.absoluteMagnetization > 0.05
+                  ? 2
+                  : (result.scf?.magnetization != null && Math.abs(result.scf.magnetization) > 0.05
+                      ? 2
+                      : undefined)),
             forceMagBlock: result.magneticGroundState?.winningMagBlock || undefined,
             dftPlusULines: dftPlusULines || undefined,
             dftPlusUNspin2: dftPlusUNspin2 || undefined,
@@ -7721,7 +7941,7 @@ ${r2Cell}
             vcRelaxStdout,
             phononPrepScfStdout,
             isMetallic: result.scf?.isMetallic,
-            totalEnergyRy: result.scf?.totalEnergy != null ? result.scf.totalEnergy / 13.605693 : null,
+            totalEnergyRy: result.scf?.totalEnergy != null ? result.scf.totalEnergy / RY_TO_EV : null,
             targetPressureKbar: workerPressure * 10.0,
           });
         }
@@ -7889,7 +8109,7 @@ ${r2Cell}
 
     if (scfUsable && !isPartialWalltime && gammaPhononPassed) {
       // Log pre-full-phonon state for diagnosis
-      console.log(`[QE-Worker] Pre-full-phonon for ${formula}: ${positions.length} atoms, a=${latticeA.toFixed(3)} Å, force=${result.scf?.totalForce?.toFixed(4) ?? "N/A"} Ry/bohr, pressure=${result.scf?.pressure?.toFixed(1) ?? "N/A"} kbar, metallic=${result.scf?.isMetallic ?? "unknown"}`);
+      console.log(`[QE-Worker] Pre-full-phonon for ${formula}: ${positions.length} atoms, a=${latticeA.toFixed(3)} Å, force=${result.scf?.totalForce?.toFixed(4) ?? "N/A"} Ry/bohr, pressure=${result.scf?.pressure?.toFixed(2) ?? "N/A"} GPa, metallic=${result.scf?.isMetallic ?? "unknown"}`);
 
       // Phonon budget: scale with atom count × electron weight. Heavy hydrides
       // (K2LaH8, LaH12) have 33+ perturbations × expensive mini-SCFs. The old
@@ -7953,11 +8173,17 @@ ${r2Cell}
         );
 
         // Check if ph.x timed out: exit -1 with TIMEOUT marker, or QE's own
-        // "Maximum CPU time exceeded" / "JOB DONE" from max_seconds.
+        // "Maximum CPU time exceeded" message printed by check_stop.f90 when
+        // max_seconds is exhausted.
+        // Previously this also matched `combined.includes("max_seconds")` —
+        // but every ph.x stdout echoes the input parameter `max_seconds = N`
+        // at the start, so any non-zero-exit-code crash was misclassified as
+        // a timeout and routed through the recover=.true. retry branch
+        // (which uses the checkpoint of a crashed run — likely garbage)
+        // instead of the tighter-mixing crash-retry branch.
         const combined = phResult!.stdout + phResult!.stderr;
         phTimedOut = phResult!.exitCode === -1 ||
-          combined.includes("Maximum CPU time exceeded") ||
-          combined.includes("max_seconds");
+          combined.includes("Maximum CPU time exceeded");
 
         // Parse what we got
         result.phonon = parsePhononOutput(phResult!.stdout);
@@ -8039,7 +8265,7 @@ ${r2Cell}
                 result.phonon.frequencies = freqValues;
                 result.phonon.lowestFrequency = Math.min(...freqValues);
                 result.phonon.highestFrequency = Math.max(...freqValues);
-                result.phonon.imaginaryCount = freqValues.filter(f => f < -20).length;
+                result.phonon.imaginaryCount = freqValues.filter(f => f < -10).length;
                 result.phonon.hasImaginary = result.phonon.imaginaryCount > 0;
                 result.phonon.converged = true;
                 console.log(`[QE-Worker] Parsed ${freqValues.length} Gamma-only phonon modes from ${dynFileName} for ${formula} (lowest=${result.phonon.lowestFrequency.toFixed(1)} cm⁻¹)`);
@@ -8105,7 +8331,7 @@ ${r2Cell}
                       result.phonon.frequencies = freqValues;
                       result.phonon.lowestFrequency = Math.min(...freqValues);
                       result.phonon.highestFrequency = Math.max(...freqValues);
-                      result.phonon.imaginaryCount = freqValues.filter(f => f < -20).length;
+                      result.phonon.imaginaryCount = freqValues.filter(f => f < -10).length;
                       result.phonon.hasImaginary = result.phonon.imaginaryCount > 0;
                       result.phonon.converged = true;
                       console.log(`[QE-Worker] dynmat.x mode-parse extracted ${freqValues.length} frequencies for ${formula}`);
@@ -8209,7 +8435,7 @@ ${r2Cell}
                     result.phonon.frequencies = freqValues;
                     result.phonon.lowestFrequency = Math.min(...freqValues);
                     result.phonon.highestFrequency = Math.max(...freqValues);
-                    result.phonon.imaginaryCount = freqValues.filter(f => f < -20).length;
+                    result.phonon.imaginaryCount = freqValues.filter(f => f < -10).length;
                     result.phonon.hasImaginary = result.phonon.imaginaryCount > 0;
                     result.phonon.converged = true;
                     console.log(`[QE-Worker] Parsed ${freqValues.length} frequencies from ${prefix}.freq file`);
@@ -8441,7 +8667,12 @@ ${r2Cell}
     const scfForceOkScreening = residualForce != null ? residualForce < 0.10 : true;
     const scfForceOkDFPT = residualForce != null ? residualForce < 0.03 : true;
     const scfForceOkPublication = residualForce != null ? residualForce < 0.01 : true;
-    const scfPressureOk = result.scf?.pressure != null ? Math.abs(result.scf.pressure) < 50 : true;
+    // result.scf.pressure is in GPa (parseSCFOutput converts kbar→GPa via /10).
+    // Previous threshold "50" was effectively 50 GPa (500 kbar) — absurdly loose
+    // for a "quality gate" since even a barely-relaxed cell rarely exceeds 5 GPa
+    // residual. Original intent was clearly 50 kbar (= 5 GPa); the mislabeling
+    // let unrelaxed structures pass the gate and proceed to DFPT.
+    const scfPressureOk = result.scf?.pressure != null ? Math.abs(result.scf.pressure) < 5 : true;
     const isMetallicForTc = result.scf?.isMetallic ?? false;
 
     // Basic quality gate (allows surrogate Tc)
@@ -8452,12 +8683,12 @@ ${r2Cell}
     if (!scfConverged) qualityGateReason.push("SCF not converged");
     if (!scfForceOkScreening) qualityGateReason.push(`force ${residualForce?.toFixed(3)} > 0.10 Ry/bohr (screening threshold)`);
     else if (!scfForceOkDFPT) qualityGateReason.push(`force ${residualForce?.toFixed(3)} > 0.03 Ry/bohr (DFPT threshold — surrogate Tc only)`);
-    if (!scfPressureOk) qualityGateReason.push(`pressure ${result.scf?.pressure?.toFixed(1)} kbar > ±50`);
+    if (!scfPressureOk) qualityGateReason.push(`pressure ${result.scf?.pressure?.toFixed(2)} GPa > ±5`);
     if (!isMetallicForTc) qualityGateReason.push("not metallic");
     if (!phononPhysicallyStable) qualityGateReason.push(phononHasResults ? "imaginary phonon modes" : "no phonon data");
 
     if (dfptGatePass) {
-      console.log(`[QE-Worker] Quality gate PASSED (DFPT-ready) for ${formula}: force=${residualForce?.toFixed(4) ?? "N/A"} < 0.03, pressure=${result.scf?.pressure?.toFixed(1) ?? "N/A"} kbar, phonon stable (${result.phonon!.frequencies.length} modes)`);
+      console.log(`[QE-Worker] Quality gate PASSED (DFPT-ready) for ${formula}: force=${residualForce?.toFixed(4) ?? "N/A"} < 0.03, pressure=${result.scf?.pressure?.toFixed(2) ?? "N/A"} GPa, phonon stable (${result.phonon!.frequencies.length} modes)`);
     } else if (qualityGatePass) {
       console.log(`[QE-Worker] Quality gate PASSED (screening only) for ${formula}: force=${residualForce?.toFixed(4) ?? "N/A"} (> 0.03, below DFPT threshold) — surrogate Tc allowed, DFPT skipped`);
     } else {
@@ -8503,6 +8734,11 @@ ${r2Cell}
         const [epwQGrid] = autoPhononQGrid(elements, positions.length, phForceEPW);
         const epwCOverA = estimateCOverA(elements, counts);
         const epwBOverA = estimateBOverA(elements, counts);
+        // Honor known-structure angles so monoclinic candidates use the
+        // correct β instead of defaulting to 90° (which would force an
+        // orthorhombic cell shape and give wrong electronic structure in
+        // the EPW NSCF/Wannier/interpolation chain).
+        const epwKS = lookupKnownStructure(formula);
 
         console.log(`[QE-Worker] ${formula} qualifies for EPW pipeline (force=${residualForce?.toFixed(6)}, phonon stable, metallic)`);
         result.epw = await runEPWPipeline(
@@ -8512,7 +8748,7 @@ ${r2Cell}
             ecutwfc: computeEcutwfc(elements, 0, 80, 45),
             ecutrho: computeEcutwfc(elements, 0, 80, 45) * ecutrhoMultiplier(elements),
             phononQGrid: [epwQGrid, epwQGrid, epwQGrid] as [number, number, number],
-            cellParameters: generateCellParameters(latticeA, epwCOverA, 0, epwBOverA, elements, counts),
+            cellParameters: generateCellParameters(latticeA, epwCOverA, 0, epwBOverA, elements, counts, epwKS?.alpha ?? 90, epwKS?.beta ?? 90, epwKS?.gamma ?? 90),
           },
           {
             runQEBinary: (binary, inputFile, cwd, timeoutMs) => runQECommand(binary, inputFile, cwd, timeoutMs),
@@ -8548,7 +8784,21 @@ ${r2Cell}
       try {
         console.log(`[QE-Worker] ${formula} qualifies for SSCHA: ${sschaGate.reason}`);
         const harmonicLambda = result.epw?.lambda ?? (result.dfpt as any)?.lambda ?? null;
-        const harmonicOmegaLog = result.epw?.omegaLog ?? (result.dfpt as any)?.omegaLog ?? null;
+        // SSCHA pipeline's allenDynesTc() expects omega_log in meV (per
+        // sscha-pipeline.ts:281, converts internally via /0.08617 to K).
+        //   - EPW result is already in meV (EPWResult.omegaLog comment)
+        //   - DFPT result is in K (QEDFPTResult.omegaLog, set by
+        //     parseLambdaOutput which converts cm⁻¹→K)
+        // Without this conversion the DFPT fallback path passed K-valued
+        // omegaLog into a meV-expecting consumer, giving Tc estimates that
+        // were ~11.6× too high whenever EPW was unavailable.
+        const dfptOmegaLogK = (result.dfpt as any)?.omegaLog as number | undefined;
+        const K_PER_MEV = 0.086173;  // k_B in meV/K — convert K → meV
+        const harmonicOmegaLog: number | null =
+          result.epw?.omegaLog
+          ?? (typeof dfptOmegaLogK === "number" && dfptOmegaLogK > 0
+              ? dfptOmegaLogK * K_PER_MEV
+              : null);
         const prefix = formula.replace(/[^a-zA-Z0-9]/g, "");
         // Adaptive nConfigs: scale with cell size (more atoms = more configs needed)
         // Errea group typically uses 100-500. 50 is noise-dominated for larger cells.
@@ -8592,8 +8842,21 @@ ${r2Cell}
             ecutrho: computeEcutwfc(elements, 0, 80, 45) * ecutrhoMultiplier(elements),
             pseudoDir: QE_PSEUDO_DIR_INPUT,
             prefix: acbn0Prefix,
-            debyeFrequencyMeV: (result.dfpt as any)?.omegaLog ?? undefined,
-            cellParameters: generateCellParameters(latticeA, acbn0COverA, 0, acbn0BOverA, elements, counts),
+            // result.dfpt.omegaLog is in K (per parseLambdaOutput's
+            // conversion); convert K→meV via k_B = 0.086173 meV/K so the
+            // ACBN0 Morel-Anderson μ* calculation gets a sensible Debye
+            // cutoff. Previously the raw K value (~800) was passed as
+            // "meV", which gave ω_D = 0.8 eV instead of ~0.07 eV — a
+            // ~11.6× overestimate of the phonon cutoff that produced
+            // wildly wrong first-principles μ* values.
+            debyeFrequencyMeV: typeof (result.dfpt as any)?.omegaLog === "number" && (result.dfpt as any).omegaLog > 0
+              ? (result.dfpt as any).omegaLog * 0.086173
+              : undefined,
+            // Honor known-structure angles for monoclinic candidates.
+            cellParameters: (() => {
+              const ks = lookupKnownStructure(formula);
+              return generateCellParameters(latticeA, acbn0COverA, 0, acbn0BOverA, elements, counts, ks?.alpha ?? 90, ks?.beta ?? 90, ks?.gamma ?? 90);
+            })(),
           },
           {
             runQEBinary: (binary, inputFile, cwd, timeoutMs) => runQECommand(binary, inputFile, cwd, timeoutMs),
@@ -8670,7 +8933,11 @@ ${r2Cell}
           ecutwfc: dmftEcutwfc,
           ecutrho: dmftEcutrho,
           latticeA,
-          cellParameters: generateCellParameters(latticeA, dmftCOverA, 0, dmftBOverA, elements, counts),
+          // Honor known-structure angles for monoclinic candidates.
+          cellParameters: (() => {
+            const ks = lookupKnownStructure(formula);
+            return generateCellParameters(latticeA, dmftCOverA, 0, dmftBOverA, elements, counts, ks?.alpha ?? 90, ks?.beta ?? 90, ks?.gamma ?? 90);
+          })(),
           positions, elements,
           ppFilenames: Object.fromEntries(elements.map(el => [el, resolvePPFilename(el)])),
           kGrid: dmftKGrid,
@@ -8914,7 +9181,7 @@ ${r2Cell}
     if (scfConverged) tcReasons.push("SCF converged");
     else tcReasons.push("SCF partial/failed");
     if (!scfForceOkScreening) tcReasons.push(`high force (${result.scf?.totalForce?.toFixed(3)} > 0.10)`);
-    if (!scfPressureOk) tcReasons.push(`high pressure (${result.scf?.pressure?.toFixed(1)} kbar)`);
+    if (!scfPressureOk) tcReasons.push(`high pressure (${result.scf?.pressure?.toFixed(2)} GPa)`);
     if (hasEPW) tcReasons.push("EPW Migdal-Eliashberg");
     if (hasSSCHA) tcReasons.push("SSCHA anharmonic corrections");
     if (hasACBN0) tcReasons.push(`ACBN0 μ*=${result.acbn0!.muStar.toFixed(3)}`);
