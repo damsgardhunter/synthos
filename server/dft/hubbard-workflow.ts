@@ -526,7 +526,14 @@ export function analyzeHubbardWorkflow(
   let qeHubbardCard = "";
   const qeBlock = ""; // empty — no Hubbard params in &SYSTEM for QE ≥7.1
   if (applyDFTplusU) {
-    const projector = hubbardKind === 1 ? "ortho-atomic" : "ortho-atomic";
+    // QE ≥7.1 recommends "ortho-atomic" universally — it's more accurate
+    // than plain "atomic" because the projectors are properly orthogonalized
+    // across overlapping orbitals (avoids over/undercounting near bonded
+    // atoms). The old conditional `kind===1 ? "ortho-atomic" : "ortho-atomic"`
+    // was dead code from a refactor; both formulations (Dudarev kind=0,
+    // Liechtenstein kind=1) work with the orthogonalized projector.
+    // See: QE 7.1 Release Notes; Mahajan et al., PRB 104, 134402 (2021).
+    const projector = "ortho-atomic";
     qeHubbardCard += `HUBBARD (${projector})\n`;
     for (const site of sites) {
       if (site.uEffective > 0 && site.orbitalManifold !== "none") {

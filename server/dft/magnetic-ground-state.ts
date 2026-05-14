@@ -445,9 +445,15 @@ function buildNoncollinearMagBlock(
     const el = elements[i];
     const strongMag = STRONG_MAGNETIC[el];
     const isWeak = WEAK_MAGNETIC.has(el);
-    const mag = strongMag ?? (isWeak ? 0.3 : 0.1);
+    // Non-magnetic atoms (ligands like O, N, As, Te, halogens) should start
+    // with zero magnetization. The old 0.1 default seeded spurious moments
+    // on ligands that QE then had to relax away — wasted iterations, and
+    // for some structures (e.g., cuprates near AFM Néel point) could trap
+    // SCF in a wrong magnetic configuration. Magnetic species below
+    // dominate symmetry-breaking via their strong_mag / weak_mag values.
+    const mag = strongMag ?? (isWeak ? 0.3 : 0.0);
 
-    lines += `  starting_magnetization(${i + 1}) = ${mag.toFixed(1)},\n`;
+    lines += `  starting_magnetization(${i + 1}) = ${mag.toFixed(2)},\n`;
 
     if (mode === "spiral" && (strongMag || isWeak)) {
       // Rotate angle2 (azimuthal) by 90° per magnetic species to seed a spiral
