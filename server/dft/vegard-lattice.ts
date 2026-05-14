@@ -271,14 +271,28 @@ export async function vegardEstimate(
     if (totalWeight > 0 && pairsWithData >= 1) {
       const volPerAtom = vegardVol / totalWeight;
 
-      // Apply pressure correction (Birch-Murnaghan)
+      // Apply Murnaghan EOS pressure correction:
+      //   V(P) / V(0) = (1 + B0'·P/B0)^(-1/B0')
+      // Valid for moderate compression; at extreme P (>500 GPa, hydrides)
+      // Birch-Murnaghan 3rd order would be more accurate but Murnaghan is
+      // adequate for the Vegard-level estimate used downstream.
       let correctedVol = volPerAtom;
       if (pressureGPa > 0) {
         const B0 = estimateBulkModulusFromElements(elements);
         const B0p = 4.0;
         const eta = 1 + B0p * (pressureGPa / B0);
-        const volRatio = eta > 0 ? Math.pow(eta, -1 / B0p) : 0.5;
-        correctedVol = volPerAtom * Math.max(0.5, Math.min(1.0, volRatio));
+        const volRatio = eta > 0 ? Math.pow(eta, -1 / B0p) : 0.0;
+        // No upper clamp at 1.0 — for P > 0 the formula already gives <1.
+        // No lower clamp at 0.5 — high-P hydrides genuinely compress beyond
+        // 50% (LaH10 at 300 GPa: ~40% volume compression vs P=0). A floor
+        // would silently flatten the high-P signal in ML training.
+        // Only guard against pathological inputs (negative B0, NaN).
+        if (volRatio > 0 && Number.isFinite(volRatio)) {
+          correctedVol = volPerAtom * volRatio;
+        } else {
+          console.warn(`[Vegard] Murnaghan EOS gave volRatio=${volRatio} for ` +
+            `P=${pressureGPa} GPa, B0=${B0} GPa — input may be pathological`);
+        }
       }
 
       const cellVolume = correctedVol * totalAtoms;
@@ -290,8 +304,15 @@ export async function vegardEstimate(
       const endpointBonus = Math.min(allEndpoints.length / 10, 0.3);
       const confidence = Math.min(0.4 + pairCoverage * 0.4 + endpointBonus, 0.95);
 
+      // No hard latticeA floor — extreme-pressure hydrides (LaH10, H3S at
+      // 300+ GPa) genuinely have a < 3.3 Å in some primitive cells.
+      // Warn for suspicious values (< 2.0 Å) but don't clamp.
+      if (latticeA < 2.0) {
+        console.warn(`[Vegard] latticeA=${latticeA.toFixed(2)} Å < 2.0 — extremely small; ` +
+          `check that pressure (${pressureGPa} GPa) and bulk modulus are physical`);
+      }
       return {
-        latticeA: Math.max(latticeA, 3.0),
+        latticeA,
         volumePerAtom: correctedVol,
         confidence,
         endpointsUsed,
@@ -308,8 +329,11 @@ export async function vegardEstimate(
     const cellVolume = avgVol * totalAtoms;
     const latticeA = Math.cbrt(cellVolume);
 
+    if (latticeA < 2.0) {
+      console.warn(`[Vegard] latticeA=${latticeA.toFixed(2)} Å < 2.0 (linear-Vegard fallback)`);
+    }
     return {
-      latticeA: Math.max(latticeA, 3.0),
+      latticeA,
       volumePerAtom: avgVol,
       confidence: 0.3,
       endpointsUsed,
@@ -334,8 +358,16 @@ export async function vegardEstimate(
   const cellVolume = totalVol / packingFactor;
   const latticeA = Math.cbrt(cellVolume);
 
+  // Volume-sum fallback: low confidence already (0.15); don't add a hard
+  // floor on top. The packing-factor formula gives reasonable values
+  // for typical chemistry; pathological tiny lattices indicate a
+  // problem with element data, not a need for clamping.
+  if (latticeA < 2.0) {
+    console.warn(`[Vegard] volume-sum fallback gave latticeA=${latticeA.toFixed(2)} Å < 2.0 — ` +
+      `check elemental atomicRadius / atomicVolume data`);
+  }
   return {
-    latticeA: Math.max(latticeA, 3.0),
+    latticeA,
     volumePerAtom: cellVolume / totalAtoms,
     confidence: 0.15,
     endpointsUsed: [],
