@@ -1024,13 +1024,28 @@ function estimateLatticeConstant(elements: string[], counts?: Record<string, num
     const B0 = estimateBulkModulus(elements, effectiveCounts);
     const B0p = 4.0;
     const eta = 1 + B0p * (pressureGPa / B0);
-    const volRatio = eta > 0 ? Math.pow(eta, -1 / B0p) : 0.5;
-    cellVolume = cellVolume * Math.max(0.5, Math.min(1.0, volRatio));
+    const volRatio = eta > 0 ? Math.pow(eta, -1 / B0p) : 0.0;
+    // Don't clamp volRatio to [0.5, 1.0] — high-P hydrides (LaH10 etc.)
+    // genuinely compress beyond 50% at 300+ GPa, and the formula already
+    // gives ≤1 for P>0. Same fix pattern as vegard-lattice.ts.
+    if (volRatio > 0 && Number.isFinite(volRatio)) {
+      cellVolume = cellVolume * volRatio;
+    } else {
+      console.warn(`[QE-Worker] Murnaghan EOS gave volRatio=${volRatio} for ` +
+        `P=${pressureGPa} GPa, B0=${B0} GPa — pathological input`);
+    }
   }
 
   const a = Math.cbrt(cellVolume);
   const perturbation = 0.97 + Math.random() * 0.06;
-  return Math.max(a * perturbation, 3.0);
+  // Don't enforce a 3.0 Å floor — high-P primitive cells can be smaller.
+  // Warn loudly only if the result is clearly unphysical (< 2.0 Å).
+  const result = a * perturbation;
+  if (result < 2.0) {
+    console.warn(`[QE-Worker] estimateLatticeConstant: a=${result.toFixed(2)} Å < 2.0 — ` +
+      `check elements/pressure inputs (V=${cellVolume.toFixed(2)} Å³, P=${pressureGPa} GPa)`);
+  }
+  return result;
 }
 
 function validatePseudopotential(filePath: string): boolean {
