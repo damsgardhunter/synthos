@@ -329,11 +329,32 @@ export function parseLambdaOutput(stdout: string): {
     if (omegaLog === 0) {
       // ph.x: "Logarithmic average frequency (t.s.) =   1000.00 K"  (already Kelvin)
       // lambda.x: "omega_log (K) =   800.0"  (K in parens before =)
-      // older QE: "omega_log =   800.0"
-      const om =
-        trimmed.match(/Logarithmic average frequency[^=]*=\s*([\d.]+)/i) ||
-        trimmed.match(/omega_log\s*(?:\([^)]*\)\s*)?=\s*([\d.]+)/i);
-      if (om) omegaLog = parseFloat(om[1]);
+      // EPW 4.x / older: "omega_log (meV) = 80.0"
+      // older QE no annotation: "omega_log =   800.0"  (Kelvin)
+      //
+      // The old regex matched any of these but treated the captured number
+      // as Kelvin regardless of the parenthesized unit. If lambda.x ever
+      // emits in meV (EPW 4.x style), Tc would be ~10× under-predicted.
+      // Explicitly inspect the parenthesized unit and convert.
+      const phMatch = trimmed.match(/Logarithmic average frequency[^=]*=\s*([\d.]+)/i);
+      if (phMatch) {
+        omegaLog = parseFloat(phMatch[1]);  // ph.x always Kelvin
+      } else {
+        const lambdaMatch = trimmed.match(/omega_log\s*(?:\(([^)]*)\)\s*)?=\s*([\d.]+)/i);
+        if (lambdaMatch) {
+          const unitRaw = (lambdaMatch[1] ?? "").toLowerCase().trim();
+          let val = parseFloat(lambdaMatch[2]);
+          if (unitRaw.includes("mev")) {
+            val *= 11.6045181;       // meV → K
+          } else if (unitRaw.includes("cm-1") || unitRaw.includes("cm^-1") || unitRaw === "cm") {
+            val *= 1.4387768775;     // cm⁻¹ → K
+          } else if (unitRaw.includes("thz")) {
+            val *= 47.9924;          // THz → K (hf/k_B with f in THz)
+          }
+          // No annotation OR (K)/(t.s.)/etc. → treat as Kelvin per QE default
+          omegaLog = val;
+        }
+      }
     }
 
     // lambda.x table: "mu* =  0.10   Tc =   55.5 K" or "0.10  55.5"
