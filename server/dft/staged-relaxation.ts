@@ -500,11 +500,34 @@ export async function runStagedRelaxation(opts: StagedRelaxationOpts): Promise<S
     // atoms into the Z=1 literature cell (a=3.09).
     const passedS1 = stage1Results.filter(r => r.result.passed);
     const allS1Sorted = passedS1.length > 0 ? passedS1 : stage1Results;
-    const perAtomEnergy = (r: { result: StageResult; candidate: StructureCandidate }) => {
+    // Rank by ENTHALPY per atom (H = E + P×V), not pure total energy. At high
+    // pressure, an uncompressed candidate looks artificially attractive on E
+    // alone (no compression penalty) but has disastrous PV — picking it forces
+    // vc-relax to compress the cell 30-40% in one go, which causes refinement
+    // to overshoot and degrade forces (LaH10 May-2026: Stage 1 picked a=5.57 Å
+    // PyXtal SG=2 over Vegard's pre-compressed 3.94 Å, and refinement made
+    // force WORSE by 12× while only partly recovering pressure).
+    //
+    // Conversion: 1 GPa·Å³ = 6.241e-3 eV. So PV/atom in eV = P[GPa] × V/atom[Å³] × 0.006241.
+    // At ambient (P=0) this reduces to pure-E ranking. At 170 GPa with V=15 Å³/atom,
+    // PV ≈ 16 eV/atom — completely dominates differences in E.
+    const GPA_ANGSTROM3_TO_EV = 6.241e-3;
+    const perAtomEnthalpy = (r: { result: StageResult; candidate: StructureCandidate }) => {
       const nAtoms = r.result.positions.length || r.candidate.positions.length || 1;
-      return r.result.totalEnergy / nAtoms;
+      const E = r.result.totalEnergy; // eV total
+      // Compute cell volume from lattice parameters (StructureCandidate has
+      // latticeA, optional latticeB/latticeC, cOverA — no explicit volume field).
+      // Stage 1 doesn't re-compute volume because calculation='relax' keeps
+      // cell fixed.
+      const a = r.candidate.latticeA;
+      const bOverA = r.candidate.latticeB ? r.candidate.latticeB / a : 1.0;
+      const cOverA = r.candidate.cOverA ?? (r.candidate.latticeC ? r.candidate.latticeC / a : 1.0);
+      const cellVolAng3 = a * a * a * bOverA * cOverA;
+      const volPerAtom = cellVolAng3 / Math.max(1, nAtoms);
+      const PVperAtom = pressureGPa * volPerAtom * GPA_ANGSTROM3_TO_EV;
+      return E / nAtoms + PVperAtom;
     };
-    allS1Sorted.sort((a, b) => perAtomEnergy(a) - perAtomEnergy(b));
+    allS1Sorted.sort((a, b) => perAtomEnthalpy(a) - perAtomEnthalpy(b));
 
     if (passedS1.length > 0) {
       const kept = passedS1.slice(0, maxStage2Candidates);
@@ -513,10 +536,14 @@ export async function runStagedRelaxation(opts: StagedRelaxationOpts): Promise<S
       bestLatticeA = best.result.latticeA;
       candidateSource = best.candidate.source;
       stages.push(best.result);
-      console.log(`[Staged-Relax] ${formula} Stage 1: ${passedS1.length} passed, keeping top ${kept.length} for Stage 2 (tier=${tier})`);
+      console.log(`[Staged-Relax] ${formula} Stage 1: ${passedS1.length} passed, keeping top ${kept.length} for Stage 2 (tier=${tier}, ranked by ${pressureGPa > 0 ? "enthalpy H=E+PV at " + pressureGPa + " GPa" : "energy"})`);
       for (let ki = 0; ki < kept.length; ki++) {
         const nAtoms = kept[ki].result.positions.length || kept[ki].candidate.positions.length || 1;
-        console.log(`[Staged-Relax]   #${ki + 1}: ${kept[ki].candidate.source} (E=${kept[ki].result.totalEnergy.toFixed(4)} eV, ${nAtoms} atoms, E/atom=${perAtomEnergy(kept[ki]).toFixed(4)} eV)`);
+        const Hperatom = perAtomEnthalpy(kept[ki]);
+        const Eperatom = kept[ki].result.totalEnergy / nAtoms;
+        const PVperatom = Hperatom - Eperatom;
+        const pvSuffix = pressureGPa > 0 ? `, PV/atom=${PVperatom.toFixed(3)} eV, H/atom=${Hperatom.toFixed(4)} eV` : "";
+        console.log(`[Staged-Relax]   #${ki + 1}: ${kept[ki].candidate.source} (E=${kept[ki].result.totalEnergy.toFixed(4)} eV, ${nAtoms} atoms, E/atom=${Eperatom.toFixed(4)} eV${pvSuffix})`);
       }
     } else if (stage1Results.length > 0) {
       // No candidate passed — use the one with lowest energy anyway (best effort).

@@ -6711,10 +6711,22 @@ ${cellBlockEos}
             const prevPressResidual = currentPressure != null ? Math.abs(currentPressure - pressTarget) : 999;
             const forceImproved = refForce < currentForce;
             const pressureImproved = refPressResidual < prevPressResidual - 1.0; // at least 1 kbar improvement
-            // Allow force to degrade slightly if pressure is improving — the cell
-            // is finding the right volume and force will re-converge in later passes.
-            // Guard: force can't more than double (catastrophic regression = bad pass).
-            const forceNotCatastrophic = refForce < currentForce * 2.0;
+            // Allow force to degrade if pressure is converging. The previous
+            // "force can't more than double" guard was relative and rejected
+            // LaH10's refinement pass where force went 0.004 → 0.054 (13×
+            // relative regression, but 50× BELOW the screening-quality cap
+            // of 1.0 in absolute terms) while pressure improved by 38% (1738
+            // → 1086 kbar residual). Pure-relative regression is meaningless
+            // at low forces — what matters is absolute force vs screening
+            // tolerance. Switch to absolute cap that scales with how
+            // aggressive the pressure refinement is.
+            //   Default: force < max(2 × previous, 0.1 Ry/bohr)
+            //   Pressure-priority: force < max(2 × previous, 0.5 Ry/bohr)
+            // 0.1 is the Stage 1 magnetic force-gate threshold;
+            // 0.5 is "still well below screening cap" — fine for an
+            // intermediate refinement state.
+            const forceCap = isPressurePriority ? Math.max(currentForce * 2.0, 0.5) : Math.max(currentForce * 2.0, 0.1);
+            const forceNotCatastrophic = refForce < forceCap;
             const madeProgress = forceImproved || (pressureImproved && forceNotCatastrophic);
 
             if (madeProgress) {
