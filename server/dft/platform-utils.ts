@@ -99,11 +99,29 @@ function getMpiWrapper(): { cmd: string; args: string[]; qeArgs: string[] } | nu
   return { cmd, args: ["-np", String(ranks), ...extra], qeArgs };
 }
 
+// QE OpenMP environment. Default OMP_NUM_THREADS=1 because gfortran-built QE
+// 7.3.1 on c2-standard-30 deadlocks in libgomp at OMP_NUM_THREADS>1 for La/
+// lanthanide PAW pseudopotentials (gdb backtrace shows all threads stuck in
+// libgomp barriers, 0% CPU). Set the env var to 1 unless the caller has
+// explicitly overridden it (QE_OMP_THREADS) — and rely on MPI ranks for
+// parallel scaling instead, which is more stable and scales better for QE.
+// Spawn the test scripts directly with OMP_NUM_THREADS=N if you want to
+// experiment, but in production we leave it at 1.
+const QE_SPAWN_ENV: NodeJS.ProcessEnv = {
+  OMP_NUM_THREADS: process.env.QE_OMP_THREADS ?? "1",
+  OMP_STACKSIZE: process.env.OMP_STACKSIZE ?? "512M",
+  // OpenMP nested parallelism off — extra protection against the deadlock
+  // even if a downstream library tries to re-enter parallel regions.
+  OMP_NESTED: "FALSE",
+  OMP_DYNAMIC: "FALSE",
+};
+
 export function spawnQE(
   binary: string,
   options: { cwd: string; stdio: ("pipe" | "inherit" | "ignore")[]; wslInputFile?: string },
 ): ChildProcess {
   const mpi = getMpiWrapper();
+  const env: NodeJS.ProcessEnv = { ...process.env, ...QE_SPAWN_ENV };
   if (IS_WINDOWS) {
     if (options.wslInputFile) {
       // Use bash -c with file redirection to bypass WSL stdin-pipe unreliability
@@ -113,6 +131,7 @@ export function spawnQE(
       return nodeSpawn("wsl.exe", ["-d", "Ubuntu", "--", "bash", "-c", cmd], {
         cwd: options.cwd,
         stdio: ["ignore", "pipe", "pipe"],
+        env,
       });
     }
     const qeArgs = mpi?.qeArgs ?? [];
@@ -120,12 +139,13 @@ export function spawnQE(
     return nodeSpawn("wsl.exe", ["-d", "Ubuntu", "--", ...innerArgs], {
       cwd: options.cwd,
       stdio: options.stdio as any,
+      env,
     });
   }
   if (mpi) {
     // mpirun args go before binary, QE args (-nk, -npool) go after
     // Result: mpirun -np 10 --allow-run-as-root pw.x -nk 5
-    return nodeSpawn(mpi.cmd, [...mpi.args, binary, ...mpi.qeArgs], { cwd: options.cwd, stdio: options.stdio as any });
+    return nodeSpawn(mpi.cmd, [...mpi.args, binary, ...mpi.qeArgs], { cwd: options.cwd, stdio: options.stdio as any, env });
   }
-  return nodeSpawn(binary, { cwd: options.cwd, stdio: options.stdio as any });
+  return nodeSpawn(binary, { cwd: options.cwd, stdio: options.stdio as any, env });
 }
