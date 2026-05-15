@@ -63,9 +63,16 @@ export const SOC_ELEMENTS: Record<string, { socEV: number; shell: string; priori
   Au: { socEV: 0.6, shell: "5d", priority: "recommended" },
   Hg: { socEV: 0.5, shell: "5d", priority: "recommended" },
 
-  // Actinides — large 5f SOC
+  // Actinides — very large 5f SOC (1-2 eV across the series). Pa onward
+  // have partially-filled 5f and need full SOC + DFT+U for correct physics;
+  // Th (5f^0) is borderline but the 6d/7s mixing has substantial SOC too.
   Th: { socEV: 0.8, shell: "5f/6d", priority: "critical" },
+  Pa: { socEV: 1.0, shell: "5f", priority: "critical" },
   U:  { socEV: 1.2, shell: "5f", priority: "critical" },
+  Np: { socEV: 1.4, shell: "5f", priority: "critical" },
+  Pu: { socEV: 1.5, shell: "5f", priority: "critical" },
+  Am: { socEV: 1.6, shell: "5f", priority: "critical" },
+  Cm: { socEV: 1.7, shell: "5f", priority: "critical" },
 
   // Lanthanides — differentiated by 4f occupation:
   //   La (4f^0, [Xe]5d^1 6s^2): empty 4f, SOC on conduction 5d is small → scalar-rel fine
@@ -246,11 +253,25 @@ export function analyzeSOCRequirement(
     };
   }
 
-  // Lanthanide-specific: flag 4f elements that need DFT+U alongside SOC
-  const LANTHANIDE_4F_SOC = new Set(["Ce", "Pr", "Nd", "Pm", "Sm", "Dy", "Ho", "Er", "Tm"]);
-  const LANTHANIDE_HALF_FILLED = new Set(["Eu", "Gd", "Tb"]);
+  // Lanthanide-specific: flag 4f elements that need DFT+U alongside SOC.
+  // Tb (4f⁹) is past half-filled, so it belongs with the SOC+U group (same
+  // regime as Dy 4f¹⁰), NOT with the half-filled exchange-dominated set.
+  // Only Eu (4f⁷) and Gd (4f⁷) are truly half-filled.
+  const LANTHANIDE_4F_SOC = new Set(["Ce", "Pr", "Nd", "Pm", "Sm", "Tb", "Dy", "Ho", "Er", "Tm"]);
+  const LANTHANIDE_HALF_FILLED = new Set(["Eu", "Gd"]);
   const lanthanidesWith4fSOC = elements.filter(el => LANTHANIDE_4F_SOC.has(el));
   const lanthanidesHalfFilled = elements.filter(el => LANTHANIDE_HALF_FILLED.has(el));
+
+  // Actinide analog: partially-filled 5f elements need DFT+U just like the
+  // 4f lanthanides. Without this, U/Pu/Np-containing heavy-fermion candidates
+  // run with PBE-only 5f states — wrong localization, wrong band structure,
+  // wrong Tc. Th (5f⁰) is empty-f and skipped; Am/Cm (5f⁷ half-filled) get
+  // the same DFT+U treatment as Eu/Gd (where exchange dominates but U still
+  // helps fix the localized-vs-itinerant 5f balance).
+  const ACTINIDE_5F_SOC = new Set(["Pa", "U", "Np", "Pu", "Bk", "Cf"]);
+  const ACTINIDE_HALF_FILLED = new Set(["Am", "Cm"]);
+  const actinidesWith5fSOC = elements.filter(el => ACTINIDE_5F_SOC.has(el));
+  const actinidesHalfFilled = elements.filter(el => ACTINIDE_HALF_FILLED.has(el));
 
   // Decision: full SOC vs scalar-relativistic
   const enableFullSOC = hasCritical || (hasRecommended && socElements.length >= 2) || totalSOCWeight > 0.3;
@@ -301,7 +322,7 @@ export function analyzeSOCRequirement(
     notes.push(
       `[SOC] Lanthanide 4f SOC+U required for: ${lanthanidesWith4fSOC.join(", ")}. ` +
       `4f electrons are at/near Fermi level — SOC + crystal-field competition is critical. ` +
-      `Add Hubbard U on f-states (lda_plus_u=.true., Hubbard_U ~ 4-6 eV for 4f).`
+      `Add Hubbard U on f-states via QE ≥7.1 HUBBARD card (U ~ 4-6 eV for 4f).`
     );
   }
   if (lanthanidesHalfFilled.length > 0) {
@@ -309,6 +330,24 @@ export function analyzeSOCRequirement(
       `[SOC] Half-filled 4f lanthanides: ${lanthanidesHalfFilled.join(", ")}. ` +
       `Exchange splitting dominates over SOC — full SOC recommended but not critical. ` +
       `DFT+U still advised for correct 4f positioning.`
+    );
+  }
+
+  // [SOC] Actinide 5f-specific notes (analog of the 4f lanthanide treatment).
+  // Without these, U/Pu/Np-containing heavy-fermion candidates ran with no
+  // Hubbard U on the 5f manifold — wrong 5f localization, wrong Tc.
+  if (actinidesWith5fSOC.length > 0) {
+    notes.push(
+      `[SOC] Actinide 5f SOC+U required for: ${actinidesWith5fSOC.join(", ")}. ` +
+      `5f electrons are partially filled and strongly correlated — SOC + Hubbard U ` +
+      `are both essential. Add U on 5f via QE ≥7.1 HUBBARD card (U ~ 3-5 eV for 5f).`
+    );
+  }
+  if (actinidesHalfFilled.length > 0) {
+    notes.push(
+      `[SOC] Half-filled 5f actinides: ${actinidesHalfFilled.join(", ")}. ` +
+      `Hund's exchange splitting dominates (~7-10 eV between majority/minority spin) ` +
+      `but Hubbard U still needed to fix localized-vs-itinerant 5f balance.`
     );
   }
 
@@ -352,8 +391,12 @@ export function analyzeSOCRequirement(
     estimatedTcImpactK: Number(tcImpact.toFixed(1)),
     qeSystemFlags: qeFlags,
     useAngleMagnetization: enableFullSOC,
-    needsDFTplusU: lanthanidesWith4fSOC.length > 0 || lanthanidesHalfFilled.length > 0,
-    hubbardUElements: [...lanthanidesWith4fSOC, ...lanthanidesHalfFilled],
+    needsDFTplusU: lanthanidesWith4fSOC.length > 0 || lanthanidesHalfFilled.length > 0
+                || actinidesWith5fSOC.length > 0 || actinidesHalfFilled.length > 0,
+    hubbardUElements: [
+      ...lanthanidesWith4fSOC, ...lanthanidesHalfFilled,
+      ...actinidesWith5fSOC, ...actinidesHalfFilled,
+    ],
     costMultiplier,
     notes,
   };

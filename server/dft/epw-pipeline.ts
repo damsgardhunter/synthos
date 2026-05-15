@@ -52,8 +52,9 @@ export interface EPWResult {
 const WANNIER_PROJECTIONS: Record<string, string> = {
   // s-block light
   H: "s",
-  // s+p alkali / alkaline-earth
-  Li: "s;p", Na: "s;p", K: "s;p",
+  // s+p alkali / alkaline-earth. Rb, Cs were missing — relevant for CsC60
+  // and Rb3C60 fullerene SCs and Cs-doped layered chalcogenides.
+  Li: "s;p", Na: "s;p", K: "s;p", Rb: "s;p", Cs: "s;p",
   Be: "s;p", Mg: "s;p", Ca: "s;p", Sr: "s;p", Ba: "s;p",
   // p-block main group (rows 2-3)
   B: "s;p", C: "s;p", N: "s;p", O: "s;p", F: "s;p",
@@ -65,10 +66,23 @@ const WANNIER_PROJECTIONS: Record<string, string> = {
   Y: "s;p;d", Zr: "s;p;d", Nb: "s;p;d", Mo: "s;p;d", Tc: "s;p;d",
   Ru: "s;p;d", Rh: "s;p;d", Pd: "s;p;d", Ag: "s;p;d", Cd: "s;p;d",
   // 5d transition metals
-  La: "s;p;d", Hf: "s;p;d", Ta: "s;p;d", W: "s;p;d", Re: "s;p;d",
+  La: "s;p;d;f", Hf: "s;p;d", Ta: "s;p;d", W: "s;p;d", Re: "s;p;d",
   Os: "s;p;d", Ir: "s;p;d", Pt: "s;p;d", Au: "s;p;d", Hg: "s;p;d",
-  // f-block (actinide / lanthanide with f)
-  Ce: "s;p;d;f", Th: "s;p;d;f",
+  // Lanthanides — 4f sits near E_F for partially-filled f^n configurations.
+  // For LaH10/CeH9/NdH9/GdH5/etc. omitting the f projection means EPW
+  // interpolates electron-phonon coupling on a 4f-blind Wannier basis,
+  // which gives garbage λ. La is f^0 but the empty 4f hybridizes with H-1s
+  // in superhydrides, so include f for La too.
+  Ce: "s;p;d;f", Pr: "s;p;d;f", Nd: "s;p;d;f", Pm: "s;p;d;f",
+  Sm: "s;p;d;f", Eu: "s;p;d;f", Gd: "s;p;d;f", Tb: "s;p;d;f",
+  Dy: "s;p;d;f", Ho: "s;p;d;f", Er: "s;p;d;f", Tm: "s;p;d;f",
+  Yb: "s;p;d;f", Lu: "s;p;d;f",
+  // Actinides — 5f sits near E_F (Th f^0 mixes with 6d/7s, U/Np have
+  // partially-filled 5f). Am (5f⁶), Cm (5f⁷ half-filled), Bk (5f⁸) added
+  // for parity with DMFT_PROJECTIONS — these are the most-correlated 5f
+  // systems and must keep the f channel in EPW Wannier interpolation.
+  Th: "s;p;d;f", Pa: "s;p;d;f", U: "s;p;d;f", Np: "s;p;d;f", Pu: "s;p;d;f",
+  Am: "s;p;d;f", Cm: "s;p;d;f", Bk: "s;p;d;f",
   // p-block heavy (rows 4-6)
   Ga: "s;p", Ge: "s;p", As: "s;p", Se: "s;p", Br: "s;p",
   In: "s;p", Sn: "s;p", Sb: "s;p", Te: "s;p", I: "s;p",
@@ -91,10 +105,17 @@ const DMFT_PROJECTIONS: Record<string, string> = {
   // 5d transition metals
   La: "d", Hf: "d", Ta: "d", W: "d", Re: "d",
   Os: "d", Ir: "d", Pt: "d", Au: "d", Hg: "d",
-  // f-block — project onto f manifold (d is not correlated for these)
-  Ce: "f", Pr: "f", Nd: "f", Sm: "f", Eu: "f",
-  Gd: "f", Tb: "f", Dy: "f", Ho: "f", Er: "f", Tm: "f",
-  Th: "f", U: "f",
+  // f-block — project onto f manifold (d is not correlated for these).
+  // Note: La f^0 is empty so DMFT projection on f is optional; we leave it
+  // out so DMFT runs only when there's an actual correlated f^n state.
+  Ce: "f", Pr: "f", Nd: "f", Pm: "f", Sm: "f", Eu: "f",
+  Gd: "f", Tb: "f", Dy: "f", Ho: "f", Er: "f", Tm: "f", Yb: "f",
+  // Actinides: include the partially-filled 5f shells. Am (5f⁶), Cm (5f⁷
+  // half-filled, peak Hund's J), Bk (5f⁸) are the most correlated of the
+  // series — omitting them previously excluded the very systems where DMFT
+  // matters most. Ac (5f⁰) and Lu (4f¹⁴) are intentionally excluded as
+  // empty/full shells with no correlation physics.
+  Th: "f", Pa: "f", U: "f", Np: "f", Pu: "f", Am: "f", Cm: "f", Bk: "f",
 };
 
 /** Number of Wannier orbitals per projection keyword */
@@ -192,7 +213,13 @@ export function generateNSCFInput(opts: {
     kGrid, nbnd,
     occupations = "smearing",
     smearing = "cold",
-    degauss = 0.02,
+    // degauss in Ry. Previous default 0.02 Ry = 0.272 eV was too large for
+    // EPW NSCF: it smears bands by an amount comparable to the EPW fsthick
+    // window (0.4 eV non-hydride / 1.0 eV hydride), so the bands within the
+    // selection window aren't crisp. EPW's own degaussw=0.025 eV is the
+    // Eliashberg-solver smearing — separate from NSCF's. Lowered to
+    // 0.005 Ry = 0.068 eV (standard EPW/Wannier90 NSCF value).
+    degauss = 0.005,
   } = opts;
 
   const ntyp = elements.length;
@@ -217,9 +244,38 @@ export function generateNSCFInput(opts: {
     .map(p => `  ${p.element}  ${p.x.toFixed(10)}  ${p.y.toFixed(10)}  ${p.z.toFixed(10)}`)
     .join("\n");
 
+  // `cellParameters` is now produced by qe-worker's generateCellParameters(),
+  // which returns a complete block including its own header
+  // (e.g. "CELL_PARAMETERS {angstrom}\n  a  0  0 ..."). Older callers passed
+  // header-less data, hence the legacy `CELL_PARAMETERS {alat}\n${...}` wrap.
+  // Double-wrapping produces malformed input with TWO `CELL_PARAMETERS`
+  // headers stacked — pw.x parses the second line ("CELL_PARAMETERS
+  // {angstrom}") as a numeric row and errors out. Detect the existing
+  // header and pass the block through verbatim. When a header-less string
+  // is supplied (legacy path), keep the {alat} wrap.
   const cellBlock = cellParameters
-    ? `CELL_PARAMETERS {alat}\n${cellParameters}\n`
+    ? (cellParameters.trim().startsWith("CELL_PARAMETERS")
+        ? `${cellParameters}\n`
+        : `CELL_PARAMETERS {alat}\n${cellParameters}\n`)
     : "";
+
+  // Explicit k-points in {crystal} format matching generateWannier90Win's
+  // (i,j,k) nested-loop order. K_POINTS {automatic} + nosym/noinv usually
+  // produces the same MP grid but pw.x's internal k-point ordering is not
+  // guaranteed to match Wannier90's (i outer, j middle, k inner) order
+  // across QE/Wannier90 version pairs. When orders disagree, the .amn from
+  // pw2wannier90 indexes against pw.x's order while Wannier90 reads it
+  // against the .win order — silently giving wrong α²F(ω) and λ.
+  // Weight 1.0 on every point (no symmetry reduction; matches nosym/noinv).
+  const nkTotal = kGrid[0] * kGrid[1] * kGrid[2];
+  const kLines: string[] = [];
+  for (let i = 0; i < kGrid[0]; i++) {
+    for (let j = 0; j < kGrid[1]; j++) {
+      for (let k = 0; k < kGrid[2]; k++) {
+        kLines.push(`  ${(i / kGrid[0]).toFixed(8)}  ${(j / kGrid[1]).toFixed(8)}  ${(k / kGrid[2]).toFixed(8)}  1.0`);
+      }
+    }
+  }
 
   return `&CONTROL
   calculation = 'nscf',
@@ -230,7 +286,7 @@ export function generateNSCFInput(opts: {
 /
 &SYSTEM
   ibrav = 0,
-  celldm(1) = ${(latticeA / 0.529177).toFixed(6)},
+  celldm(1) = ${(latticeA * 1.8897259886).toFixed(6)},
   nat = ${nat},
   ntyp = ${ntyp},
   ecutwfc = ${ecutwfc},
@@ -250,8 +306,9 @@ ATOMIC_SPECIES
 ${speciesBlock}
 ATOMIC_POSITIONS {crystal}
 ${posBlock}
-${cellBlock}K_POINTS {automatic}
-  ${kGrid[0]} ${kGrid[1]} ${kGrid[2]}  0 0 0
+${cellBlock}K_POINTS {crystal}
+  ${nkTotal}
+${kLines.join("\n")}
 `;
 }
 
@@ -460,6 +517,7 @@ export function generateEPWInput(opts: {
   fsthick?: number;   // eV, Fermi surface thickness
   degaussw?: number;  // eV
   isHydride?: boolean;
+  fermiEnergy?: number; // eV (absolute) — needed to align disentanglement window
 }): string {
   const {
     prefix, coarseKGrid, coarseQGrid, fineKGrid, fineQGrid,
@@ -468,6 +526,7 @@ export function generateEPWInput(opts: {
     cellParameters,
     degaussw = 0.025,
     isHydride = false,
+    fermiEnergy = 0.0,
   } = opts;
 
   const fsthick = opts.fsthick ?? (isHydride ? 1.0 : 0.4);
@@ -493,8 +552,19 @@ export function generateEPWInput(opts: {
     .map(p => `  ${p.element}  ${p.x.toFixed(10)}  ${p.y.toFixed(10)}  ${p.z.toFixed(10)}`)
     .join("\n");
 
+  // `cellParameters` is now produced by qe-worker's generateCellParameters(),
+  // which returns a complete block including its own header
+  // (e.g. "CELL_PARAMETERS {angstrom}\n  a  0  0 ..."). Older callers passed
+  // header-less data, hence the legacy `CELL_PARAMETERS {alat}\n${...}` wrap.
+  // Double-wrapping produces malformed input with TWO `CELL_PARAMETERS`
+  // headers stacked — pw.x parses the second line ("CELL_PARAMETERS
+  // {angstrom}") as a numeric row and errors out. Detect the existing
+  // header and pass the block through verbatim. When a header-less string
+  // is supplied (legacy path), keep the {alat} wrap.
   const cellBlock = cellParameters
-    ? `CELL_PARAMETERS {alat}\n${cellParameters}\n`
+    ? (cellParameters.trim().startsWith("CELL_PARAMETERS")
+        ? `${cellParameters}\n`
+        : `CELL_PARAMETERS {alat}\n${cellParameters}\n`)
     : "";
 
   // Temperature sweep: 5K to 300K in 5K steps (60 temperatures)
@@ -502,16 +572,30 @@ export function generateEPWInput(opts: {
   const temps_min = 5.0;
   const temps_max = 300.0;
 
+  // Per-species atomic mass for EPW. The old code had `amass(1) = 1.0`
+  // hardcoded — that overrode species 1's mass to 1 amu regardless of
+  // element (Fe → 1 amu, La → 1 amu, etc.). For multi-species systems the
+  // other amass(i) values were left unset, defaulting to 0 in some EPW
+  // builds. Either way, the Wannier-phonon consistency check in EPW would
+  // mismatch against the upstream .dyn files (computed with correct masses).
+  const amassBlock = elements
+    .map((el, i) => {
+      const data = getElementData(el);
+      const mass = (data as any)?.atomicMass ?? (data as any)?.mass ?? 1.0;
+      return `  amass(${i + 1}) = ${mass.toFixed(4)},`;
+    })
+    .join("\n");
+
   return `--
 &inputepw
   prefix = '${prefix}',
   outdir = './tmp',
   dvscf_dir = './tmp',
-  amass(1) = 1.0,
+${amassBlock}
 
   ! System
   ibrav = 0,
-  celldm(1) = ${(latticeA / 0.529177).toFixed(6)},
+  celldm(1) = ${(latticeA * 1.8897259886).toFixed(6)},
   nat = ${nat},
   ntyp = ${ntyp},
   ecutwfc = ${ecutwfc},
@@ -522,16 +606,36 @@ export function generateEPWInput(opts: {
   epbread = .false.,
   epwwrite = .true.,
   epwread = .false.,
-  ephwrite = .false.,
+  ! ephwrite MUST be .true. for any Eliashberg run: it writes the e-ph
+  ! matrix elements on the fine k/q mesh (.ephmat / .freq / .egnv / .ikmap)
+  ! that the Migdal-Eliashberg solver below reads. With .false. and no
+  ! pre-existing .ephmat files (this is a single-run workflow — eliashberg
+  ! is set in the same input), the laniso solver has no data and produces
+  ! no Tc_ME / gap — i.e. tcMigdalEliashberg, the whole point of the
+  ! pipeline, never gets computed.
+  ephwrite = .true.,
 
-  ! Wannier
+  ! Wannier — projections and disentanglement window MUST match what
+  ! generateWannier90Win() wrote to ${prefix}.win, otherwise EPW's internal
+  ! wannierize step disagrees with the .amn/.mmn files from pw2wannier90
+  ! and produces wrong Wannier interpolation.
+  ! Previously this used dis_win_min/max = ±100 (entire band range,
+  ! mixed in semicore states) and proj(1) = 'random' (discarded the
+  ! per-element s;p;d;f projections from the WANNIER_PROJECTIONS table).
+  ! For LaH10/CeH9/etc. that meant the f-orbital channel was lost,
+  ! giving garbage λ.
   wannierize = .true.,
   nbndsub = ${numWann},
   nbndskip = 0,
   num_iter = 300,
-  dis_win_min = -100.0,
-  dis_win_max = 100.0,
-  proj(1) = 'random',
+  dis_win_min = ${(fermiEnergy - 15.0).toFixed(4)},
+  dis_win_max = ${(fermiEnergy + 20.0).toFixed(4)},
+  dis_froz_min = ${(fermiEnergy - 5.0).toFixed(4)},
+  dis_froz_max = ${(fermiEnergy + 2.0).toFixed(4)},
+${elements.map((el, i) => {
+  const proj = WANNIER_PROJECTIONS[el] ?? "s;p";
+  return `  proj(${i + 1}) = '${el}:${proj}',`;
+}).join("\n")}
 
   ! Interpolation grids (coarse)
   nkf1 = ${fineKGrid[0]}, nkf2 = ${fineKGrid[1]}, nkf3 = ${fineKGrid[2]},
@@ -645,7 +749,6 @@ export function parseEPWOutput(stdout: string): Partial<EPWResult> {
   const a2fVals: number[] = [];
   // EPW prints a2F in tabular format:  "   freq   a2F   a2F_cum  ..."
   // or in a file. Try to parse inline data.
-  const a2fRegex = /^\s*([\d.]+)\s+([\d.Ee+-]+)\s+/gm;
   // Look for the alpha2F section
   const a2fSection = stdout.match(/alpha2F.*?\n((?:\s*[\d.]+\s+[\d.Ee+-]+.*\n)+)/i);
   if (a2fSection) {
@@ -714,6 +817,13 @@ export interface EPWPipelineCallbacks {
   ) => Promise<{ stdout: string; stderr: string; exitCode: number | null }>;
   getPseudoDirInput: () => string;
   resolvePPFilename: (el: string) => string;
+  /** Directory containing the QE binaries (pw.x, ph.x, wannier90.x, etc.).
+   *  Should match the QE_BIN_DIR env var the rest of the project respects.
+   *  When unset, falls back to /usr/local/bin for backwards compatibility
+   *  with the legacy hardcoded path — but every other pipeline takes this
+   *  from the callbacks, and apt-installed QE on Ubuntu lives at /usr/bin,
+   *  so leaving it unset will silently fail to find QE on most systems. */
+  getQEBinDir?: () => string;
 }
 
 export async function runEPWPipeline(
@@ -731,6 +841,13 @@ export async function runEPWPipeline(
   const nAtoms = positions.length;
   const pseudoDir = callbacks.getPseudoDirInput();
   const warnings: string[] = [];
+  // Resolve the QE binary directory once. Was previously hardcoded to
+  // /usr/local/bin for every binary call in this pipeline, which only worked
+  // on systems where QE happened to be at that exact path. apt-installed QE
+  // on Ubuntu lives at /usr/bin/, custom builds usually go in $HOME/qe-X/bin
+  // — the rest of the project respects QE_BIN_DIR via the QERunnerCallbacks
+  // contract. Honor the same convention here.
+  const qeBinDir = callbacks.getQEBinDir?.() ?? "/usr/local/bin";
 
   const ppFilenames: Record<string, string> = {};
   for (const el of elements) {
@@ -779,7 +896,7 @@ export async function runEPWPipeline(
   }
 
   const nscfResult = await safeRun(
-    callbacks, path.posix.join("/usr/local/bin", "pw.x"),
+    callbacks, path.posix.join(qeBinDir, "pw.x"),
     nscfFile, jobDir, 3_600_000, // 1h timeout
   );
   if (!nscfResult || nscfResult.exitCode !== 0) {
@@ -811,7 +928,7 @@ export async function runEPWPipeline(
   // wannier90.x -pp takes the seedname (prefix), not an input file
   // We need to run: wannier90.x -pp <prefix>   from within jobDir
   const w90ppResult = await safeRun(
-    callbacks, path.posix.join("/usr/local/bin", "wannier90.x"),
+    callbacks, path.posix.join(qeBinDir, "wannier90.x"),
     `-pp ${prefix}`, jobDir, 600_000, // 10 min
   );
   if (!w90ppResult || w90ppResult.exitCode !== 0) {
@@ -836,7 +953,7 @@ export async function runEPWPipeline(
   }
 
   const pw2wResult = await safeRun(
-    callbacks, path.posix.join("/usr/local/bin", "pw2wannier90.x"),
+    callbacks, path.posix.join(qeBinDir, "pw2wannier90.x"),
     pw2wFile, jobDir, 1_800_000, // 30 min
   );
   if (!pw2wResult || pw2wResult.exitCode !== 0) {
@@ -851,7 +968,7 @@ export async function runEPWPipeline(
   // -----------------------------------------------------------------------
   console.log(`[EPW] Step 4/5: wannier90.x (full Wannier minimization)`);
   const w90Result = await safeRun(
-    callbacks, path.posix.join("/usr/local/bin", "wannier90.x"),
+    callbacks, path.posix.join(qeBinDir, "wannier90.x"),
     prefix, jobDir, 1_800_000, // 30 min
   );
   if (!w90Result || w90Result.exitCode !== 0) {
@@ -914,6 +1031,7 @@ export async function runEPWPipeline(
     latticeA,
     cellParameters: options.cellParameters,
     isHydride: options.isHydride,
+    fermiEnergy: options.fermiEnergy,
   });
 
   const epwFile = path.posix.join(jobDir, `${prefix}_epw.in`);
@@ -926,7 +1044,7 @@ export async function runEPWPipeline(
   }
 
   const epwResult = await safeRun(
-    callbacks, path.posix.join("/usr/local/bin", "epw.x"),
+    callbacks, path.posix.join(qeBinDir, "epw.x"),
     epwFile, jobDir, 14_400_000, // 4h timeout for EPW
   );
   if (!epwResult || epwResult.exitCode !== 0) {

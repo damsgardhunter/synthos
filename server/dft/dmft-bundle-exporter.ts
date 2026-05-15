@@ -23,6 +23,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { execSync } from "child_process";
 import type { HubbardWorkflowResult, HubbardSiteConfig } from "./hubbard-workflow";
+import { HUNDS_J } from "./hubbard-workflow";
 import type { MagneticGroundStateResult } from "./magnetic-ground-state";
 import type { ACBN0Result } from "./acbn0-pipeline";
 import { countDMFTOrbitals, DMFT_PROJECTIONS } from "./epw-pipeline";
@@ -156,11 +157,41 @@ function buildCorrelatedSubspace(
     if (site.needsU) siteMap.set(site.element, site);
   }
 
-  // Build shells from atom positions
+  // Iterate atoms grouped by ELEMENT first, then by position order within
+  // each element. This matches Wannier90's projection output order:
+  // Wannier90 processes projection blocks in `.win` projection-section order
+  // (one block per element via "El: orbital_list"), and within each block
+  // iterates over all atoms of that element in their cell positions. The
+  // identity projector at HDF5-export time (line 511-518) maps shell_i to
+  // Wannier orbitals [orb_offset, orb_offset + dim), so shell ORDER must
+  // match the Wannier ORDER or the projector cross-maps orbitals between
+  // shells. With positions like [Cu1, Ni, Cu2] the previous position-order
+  // shell list gave [Cu1, Ni, Cu2] while Wannier90 emits [Cu1-d, Cu2-d,
+  // Ni-d] — DMFT then received H_Cu1=Cu1, H_Ni=Cu2, H_Cu2=Ni (orbitals
+  // swapped between Ni and Cu2). Group by element to keep them aligned.
+  const elementOrder: string[] = [];
+  const seen = new Set<string>();
+  for (const el of elements) {
+    if (!seen.has(el)) { elementOrder.push(el); seen.add(el); }
+  }
+  const atomOrder: number[] = [];
+  for (const el of elementOrder) {
+    for (let atomIdx = 0; atomIdx < positions.length; atomIdx++) {
+      if (positions[atomIdx].element === el) atomOrder.push(atomIdx);
+    }
+  }
+  // Append any positions whose element isn't in `elements` (shouldn't
+  // happen if inputs are consistent, but guard against missing-from-list).
+  for (let atomIdx = 0; atomIdx < positions.length; atomIdx++) {
+    if (!atomOrder.includes(atomIdx)) atomOrder.push(atomIdx);
+  }
+
+  // Build shells from atom positions, iterated in Wannier90 (element-then-
+  // position) order rather than raw position order.
   let sortIndex = 0;
   const sortMap = new Map<string, number>();
 
-  for (let atomIdx = 0; atomIdx < positions.length; atomIdx++) {
+  for (const atomIdx of atomOrder) {
     const el = positions[atomIdx].element;
     const site = siteMap.get(el);
     if (!site) continue;
@@ -178,9 +209,25 @@ function buildCorrelatedSubspace(
       sortMap.set(el, sortIndex++);
     }
 
-    // U/J: prefer ACBN0 first-principles values, fall back to workflow
-    let U = site.uEffective;
-    let J = site.hunds;
+    // U/J for the DMFT multi-orbital interaction tensor.
+    //
+    // The workflow stores Dudarev U_eff = U_bare - J in `site.uEffective`
+    // and only sets `site.hunds > 0` when QE will use the Liechtenstein
+    // formulation (kind=1). DMFT solvers (Slater-Kanamori, full Slater)
+    // always need U_bare and J separately to construct the on-site
+    // interaction tensor (intra-orbital U, inter-orbital U' = U - 2J,
+    // pair-hopping J). Hund's J is a property of the correlated d/f shell,
+    // NOT of the DFT functional choice — so even when QE ran Dudarev
+    // (kind=0, the common case → site.hunds = 0) the DMFT bundle still
+    // needs a physical J. Passing J = 0 through collapses the interaction
+    // to density-density only (no Hund's physics) and, via U = U_eff + 0,
+    // under-estimates U_bare by ~J (~0.5-1.0 eV for 3d). Fall back to the
+    // cRPA HUNDS_J table when the workflow didn't supply one.
+    const jValue = site.hunds > 0 ? site.hunds : (HUNDS_J[el] ?? 0);
+    let U = site.uEffective + jValue;  // reconstruct U_bare = U_eff + J
+    let J = jValue;
+    // ACBN0 hp.x gives a first-principles U_bare; use it directly when
+    // available (J stays the cRPA table value — ACBN0Result exposes no J).
     if (acbn0?.converged && acbn0.hubbardU[el] != null) {
       U = acbn0.hubbardU[el];
     }
@@ -279,14 +326,26 @@ export async function exportDMFTBundle(
     magneticOrdering = input.magneticGroundState.groundState;
   }
 
-  // 5. Estimate n_electrons in correlated subspace
-  // Rough estimate: for d-shells, count valence electrons from the periodic table
+  // 5. Estimate n_electrons in correlated subspace.
+  // Values assume the typical compound-valence oxidation state for each element:
+  //   - 3d TMs: low oxide state (Cu²⁺ d⁹ for cuprates, Ni²⁺ d⁸ for nickelates)
+  //   - 4d/5d TMs: late-row in d¹⁰ noble configurations
+  //   - Lanthanides: Ln³⁺ (4f^n where n = atomic_number - 57)
+  //   - Actinides: An³⁺ or An⁴⁺ depending on stability (Th⁴⁺=5f⁰, U⁴⁺=5f²)
+  // Missing elements fell through to `?? 0`, giving wrong seed n_electrons for
+  // bundles with Pm/Ho/Er/Tm/Yb/Lu/Ag/Au/Cd/Hg/Tc or actinides Pa/Np/Pu/Am/Cm.
   const VALENCE_D_ELECTRONS: Record<string, number> = {
+    // 3d (oxide valences: Cu²⁺ d⁹, Ni²⁺ d⁸, Co²⁺ d⁷, etc.)
     Sc: 1, Ti: 2, V: 3, Cr: 5, Mn: 5, Fe: 6, Co: 7, Ni: 8, Cu: 9, Zn: 10,
-    Y: 1, Zr: 2, Nb: 4, Mo: 5, Ru: 7, Rh: 8, Pd: 10,
-    La: 0, Hf: 2, Ta: 3, W: 4, Re: 5, Os: 6, Ir: 7, Pt: 9,
-    Ce: 1, Pr: 2, Nd: 3, Sm: 5, Eu: 6, Gd: 7, Tb: 8, Dy: 9,
-    Th: 0, U: 2,
+    // 4d (Ag/Cd added — full d-shell)
+    Y: 1, Zr: 2, Nb: 4, Mo: 5, Tc: 5, Ru: 7, Rh: 8, Pd: 10, Ag: 10, Cd: 10,
+    // 5d (Au/Hg added)
+    La: 0, Hf: 2, Ta: 3, W: 4, Re: 5, Os: 6, Ir: 7, Pt: 9, Au: 10, Hg: 10,
+    // 4f lanthanides (Ln³⁺ f^n; Pm, Ho, Er, Tm, Yb, Lu were missing)
+    Ce: 1, Pr: 2, Nd: 3, Pm: 4, Sm: 5, Eu: 6, Gd: 7, Tb: 8, Dy: 9,
+    Ho: 10, Er: 11, Tm: 12, Yb: 13, Lu: 14,
+    // 5f actinides (Pa/Np/Pu/Am/Cm/Bk were missing — most-correlated 5f)
+    Th: 0, Pa: 1, U: 2, Np: 3, Pu: 4, Am: 6, Cm: 7, Bk: 8,
   };
   let nElectrons = 0;
   for (const shell of shells) {
@@ -510,6 +569,12 @@ with h5py.File(sys.argv[2], 'w') as hf:
     sg.create_dataset('lattice_vectors', data=np.array(d['structure']['lattice_vectors']))
     pos = d['structure']['positions']
     sg.create_dataset('positions', data=np.array([[p['x'], p['y'], p['z']] for p in pos]))
+    # Per-atom species labels — without this, HDF5 consumers had positions but
+    # no way to map atom index → element. corr_shells stores atom indices
+    # (shell['atom']) so consumers need this array to look up which element
+    # each correlated shell sits on. Previously only the JSON bundle preserved
+    # element-per-position; the HDF5 export dropped it.
+    sg.create_dataset('position_species', data=json.dumps([p['element'] for p in pos]))
     sg.create_dataset('pressure_gpa', data=d['structure']['pressure_gpa'])
 
     # Electronic

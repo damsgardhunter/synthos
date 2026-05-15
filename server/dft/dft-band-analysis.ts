@@ -13,7 +13,10 @@ export interface DFTFermiPocket {
   cylindricalCharacter: number;
   avgVelocity: number;
   avgEnergy: number;
-  orbitalCharacter: { s: number; p: number; d: number };
+  /** Fractional orbital weights from projwfc.x — f kept separate from d so
+   *  downstream f-electron SC classifiers (heavy-fermion, Ce/U-based)
+   *  see the actual 4f/5f character at the Fermi level. */
+  orbitalCharacter: { s: number; p: number; d: number; f: number };
 }
 
 export interface DFTNestingAnalysis {
@@ -214,7 +217,12 @@ export function detectSOCGaps(bandResult: DFTBandStructureResult): { kIndex: num
         const e2 = kpt.energies[b2];
         if (e2 === undefined) continue;
         const gap = e2 - e1;
-        if (gap > 0.001 && gap < 0.15) {
+        // SOC splittings span 1 meV – 1.5 eV: light p-block (Si: ~50 meV),
+        // 5d transition metals & TIs (Bi₂Se₃: ~300 meV; WSe₂: ~460 meV;
+        // Pt/Au bulk: 500–800 meV; Bi: ~1.0 eV). The previous 150 meV ceiling
+        // discarded every heavy-element SOC gap, suppressing exactly the
+        // topological / SC-parent signal we want to detect.
+        if (gap > 0.001 && gap < 1.5) {
           const midE = (e1 + e2) / 2;
           const atFermi = Math.abs(midE) < 0.3;
           gaps.push({
@@ -228,10 +236,27 @@ export function detectSOCGaps(bandResult: DFTBandStructureResult): { kIndex: num
     }
   }
 
-  if (gaps.length > 1000) {
-    gaps.length = 1000;
-  }
-  gaps.sort((a, b) => a.gapMeV - b.gapMeV);
+  // Sort by (atFermi, gapMeV) descending: atFermi gaps first (since the
+  // downstream consumer at line 594 filters to `g.atFermi` and takes
+  // Math.max(gapMeV) for TI classification), then by gap size within each
+  // class. Return the top 20.
+  //
+  // The previous ascending-sort kept the smallest 20 gaps — for materials
+  // with both weak (10 meV) and strong (500 meV) SOC splittings, only the
+  // weak ones survived. maxSOCGap then under-reported and TI confidence
+  // was systematically too low for heavy-element materials (Bi/Pb/Hg/Au
+  // compounds, lanthanide-rich oxides).
+  //
+  // The sort MUST happen before any truncation: a prior `gaps.length = 1000`
+  // cap ran before the sort, keeping the first 1000 gaps in k-point scan
+  // order and discarding everything at higher k-indices — which silently
+  // dropped the largest/at-Fermi gaps for any material with >1000 candidate
+  // pairs (e.g. 200 kpts × 50 bands × 3 offsets), re-introducing the exact
+  // maxSOCGap under-reporting the descending sort was meant to fix.
+  gaps.sort((a, b) => {
+    if (a.atFermi !== b.atFermi) return a.atFermi ? -1 : 1;  // atFermi first
+    return b.gapMeV - a.gapMeV;                              // then descending size
+  });
   return gaps.slice(0, 20);
 }
 
@@ -307,13 +332,19 @@ export function computeFermiIsosurface(bandResult: DFTBandStructureResult): Ferm
 
   const enclosedVol = isoPts.length > 0 ? isoPts.length / (bandResult.nKPoints * bandResult.nBands) : 0;
 
+  // Sanity-cap anisotropy at 1000 (numerical guard against divide-by-near-zero
+  // when one velocity component is ~1e-6). DO NOT cap at 20 — quasi-1D
+  // superconductors (Li₀.₉Mo₆O₁₇: ~100, TaSe₃: ~50, K₂Cr₃As₁₁: ~80) have
+  // legitimately high anisotropy that's a primary SC discovery signal.
+  const sanitizedAnisotropy = Number.isFinite(anisotropy) ? Math.min(1000, anisotropy) : 1;
+
   return {
     points: isoPts,
     totalPoints: isoPts.length,
     sheetCount: bandSheets.size,
     enclosedVolumeFraction: enclosedVol,
     avgVelocity: avgVel,
-    anisotropy: Math.min(20, anisotropy),
+    anisotropy: sanitizedAnisotropy,
   };
 }
 
@@ -493,8 +524,21 @@ const TOPOLOGY_RULES: TopologyRule[] = [
   },
 ];
 
-export function estimateOrbitalFractions(elements: string[]): { s: number; p: number; d: number } {
-  let sSum = 0, pSum = 0, dSum = 0;
+// Lanthanides/actinides where the f shell is partially filled and the f
+// character dominates near E_F. La (4f⁰) and Lu (4f¹⁴ full) are excluded
+// since their Fermi-level states are mostly 5d/6s; same for Th (5f⁰).
+const F_DOMINANT_LN = new Set([
+  "Ce", "Pr", "Nd", "Pm", "Sm", "Eu", "Gd", "Tb", "Dy", "Ho", "Er", "Tm", "Yb",
+]);
+const F_DOMINANT_AN = new Set([
+  // Bk (5f⁸/⁹) and Cf (5f⁹/¹⁰) added — partially-filled 5f, f character
+  // dominates at E_F. Without these, Bk/Cf compounds got lumped into
+  // d-character orbital classification, hiding their f-electron nature.
+  "Pa", "U", "Np", "Pu", "Am", "Cm", "Bk", "Cf",
+]);
+
+export function estimateOrbitalFractions(elements: string[]): { s: number; p: number; d: number; f: number } {
+  let sSum = 0, pSum = 0, dSum = 0, fSum = 0;
   let totalWeight = 0;
 
   for (const el of elements) {
@@ -508,8 +552,18 @@ export function estimateOrbitalFractions(elements: string[]): { s: number; p: nu
       pSum += ve;
     } else if (isTransitionMetal(el)) {
       dSum += ve;
+    } else if (F_DOMINANT_LN.has(el) || F_DOMINANT_AN.has(el)) {
+      // 4f/5f-dominant: most weight on f, small fraction on outer s/d.
+      // The previous code lumped all rare-earth/actinide weight into d,
+      // which made heavy-fermion / Ce/U-based SC candidates indistinguishable
+      // from d-electron systems in the orbital-character classifier.
+      fSum += ve * 0.75;
+      dSum += ve * 0.15;
+      sSum += ve * 0.10;
     } else if (isRareEarth(el) || isActinide(el)) {
-      dSum += ve;
+      // La (4f⁰), Lu (4f¹⁴ full), Th (5f⁰): d/s character at E_F, no f.
+      dSum += ve * 0.6;
+      sSum += ve * 0.4;
     } else {
       const period = data.atomicNumber <= 2 ? 1 : data.atomicNumber <= 10 ? 2 : data.atomicNumber <= 18 ? 3 : 4;
       if (period <= 2) sSum += ve;
@@ -525,13 +579,15 @@ export function estimateOrbitalFractions(elements: string[]): { s: number; p: nu
     sSum /= totalWeight;
     pSum /= totalWeight;
     dSum /= totalWeight;
+    fSum /= totalWeight;
   } else {
     sSum = 0.33;
     pSum = 0.34;
     dSum = 0.33;
+    fSum = 0;
   }
 
-  return { s: sSum, p: pSum, d: dSum };
+  return { s: sSum, p: pSum, d: dSum, f: fSum };
 }
 
 export function classifyDFTTopology(bandResult: DFTBandStructureResult, socStrength: number, spaceGroup?: string): DFTTopologicalClassification {
@@ -682,6 +738,22 @@ export function extractFermiPockets(bandResult: DFTBandStructureResult, elements
   const pockets: DFTFermiPocket[] = [];
   if (!bandResult.eigenvalues.length || bandResult.nBands === 0) return pockets;
 
+  // If `elements` wasn't passed but the bandResult has a formula, parse the
+  // elements from it. All 4 internal call sites previously passed only
+  // bandResult, so the orbital-character fallback (line 782) always used the
+  // uninformative { s:0.33, p:0.34, d:0.33, f:0 } split — missing f-character
+  // for every Ce/U/Pu-containing pocket. The formula was available on
+  // bandResult all along; just parse it.
+  if (!elements || elements.length === 0) {
+    const parsedElements: string[] = [];
+    const re = /([A-Z][a-z]?)(\d*\.?\d*)/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(bandResult.formula)) !== null) {
+      if (m[1]) parsedElements.push(m[1]);
+    }
+    if (parsedElements.length > 0) elements = parsedElements;
+  }
+
   const bandCrossingMap = new Map<number, BandCrossing[]>();
   for (const crossing of bandResult.bandCrossings) {
     if (!bandCrossingMap.has(crossing.bandIndex)) {
@@ -727,24 +799,33 @@ export function extractFermiPockets(bandResult: DFTBandStructureResult, elements
 
     const stoichFallback = elements && elements.length > 0
       ? estimateOrbitalFractions(elements)
-      : { s: 0.33, p: 0.34, d: 0.33 };
+      : { s: 0.33, p: 0.34, d: 0.33, f: 0 };
 
-    let orbChar = { ...stoichFallback };
+    let orbChar: { s: number; p: number; d: number; f: number } = { ...stoichFallback };
 
     const fermiKpts = bandResult.eigenvalues.filter(kpt =>
       kpt.weights?.[b] && Math.abs(kpt.energies[b]) < 1.0
     );
     if (fermiKpts.length > 0) {
-      let sSum = 0, pSum = 0, dSum = 0;
+      // Keep s, p, d, f separate so downstream f-electron SC classifiers
+      // can see the actual 4f/5f character. Previously w.f was lumped into
+      // dSum, which made every Ce/U-based pocket look d-dominated.
+      let sSum = 0, pSum = 0, dSum = 0, fSum = 0;
       for (const kpt of fermiKpts) {
         const w = kpt.weights![b];
         sSum += w.s;
         pSum += w.p;
-        dSum += w.d + w.f;
+        dSum += w.d;
+        fSum += w.f;
       }
-      const wTotal = sSum + pSum + dSum;
+      const wTotal = sSum + pSum + dSum + fSum;
       if (wTotal > 0.01) {
-        orbChar = { s: sSum / wTotal, p: pSum / wTotal, d: dSum / wTotal };
+        orbChar = {
+          s: sSum / wTotal,
+          p: pSum / wTotal,
+          d: dSum / wTotal,
+          f: fSum / wTotal,
+        };
       }
     }
 
@@ -837,8 +918,20 @@ export function computeDFTNesting(pockets: DFTFermiPocket[], bandResult: DFTBand
     connectedPockets: bin.pocketPair,
   }));
 
+  // Nesting score: ratio of dominant q-vector population to the total
+  // weight in q-space. For a perfectly nested surface (all pocket pairs
+  // share one q) the top bin holds all the mass → score = 1. For a
+  // 3D Fermi sphere (pair differences spread uniformly across many bins)
+  // the top bin holds only ~1/N_bins of the mass → score ~ 0.
+  // The previous formula `sortedBins[0].count / maxCount` was identically 1
+  // because maxCount IS sortedBins[0].count by definition — the nesting
+  // feature was useless for ML discrimination across the entire dataset.
+  const totalCount = sortedBins.reduce((s, b) => s + b.count, 0);
+  const topFraction = totalCount > 0 ? sortedBins[0].count / totalCount : 0;
+  // Modest boost for multi-pocket systems (more pairs → more meaningful peak).
+  const multiPocketBoost = pockets.length > 2 ? 1.2 : 1.0;
   const nestingScore = sortedBins.length > 0
-    ? Math.min(1.0, (sortedBins[0].count / Math.max(1, maxCount)) * (pockets.length > 2 ? 1.2 : 1.0))
+    ? Math.min(1.0, topFraction * multiPocketBoost)
     : 0;
 
   const connectedPairs = new Set(sortedBins.filter(b => b.count > 1).map(b => `${b.pocketPair[0]}-${b.pocketPair[1]}`));
@@ -890,7 +983,11 @@ export function buildFermiSurfaceFromDFT(bandResult: DFTBandStructureResult): Fe
     type: (p.type === "path-electron" ? "electron" : "hole") as "electron" | "hole",
     volume: p.volume,
     cylindricalCharacter: p.cylindricalCharacter,
-    orbitalCharacter: { ...p.orbitalCharacter, f: 0 },
+    // Pass through s/p/d/f from projwfc.x. Previously f was hardcoded to 0,
+    // so heavy-fermion / Ce-based / U-based pockets — which have substantial
+    // 4f/5f character at E_F — were misclassified as d-dominated by the
+    // downstream `f > 0.4` orbital-type detector in fermi-surface-engine.
+    orbitalCharacter: { ...p.orbitalCharacter },
     bandIndex: p.bandIndex,
     avgVelocity: p.avgVelocity,
   }));

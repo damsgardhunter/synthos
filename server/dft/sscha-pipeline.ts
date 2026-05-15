@@ -281,9 +281,18 @@ function parseSSCHAOutput(stdout: string): Partial<SSCHAResult> & { success?: bo
 function allenDynesTc(lambda: number, omegaLogMeV: number, muStar: number): number {
   if (lambda < 0.01 || omegaLogMeV < 0.01) return 0;
   const omegaLogK = omegaLogMeV / 0.08617; // meV to K
-  const exponent = -1.04 * (1 + lambda) / (lambda - muStar * (1 + 0.62 * lambda));
+  const denom = lambda - muStar * (1 + 0.62 * lambda);
+  if (denom <= 0) return 0;
+  const exponent = -1.04 * (1 + lambda) / denom;
   if (exponent > 0 || exponent < -100) return 0;
-  return (omegaLogK / 1.2) * Math.exp(exponent);
+  // Allen-Dynes f1 strong-coupling correction (Allen & Dynes, PRB 12, 905
+  // (1975), eq 3.3). SSCHA candidates are dominated by strong-coupling
+  // hydrides where λ ≳ 1.5 — without f1 the McMillan-only formula
+  // under-predicts Tc by 10–15%. f2 (spectral moment correction) requires
+  // ⟨ω²⟩ which is not available here; f2 → 1 is the safe fallback.
+  const lambdaBar = 2.46 * (1 + 3.8 * muStar);
+  const f1 = Math.pow(1 + Math.pow(lambda / lambdaBar, 1.5), 1 / 3);
+  return (omegaLogK / 1.2) * f1 * Math.exp(exponent);
 }
 
 // ---------------------------------------------------------------------------
@@ -413,8 +422,13 @@ export async function runSSCHAPipeline(
     workerArgs.push("--lambda-harmonic", String(lambdaForTc));
   }
 
-  // Determine pw.x path
-  const pwBinary = process.env.QE_PW_BINARY || "/usr/local/bin/pw.x";
+  // Determine pw.x path. Honor the project-wide QE_BIN_DIR (used by every
+  // other pipeline) before falling back to /usr/local/bin — apt-installed
+  // QE on Ubuntu lives at /usr/bin/pw.x, custom builds usually at
+  // $HOME/qe-X/bin/pw.x. QE_PW_BINARY remains the highest-precedence
+  // override for callers who want to point SSCHA at a specific binary.
+  const pwBinary = process.env.QE_PW_BINARY
+    || (process.env.QE_BIN_DIR ? path.posix.join(process.env.QE_BIN_DIR, "pw.x") : "/usr/local/bin/pw.x");
   workerArgs.push("--pw-binary", pwBinary);
 
   console.log(`[SSCHA] Launching Python worker: ${PYTHON_BIN} sscha-worker.py`);

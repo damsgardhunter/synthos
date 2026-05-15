@@ -23,6 +23,7 @@ import OpenAI from "openai";
 import * as fs from "fs";
 import * as path from "path";
 import { openaiCircuitOpen, recordOpenAIFail, recordOpenAISuccess } from "../learning/openai-circuit";
+import { getTempSubdir } from "./platform-utils";
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -82,7 +83,12 @@ const openai = new OpenAI({
 
 // ─── Disk cache ──────────────────────────────────────────────────────
 
-const CACHE_DIR = "/tmp/qe_calculations/structure_advice_cache";
+// Use cross-platform temp dir (getTempSubdir → os.tmpdir() + path.join). The
+// previous hardcoded "/tmp/..." path silently broke caching on Windows
+// (no /tmp directory, fs.existsSync always returns false) — every getStructureAdvice
+// call then hit OpenAI even for compositions already advised in this session,
+// burning the LLM budget and slowing the pipeline.
+const CACHE_DIR = path.join(getTempSubdir("qe_calculations"), "structure_advice_cache");
 
 function getCachePath(formula: string, pressureGpa: number): string {
   const pressureBucket = Math.round(pressureGpa / 10) * 10; // bucket by 10 GPa
@@ -241,9 +247,13 @@ export async function getStructureAdvice(
 
 function validateLattice(raw: any): { a: number; b: number; c: number } {
   if (!raw || typeof raw !== "object") return { a: 0, b: 0, c: 0 };
-  const a = typeof raw.a === "number" && raw.a > 0.5 && raw.a < 30 ? raw.a : 0;
-  const b = typeof raw.b === "number" && raw.b > 0.5 && raw.b < 30 ? raw.b : a;
-  const c = typeof raw.c === "number" && raw.c > 0.5 && raw.c < 50 ? raw.c : a;
+  // Lower bound: 2.0 Å. The smallest known crystal lattices are densely-packed
+  // metals at ~2.5 Å (e.g., Be ~2.29 Å a-axis). LLM hallucinations like "1 Å"
+  // were previously accepted at 0.5 Å threshold, producing atom-overlap inputs
+  // that crashed QE downstream.
+  const a = typeof raw.a === "number" && raw.a >= 2.0 && raw.a < 30 ? raw.a : 0;
+  const b = typeof raw.b === "number" && raw.b >= 2.0 && raw.b < 30 ? raw.b : a;
+  const c = typeof raw.c === "number" && raw.c >= 2.0 && raw.c < 50 ? raw.c : a;
   return { a, b, c };
 }
 
@@ -251,7 +261,10 @@ function validatePairDistances(raw: any): Record<string, number> {
   if (!raw || typeof raw !== "object") return {};
   const result: Record<string, number> = {};
   for (const [pair, dist] of Object.entries(raw)) {
-    if (typeof dist === "number" && dist > 0.3 && dist < 10) {
+    // Lower bound: 0.5 Å. The shortest physically reasonable bond is H-H at
+    // extreme pressure (~0.65 Å at 1 TPa); anything < 0.5 Å implies overlap
+    // and is an LLM hallucination. Previously 0.3 Å allowed unphysical inputs.
+    if (typeof dist === "number" && dist >= 0.5 && dist < 10) {
       result[pair] = Number(dist.toFixed(2));
     }
   }

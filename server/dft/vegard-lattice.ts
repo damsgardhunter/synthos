@@ -153,7 +153,29 @@ async function fetchBinaryEndpoints(el1: string, el2: string): Promise<BinaryEnd
     const mp = r.value as MPStructureData;
     const formula = stoichs[i];
 
-    const vol = mp.latticeParams.a * mp.latticeParams.b * mp.latticeParams.c;
+    // Cell volume must account for lattice angles — `a*b*c` is the cell
+    // volume ONLY for orthogonal cells. For monoclinic (β ≠ 90°), triclinic
+    // (general angles), or hexagonal (γ = 120°) MP entries this overestimates
+    // the volume by 1/sin(angle), e.g. VO2 (β=122.6°): a·b·c = 140.4 Å³ vs
+    // actual ≈ 118 Å³, and MgB2 (γ=120°): a·b·c = 33.4 Å³ vs actual ≈ 28.9 Å³.
+    // The inflated per-atom volume propagated into the Vegard average and
+    // bloated downstream lattice estimates for any compound that included a
+    // non-orthogonal binary endpoint. Use MP's reported `volume` field when
+    // available; fall back to the trigonometric formula when only angles are
+    // present; fall back to a·b·c only for orthogonal cells.
+    const lp = mp.latticeParams;
+    let vol: number;
+    if (typeof lp.volume === "number" && lp.volume > 0) {
+      vol = lp.volume;
+    } else {
+      const alpha = (lp.alpha ?? 90) * Math.PI / 180;
+      const beta = (lp.beta ?? 90) * Math.PI / 180;
+      const gamma = (lp.gamma ?? 90) * Math.PI / 180;
+      const cosA = Math.cos(alpha), cosB = Math.cos(beta), cosG = Math.cos(gamma);
+      const detTerm = 1 - cosA * cosA - cosB * cosB - cosG * cosG + 2 * cosA * cosB * cosG;
+      const sqrt = detTerm > 0 ? Math.sqrt(detTerm) : 1.0;
+      vol = lp.a * lp.b * lp.c * sqrt;
+    }
     const nAtoms = mp.atomicPositions.length || 1;
 
     endpoints.push({
@@ -278,7 +300,7 @@ export async function vegardEstimate(
       // adequate for the Vegard-level estimate used downstream.
       let correctedVol = volPerAtom;
       if (pressureGPa > 0) {
-        const B0 = estimateBulkModulusFromElements(elements);
+        const B0 = estimateBulkModulusFromElements(elements, fractions);
         const B0p = 4.0;
         const eta = 1 + B0p * (pressureGPa / B0);
         const volRatio = eta > 0 ? Math.pow(eta, -1 / B0p) : 0.0;
@@ -376,17 +398,53 @@ export async function vegardEstimate(
   };
 }
 
-function estimateBulkModulusFromElements(elements: string[]): number {
+function estimateBulkModulusFromElements(
+  elements: string[],
+  fractions?: Record<string, number>,
+): number {
+  // For hydrides, H's molecular B0 (~0.2 GPa, the ambient H₂ gas value) is
+  // irrelevant to the SOLID compound's stiffness — in LaH10, H3S, CaH6, etc.,
+  // the bulk modulus is governed by metal-metal and metal-H interactions.
+  // The flat element average gives ~2.7 GPa for LaH10 vs the physical
+  // ~150 GPa, and the downstream Murnaghan EOS then over-compresses lattice
+  // constants by ~30%.
+  //
+  // Mirrors the more sophisticated `estimateBulkModulus` in qe-worker.ts:
+  //   1. Average over NON-H elements only (gives the base metal stiffness).
+  //   2. Apply a cage-stiffening factor of (1 + 6·hFraction) — calibrated
+  //      to give LaH10 (H_frac=0.91) B0 ≈ 28·6.5 = 182 GPa.
+  //   3. Floor at 30 GPa for soft-alkali edge cases.
+  const nonHElements = elements.filter(e => e !== "H");
+  const useElements = nonHElements.length > 0 ? nonHElements : elements;
+
+  // Fraction-weighted average — the previous unweighted average gave the same
+  // weight to a minority species and the majority species. For e.g. CaH₆ →
+  // {Ca:1, H:6}, after H exclusion only Ca remains so it's fine; but for
+  // LaCa10H50 (one La + 10 Ca + 50 H), unweighted = (28+17)/2 = 22.5 GPa,
+  // whereas the physically correct stoichiometry-weighted average is
+  // 1/11·28 + 10/11·17 ≈ 18 GPa (Ca-dominated). This propagates into the
+  // Murnaghan EOS volume correction and thus into the Vegard lattice.
   let sumB = 0;
-  let count = 0;
-  for (const el of elements) {
+  let sumW = 0;
+  for (const el of useElements) {
     const d = getElementData(el);
     if (d?.bulkModulus) {
-      sumB += d.bulkModulus;
-      count++;
+      const w = fractions?.[el] ?? 1;
+      sumB += d.bulkModulus * w;
+      sumW += w;
     }
   }
-  return count > 0 ? sumB / count : 100; // Default 100 GPa
+  const baseB0 = sumW > 0 ? sumB / sumW : 100;
+
+  // Cage stiffening when fractions are available and H is present.
+  let hFraction = 0;
+  if (fractions) {
+    const hFrac = fractions["H"] ?? 0;
+    const totalFrac = Object.values(fractions).reduce((s, f) => s + f, 0);
+    hFraction = totalFrac > 0 ? hFrac / totalFrac : 0;
+  }
+  const cageFactor = 1.0 + 6.0 * hFraction;
+  return Math.max(30, baseB0 * cageFactor);
 }
 
 // ---------------------------------------------------------------------------
@@ -443,8 +501,19 @@ function interpolatePositionsFromEndpoints(
 
   // Chemical character classification
   const LARGE_ELECTROPOSITIVE = new Set([
+    // Alkali & alkaline earth
     "K", "Rb", "Cs", "Ca", "Sr", "Ba", "Na", "Li",
-    "La", "Ce", "Pr", "Nd", "Sm", "Eu", "Gd", "Y", "Sc",
+    // Lanthanides — full series. Previously only La-Sm/Eu/Gd were listed;
+    // Tb-Lu and Pm were missing and got classified as "framework". For
+    // heavy-rare-earth compounds (HoMn2O5, ErAl2, TmZn etc.) this placed
+    // the large Ln³⁺ on small framework sites — wrong starting structure
+    // for ML training.
+    "La", "Ce", "Pr", "Nd", "Pm", "Sm", "Eu", "Gd",
+    "Tb", "Dy", "Ho", "Er", "Tm", "Yb", "Lu", "Y", "Sc",
+    // Actinides — large ionic radii (1.7-1.9 Å), electropositive. Same
+    // mis-classification issue: UO2, PuO2, AmO2 etc. were placing the
+    // actinide on framework sites instead of large-cation perovskite-A sites.
+    "Ac", "Th", "Pa", "U", "Np", "Pu", "Am", "Cm",
   ]);
   const ANION_LIKE = new Set(["O", "F", "S", "Se", "Te", "N", "P", "As", "Cl", "Br", "I"]);
 
@@ -627,18 +696,40 @@ export async function interpolateFromTemplateReferences(
       const ksElements = new Set(ks.atoms.map(a => a.element));
       const shared = elements.filter(e => ksElements.has(e));
       if (shared.length === 0) continue;
+      // Cell volume must account for non-orthogonal angles AND distinct b, c —
+      // `latticeA**3` assumed a cubic cell, which is wrong for every
+      // monoclinic/hexagonal/triclinic known-structure entry in the DB.
+      // Concrete impact: VO2 (β=122.6°, a=5.75, b=4.54, c=5.38) would have
+      // volumeAtom = 5.75³/12 = 15.84 Å³/atom, vs the correct
+      // a·b·c·sin(β)/12 = 5.75·4.54·5.38·0.842/12 = 9.86 Å³/atom — off by
+      // 60%. The Vegard pipeline then used this inflated volume as a
+      // reference for VCA-template ranking, pushing chemically reasonable
+      // candidates out of contention.
+      const ksA = ks.latticeA;
+      const ksB = ks.latticeB ?? ks.latticeA;
+      const ksC = ks.latticeC ?? ks.latticeA;
+      const ksAlphaDeg = ks.alpha ?? 90;
+      const ksBetaDeg = ks.beta ?? 90;
+      const ksGammaDeg = ks.gamma ?? (ks.latticeType === "hexagonal" ? 120 : 90);
+      const ksAlphaR = ksAlphaDeg * Math.PI / 180;
+      const ksBetaR = ksBetaDeg * Math.PI / 180;
+      const ksGammaR = ksGammaDeg * Math.PI / 180;
+      const cosAks = Math.cos(ksAlphaR), cosBks = Math.cos(ksBetaR), cosGks = Math.cos(ksGammaR);
+      const detTermKs = 1 - cosAks * cosAks - cosBks * cosBks - cosGks * cosGks
+                       + 2 * cosAks * cosBks * cosGks;
+      const sinKs = detTermKs > 0 ? Math.sqrt(detTermKs) : 1.0;
+      const ksCellVol = ksA * ksB * ksC * sinKs;
       localRefs.push({
         compound: ksFormula,
         elements: Array.from(ksElements).sort(),
-        volumeAtom: (ks.latticeA ** 3) / ks.atoms.length,
+        volumeAtom: ksCellVol / ks.atoms.length,
         latticeSystem: ks.latticeType,
         spaceGroupNumber: ks.spaceGroupNumber,
         spaceGroupSymbol: ks.spaceGroup,
         enthalpyFormationAtom: null,
         bandgap: null,
         source: "known-structures",
-        geometry: [ks.latticeA, ks.latticeB ?? ks.latticeA, ks.latticeC ?? ks.latticeA, 90, 90,
-          ks.latticeType === "hexagonal" ? 120 : 90] as [number, number, number, number, number, number],
+        geometry: [ksA, ksB, ksC, ksAlphaDeg, ksBetaDeg, ksGammaDeg] as [number, number, number, number, number, number],
         positions: ks.atoms.map(a => ({ element: a.element, x: a.x, y: a.y, z: a.z })),
       });
     }

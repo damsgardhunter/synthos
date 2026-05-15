@@ -252,6 +252,10 @@ function estimatePressureCOverA(
   return ambientCOverA;
 }
 
+// Atomic volumes (Å³/atom) at ambient. Used as the Vegard-style starting
+// guess for unit-cell volume in structure generation. Missing elements
+// previously fell through to 15 Å³/atom — fine for most TMs but wildly off
+// for lanthanides (~18-29) and actinides (~12-21).
 const ATOMIC_VOLUMES: Record<string, number> = {
   H: 5.0, He: 6.0, Li: 20.0, Be: 8.0, B: 8.0, C: 9.0, N: 10.0,
   O: 12.0, F: 11.0, Ne: 13.0, Na: 24.0, Mg: 14.0, Al: 17.0, Si: 20.0,
@@ -260,9 +264,22 @@ const ATOMIC_VOLUMES: Record<string, number> = {
   Cu: 12.0, Zn: 15.0, Ga: 20.0, Ge: 23.0, As: 21.0, Se: 17.0, Br: 24.0,
   Kr: 27.0, Rb: 56.0, Sr: 34.0, Y: 25.0, Zr: 23.0, Nb: 18.0, Mo: 16.0,
   Ru: 14.0, Rh: 14.0, Pd: 15.0, Ag: 17.0, Cd: 22.0, In: 26.0, Sn: 27.0,
-  Sb: 30.0, Te: 34.0, I: 26.0, Cs: 71.0, Ba: 39.0, La: 37.0, Ce: 35.0,
+  Sb: 30.0, Te: 34.0, I: 26.0, Cs: 71.0, Ba: 39.0,
+  // Lanthanides — values from CRC Handbook elemental volumes per atom.
+  // Eu (28.9) and Yb (24.8) are anomalous "divalent" lanthanides, larger
+  // than their trivalent neighbors due to half-filled (Eu) or full (Yb) 4f.
+  La: 37.0, Ce: 35.0, Pr: 20.8, Nd: 20.6, Pm: 20.3, Sm: 20.0,
+  Eu: 28.9, Gd: 19.9, Tb: 19.3, Dy: 19.0, Ho: 18.7, Er: 18.5,
+  Tm: 18.1, Yb: 24.8, Lu: 17.8,
+  // 5d transition metals + heavy p-block
   Hf: 22.0, Ta: 18.0, W: 16.0, Re: 15.0, Os: 14.0, Ir: 14.0, Pt: 15.0,
-  Au: 17.0, Hg: 23.0, Tl: 29.0, Pb: 30.0, Bi: 35.0, Th: 33.0, U: 21.0,
+  Au: 17.0, Hg: 23.0, Tl: 29.0, Pb: 30.0, Bi: 35.0,
+  // Actinides — Pu's anomalously small volume (12.3) reflects the 5f
+  // localization transition in α-Pu; bulk Pu metal is in the δ phase
+  // (~21 Å³). Use the more typical large-volume value here. Ac added
+  // (was missing → fell through to 15.0 default, ~50% too small for the
+  // largest non-radioactive actinide → wrong Vegard volume for Ac-X compounds).
+  Ac: 37.0, Th: 33.0, Pa: 15.0, U: 21.0, Np: 19.2, Pu: 20.0, Am: 17.6, Cm: 18.3,
   Tc: 14.0,
 };
 
@@ -1077,8 +1094,25 @@ function getProtoSiteCounts(proto: PrototypeStructure): Record<string, number> {
   return siteCounts;
 }
 
-const RARE_EARTHS = new Set(["La", "Ce", "Pr", "Nd", "Sm", "Eu", "Gd", "Tb", "Dy", "Ho", "Er", "Tm", "Yb", "Lu", "Y", "Sc"]);
-const TRANSITION_METALS = new Set(["Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn", "Zr", "Nb", "Mo", "Tc", "Ru", "Rh", "Pd", "Ag", "Cd", "Hf", "Ta", "W", "Re", "Os", "Ir", "Pt", "Au"]);
+// f-block elements (lanthanides + actinides) classified as "rare-earth"
+// for cage seeding / coordination / class-baseline purposes. Actinides
+// share the same large atomic radii and high-coordination chemistry as
+// lanthanides — Pm (rarely available) and Pa/Np/Pu/Am/Cm were previously
+// falling through to "other" → baseline 1.4 Å instead of 1.9 Å, biasing
+// the cage seeder toward too-small lattices for U/Pu/Np-containing
+// candidates.
+const RARE_EARTHS = new Set([
+  "Y", "Sc",
+  // Lanthanides
+  "La", "Ce", "Pr", "Nd", "Pm", "Sm", "Eu", "Gd", "Tb", "Dy", "Ho", "Er", "Tm", "Yb", "Lu",
+  // Actinides (added Bk, Cf for parity with qe-worker.ts:HEAVY_ELEMENTS)
+  "Ac", "Th", "Pa", "U", "Np", "Pu", "Am", "Cm", "Bk", "Cf",
+]);
+// Hg added (5d¹⁰6s²) — without it, HgBa2CuO4 / HgBa2Ca2Cu3O8 (Tc=134 K)
+// and other Hg-cuprate candidates were classified as "other" by
+// classifyElement, mis-routing through the prototype selector that
+// expects TM character on the Hg site.
+const TRANSITION_METALS = new Set(["Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn", "Zr", "Nb", "Mo", "Tc", "Ru", "Rh", "Pd", "Ag", "Cd", "Hf", "Ta", "W", "Re", "Os", "Ir", "Pt", "Au", "Hg"]);
 const ANIONS = new Set(["O", "S", "Se", "Te", "F", "Cl", "Br", "I", "N"]);
 const PNICTIDES = new Set(["P", "As", "Sb"]);
 const ALKALINE_EARTH = new Set(["Ca", "Sr", "Ba", "Mg"]);
@@ -2618,7 +2652,6 @@ function generateHydrideCageStructure(
     }
 
     const hPerCopy = Math.ceil(hCount / nCopies);
-    const minHH = 0.5;
     for (let i = 0; i < hPerCopy && hPlaced < hCount; i++) {
       const siteIdx = i % hSiteCount;
       const wrapCount = Math.floor(i / hSiteCount);
@@ -2640,7 +2673,8 @@ function generateHydrideCageStructure(
       let z = bz + offZ;
       let tooClose = false;
       for (const existing of atoms) {
-        if (pbcMinImageDist(x, y, z, existing.x, existing.y, existing.z, superVecs) < minHH) {
+        const minDist = getMinInteratomicDistance("H", existing.element, pressureGPa);
+        if (pbcMinImageDist(x, y, z, existing.x, existing.y, existing.z, superVecs) < minDist) {
           tooClose = true;
           break;
         }
@@ -2655,7 +2689,8 @@ function generateHydrideCageStructure(
           x = rx + offX; y = ry + offY; z = rz + offZ;
           let ok = true;
           for (const existing of atoms) {
-            if (pbcMinImageDist(x, y, z, existing.x, existing.y, existing.z, superVecs) < minHH) { ok = false; break; }
+            const minDist = getMinInteratomicDistance("H", existing.element, pressureGPa);
+            if (pbcMinImageDist(x, y, z, existing.x, existing.y, existing.z, superVecs) < minDist) { ok = false; break; }
           }
           if (ok) { tooClose = false; break; }
         }
@@ -2671,12 +2706,10 @@ function generateHydrideCageStructure(
   while (hPlaced < hCount && nCopies > 0) {
     const pos = cage.hydrogenFrac[hPlaced % hSiteCount];
     const copy = Math.floor(hPlaced / hSiteCount) % nCopies;
-    const [offX, offY, offZ] = fracToCart(
-      copy % 2,
-      Math.floor(copy / 2) % 2,
-      Math.floor(copy / 4),
-      cageVecs,
-    );
+    const ix = copy % gridX;
+    const iy = Math.floor(copy / gridX) % gridY;
+    const iz = Math.floor(copy / (gridX * gridY)) % gridZ;
+    const [offX, offY, offZ] = fracToCart(ix, iy, iz, cageVecs);
 
     let placed = false;
     for (let retry = 0; retry < 10 && !placed; retry++) {
@@ -2692,7 +2725,8 @@ function generateHydrideCageStructure(
 
       let tooClose = false;
       for (const existing of atoms) {
-        if (pbcMinImageDist(x, y, z, existing.x, existing.y, existing.z, superVecs) < 0.5) {
+        const minDist = getMinInteratomicDistance("H", existing.element, pressureGPa);
+        if (pbcMinImageDist(x, y, z, existing.x, existing.y, existing.z, superVecs) < minDist) {
           tooClose = true;
           break;
         }
@@ -3305,8 +3339,15 @@ function parseXtbOutput(output: string): Partial<DFTResult> {
     result.isMetallic = result.homoLumoGap < 0.5;
   }
 
-  const homoMatch = output.match(/\(HOMO\)\s+([-\d.]+)\s+eV/);
-  const lumoMatch = output.match(/\(LUMO\)\s+([-\d.]+)\s+eV/);
+  // xTB orbital-energy table format is:
+  //     <idx>  <occ>  <energy_Eh>  <energy_eV>  (HOMO)
+  // i.e. the eV value precedes the (HOMO)/(LUMO) marker. The previous regex
+  // `\(HOMO\)\s+([-\d.]+)\s+eV` looked for the value AFTER the marker and
+  // never matched anything — `result.homo`/`result.lumo`/`result.fermiLevel`
+  // were always null from the xTB path. Capture the eV column (4th token)
+  // that immediately precedes the marker.
+  const homoMatch = output.match(/([-\d.]+)\s+\(HOMO\)/);
+  const lumoMatch = output.match(/([-\d.]+)\s+\(LUMO\)/);
   if (homoMatch) result.homo = parseFloat(homoMatch[1]);
   if (lumoMatch) result.lumo = parseFloat(lumoMatch[1]);
 
@@ -3317,14 +3358,27 @@ function parseXtbOutput(output: string): Partial<DFTResult> {
   const dipoleAlt = output.match(/molecular dipole:.*?tot \(Debye\).*?full:\s+[-\d.]+\s+[-\d.]+\s+[-\d.]+\s+([-\d.]+)/s);
   if (dipoleAlt) result.dipoleMoment = parseFloat(dipoleAlt[1]);
 
+  // xTB per-atom table column layout:
+  //   #   Z          covCN         q      C6AA      α(0)
+  //   1   1 H        0.860    -0.231    1.235     1.456
+  //   2   8 O        1.234    -0.500    7.890     5.000
+  // parts indices: 0=idx, 1=Z, 2=element, 3=covCN, 4=q, 5=C6AA, 6=α(0)
+  //
+  // The previous code read parts[1] as element and parts[3] as charge —
+  // those are actually Z (atomic number) and covCN. The element-name
+  // regex `^[A-Z][a-z]?$` then rejected the integer "1" silently, so
+  // `result.charges` was always `{}` for every xTB call. Any downstream
+  // consumer of partial atomic charges (charge-transfer features,
+  // electronegativity-flow ML features, ionic-character classification)
+  // saw an empty map and fell through to defaults.
   const chargeBlock = output.match(/#\s+Z\s+covCN\s+q\s+C6AA\s+.*?\n([\s\S]*?)(?:\n\n|\nWiberg|\nmolecular)/);
   if (chargeBlock) {
     const lines = chargeBlock[1].trim().split("\n");
     for (const line of lines) {
       const parts = line.trim().split(/\s+/);
-      if (parts.length >= 4) {
-        const el = parts[1];
-        const charge = parseFloat(parts[3]);
+      if (parts.length >= 5) {
+        const el = parts[2];
+        const charge = parseFloat(parts[4]);
         if (!isNaN(charge) && el.match(/^[A-Z][a-z]?$/)) {
           if (!result.charges![el]) result.charges![el] = 0;
           result.charges![el] += charge;
@@ -3337,9 +3391,21 @@ function parseXtbOutput(output: string): Partial<DFTResult> {
     result.converged = true;
   }
 
-  const wallMatch = output.match(/wall-time:\s+\d+ d,\s+\d+ h,\s+\d+ min,\s+([\d.]+) sec/);
+  // xTB prints "* wall-time:     N d,  N h,  N min,  X.X sec" — the day,
+  // hour, and minute components are NOT optional, they're always present
+  // even if zero. The previous regex captured ONLY the sec field, so any
+  // xTB run longer than 60 seconds reported a truncated wall time (e.g.
+  // a 1h23m45s run logged as 45.67 s — off by 99%). For Hessian / opt-tight
+  // runs on 8-atom hydrides this routinely takes 5-15 min, so the wall-time
+  // metric was systematically under-reporting actual compute cost. Capture
+  // all four components and combine into the total seconds.
+  const wallMatch = output.match(/wall-time:\s+(\d+)\s*d,\s+(\d+)\s*h,\s+(\d+)\s*min,\s+([\d.]+)\s*sec/);
   if (wallMatch) {
-    result.wallTimeSeconds = parseFloat(wallMatch[1]);
+    const days = parseInt(wallMatch[1], 10);
+    const hours = parseInt(wallMatch[2], 10);
+    const minutes = parseInt(wallMatch[3], 10);
+    const seconds = parseFloat(wallMatch[4]);
+    result.wallTimeSeconds = days * 86400 + hours * 3600 + minutes * 60 + seconds;
   }
 
   return result;
@@ -3548,9 +3614,37 @@ function parseOptimizationOutput(output: string): { energyChange: number; gradie
     if (lastGrad) gradientNorm = Math.abs(parseFloat(lastGrad[1]));
   }
 
-  if (output.includes("normal termination of xtb") && !output.includes("FAILED")) {
-    converged = true;
+  // Explicit "did NOT converge" markers must override any earlier converged=true.
+  // xTB emits "normal termination of xtb" on EVERY clean exit including hit-
+  // max-cycles cases, so the earlier `normal termination && !FAILED` fallback
+  // marked max-iter-aborted opts as converged. The relevant unsuccessful
+  // termination strings xTB prints:
+  //   - "GEOMETRY OPTIMIZATION FAILED" / "*GEOMETRY OPTIMIZATION FAILED*"
+  //   - "geometry optimization not converged" (lowercase variant)
+  //   - "max number of optimization cycles reached"
+  //   - "FAILED TO CONVERGE" (in the banner)
+  // Only the FAILED substring was caught before; the lowercase / "max number"
+  // forms slipped through and any caller relying on `converged` got the
+  // wrong answer (downstream cached the unconverged geometry as "converged",
+  // skipped subsequent re-optimization attempts).
+  const failureMarkers = [
+    "GEOMETRY OPTIMIZATION FAILED",
+    "FAILED TO CONVERGE",
+    "geometry optimization not converged",
+    "max number of optimization cycles reached",
+  ];
+  const optExplicitlyFailed = failureMarkers.some(m => output.includes(m));
+  if (optExplicitlyFailed) {
+    converged = false;
+    return { energyChange, gradientNorm, iterations, converged };
   }
+  // Only treat "normal termination of xtb" as a convergence signal when we
+  // ALSO saw an explicit convergence marker earlier. Without that gate, an
+  // SP-like run with no opt-cycle markers (or an opt that crashed mid-cycle
+  // but still printed "normal termination") was being labeled converged.
+  // The two markers we trust as positive convergence are already handled
+  // above (lines for `convergence criteria satisfied after N iterations`
+  // and `GEOMETRY OPTIMIZATION CONVERGED`).
 
   return { energyChange, gradientNorm, iterations, converged };
 }
@@ -4054,7 +4148,33 @@ export async function runDFTCalculation(formula: string, pressureGpa: number = 0
         atoms = applyPressureScaling(atoms, formula, pressureGpa);
       }
     }
-    if (atoms.length < 2) return null;
+    // Return an unconverged stub rather than `null` — the function signature
+    // is `Promise<DFTResult>` (non-nullable), and the sole caller at
+    // runXTBEnrichment line 4677 reads `dftResult.converged` without a null
+    // check. Previously this raised `Cannot read properties of null` when
+    // structure generation also failed to produce ≥2 atoms (rare but
+    // possible — e.g., single-element compounds in degenerate prototypes).
+    if (atoms.length < 2) {
+      return {
+        formula,
+        method: "GFN2-xTB",
+        prototype,
+        totalEnergy: 0,
+        totalEnergyPerAtom: 0,
+        homoLumoGap: 0,
+        isMetallic: false,
+        homo: null,
+        lumo: null,
+        fermiLevel: null,
+        dipoleMoment: null,
+        charges: {},
+        converged: false,
+        wallTimeSeconds: 0,
+        atomCount: atoms.length,
+        error: "Too few atoms for DFT (structure generation produced < 2 atoms)",
+        optimized: false,
+      };
+    }
   }
 
   const xyzPath = path.join(calcDir, "input.xyz");
@@ -4555,7 +4675,22 @@ export async function runXTBPhononCheck(formula: string): Promise<PhononStabilit
         { timeout: TIMEOUT_MS, env, maxBuffer: 20 * 1024 * 1024 }
       );
 
-      const converged = optOutput.includes("GEOMETRY OPTIMIZATION CONVERGED") || optOutput.includes("normal termination");
+      // Convergence check for the analytical-phonon fallback path. Was OR'd
+      // with "normal termination" — but xTB prints that on every clean exit
+      // including max-iter aborts (see parseOptimizationOutput rationale).
+      // Use explicit positive markers and a failure-marker veto so the
+      // fallback's debye-frequency scaling (line 4696: converged ? 1.0 : 0.8)
+      // correctly reflects whether the geometry settled or not.
+      const optFailureMarkers = [
+        "GEOMETRY OPTIMIZATION FAILED",
+        "FAILED TO CONVERGE",
+        "geometry optimization not converged",
+        "max number of optimization cycles reached",
+      ];
+      const optFailed = optFailureMarkers.some(m => optOutput.includes(m));
+      const optExplicitSuccess = optOutput.includes("GEOMETRY OPTIMIZATION CONVERGED")
+        || optOutput.includes("convergence criteria satisfied after");
+      const converged = optExplicitSuccess && !optFailed;
       const counts = parseFormula(formula);
       const elements = Object.keys(counts);
       const avgMass = elements.reduce((s, el) => {

@@ -14,6 +14,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import type { StructureCandidate } from "./vegard-lattice";
+import { lookupKnownStructure } from "../learning/known-structures";
 
 // CODATA 2018 Rydberg → eV. Several inline `13.6057` rounded constants were
 // scattered across this file; consolidated to a single precise constant
@@ -88,7 +89,7 @@ export interface QERunnerCallbacks {
   hasMagneticElements(elements: string[]): boolean;
   generateMagnetizationLines(elements: string[], counts: Record<string, number>): string;
   estimateCOverA(elements: string[], counts: Record<string, number>): number;
-  generateCellParameters(latticeA: number, cOverA: number, beta?: number, bOverA?: number, elements?: string[], counts?: Record<string, number>): string;
+  generateCellParameters(latticeA: number, cOverA: number, ibrav?: number, bOverA?: number, elements?: string[], counts?: Record<string, number>, alpha?: number, beta?: number, gamma?: number): string;
 }
 
 export interface StagedRelaxationOpts {
@@ -526,6 +527,20 @@ export async function runStagedRelaxation(opts: StagedRelaxationOpts): Promise<S
     // At ambient (P=0) this reduces to pure-E ranking. At 170 GPa with V=15 Å³/atom,
     // PV ≈ 16 eV/atom — completely dominates differences in E.
     const GPA_ANGSTROM3_TO_EV = 6.241e-3;
+    // Triclinic/monoclinic volume factor: V = a·b·c·√(1 - cos²α - cos²β -
+    // cos²γ + 2cosα·cosβ·cosγ). For α=β=γ=90° this reduces to 1 (orthogonal),
+    // so it is safe to apply unconditionally. Without it, monoclinic candidates
+    // (VO2 β=122.6°, ZrO2, HfO2, LaPO4, CePO4) get a·b·c volumes inflated by
+    // up to ~20%, which inflates the PV enthalpy penalty and unfairly demotes
+    // them in the Stage 1 ranking — the same orthogonal-cell assumption that
+    // Stage 1 input generation (cellAlpha/cellBeta/cellGamma below) avoids.
+    const enthalpyKS = lookupKnownStructure(formula);
+    const volAlpha = (enthalpyKS?.alpha ?? 90) * Math.PI / 180;
+    const volBeta = (enthalpyKS?.beta ?? 90) * Math.PI / 180;
+    const volGamma = (enthalpyKS?.gamma ?? 90) * Math.PI / 180;
+    const cosA = Math.cos(volAlpha), cosB = Math.cos(volBeta), cosG = Math.cos(volGamma);
+    const cellAngleFactor = Math.sqrt(Math.max(0,
+      1 - cosA * cosA - cosB * cosB - cosG * cosG + 2 * cosA * cosB * cosG));
     const perAtomEnthalpy = (r: { result: StageResult; candidate: StructureCandidate }) => {
       const nAtoms = r.result.positions.length || r.candidate.positions.length || 1;
       const E = r.result.totalEnergy; // eV total
@@ -536,7 +551,7 @@ export async function runStagedRelaxation(opts: StagedRelaxationOpts): Promise<S
       const a = r.candidate.latticeA;
       const bOverA = r.candidate.latticeB ? r.candidate.latticeB / a : 1.0;
       const cOverA = r.candidate.cOverA ?? (r.candidate.latticeC ? r.candidate.latticeC / a : 1.0);
-      const cellVolAng3 = a * a * a * bOverA * cOverA;
+      const cellVolAng3 = a * a * a * bOverA * cOverA * cellAngleFactor;
       const volPerAtom = cellVolAng3 / Math.max(1, nAtoms);
       const PVperAtom = pressureGPa * volPerAtom * GPA_ANGSTROM3_TO_EV;
       return E / nAtoms + PVperAtom;
@@ -644,7 +659,23 @@ async function runStage1AtomicRelax(
   const t0 = Date.now();
   const positions = candidate.positions;
   const latticeA = candidate.latticeA;
-  const cOverA = candidate.cOverA ?? cb.estimateCOverA(elements, counts);
+  const cOverA = candidate.cOverA
+    ?? (candidate.latticeC != null ? candidate.latticeC / latticeA : cb.estimateCOverA(elements, counts));
+  // Preserve orthorhombic b/a from the candidate (MP, POSCAR, AIRSS sources
+  // already supply distinct b). Without this Stage 1 forces b=a, which biases
+  // BFGS into a tetragonal basin and discards structural information the
+  // upstream pipeline paid for.
+  const bOverA = candidate.latticeB != null && candidate.latticeB > 0
+    ? candidate.latticeB / latticeA
+    : 1.0;
+  // Monoclinic angle from literature when available — without this the cell
+  // is generated with β=90° even for known monoclinic compounds (VO2, ZrO2,
+  // HfO2, LaPO4, CePO4) and the BFGS relax cannot recover the true symmetry
+  // since ibrav=0 + initially orthogonal vectors keeps β locked at 90°.
+  const ks = lookupKnownStructure(formula);
+  const cellAlpha = ks?.alpha ?? 90;
+  const cellBeta = ks?.beta ?? 90;
+  const cellGamma = ks?.gamma ?? 90;
   const totalAtoms = positions.length;
   const nTypes = elements.length;
 
@@ -671,7 +702,7 @@ async function runStage1AtomicRelax(
   }
 
   const prefix = formula.replace(/[^a-zA-Z0-9]/g, "");
-  const cellBlock = cb.generateCellParameters(latticeA, cOverA, 0, 1.0, elements, counts);
+  const cellBlock = cb.generateCellParameters(latticeA, cOverA, 0, bOverA, elements, counts, cellAlpha, cellBeta, cellGamma);
 
   // Stage 1 SCF physics — tightened for magnetic systems. The previous params
   // (conv_thr=1e-4, scf_must_converge=.false., mixing_beta=0.4, degauss=0.015)

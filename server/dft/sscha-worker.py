@@ -46,6 +46,7 @@ try:
     import cellconstructor as CC
     import cellconstructor.Phonons
     import cellconstructor.ForceTensor
+    import cellconstructor.Units
     import sscha
     import sscha.Ensemble
     import sscha.SchaMinimizer
@@ -64,8 +65,11 @@ except ImportError:
 
 
 # ─── Constants ──────────────────────────────────────────────────────────────
-BOHR_TO_ANG = 0.529177249
-RY_TO_EV = 13.605698
+# CODATA 2018 — kept in sync with qe-worker.ts and other TS DFT files
+BOHR_TO_ANG = 0.529177210903
+# CODATA 2018 — Rydberg constant times hc → eV: R_∞ × hc = 13.605693122994 eV
+# Previous value 13.605698 was the older (pre-2018) value, off by 5 ppm.
+RY_TO_EV = 13.605693122994
 RY_TO_MEV = RY_TO_EV * 1000.0
 K_BOLTZMANN_EV = 8.617333262e-5  # eV/K
 HBAR_EV_S = 6.582119569e-16  # eV·s
@@ -73,6 +77,36 @@ MAX_SSCHA_ITERATIONS = 20
 MAX_FORCE_CALCS = 2000  # absolute safety cap on total DFT calls
 PW_TIMEOUT_S = 3600  # 1 hour per SCF
 TOTAL_TIMEOUT_S = 86400  # 24 hours total
+
+# Atomic masses in amu (for SSCHA fallback ZPE amplitude calculation).
+ATOMIC_MASSES_AMU = {
+    "H": 1.008, "He": 4.003, "Li": 6.941, "Be": 9.012, "B": 10.811, "C": 12.011,
+    "N": 14.007, "O": 15.999, "F": 18.998, "Na": 22.990, "Mg": 24.305, "Al": 26.982,
+    "Si": 28.086, "P": 30.974, "S": 32.065, "Cl": 35.453, "K": 39.098, "Ca": 40.078,
+    "Sc": 44.956, "Ti": 47.867, "V": 50.942, "Cr": 51.996, "Mn": 54.938, "Fe": 55.845,
+    "Co": 58.933, "Ni": 58.693, "Cu": 63.546, "Zn": 65.380, "Ga": 69.723, "Ge": 72.640,
+    "As": 74.922, "Se": 78.960, "Br": 79.904, "Rb": 85.468, "Sr": 87.620, "Y": 88.906,
+    "Zr": 91.224, "Nb": 92.906, "Mo": 95.960, "Tc": 98.0, "Ru": 101.07, "Rh": 102.91,
+    "Pd": 106.42, "Ag": 107.87, "Cd": 112.41, "In": 114.82, "Sn": 118.71, "Sb": 121.76,
+    "Te": 127.60, "I": 126.90, "Cs": 132.91, "Ba": 137.33, "La": 138.91, "Ce": 140.12,
+    "Pr": 140.91, "Nd": 144.24, "Sm": 150.36, "Eu": 151.96, "Gd": 157.25, "Tb": 158.93,
+    "Dy": 162.50, "Ho": 164.93, "Er": 167.26, "Tm": 168.93, "Yb": 173.04, "Lu": 174.97,
+    "Hf": 178.49, "Ta": 180.95, "W": 183.84, "Re": 186.21, "Os": 190.23, "Ir": 192.22,
+    "Pt": 195.08, "Au": 196.97, "Hg": 200.59, "Tl": 204.38, "Pb": 207.2, "Bi": 208.98,
+    "Th": 232.04, "Pa": 231.04, "U": 238.03,
+}
+
+# Quantum harmonic oscillator amplitude prefactor for σ²[Å²] = K_QHO·(2n+1)/(m_amu·ω_cm).
+# Derivation: σ²[m²] = ℏ·(2n+1)/(2·m·ω) with m in kg, ω = 2πc·ω_cm in rad/s.
+#   ℏ = 1.0546e-34 J·s
+#   1 amu = 1.6605e-27 kg
+#   2πc[m/s] = 2π × 2.998e8 m/s = 1.883e9
+#   ω[rad/s] = 2πc[m/s] × ω_cm[1/m] = 1.883e9 × 100 × ω_cm[1/cm] = 1.883e11 × ω_cm
+#   σ²[m²] = 1.0546e-34·(2n+1)/(2·m_amu·1.6605e-27·1.883e11·ω_cm)
+#          = (2n+1)·1.687e-19 / (m_amu·ω_cm) [m²]
+#          = (2n+1)·16.87 / (m_amu·ω_cm) [Å²]  (×10^20)
+# Sanity check: H @ 3000 cm⁻¹, T=0 → σ² = 16.87/(1.008·3000) = 5.58e-3 Å² → σ ≈ 0.075 Å ✓
+K_QHO_AMPLITUDE_AA2_CM = 16.87
 
 
 def log(msg: str):
@@ -333,8 +367,28 @@ def compute_omega_log_lambda(freqs_cm: np.ndarray, mode_lambdas: np.ndarray) -> 
     return {"omega_log_meV": omega_log_meV, "lambda_total": lam_total}
 
 
+def omega_log_inv_weighted(freqs_cm: np.ndarray) -> float:
+    """
+    Allen-Dynes omega_log estimated from phonon frequencies alone, for the case
+    where per-mode lambda is not available (SSCHA anharmonic frequencies before
+    an EPW re-run). The Allen-Dynes omega_log is the alpha2F/omega-weighted log
+    average; under the DOS-only approximation alpha2F(w) ~ F(w) this reduces to
+    the 1/omega-weighted log average:
+        omega_log = exp[ sum_i (1/w_i) ln(w_i) / sum_i (1/w_i) ].
+    An unweighted geometric mean exp(mean(ln(w))) overweights stiff optical
+    modes and underweights the low-frequency acoustic modes that physically
+    dominate omega_log, systematically overestimating it -> overestimating the
+    Allen-Dynes Tc. Returns omega_log in cm^-1, or 0.0 if no positive modes.
+    """
+    w = freqs_cm[freqs_cm > 1.0]
+    if w.size == 0:
+        return 0.0
+    inv = 1.0 / w
+    return float(np.exp(np.sum(inv * np.log(w)) / np.sum(inv)))
+
+
 def allen_dynes_tc(lambda_ep: float, omega_log_meV: float, mu_star: float = 0.10) -> float:
-    """Allen-Dynes Tc formula. Returns Tc in K."""
+    """Allen-Dynes Tc formula with strong-coupling f1 correction. Returns Tc in K."""
     if lambda_ep < 0.01 or omega_log_meV < 0.01:
         return 0.0
     # k_B = 0.08617 meV/K, so omega_log[meV] / k_B[meV/K] = omega_log[K].
@@ -342,10 +396,20 @@ def allen_dynes_tc(lambda_ep: float, omega_log_meV: float, mu_star: float = 0.10
     # both wrong by a factor of 1000 — K_BOLTZMANN_EV is in eV/K, not meV/K —
     # AND dead code, overwritten on the next line. Now consolidated.)
     omega_log_K = omega_log_meV / 0.08617
-    exponent = -1.04 * (1 + lambda_ep) / (lambda_ep - mu_star * (1 + 0.62 * lambda_ep))
+    denom = lambda_ep - mu_star * (1 + 0.62 * lambda_ep)
+    if denom <= 0:
+        return 0.0
+    exponent = -1.04 * (1 + lambda_ep) / denom
     if exponent > 0 or exponent < -100:
         return 0.0
-    return (omega_log_K / 1.2) * np.exp(exponent)
+    # Allen-Dynes f1 strong-coupling correction (Allen & Dynes, PRB 12, 905
+    # (1975), eq 3.3). SSCHA candidates are strong-coupling hydrides where
+    # lambda >~ 1.5 — without f1 the McMillan-only formula under-predicts Tc
+    # by 10-15%. f2 (spectral-moment correction) requires <omega^2> which
+    # is not available at this call site; f2 -> 1 is the safe fallback.
+    lambda_bar = 2.46 * (1 + 3.8 * mu_star)
+    f1 = (1 + (lambda_ep / lambda_bar) ** 1.5) ** (1 / 3)
+    return (omega_log_K / 1.2) * f1 * np.exp(exponent)
 
 
 # ─── Main SSCHA workflow (with library) ────────────────────────────────────
@@ -399,9 +463,18 @@ def run_sscha_with_library(args) -> dict:
         for i, el in enumerate(unit_cell.atoms):
             if el not in species_set:
                 mass = unit_cell.masses[unit_cell.atoms.index(el)]
-                # Try to find pseudopotential file
-                pp_files = [f for f in os.listdir(args.pseudo_dir)
-                           if f.startswith(el) and f.endswith(".UPF")]
+                # Find pseudopotential file. The element symbol must be
+                # exactly matched as the prefix BEFORE any extension/suffix:
+                # for element "C" we must NOT pick "Ca.UPF" / "Cu.UPF" / etc.
+                # Match patterns: "C.UPF", "C.pbe-...-kjpaw_psl.1.0.0.UPF",
+                # "C_PBE_OPTHARDER.UPF" — i.e., element followed by "." or "_".
+                pp_files = [
+                    f for f in os.listdir(args.pseudo_dir)
+                    if f.endswith(".UPF")
+                    and (f == f"{el}.UPF" or f.startswith(f"{el}.") or f.startswith(f"{el}_"))
+                ]
+                # Prefer the exact-match "{el}.UPF" if multiple variants exist
+                pp_files.sort(key=lambda f: 0 if f == f"{el}.UPF" else 1)
                 pp = pp_files[0] if pp_files else f"{el}.UPF"
                 species_set[el] = (el, mass, pp)
         species_list = list(species_set.values())
@@ -463,6 +536,12 @@ def run_sscha_with_library(args) -> dict:
 
         if minim.is_converged():
             converged = True
+            # Capture the CONVERGED dynamical matrix. Without this the
+            # converged-break skipped the `supercell = minim.dyn` update
+            # below, so the final anharmonic frequencies / omega_log were
+            # extracted from the second-to-last (pre-convergence) dyn —
+            # i.e. the converged result was silently one iteration stale.
+            supercell = minim.dyn
             log(f"  Converged at iteration {iteration}!")
             break
 
@@ -472,9 +551,18 @@ def run_sscha_with_library(args) -> dict:
     # Extract final results
     log("Extracting anharmonic properties...")
 
-    # Get anharmonic phonon frequencies
-    final_dyn = supercell if converged else supercell
-    w_anh, _ = final_dyn.DyagDinQ(0)  # Gamma frequencies in cm^-1
+    # Get anharmonic phonon frequencies. `supercell` now always holds the
+    # latest minimizer dyn — the converged one when converged (captured in
+    # the is_converged() branch above), or the last iteration's otherwise.
+    final_dyn = supercell
+    # cellconstructor's DyagDinQ returns Gamma frequencies in RYDBERG atomic
+    # units (per its docstring), NOT cm^-1. Every consumer below — the >1.0
+    # positive-mode filter, the <-5.0 imaginary count, omega_log_inv_weighted,
+    # and the *0.12398 cm^-1->meV conversion — assumes cm^-1. Without this
+    # rescaling w_anh stays ~0.009 Ry for a real ~1000 cm^-1 phonon, so
+    # positive_w is always empty and omegaLogAnharmonic is silently always 0.
+    w_anh, _ = final_dyn.DyagDinQ(0)
+    w_anh = np.asarray(w_anh) * CC.Units.RY_TO_CM
 
     # Compute omega_log (anharmonic)
     # For a proper calculation we'd need the full Brillouin zone,
@@ -482,8 +570,9 @@ def run_sscha_with_library(args) -> dict:
     positive_w = w_anh[w_anh > 1.0]
 
     if len(positive_w) > 0:
-        # Approximate omega_log from positive frequencies
-        omega_log_cm = np.exp(np.mean(np.log(positive_w)))
+        # Allen-Dynes omega_log: 1/omega-weighted log average (DOS-only
+        # approximation), NOT an unweighted geometric mean.
+        omega_log_cm = omega_log_inv_weighted(positive_w)
         omega_log_meV = omega_log_cm * 0.12398
     else:
         omega_log_meV = 0.0
@@ -581,16 +670,29 @@ def run_sscha_fallback(args) -> dict:
 
     n_imag_harm = int(np.sum(np.array(harmonic_freqs_cm) < -1.0))
 
-    # Build species list from pseudopotential directory
+    # Build species list from pseudopotential directory. Two bugs in the
+    # previous version:
+    #   1. `f.lower().startswith(el.lower())` matched "Ca.UPF" / "Cl.UPF" /
+    #      "Co.UPF" etc. when looking for "C.UPF" — wrong PP assigned to
+    #      Carbon atoms based on filesystem listing order.
+    #   2. Mass hardcoded to 1.0 amu — pw.x's ATOMIC_SPECIES card got
+    #      wrong masses, which affects phonon eigenvector mass-weighting
+    #      if ph.x is run on this SCF.
     species_set = {}
     for el in atom_labels:
         if el not in species_set:
+            # Exact element match: filename must start with "{el}." or "{el}_"
+            # so "C" doesn't match "Ca.UPF". Case-sensitive — QE elements
+            # are capitalized.
             pp_files = [
                 f for f in os.listdir(args.pseudo_dir)
-                if f.lower().startswith(el.lower()) and f.upper().endswith(".UPF")
+                if f.endswith(".UPF")
+                and (f == f"{el}.UPF" or f.startswith(f"{el}.") or f.startswith(f"{el}_"))
             ]
+            pp_files.sort(key=lambda f: 0 if f == f"{el}.UPF" else 1)
             pp = pp_files[0] if pp_files else f"{el}.UPF"
-            species_set[el] = (el, 1.0, pp)
+            mass = ATOMIC_MASSES_AMU.get(el, 50.0)
+            species_set[el] = (el, mass, pp)
     species_list = list(species_set.values())
 
     # Generate displaced configurations
@@ -598,8 +700,26 @@ def run_sscha_fallback(args) -> dict:
     n_configs = min(args.nconfigs, max(2 * n_modes, 20))
     T = args.temperature
 
-    # Thermal displacement amplitude: u ~ sqrt(k_B T / (m * omega^2))
-    # For each mode, displace along eigenvector with Gaussian amplitude
+    # Per-atom mass in amu (used to scale ZPE amplitude per atom — light atoms
+    # like H vibrate with larger amplitude than heavy atoms like U).
+    atom_masses_amu = np.array(
+        [ATOMIC_MASSES_AMU.get(el, 50.0) for el in atom_labels],
+        dtype=float,
+    )
+    # Effective "reduced" mass for a mode where we don't have an eigenvector:
+    # use the harmonic mean of atom masses (closer to the lightest atom, which
+    # dominates the optical-mode amplitude).
+    inv_mean_mass = float(np.mean(1.0 / np.maximum(atom_masses_amu, 0.1)))
+    reduced_mass_amu = 1.0 / inv_mean_mass
+
+    # Quantum-harmonic-oscillator displacement amplitude per mode (Å):
+    #   σ_mode²[Å²] = K_QHO · (2 n_bose + 1) / (m_eff · ω[cm⁻¹])
+    # The previous formula `sqrt((2n+1)·ℏω_eV / (2·ω·0.124e-3))` algebraically
+    # reduced to `sqrt((2n+1)/2)` — a constant ~0.7 with no mass or frequency
+    # dependence — then was clamped to [0.005, 0.15] Å. That gave the SAME
+    # amplitude to every mode regardless of m or ω, completely wrong for
+    # H-rich hydrides where the light-H modes need much larger amplitudes
+    # than the metal-sublattice modes.
     displacements = []
     rng = np.random.default_rng(seed=42)
 
@@ -607,36 +727,40 @@ def run_sscha_fallback(args) -> dict:
         disp = np.zeros((nat, 3))
         for mode_idx in range(n_modes):
             freq_cm = harmonic_freqs_cm[mode_idx] if mode_idx < len(harmonic_freqs_cm) else 100.0
-            if abs(freq_cm) < 5.0:
+            abs_freq = abs(freq_cm)
+            if abs_freq < 5.0:
                 continue  # skip near-zero (acoustic) modes
 
-            # Convert frequency to angular frequency (rad/s)
-            freq_hz = abs(freq_cm) * 2.998e10  # cm^-1 to Hz
-            omega = 2 * np.pi * freq_hz
-
-            # Thermal displacement amplitude in Angstrom
-            # sigma = sqrt(hbar / (2 * m * omega) * coth(hbar*omega/(2*k_B*T)))
-            # Simplified: sigma ~ 0.01-0.1 Angstrom for typical phonon modes
-            hbar_omega_eV = abs(freq_cm) * 0.12398e-3  # cm^-1 to eV
+            # Bose occupation at temperature T
+            hbar_omega_eV = abs_freq * 0.12398e-3  # cm^-1 to eV
             if T > 0 and hbar_omega_eV > 0:
-                n_bose = 1.0 / (np.exp(hbar_omega_eV / (K_BOLTZMANN_EV * T)) - 1.0) \
-                    if hbar_omega_eV / (K_BOLTZMANN_EV * T) < 100 else 0.0
-                sigma = np.sqrt((2 * n_bose + 1) * hbar_omega_eV / (2.0 * abs(freq_cm) * 0.12398e-3))
-                sigma = min(sigma, 0.15)  # cap displacement
-                sigma = max(sigma, 0.005)  # minimum displacement
+                x = hbar_omega_eV / (K_BOLTZMANN_EV * T)
+                n_bose = 1.0 / (np.exp(x) - 1.0) if x < 50 else 0.0
             else:
-                sigma = 0.02
+                n_bose = 0.0
 
-            # Random displacement along mode eigenvector (or random direction if no eigvec)
-            amplitude = rng.normal(0, sigma)
+            # Mode amplitude using reduced mass (mass-aware fallback when
+            # eigenvector is unavailable). σ in Å.
+            sigma_mode_sq = K_QHO_AMPLITUDE_AA2_CM * (2 * n_bose + 1) / (reduced_mass_amu * abs_freq)
+            sigma_mode = float(np.sqrt(max(sigma_mode_sq, 0.0)))
+            # Sanity bounds: prevent pathological values for soft modes (<5 cm⁻¹
+            # already skipped) and for huge mass underestimates.
+            sigma_mode = min(sigma_mode, 0.20)  # 0.2 Å absolute ceiling per mode
+            sigma_mode = max(sigma_mode, 0.001)
+
+            amplitude = rng.normal(0, sigma_mode)
             if eigenvectors is not None and mode_idx < eigenvectors.shape[0]:
                 evec = eigenvectors[mode_idx].reshape(nat, 3)
                 disp += amplitude * evec
             else:
-                # Random direction per atom
+                # Random unit-direction per atom. Per-atom amplitude must scale
+                # as 1/sqrt(m_atom) to recover the quantum amplitude in real
+                # space (the eigenvector branch handles this implicitly via
+                # mass-weighted normalization).
                 direction = rng.normal(0, 1, (nat, 3))
                 direction /= (np.linalg.norm(direction, axis=1, keepdims=True) + 1e-12)
-                disp += (amplitude / np.sqrt(nat)) * direction
+                per_atom_scale = np.sqrt(reduced_mass_amu / atom_masses_amu)[:, None]
+                disp += (amplitude / np.sqrt(nat)) * direction * per_atom_scale
 
         displacements.append(disp)
 
@@ -646,6 +770,7 @@ def run_sscha_fallback(args) -> dict:
     total_force_calcs = 0
     forces_list = []
     energies_list = []
+    used_displacements = []
     start_time = time.time()
     failed_count = 0
 
@@ -682,6 +807,7 @@ def run_sscha_fallback(args) -> dict:
         if result["success"]:
             forces_list.append(result["forces"])
             energies_list.append(result["energy"])
+            used_displacements.append(displacements[ic])
         else:
             failed_count += 1
             log(f"    config {ic} failed: {result.get('error', 'unknown')}")
@@ -705,7 +831,7 @@ def run_sscha_fallback(args) -> dict:
 
     # Fit effective force constants from displacement-force data
     # F = -Phi * u  =>  Phi = -(F^T * u) / (u^T * u) in least-squares sense
-    U_mat = np.array([d.flatten() for d in displacements[:len(forces_list)]])  # (nconf, 3N)
+    U_mat = np.array([d.flatten() for d in used_displacements])  # (nconf, 3N) — paired with successful configs only
     F_mat = np.array([f.flatten() for f in forces_list])  # (nconf, 3N)
 
     # Convert forces from Ry/Bohr to eV/Angstrom for consistent units
@@ -719,34 +845,47 @@ def run_sscha_fallback(args) -> dict:
         # Symmetrize force constant matrix
         Phi = 0.5 * (Phi + Phi.T)
 
-        # Mass-weight the dynamical matrix
-        # D = M^{-1/2} Phi M^{-1/2}
-        # For simplicity, use unit masses (already in natural units)
-        eigenvalues, eigvecs = np.linalg.eigh(Phi)
+        # Mass-weight the dynamical matrix: D_ij = Phi_ij / sqrt(m_i · m_j).
+        # Without this, the diagonalization assumes m=1 amu for every atom —
+        # heavy elements end up with ω too high by sqrt(m_amu): Li by 2.6×,
+        # Fe by 7.5×, U by 15.4×. Critical for any non-H-only system.
+        masses_per_atom = np.array(
+            [ATOMIC_MASSES_AMU.get(el, 50.0) for el in atom_labels],
+            dtype=float,
+        )
+        # Expand to 3N components (each atom has x, y, z)
+        masses_3N = np.repeat(masses_per_atom, 3)
+        sqrt_m = np.sqrt(masses_3N)
+        # D = Phi / (sqrt_m_i * sqrt_m_j) via outer-product division
+        D = Phi / np.outer(sqrt_m, sqrt_m)
 
-        # Convert eigenvalues to frequencies (cm^-1)
-        # omega^2 = eigenvalue (in eV/Angstrom^2/amu)
-        # For proper conversion we need atomic masses
+        eigenvalues, eigvecs = np.linalg.eigh(D)
+
+        # Convert eigenvalues to frequencies (cm^-1):
+        #   D has units eV/(Å²·amu) ⇒ sqrt(D) is angular frequency in units
+        #   where the conversion factor 15.633 maps to THz when m is in amu
+        #   and K in eV/Å². Then 33.356 cm⁻¹/THz to reach the standard unit.
+        # See: https://en.wikipedia.org/wiki/Reciprocal_centimetre#Spectroscopy
         anh_freqs_cm = []
         for ev in eigenvalues:
             if ev > 0:
-                # Approximate: omega (cm^-1) ~ sqrt(ev) * conversion_factor
-                # This is a rough estimate without proper mass weighting
-                freq_THz = np.sqrt(abs(ev)) * 15.633  # rough eV/A^2 -> THz
-                freq_cm = freq_THz * 33.356  # THz -> cm^-1
+                freq_THz = np.sqrt(ev) * 15.633   # eV/(Å²·amu) → THz
+                freq_cm = freq_THz * 33.356        # THz → cm⁻¹
                 anh_freqs_cm.append(freq_cm)
             else:
+                # Imaginary mode — record as negative frequency by convention
                 freq_THz = np.sqrt(abs(ev)) * 15.633
-                freq_cm = freq_THz * 33.356
-                anh_freqs_cm.append(-freq_cm)  # imaginary
+                freq_cm = -freq_THz * 33.356
+                anh_freqs_cm.append(freq_cm)
 
         anh_freqs_cm = np.array(sorted(anh_freqs_cm))
 
-        # Compute anharmonic omega_log
+        # Compute anharmonic omega_log — Allen-Dynes 1/omega-weighted log
+        # average (DOS-only approximation), NOT an unweighted geometric mean.
         positive_mask = anh_freqs_cm > 5.0
         if np.any(positive_mask):
             pos_freqs = anh_freqs_cm[positive_mask]
-            omega_log_cm = np.exp(np.mean(np.log(pos_freqs)))
+            omega_log_cm = omega_log_inv_weighted(pos_freqs)
             omega_log_meV = omega_log_cm * 0.12398
         else:
             omega_log_meV = 0.0
@@ -800,12 +939,21 @@ def parse_dyn_file(filename: str) -> dict:
         atoms = []
         nat = 0
 
-        # Find the line with ntyp, nat, ibrav
+        # Find the line with ntyp, nat, ibrav, celldm(1..6). A QE .dyn file
+        # writes these as bare numbers (no "celldm(1) =" syntax), so celldm(1)
+        # — the alat in Bohr — is the 4th token here. The .dyn cell vectors and
+        # atomic positions are in units of this alat; without it they default
+        # to alat=1 Bohr, collapsing the cell to ~0.5 Å and failing every SCF.
+        alat_bohr = 1.0
         for i, line in enumerate(lines):
-            m = re.match(r"\s*(\d+)\s+(\d+)\s+(\d+)\s+", line)
+            m = re.match(r"\s*(\d+)\s+(\d+)\s+(\d+)\s+([-\d.eE+]+)", line)
             if m and i < 10:
                 ntyp = int(m.group(1))
                 nat = int(m.group(2))
+                try:
+                    alat_bohr = float(m.group(4))
+                except ValueError:
+                    alat_bohr = 1.0
                 break
 
         # Parse cell vectors — typically 3 lines after the lattice parameter line
@@ -823,9 +971,9 @@ def parse_dyn_file(filename: str) -> dict:
                 except (ValueError, IndexError):
                     continue
 
-        # Convert cell from alat units to Angstrom if needed
-        # Look for alat
-        alat_bohr = 1.0
+        # Convert cell from alat units to Angstrom. alat_bohr is taken from the
+        # .dyn header (celldm(1)) above; the explicit-syntax search below is a
+        # harmless override for the rare case a dyn file embeds it that way.
         for line in lines:
             m = re.search(r"celldm\(1\)\s*=\s*([\d.]+)", line)
             if m:
@@ -858,21 +1006,50 @@ def parse_dyn_file(filename: str) -> dict:
 
         positions = np.array(positions)
 
-        # Parse frequencies
+        # Parse frequencies. QE writes dyn-file frequencies in dual-unit form:
+        #   freq (    1) =     -2.345 [THz] =    -78.12 [cm-1]
+        #   omega( 1) =     -2.345 [THz] =    -78.12 [cm-1]
+        #   omega(1-3) = ...    (QE 7.x range form for degenerate modes)
+        # The cm⁻¹ value is the SECOND number on the line — we must skip past
+        # the THz value first. Without this, the regex captured the THz value
+        # and silently stored frequencies that were 33× too small. The
+        # `(?:\s*-\s*\d+)?` clause handles QE 7.x range form `omega(1-3)`
+        # emitted for degenerate modes in cubic/high-symmetry crystals.
         freqs = []
         for line in lines:
-            m = re.search(r"freq\s*\(\s*\d+\)\s*=\s*([-\d.]+)\s*\[cm-1\]", line)
+            # Dual-unit form (standard since QE 6.x)
+            m = re.search(
+                r"(?:freq|omega)\s*\(\s*\d+(?:\s*-\s*\d+)?\s*\)\s*=\s*[-\d.eE+]+\s*\[THz\]\s*=\s*([-\d.eE+]+)\s*\[\s*cm[-^]?-?1\s*\]",
+                line,
+            )
             if m:
-                freqs.append(float(m.group(1)))
-            # Also handle: omega( 1) =  12.345 [cm-1]
-            m2 = re.search(r"omega\s*\(\s*\d+\)\s*=\s*([-\d.]+)\s*\[cm-1\]", line)
-            if m2:
-                freqs.append(float(m2.group(1)))
+                try:
+                    freqs.append(float(m.group(1)))
+                except ValueError:
+                    pass
+                continue
+            # Fallback: cm⁻¹-only form (rare; some older QE versions)
+            m_simple = re.search(
+                r"(?:freq|omega)\s*\(\s*\d+(?:\s*-\s*\d+)?\s*\)\s*=\s*([-\d.eE+]+)\s*\[\s*cm[-^]?-?1\s*\]",
+                line,
+            )
+            if m_simple:
+                try:
+                    freqs.append(float(m_simple.group(1)))
+                except ValueError:
+                    pass
 
         if not freqs:
-            log(f"  No frequencies parsed from {filename}")
-            # Generate dummy frequencies
-            freqs = [100.0] * (3 * len(atoms))
+            # A dyn file written by ph.x always contains the diagonalized
+            # frequency block. An empty parse means the file is truncated or
+            # corrupted. The old behavior fabricated placeholder frequencies
+            # (100 cm^-1 per mode), which silently produced a SSCHA result
+            # with a plausible-looking omega_log and Tc that is pure fiction.
+            # Signal a genuine parse failure instead — the caller already
+            # handles a None return with a proper "Failed to parse dynamical
+            # matrix" error result.
+            log(f"  No frequencies parsed from {filename} — treating as parse failure")
+            return None
 
         return {
             "nat": len(atoms),

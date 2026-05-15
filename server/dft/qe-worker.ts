@@ -150,14 +150,34 @@ function fracDistAngstrom(
   fdx: number, fdy: number, fdz: number,
   latticeA: number, cOverA: number = 1.0, bOverA: number = 1.0,
   gammaRad: number = Math.PI / 2,
+  alphaRad: number = Math.PI / 2,
+  betaRad: number = Math.PI / 2,
 ): number {
   const a = latticeA;
   const b = latticeA * bOverA;
   const c = latticeA * cOverA;
+  // Build the conventional triclinic lattice vectors:
+  //   vec_a = (a, 0, 0)
+  //   vec_b = (b cos γ, b sin γ, 0)
+  //   vec_c = (c cos β, c (cos α − cos β cos γ)/sin γ, c · sqrt(1 − ...)/sin γ)
+  // The previous formula assumed α = β = 90° and only handled γ, giving wrong
+  // distances for any monoclinic (β ≠ 90°) or triclinic cell. For VO₂
+  // (β = 122.6°) this overestimated a+c bond distances by ~50% — bond-length
+  // sanity checks then under-flagged or mis-pair-labeled the closest contacts
+  // and the pre-phonon validator's "expected bond length" ratio for monoclinic
+  // structures was systematically off.
+  const cosA = Math.cos(alphaRad);
+  const cosB = Math.cos(betaRad);
   const cosG = Math.cos(gammaRad);
-  const dx = fdx * a + fdy * b * cosG;
-  const dy = fdy * b * Math.sin(gammaRad);
-  const dz = fdz * c;
+  const sinG = Math.sin(gammaRad);
+  const cx = c * cosB;
+  // Guard against degenerate γ → 0/π where sinG → 0 (would be a singular cell).
+  const cy = sinG > 1e-10 ? c * (cosA - cosB * cosG) / sinG : 0;
+  const czSq = c * c - cx * cx - cy * cy;
+  const cz = czSq > 0 ? Math.sqrt(czSq) : 0;
+  const dx = fdx * a + fdy * b * cosG + fdz * cx;
+  const dy = fdy * b * sinG + fdz * cy;
+  const dz = fdz * cz;
   return Math.sqrt(dx * dx + dy * dy + dz * dz);
 }
 
@@ -516,7 +536,16 @@ function resolvePPFilename(element: string): string {
 function detectPPType(element: string): "paw" | "uspp" | "nc" {
   const ppPath = path.join(QE_PSEUDO_DIR, resolvePPFilename(element));
   try {
-    const head = fs.readFileSync(ppPath, "utf-8").slice(0, 2000);
+    // The PP type flags (is_paw / is_ultrasoft / pseudo_type) live in the
+    // <PP_HEADER> element, which UPF v2 places AFTER the <PP_INFO> block.
+    // PP_INFO carries the generation log and can run past 2 KB — verified
+    // 7 PSL pseudos (Ce, La, Nb, W, Y, Zn, Zr) whose PP_HEADER starts
+    // beyond byte 2000. A 2 KB window missed them entirely and the
+    // function silently returned the "paw" fallback, which mis-sized
+    // ecutrho for any USPP element not also in HARD_PAW_ELEMENTS.
+    // readFileSync already loads the whole file, so widening the slice
+    // costs no extra I/O.
+    const head = fs.readFileSync(ppPath, "utf-8").slice(0, 65536);
     if (head.includes('is_paw="true"') || head.includes("is_paw='.true.'") || head.includes("pseudo_type=\"PAW\"")) return "paw";
     if (head.includes('is_ultrasoft="true"') || head.includes("is_ultrasoft='.true.'") || head.includes("pseudo_type=\"US\"") || head.includes("Ultrasoft")) return "uspp";
     if (head.includes("pseudo_type=\"NC\"") || head.includes("Norm-Conserving") || head.includes("norm-conserving")) return "nc";
@@ -539,7 +568,13 @@ function detectPPType(element: string): "paw" | "uspp" | "nc" {
 function detectPPHasSOC(element: string): boolean {
   const ppPath = path.join(QE_PSEUDO_DIR, resolvePPFilename(element));
   try {
-    const head = fs.readFileSync(ppPath, "utf-8").slice(0, 4000);
+    // has_so lives in <PP_HEADER>, which follows the (variable-length)
+    // <PP_INFO> block — observed up to byte ~2950 in the current pseudo
+    // set, leaving little margin under a 4 KB window. Read a generous
+    // window so a larger PP_INFO can't push has_so out of view and
+    // cause a fully-relativistic pseudo to be misread as scalar (which
+    // would silently downgrade lspinorb and drop SO splitting).
+    const head = fs.readFileSync(ppPath, "utf-8").slice(0, 65536);
     if (head.includes('has_so="T"') || head.includes("has_so='.true.'")) return true;
     if (head.match(/relativistic\s*[:=]\s*['"]?full/i)) return true;
   } catch {}
@@ -633,7 +668,13 @@ function getAtomicMass(el: string): number {
   const local = ELEMENT_DATA[el];
   if (local) return local.mass;
   const central = getElementData(el);
-  return central ? central.atomicMass : 50;
+  if (central) return central.atomicMass;
+  // Both tables missed this element. Falling back to 50 amu silently biases
+  // phonon frequencies (ω ∝ 1/√M, so a wrong mass shifts every frequency
+  // for this species). Log a warning so the misclassification surfaces
+  // instead of producing subtly wrong Tc predictions downstream.
+  console.warn(`[QE-Worker] getAtomicMass: no mass for element "${el}" in ELEMENT_DATA or central elemental-data — falling back to 50 amu. Phonons for this species will be off by sqrt(M_real/50).`);
+  return 50;
 }
 
 function getZValence(el: string): number {
@@ -1153,9 +1194,16 @@ function getUnsupportedElement(elements: string[]): string | null {
 function validateSemicorePP(element: string, ppPath: string): boolean {
   if (!SEMICORE_REQUIRED.has(element)) return true;
   try {
+    // z_valence / number_of_wfc are <PP_HEADER> attributes, which sit after
+    // the variable-length <PP_INFO> block — observed up to byte ~3240 in the
+    // current pseudo set, leaving < 900 bytes of margin under a 4 KB read.
+    // Use a generous 64 KB buffer so a larger PP_INFO can't push the header
+    // attributes out of view and cause a valid semicore PP to be rejected
+    // (triggering a needless re-download) or a deficient one to pass.
+    const HEADER_READ_BYTES = 65536;
     const fd = fs.openSync(ppPath, "r");
-    const buf = Buffer.alloc(4096);
-    const bytesRead = fs.readSync(fd, buf, 0, 4096, 0);
+    const buf = Buffer.alloc(HEADER_READ_BYTES);
+    const bytesRead = fs.readSync(fd, buf, 0, HEADER_READ_BYTES, 0);
     fs.closeSync(fd);
     const header = buf.toString("utf-8", 0, bytesRead).toLowerCase();
 
@@ -1983,8 +2031,18 @@ function computeEcutwfc(elements: string[], extraBoost: number = 0, hydrogenFloo
 // QE default (≈ nelec/2 + 20% buffer) drifts upward with total electron
 // count and wastes effort on high-lying unoccupied bands we never use.
 // Formula mirrors aiida-quantumespresso's PwBaseWorkChain default:
-// nbnd = ceil(nelec/2) + max(4, ceil(nelec * 0.10))
-// Doubled when nspin=2 because each band is per-spin in QE.
+//   nbnd_per_spin = ceil(nelec/2) + max(4, ceil(nelec * 0.10))
+//
+// For nspin=2 we double this. Note: QE's `nbnd` is already per-spin (QE
+// internally allocates 2*nbnd states when nspin=2), so doubling is NOT a
+// physics requirement — aiida and standard QE tutorials use the same
+// per-spin nbnd for nspin=2 as for nspin=1. We double anyway as a
+// CONVERGENCE AID for magnetic systems near van Hove singularities or
+// with strong spin-up/spin-down band asymmetry, where extra empty bands
+// help SCF reach the correct ground state. Trade-off: ~2× memory and
+// ~2× per-iteration cost vs. fewer TOO_FEW_BANDS retries. The handler
+// at line 7393 bumps nbnd anyway if it ever fails, so a tighter starting
+// nbnd would be safe — kept conservative for now.
 /**
  * Compute nbnd for QE. Uses actual atom count from positions (not formula
  * counts) to handle supercells correctly. Known structures like Nb3Sn in
@@ -2075,6 +2133,7 @@ function isAFMCandidate(elements: string[], counts: Record<string, number>): boo
   const hasP = elements.includes("P");
   const hasSe = elements.includes("Se");
   const hasTe = elements.includes("Te");
+  const hasS = elements.includes("S");
 
   if (hasCu && hasO) {
     const oCount = counts["O"] || 0;
@@ -2082,7 +2141,14 @@ function isAFMCandidate(elements: string[], counts: Record<string, number>): boo
     if (oCount >= 2 && cuCount >= 1) return true;
   }
 
-  if (hasFe && (hasAs || hasP || hasSe || hasTe)) return true;
+  // Include S in the chalcogenide check — Fe-S compounds (FeS mackinawite,
+  // FeS2 pyrite/marcasite, Fe7S8 pyrrhotite) are antiferromagnetic ground
+  // states and should get AFM starting_magnetization in the initial SCF
+  // input. Matches the parallel fix in magnetic-ground-state.ts:
+  // shouldSearchMagneticGS (iteration 105). Without S here, Fe-sulfide
+  // initial SCFs seeded FM until the magnetic-GS search re-ran with the
+  // correct ordering, costing an extra round of SCF iterations.
+  if (hasFe && (hasAs || hasP || hasSe || hasTe || hasS)) return true;
 
   if (elements.includes("Mn") && hasO) return true;
   if (elements.includes("Cr") && hasO) return true;
@@ -2096,9 +2162,16 @@ function determineAFMPattern(elements: string[], counts: Record<string, number>)
   const hasFe = elements.includes("Fe");
   const hasAs = elements.includes("As");
   const hasP = elements.includes("P");
+  // Fe-chalcogenide (FeSe, FeTe, FeS family) — stripe/checkerboard AFM is the
+  // pnictide-class ground state per Mazin et al., PRL 101, 057003 (2008).
+  // Was missing Se/Te/S — these compounds got the generic "alternating"
+  // pattern instead of the physically-motivated checkerboard seed.
+  const hasSe = elements.includes("Se");
+  const hasTe = elements.includes("Te");
+  const hasS = elements.includes("S");
 
   if (hasCu && hasO) return "layered";
-  if (hasFe && (hasAs || hasP)) return "checkerboard";
+  if (hasFe && (hasAs || hasP || hasSe || hasTe || hasS)) return "checkerboard";
   if (elements.includes("Mn") && hasO) return "checkerboard";
   return "alternating";
 }
@@ -2246,8 +2319,15 @@ function generateCellParameters(
 function latticeVectorsFromParams(
   latticeA: number, cOverA: number, bOverA: number,
   elements?: string[], counts?: Record<string, number>,
+  alpha: number = 90, beta: number = 90, gamma: number = 90,
 ): number[][] {
-  const cellStr = generateCellParameters(latticeA, cOverA, 0, bOverA, elements, counts);
+  // Angles propagated so monoclinic/triclinic candidates get the correct
+  // cell vectors. Without this, the DMFT pipeline (the sole caller) was
+  // generating a Wannier90 .win file with an orthorhombic cell while QE
+  // NSCF ran with the actual monoclinic β — Wannier projections then
+  // misaligned with the electronic structure, and the downstream DMFT
+  // bundle had inconsistent lattice_vectors vs the H(R) it described.
+  const cellStr = generateCellParameters(latticeA, cOverA, 0, bOverA, elements, counts, alpha, beta, gamma);
   const lines = cellStr.split("\n").filter(l => l.trim() && !l.includes("CELL_PARAMETERS"));
   return lines.map(line => {
     const nums = line.trim().split(/\s+/).map(Number);
@@ -2291,8 +2371,18 @@ function generateSCFInput(
     atomicSpecies += `  ${el}  ${mass.toFixed(3)}  ${resolvePPFilename(el)}\n`;
   }
 
+  // Pass `formula` and `latticeA` so the Tier-0 known-structure lookup +
+  // perturbPositions path inside generateAtomicPositions can fire. Without
+  // these arguments, every SCF — including the ones for literature compounds
+  // already in known-structures.ts (LaH10, CaH6, MgB2, H3S, etc.) — fell
+  // straight through to the generic prototype/fallback positions, while the
+  // cell block at line 2321 still used the known-structure lattice. That's
+  // an inconsistent atoms-cell pair: the cell shape was right, but the
+  // ATOMIC_POSITIONS came from a guess. ph.x downstream then had to relax
+  // around a wrong starting geometry and frequently produced soft modes
+  // that real Wyckoff positions wouldn't.
   let atomicPositions = "";
-  const positions = generateAtomicPositions(elements, counts);
+  const positions = generateAtomicPositions(elements, counts, formula, latticeA);
   for (const pos of positions) {
     atomicPositions += `  ${pos.element}  ${pos.x.toFixed(6)}  ${pos.y.toFixed(6)}  ${pos.z.toFixed(6)}\n`;
   }
@@ -3318,6 +3408,8 @@ function findMinBondLength(
   cOverA: number,
   bOverA: number,
   gammaRad: number,
+  alphaRad: number = Math.PI / 2,
+  betaRad: number = Math.PI / 2,
 ): { minDistAng: number; pair: string; expectedAng: number; ratio: number } {
   let minDist = Infinity;
   let minPair = "?";
@@ -3332,7 +3424,7 @@ function findMinBondLength(
       fdx -= Math.round(fdx);
       fdy -= Math.round(fdy);
       fdz -= Math.round(fdz);
-      const d = fracDistAngstrom(fdx, fdy, fdz, latticeA, cOverA, bOverA, gammaRad);
+      const d = fracDistAngstrom(fdx, fdy, fdz, latticeA, cOverA, bOverA, gammaRad, alphaRad, betaRad);
       if (d < minDist) {
         minDist = d;
         const [a, b] = [pi.element, pj.element].sort();
@@ -3365,6 +3457,13 @@ function runPrePhononValidation(opts: {
   cOverA: number;
   bOverA: number;
   gammaRad: number;
+  /** α/β in radians — π/2 (90°) for cubic/tetragonal/orthorhombic/hexagonal,
+   *  not 90° only for monoclinic (β ≠ 90°) and triclinic. Default π/2 keeps
+   *  the legacy orthogonal-cell behavior; pass the known-structure angles
+   *  for monoclinic candidates so findMinBondLength reports correct
+   *  inter-atomic distances. */
+  alphaRad?: number;
+  betaRad?: number;
   vcRelaxStdout: string | null;
   phononPrepScfStdout: string | null;
   isMetallic: boolean | undefined;
@@ -3412,9 +3511,11 @@ function runPrePhononValidation(opts: {
     warnings.push(`atomic reorganization: atom #${rms.maxAtomIdx} moved ${rms.max.toFixed(3)} frac (>0.20) — likely hopped to a new Wyckoff site`);
   }
 
-  // (3) Bond-length sanity
+  // (3) Bond-length sanity — pass α/β when known so monoclinic c-axis bonds
+  // get correct distances. Defaults to 90° (orthogonal cell convention).
   const bond = findMinBondLength(
     opts.finalPositions, opts.latticeA, opts.cOverA, opts.bOverA, opts.gammaRad,
+    opts.alphaRad ?? Math.PI / 2, opts.betaRad ?? Math.PI / 2,
   );
   console.log(`[Pre-Phonon] ${formula} min bond: ${bond.pair}=${bond.minDistAng.toFixed(3)} Å (expect ~${bond.expectedAng.toFixed(3)} Å from atomic radii, ratio=${bond.ratio.toFixed(2)})`);
   if (bond.ratio < 0.70) {
@@ -3587,9 +3688,38 @@ function parseSmearingEntropy(stdout: string): number | null {
  * tracks whether any local moment formed at all.
  */
 function parseFinalMagnetization(stdout: string): { total: number | null; absolute: number | null } {
-  const totalMatches = [...stdout.matchAll(/total magnetization\s+=\s+(-?[\d.]+)/g)];
+  // Collinear (nspin=2):  "total magnetization =     1.23 Bohr mag/cell"
+  // Non-collinear:        "total magnetization =     0.00     0.00     1.23 Bohr mag/cell"
+  // Same bug as parseSCFOutput's magnetization parser (iteration 106): the
+  // single-number regex captured only M_x for NC cells, making non-collinear
+  // FM aligned to z (M_z dominant) look AFM-like (total ≈ 0). The pre-phonon
+  // validation's ratioVc = |total|/|absolute| would be ~0 (AFM signature)
+  // even though the true config was FM, producing spurious "FM↔AFM
+  // transition" warnings between vc-relax and phonon-prep SCF.
+  let total: number | null = null;
+  const totalLineMatches = [...stdout.matchAll(/total magnetization\s+=\s+([^\n]+?Bohr mag\/cell)/g)];
+  if (totalLineMatches.length > 0) {
+    const line = totalLineMatches[totalLineMatches.length - 1][1];
+    const nums = line.match(/-?\d+\.?\d*(?:[eE][-+]?\d+)?/g) ?? [];
+    const components = nums.map(parseFloat).filter(Number.isFinite);
+    if (components.length === 1) {
+      total = components[0];
+    } else if (components.length >= 3) {
+      const [mx, my, mz] = components.slice(0, 3);
+      const norm = Math.sqrt(mx * mx + my * my + mz * mz);
+      const dominant = Math.abs(mx) >= Math.abs(my) && Math.abs(mx) >= Math.abs(mz) ? mx
+                     : Math.abs(my) >= Math.abs(mz) ? my : mz;
+      total = norm * (dominant < 0 ? -1 : 1);
+    }
+  }
+  // Legacy single-number fallback for QE versions without the "Bohr mag/cell" suffix.
+  if (total === null) {
+    const totalMatches = [...stdout.matchAll(/total magnetization\s+=\s+(-?[\d.]+)/g)];
+    if (totalMatches.length > 0) {
+      total = parseFloat(totalMatches[totalMatches.length - 1][1]);
+    }
+  }
   const absMatches = [...stdout.matchAll(/absolute magnetization\s+=\s+(-?[\d.]+)/g)];
-  const total = totalMatches.length > 0 ? parseFloat(totalMatches[totalMatches.length - 1][1]) : null;
   const absolute = absMatches.length > 0 ? parseFloat(absMatches[absMatches.length - 1][1]) : null;
   return {
     total: total != null && Number.isFinite(total) ? total : null,
@@ -3651,6 +3781,35 @@ function predictMetallicCharacter(
   if (hasH && hasMetallic && !hasHalogen) return "metal";
   // Everything else (semiconductor-like, multinaries): ambiguous
   return "ambiguous";
+}
+
+// Parse the QE run wall time (seconds) from the total-clock line. pw.x heads
+// it "PWSCF :", ph.x heads it "PHONON :", followed by "<cpu> CPU <wall> WALL".
+// Each time uses one of three magnitude-dependent formats:
+//   < 1 min:   "12.34s"        < 1 hour:  "45m18.23s"        >= 1 hour: "1h23m"
+// The >=1h format omits seconds ENTIRELY. The previous regexes all required a
+// trailing "<digits>s WALL", so every multi-hour vc-relax / refinement pass
+// parsed wallTimeSeconds = 0 (the refinement loop then logged "wall=0s" and
+// totalRefineWallSec never accumulated). Anchoring on the total-clock line also
+// stops us from picking a tiny leaf-routine clock (davcio etc.) as the total.
+function parseQEWallSeconds(stdout: string): number {
+  const pwscfLines = [...stdout.matchAll(/(?:PWSCF|PHONON)\s*:\s*\S.*?\sCPU\s+(.+?)\s+WALL/g)];
+  let token: string | null = null;
+  if (pwscfLines.length > 0) {
+    token = pwscfLines[pwscfLines.length - 1][1];
+  } else {
+    // Fallback: no PWSCF line (truncated/SIGKILLed output) — last WALL clock.
+    const anyWall = [...stdout.matchAll(/(\d+h\s*\d+m(?:\s*[\d.]+s)?|\d+m\s*[\d.]+s|[\d.]+s)\s+WALL/g)];
+    if (anyWall.length > 0) token = anyWall[anyWall.length - 1][1];
+  }
+  if (!token) return 0;
+  const hm = token.match(/(\d+)\s*h\s*(\d+)\s*m(?:\s*([\d.]+)\s*s)?/);
+  if (hm) return parseInt(hm[1]) * 3600 + parseInt(hm[2]) * 60 + (hm[3] ? parseFloat(hm[3]) : 0);
+  const ms = token.match(/(\d+)\s*m\s*([\d.]+)\s*s/);
+  if (ms) return parseInt(ms[1]) * 60 + parseFloat(ms[2]);
+  const s = token.match(/([\d.]+)\s*s/);
+  if (s) return parseFloat(s[1]);
+  return 0;
 }
 
 function parseSCFOutput(stdout: string, degaussRy: number = 0.005): QESCFResult {
@@ -3767,26 +3926,7 @@ function parseSCFOutput(stdout: string, degaussRy: number = 0.005): QESCFResult 
     result.pressure = parseFloat(pressureMatches[pressureMatches.length - 1][1]) / 10;
   }
 
-  // Use LAST WALL time — the final "PWSCF : ... WALL" line is the total.
-  // QE writes wall time BEFORE the "WALL" suffix, in the format:
-  //   PWSCF        :     1m17.21s CPU     1m20.43s WALL          (Xm Y.Ys)
-  //   PWSCF        :  1h12m18.27s CPU  1h13m45.32s WALL          (XhXmY.Ys)
-  //   PWSCF        :     45.32s CPU     46.10s WALL               (Y.Ys)
-  // The previous regex looked for "WALL : <time>" (WALL first, time after) —
-  // a pattern QE never emits — so wallTimeSeconds stayed 0 for every SCF run.
-  const wallHmsMatches = [...stdout.matchAll(/(\d+)h\s*(\d+)m\s*([\d.]+)s\s+WALL/g)];
-  const wallMsMatches = [...stdout.matchAll(/(\d+)m\s*([\d.]+)s\s+WALL/g)];
-  const wallSecMatches = [...stdout.matchAll(/([\d.]+)s\s+WALL/g)];
-  if (wallHmsMatches.length > 0) {
-    const m = wallHmsMatches[wallHmsMatches.length - 1];
-    result.wallTimeSeconds = parseInt(m[1]) * 3600 + parseInt(m[2]) * 60 + parseFloat(m[3]);
-  } else if (wallMsMatches.length > 0) {
-    const m = wallMsMatches[wallMsMatches.length - 1];
-    result.wallTimeSeconds = parseInt(m[1]) * 60 + parseFloat(m[2]);
-  } else if (wallSecMatches.length > 0) {
-    const m = wallSecMatches[wallSecMatches.length - 1];
-    result.wallTimeSeconds = parseFloat(m[1]);
-  }
+  result.wallTimeSeconds = parseQEWallSeconds(stdout);
 
   // Use LAST magnetization — changes between ionic steps in vc-relax.
   // total magnetization = signed net moment (≈0 for AFM); absolute = ∫|m(r)| d³r.
@@ -3795,9 +3935,36 @@ function parseSCFOutput(stdout: string, degaussRy: number = 0.005): QESCFResult 
   // signed total, so AFM cuprates / Fe-pnictides looked non-magnetic to
   // dft-job-queue's `qeIsMagnetic` flag (`abs(total) > 0.5`) and bypassed
   // the magnetic ML feature path.
-  const magMatches = [...stdout.matchAll(/total magnetization\s+=\s+(-?[\d.]+)/g)];
-  if (magMatches.length > 0) {
-    result.magnetization = parseFloat(magMatches[magMatches.length - 1][1]);
+  // Collinear (nspin=2):  "total magnetization =     1.23 Bohr mag/cell"   (single scalar)
+  // Non-collinear:        "total magnetization =     0.00     0.00     1.23 Bohr mag/cell"
+  // Capture all numbers on the line and use the L2 norm of the vector. The
+  // previous single-number regex captured only M_x, so non-collinear AFM
+  // ordered along z reported magnetization = 0 and looked non-magnetic to
+  // any consumer reading `result.magnetization` directly.
+  const magLineMatches = [...stdout.matchAll(/total magnetization\s+=\s+([^\n]+?Bohr mag\/cell)/g)];
+  if (magLineMatches.length > 0) {
+    const line = magLineMatches[magLineMatches.length - 1][1];
+    const nums = line.match(/-?\d+\.?\d*(?:[eE][-+]?\d+)?/g) ?? [];
+    const components = nums.map(parseFloat).filter(Number.isFinite);
+    if (components.length === 1) {
+      result.magnetization = components[0];
+    } else if (components.length >= 3) {
+      // Magnitude of the 3-vector; preserve sign convention by taking the
+      // dominant component's sign so AFM-like cancellation still shows ≈0.
+      const [mx, my, mz] = components.slice(0, 3);
+      const norm = Math.sqrt(mx * mx + my * my + mz * mz);
+      const dominant = Math.abs(mx) >= Math.abs(my) && Math.abs(mx) >= Math.abs(mz) ? mx
+                     : Math.abs(my) >= Math.abs(mz) ? my : mz;
+      result.magnetization = norm * (dominant < 0 ? -1 : 1);
+    }
+  }
+  // Fallback to legacy single-number regex if the new one didn't match
+  // (handles QE versions / verbosity that omit the "Bohr mag/cell" suffix).
+  if (result.magnetization === null) {
+    const magMatches = [...stdout.matchAll(/total magnetization\s+=\s+(-?[\d.]+)/g)];
+    if (magMatches.length > 0) {
+      result.magnetization = parseFloat(magMatches[magMatches.length - 1][1]);
+    }
   }
   const absMagMatches = [...stdout.matchAll(/absolute magnetization\s+=\s+(-?[\d.]+)/g)];
   if (absMagMatches.length > 0) {
@@ -3883,13 +4050,29 @@ function parsePhononOutput(stdout: string): QEPhononResult {
     result.hasImaginary = result.imaginaryCount > 0;
   }
 
-  // ph.x convergence markers — "End of self-consistent calculation" belongs to pw.x
-  result.converged = (
-    stdout.includes("Phonon calculation on a mesh") ||
-    stdout.includes("Writing dynmat at Gamma") ||
-    stdout.includes("PHONON       :") ||
-    (result.frequencies.length > 0 && !stdout.includes("ERROR") && !stdout.includes("stopping"))
-  );
+  // ph.x convergence detection. Previously OR'd "Phonon calculation on a mesh"
+  // into the condition, but that string is printed at the START of every
+  // ldisp=.true. run (before any computation). A timed-out / crashed ph.x
+  // that produced only the header still set converged=true, so downstream
+  // Eliashberg / EPC steps ran on partial data and produced garbage λ/ω_log.
+  //
+  // QE markers and what each actually signals:
+  //   - "Phonon calculation on a mesh" — START of ldisp=.true. run (NOT a success signal)
+  //   - "Writing dynmat at Gamma"      — one q-point complete (partial)
+  //   - "PHONON       :"               — timing summary (printed at clean exit,
+  //                                       including clean max_seconds timeouts)
+  //   - "JOB DONE"                     — universal QE clean-exit marker
+  //                                       (also fires for max_seconds timeouts)
+  //
+  // Neither "PHONON :" nor "JOB DONE" alone proves successful convergence —
+  // they're both compatible with a clean max-seconds exit. The reliable test
+  // is: frequencies parsed AND no failure markers in the output. The dynmat-
+  // at-gamma marker adds confidence (we got at least one q-point's worth of
+  // data) but only when frequencies were also extracted.
+  const phononHadFailure = stdout.includes("ERROR")
+    || stdout.includes("stopping")
+    || stdout.includes("Maximum CPU time exceeded");
+  result.converged = result.frequencies.length > 0 && !phononHadFailure;
 
   // QE wall time format: "PHONON       :   2m39.47s CPU   2m52.16s WALL"
   // Pattern: optional "Xh" then "Xm" then "Y.Ys" then "WALL" (WALL is a suffix).
@@ -3897,19 +4080,7 @@ function parsePhononOutput(stdout: string): QEPhononResult {
   // stdout. The previous code used .match() (first match) which for short
   // runs (<1 min) returned init_run's 1-2s in the seconds-only fallback
   // instead of the actual phonon calculation time.
-  const phWallHmsMatches = [...stdout.matchAll(/(\d+)h\s*(\d+)m\s*([\d.]+)s\s+WALL/g)];
-  const phWallMsMatches = [...stdout.matchAll(/(\d+)m\s*([\d.]+)s\s+WALL/g)];
-  const phWallSecMatches = [...stdout.matchAll(/([\d.]+)s\s+WALL/g)];
-  if (phWallHmsMatches.length > 0) {
-    const m = phWallHmsMatches[phWallHmsMatches.length - 1];
-    result.wallTimeSeconds = parseInt(m[1]) * 3600 + parseInt(m[2]) * 60 + parseFloat(m[3]);
-  } else if (phWallMsMatches.length > 0) {
-    const m = phWallMsMatches[phWallMsMatches.length - 1];
-    result.wallTimeSeconds = parseInt(m[1]) * 60 + parseFloat(m[2]);
-  } else if (phWallSecMatches.length > 0) {
-    const m = phWallSecMatches[phWallSecMatches.length - 1];
-    result.wallTimeSeconds = parseFloat(m[1]);
-  }
+  result.wallTimeSeconds = parseQEWallSeconds(stdout);
 
   return result;
 }
@@ -4533,11 +4704,18 @@ function generateVCRelaxInput(
   const hasHVcr = elements.includes("H");
   const hasMagVcr = elements.some(el => el in MAGNETIC_ELEMENTS);
   const isHighPHydride = hasHVcr && pressureGPa >= 50 && totalAtoms >= 7;
+  // Cuprates (Cu-O layered oxides): SCF is slow — dense Cu-3d bands plus
+  // long-wavelength charge sloshing across the CuO2 planes. With 'plain'
+  // mixing the slosh stalls SCF so each ionic step burns the whole
+  // electron_maxstep budget, leaving only 5-6 ionic steps per pass. They get
+  // local-TF mixing (damps the layered sloshing) + the magnetic-tier 60 min
+  // wall budget so the cell/ion relaxation has room to converge.
+  const isCuprateVcr = elements.includes("Cu") && elements.includes("O") && (counts["O"] ?? 0) >= 2;
   // Atom-count scaling: larger cells need proportionally more time.
   // Base budgets calibrated for 7-atom cells; scale by (nAtoms/7)^1.2 for larger.
   const atomScale = totalAtoms > 7 ? Math.pow(totalAtoms / 7, 1.2) : 1.0;
   const vcRelaxMaxSeconds = isHighPHydride ? Math.round(10800 * atomScale) // 3h base for high-P hydrides, scaled
-    : hasMagVcr ? Math.round(3600 * atomScale)                              // 60 min base for magnetic, scaled
+    : (hasMagVcr || isCuprateVcr) ? Math.round(3600 * atomScale)            // 60 min base for magnetic/cuprate, scaled
     : Math.round(Math.max(600, Math.min(QE_MAX_SECONDS, 1800)) * atomScale); // 30 min base, scaled
   const VC_RELAX_MAX_SECONDS = vcRelaxMaxSeconds;
   // UNIFIED vc-relax: damped dynamics with TIGHT SCF convergence.
@@ -4554,8 +4732,8 @@ function generateVCRelaxInput(
   //   cell_dynamics='damp-w' — cell adjusts gradually with positions
   //   conv_thr=1e-7 — production-quality forces at every ionic step
   //   400 nstep — enough for convergence (slower per step, but accurate)
-  const vcMixingMode = isHighPHydride ? "local-TF" : hasMagVcr ? "local-TF" : "plain";
-  const vcMixingBeta = isHighPHydride ? 0.2 : hasMagVcr ? 0.2 : 0.3;
+  const vcMixingMode = isHighPHydride ? "local-TF" : (hasMagVcr || isCuprateVcr) ? "local-TF" : "plain";
+  const vcMixingBeta = isHighPHydride ? 0.2 : (hasMagVcr || isCuprateVcr) ? 0.2 : 0.3;
 
   return `&CONTROL
   calculation = 'vc-relax',
@@ -4646,29 +4824,27 @@ function parseVCRelaxOutput(stdout: string): VCRelaxResult {
     }
   }
 
-  const energyMatch = stdout.match(/!\s+total energy\s+=\s+([-\d.]+)\s+Ry/);
-  if (energyMatch) {
-    result.totalEnergy = parseFloat(energyMatch[1]) * RY_TO_EV;
+  // vc-relax prints one "! total energy" line per ionic step, plus a final
+  // SCF after the cell converges. We want the LAST occurrence (the final
+  // converged geometry), not the first (the starting unrelaxed geometry).
+  // The non-global `.match()` returns only the first capture — every
+  // vc-relax was reporting the starting-geometry energy as if it were the
+  // relaxed-geometry energy. Symptoms:
+  //   - vcParsed.totalEnergy looked artificially high (starting was un-
+  //     relaxed, real final was lower by 0.1-1 eV/atom typical).
+  //   - The polish-pass ΔE/atom convergence check at line 7011-7012 was
+  //     comparing first-step energies across passes instead of final-step
+  //     energies — partially masked because polishedScf (parsed via the
+  //     fixed parseSCFOutput) was still correct downstream, but the polish
+  //     log line and any consumer reading vcParsed.totalEnergy directly
+  //     saw the wrong number.
+  // Mirrors the LAST-match pattern in parseSCFOutput:3801.
+  const energyMatches = [...stdout.matchAll(/!\s+total energy\s+=\s+([-\d.]+)\s+Ry/g)];
+  if (energyMatches.length > 0) {
+    result.totalEnergy = parseFloat(energyMatches[energyMatches.length - 1][1]) * RY_TO_EV;
   }
 
-  // QE wall time format: "PWSCF : 1m17.21s CPU 1m20.43s WALL"
-  // The previous regex `WALL\s*:\s*<time>` does not exist in QE output, and
-  // the fallback `PWSCF : XmY.Ys` would capture the CPU time (which appears
-  // BEFORE the WALL time on the same line). Use WALL-as-suffix with
-  // matchAll + last to grab the PWSCF total at the end of stdout.
-  const vcWallHmsMatches = [...stdout.matchAll(/(\d+)h\s*(\d+)m\s*([\d.]+)s\s+WALL/g)];
-  const vcWallMsMatches = [...stdout.matchAll(/(\d+)m\s*([\d.]+)s\s+WALL/g)];
-  const vcWallSecMatches = [...stdout.matchAll(/([\d.]+)s\s+WALL/g)];
-  if (vcWallHmsMatches.length > 0) {
-    const m = vcWallHmsMatches[vcWallHmsMatches.length - 1];
-    result.wallTimeSeconds = parseInt(m[1]) * 3600 + parseInt(m[2]) * 60 + parseFloat(m[3]);
-  } else if (vcWallMsMatches.length > 0) {
-    const m = vcWallMsMatches[vcWallMsMatches.length - 1];
-    result.wallTimeSeconds = parseInt(m[1]) * 60 + parseFloat(m[2]);
-  } else if (vcWallSecMatches.length > 0) {
-    const m = vcWallSecMatches[vcWallSecMatches.length - 1];
-    result.wallTimeSeconds = parseFloat(m[1]);
-  }
+  result.wallTimeSeconds = parseQEWallSeconds(stdout);
 
   // Match the LAST CELL_PARAMETERS block (damped dynamics outputs many)
   const cellMatches = [...stdout.matchAll(/CELL_PARAMETERS\s*[{(]\s*([^})]*)\s*[})]\s*\n([\s\S]*?)(?=\n\s*\n|\nATOMIC|\nEnd|\n\s*Writing|\n\s*PWSCF|\n\s*NEW-OLD|$)/g)];
@@ -4763,9 +4939,17 @@ function parseVCRelaxOutput(stdout: string): VCRelaxResult {
             }
             const inv = cellVectorsAng ? invertCell3x3(cellVectorsAng) : null;
             if (inv) {
-              x = inv[0][0]*posAng[0] + inv[0][1]*posAng[1] + inv[0][2]*posAng[2];
-              y = inv[1][0]*posAng[0] + inv[1][1]*posAng[1] + inv[1][2]*posAng[2];
-              z = inv[2][0]*posAng[0] + inv[2][1]*posAng[1] + inv[2][2]*posAng[2];
+              // CELL_PARAMETERS stores lattice vectors as ROWS, so a Cartesian
+              // position relates to fractional coords by R = cellᵀ · f, hence
+              // f = (cellᵀ)⁻¹ · R = (cell⁻¹)ᵀ · R. The earlier form inv · R
+              // (no transpose) is only correct for orthogonal cells where
+              // cell⁻¹ is symmetric — for monoclinic/triclinic/hexagonal cells
+              // it produced wrong fractional coords (e.g. a hexagonal cell maps
+              // an atom at frac (1,0,0) to (1,0.577,0)). Apply the transpose:
+              //   f[i] = Σ_j (cell⁻¹)ᵀ[i][j] R[j] = Σ_j inv[j][i] R[j].
+              x = inv[0][0]*posAng[0] + inv[1][0]*posAng[1] + inv[2][0]*posAng[2];
+              y = inv[0][1]*posAng[0] + inv[1][1]*posAng[1] + inv[2][1]*posAng[2];
+              z = inv[0][2]*posAng[0] + inv[1][2]*posAng[1] + inv[2][2]*posAng[2];
             } else {
               const lat = result.finalLatticeAng ?? 1.0;
               x = posAng[0] / lat;
@@ -5484,6 +5668,38 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       console.log(`[QE-Worker] Injected DFT-cached structure for ${formula}: a=${cachedStructure.latticeA.toFixed(3)} Å, ${cachedStructure.positions.length} atoms, force=${cachedStructure.force.toFixed(6)} (total now: ${structureCandidates.length})`);
     }
 
+    // --- Inject literature known-structure as a top-confidence candidate ---
+    // For verified compounds the known-structures database carries exact
+    // literature Wyckoff positions + anisotropic lattice. generateStructure
+    // Candidates() never injects this DB directly — it relies on a live MP
+    // fetch (often unavailable) and CSP (AIRSS/PyXtal). For complex layered
+    // cells — e.g. the 12-atom Hg-1212 cuprate HgBa2CaCu2O6 (a=3.86, c=12.66,
+    // c/a=3.28) — random CSP never reproduces the layered CuO2-plane motif,
+    // so Stage 1 picks a garbage structure and vc-relax starts at force
+    // ~3.5 Ry/bohr / P~740 kbar. Injecting the literature cell + Wyckoff
+    // positions gives the funnel/Stage 1 the true ground-state geometry to
+    // rank against. Confidence 0.97: above MP-direct (0.90), below
+    // DFT-cached (0.99) since a prior DFT-optimized cell is still better.
+    const ksCandidate = lookupKnownStructure(formula);
+    if (ksCandidate && ksCandidate.atoms.length > 0 && ksCandidate.latticeA > 0) {
+      const ksCOverA = ksCandidate.latticeC && ksCandidate.latticeA > 0
+        ? ksCandidate.latticeC / ksCandidate.latticeA : 1.0;
+      structureCandidates.push({
+        latticeA: ksCandidate.latticeA,
+        latticeB: ksCandidate.latticeB,
+        latticeC: ksCandidate.latticeC,
+        cOverA: ksCOverA,
+        positions: ksCandidate.atoms.map(a => ({ element: a.element, x: a.x, y: a.y, z: a.z })),
+        prototype: "known-structure",
+        crystalSystem: ksCandidate.latticeType ?? "unknown",
+        spaceGroup: ksCandidate.spaceGroup ?? "",
+        source: `Literature structure (${ksCandidate.spaceGroup}, ${ksCandidate.atoms.length} atoms)`,
+        confidence: 0.97,
+        isMetallic: null,
+      });
+      console.log(`[QE-Worker] Injected literature known-structure for ${formula}: ${ksCandidate.spaceGroup}, a=${ksCandidate.latticeA.toFixed(2)} Å${ksCandidate.latticeC ? `, c=${ksCandidate.latticeC.toFixed(2)} Å (c/a=${ksCOverA.toFixed(2)})` : ""}, ${ksCandidate.atoms.length} atoms (total now: ${structureCandidates.length})`);
+    }
+
     // --- Candidate stats logging ---
     try {
       logCandidateStats(structureCandidates as any, formula);
@@ -6119,6 +6335,16 @@ ${guardCell}
       const ecutrhoRelax = ecutwfcRelax * ecutrhoMultiplier(elements);
       const cOverARelax = estimateCOverA(elements, counts);
       const bOverARelax = estimateBOverA(elements, counts);
+      // Look up known-structure angles so monoclinic candidates don't get
+      // distorted back to orthorhombic during the iterative lattice rescaling.
+      // Without this, vc-relax converged the correct monoclinic cell (per
+      // iteration 76's fix), but this rescaling loop generated cell blocks
+      // with all 90° angles — losing the monoclinic shape between vc-relax
+      // and the subsequent SCF/phonon steps.
+      const ksRelax = lookupKnownStructure(formula);
+      const relaxAlpha = ksRelax?.alpha ?? 90;
+      const relaxBeta = ksRelax?.beta ?? 90;
+      const relaxGamma = ksRelax?.gamma ?? 90;
       const hasMagRelax = mayHaveMagneticMoment(elements);
       const nspinRelax = hasMagRelax ? 2 : 1;
       const magLinesRelax = hasMagRelax ? generateMagnetizationLines(elements, counts, isAFMCandidate(elements, counts), !elements.some(el => el in MAGNETIC_ELEMENTS)) : "";
@@ -6144,7 +6370,7 @@ ${guardCell}
           atomicPosRelax += `  ${pos.element}  ${pos.x.toFixed(6)}  ${pos.y.toFixed(6)}  ${pos.z.toFixed(6)}\n`;
         }
         const kptsRelax = autoKPoints(stepA, cOverARelax, bOverARelax, undefined, 0.6, { stage: "relax", totalAtoms: positions.length }).trim();
-        const cellBlockRelax = generateCellParameters(stepA, cOverARelax, 0, bOverARelax, elements, counts);
+        const cellBlockRelax = generateCellParameters(stepA, cOverARelax, 0, bOverARelax, elements, counts, relaxAlpha, relaxBeta, relaxGamma);
 
         const relaxInput = `&CONTROL
   calculation = 'relax',
@@ -6454,7 +6680,17 @@ ${cellBlockEos}
       const hasHVcRelax = elements.includes("H");
       const isHighPHVcRelax = hasHVcRelax && workerPressure >= 50 && positions.length >= 7;
       const hasMagVcRelax = elements.some(el => el in MAGNETIC_ELEMENTS);
-      const vcRelaxMaxSec = isHighPHVcRelax ? 10800 : hasMagVcRelax ? 3600 : 1800; // 3h for high-P hydrides
+      const isCuprateVcRelax = elements.includes("Cu") && elements.includes("O") && (counts["O"] ?? 0) >= 2;
+      // Mirror generateVCRelaxInput's internal VC_RELAX_MAX_SECONDS exactly
+      // (same base × atom-scale): QE's max_seconds is then passed as an
+      // explicit override so it equals the Node kill timeout. Previously the
+      // kill timeout used an unscaled base (1800/3600) while the input file
+      // baked in the atom-scaled value — for >7-atom cells Node SIGKILLed QE
+      // before it printed its clock summary (wall parsed as 0s).
+      const vcRelaxAtomScale = positions.length > 7 ? Math.pow(positions.length / 7, 1.2) : 1.0;
+      const vcRelaxMaxSec = Math.round(
+        (isHighPHVcRelax ? 10800 : (hasMagVcRelax || isCuprateVcRelax) ? 3600 : 1800) * vcRelaxAtomScale,
+      );
       const vcRelaxKillMs = vcRelaxMaxSec * 1000 + 60_000;
 
       // === UNIFIED vc-relax: damped dynamics with tight SCF ===
@@ -6467,6 +6703,7 @@ ${cellBlockEos}
         forceNspin: result.magneticGroundState?.winningNspin,
         forceMagBlock: result.magneticGroundState?.winningMagBlock || undefined,
         hubbardCard: hubbardResult?.applyToVCRelax ? hubbardResult.qeHubbardCard : undefined,
+        maxSecondsOverride: vcRelaxMaxSec,
       });
       const vcFile = path.join(jobDir, "vc_relax.in");
       fs.writeFileSync(vcFile, vcInput);
@@ -6571,6 +6808,10 @@ ${cellBlockEos}
       cleanQETmpDir(path.join(jobDir, "tmp"));
     }
 
+    // Post-refinement max force (Ry/bohr) — visible to the smearing-polish
+    // gate below. Stays 999 if refinement never ran (vc-relax failed).
+    let postRefinementForce = 999;
+
     // === Refinement vc-relax loop: keep restarting until force is publication-ready ===
     // Each pass restarts from the previous pass's final geometry with zeroed velocities,
     // eliminating oscillation and converging tighter. Stops when force drops below
@@ -6657,26 +6898,39 @@ ${cellBlockEos}
             refineNstep = 300; // fallback if no convergence data
           }
 
+          // Timeout per refinement pass, scaled by atom count (base calibrated
+          // for 7 atoms). Computed BEFORE generateVCRelaxInput so it can be
+          // passed as maxSecondsOverride — QE's internal max_seconds MUST match
+          // the Node-side kill timeout. Previously generateVCRelaxInput baked
+          // its own VC_RELAX_MAX_SECONDS (1800·scale) while Node killed at the
+          // shorter refineMaxSec (1200·scale): QE got SIGKILLed mid-run before
+          // printing its clock summary, so the pass logged "wall=0s".
+          const hasHRefine = elements.includes("H");
+          const hasMagRefine = elements.some(el => el in MAGNETIC_ELEMENTS);
+          const isHighPHRefine = hasHRefine && workerPressure >= 50 && positions.length >= 7;
+          // Cuprates need a much larger budget — slow layered-oxide SCF means
+          // only 5-6 ionic steps fit at the 1200 s base. 3600 s base (matched
+          // with local-TF mixing in generateVCRelaxInput) lets more ionic
+          // steps land per pass so the cell/ion geometry actually converges.
+          const isCuprateRefine = elements.includes("Cu") && elements.includes("O") && (counts["O"] ?? 0) >= 2;
+          const refineAtomScale = positions.length > 7 ? Math.pow(positions.length / 7, 1.2) : 1.0;
+          const refineMaxSec = Math.round(
+            (isHighPHRefine ? 9000 : (hasMagRefine || isCuprateRefine) ? 3600 : 1200) * refineAtomScale,
+          );
+          const refineKillMs = refineMaxSec * 1000 + 60_000;
+
           // In pressure-priority mode, use ultra-tight forc_conv_thr (1e-5 Ry/bohr)
           // so QE treats ions as converged immediately and spends all steps on cell.
-          // Also tighten press_conv_thr to drive cell convergence harder.
           const refineInput = generateVCRelaxInput(formula, elements, counts, latticeA, positions, workerPressure, refineNstep, {
             socFlags: socAnalysis?.enableFullSOC ? socAnalysis.qeSystemFlags : undefined,
             forceNspin: result.magneticGroundState?.winningNspin,
             forceMagBlock: result.magneticGroundState?.winningMagBlock || undefined,
             hubbardCard: hubbardResult?.applyToVCRelax ? hubbardResult.qeHubbardCard : undefined,
             pressurePriority: isPressurePriority,
+            maxSecondsOverride: refineMaxSec,
           });
           const refineFile = path.join(jobDir, `vc_relax_refine${refinePass}.in`);
           fs.writeFileSync(refineFile, refineInput);
-
-          const hasHRefine = elements.includes("H");
-          const hasMagRefine = elements.some(el => el in MAGNETIC_ELEMENTS);
-          const isHighPHRefine = hasHRefine && workerPressure >= 50 && positions.length >= 7;
-          // Timeout per refinement pass, scaled by atom count (base calibrated for 7 atoms)
-          const refineAtomScale = positions.length > 7 ? Math.pow(positions.length / 7, 1.2) : 1.0;
-          const refineMaxSec = Math.round((isHighPHRefine ? 9000 : hasMagRefine ? 2400 : 1200) * refineAtomScale);
-          const refineKillMs = refineMaxSec * 1000 + 60_000;
 
           console.log(`[QE-Worker] Refinement pass ${refinePass} starting for ${formula} (a=${latticeA.toFixed(3)} A, ${positions.length} atoms, nstep=${refineNstep}, timeout=${refineMaxSec}s)`);
 
@@ -6782,6 +7036,7 @@ ${cellBlockEos}
           console.log(`[QE-Worker] Refinement stopped for ${formula}: force=${currentForce.toFixed(6)} (started at ${startingForce.toFixed(6)}) after ${refinePass} pass${refinePass > 1 ? "es" : ""}, total wall=${totalRefineWallSec.toFixed(0)}s (${(totalRefineWallSec / 60).toFixed(1)} min), force reduced ${forceReduction}%`);
         }
       }
+      postRefinementForce = currentForce;
     }
 
     // --- Smearing-polish vc-relax phase ---
@@ -6794,7 +7049,19 @@ ${cellBlockEos}
     // Each polish pass uses small nstep (200) since geometry is already close
     // and the goal is energy convergence, not geometry overhaul. Timeout is
     // 1.5× the refinement budget to accommodate slower SCF at tight smearing.
-    if (result.vcRelaxed && positions.length > 0) {
+    //
+    // GATE: skip the polish entirely when refinement left the geometry with
+    // force > 0.1 Ry/bohr. The polish only refines the energy/geometry near
+    // an *already-converged* T→0 minimum (nstep=200, small steps). If the
+    // geometry is still far from any minimum, tightening degauss buys nothing
+    // and burns 30–180 min of wall time chasing energy convergence on a
+    // geometry that's still wrong. 0.1 Ry/bohr matches the Stage 1 force gate.
+    const SMEARING_POLISH_FORCE_GATE = 0.1; // Ry/bohr
+    const polishGatePassed = postRefinementForce <= SMEARING_POLISH_FORCE_GATE;
+    if (result.vcRelaxed && positions.length > 0 && !polishGatePassed) {
+      console.log(`[QE-Worker] Skipping smearing-polish for ${formula}: post-refinement force=${postRefinementForce.toFixed(4)} Ry/bohr > ${SMEARING_POLISH_FORCE_GATE} — geometry not converged, polishing the smearing would not help`);
+    }
+    if (result.vcRelaxed && positions.length > 0 && polishGatePassed) {
       const polishLadder: Array<{ degauss: number; convThr: string }> = [
         { degauss: 0.005,  convThr: "1.0d-9"  },
         { degauss: 0.0025, convThr: "1.0d-10" },
@@ -7536,7 +7803,8 @@ ${cellBlockEos}
     } else {
       result.qualityTier = "failed";
     }
-    // Upgraded later: final_converged after phonon, publication_ready after e-ph
+    // Upgraded later (right before DMFT eligibility check): final_converged after
+    // stable phonon + DFPT-grade force, publication_ready after real e-ph + tight force.
 
     // --- Stage 5.5: Convex hull stability assessment ---
     // After SCF converges, estimate how far this structure is from the
@@ -7940,6 +8208,12 @@ ${r2Cell}
               phononPrepScfStdout = fs.readFileSync(path.join(jobDir, pgOuts[pgOuts.length - 1]), "utf-8");
             }
           } catch { /* best effort */ }
+          // Pre-phonon validation: pass known-structure angles when this is
+          // a literature compound. Without α/β, the bond-length sanity check
+          // overestimates c-axis distances for monoclinic candidates and
+          // could mis-flag the closest contact (VO2 β=122.6°, ZrO2/HfO2 ~99°,
+          // VO2-family ~5-50% bond-length error).
+          const prePhononKS = lookupKnownStructure(formula);
           runPrePhononValidation({
             formula,
             elements,
@@ -7949,7 +8223,9 @@ ${r2Cell}
             latticeA,
             cOverA,
             bOverA: bOverAFull,
-            gammaRad: Math.PI / 2,
+            gammaRad: prePhononKS?.gamma != null ? prePhononKS.gamma * Math.PI / 180 : Math.PI / 2,
+            alphaRad: prePhononKS?.alpha != null ? prePhononKS.alpha * Math.PI / 180 : Math.PI / 2,
+            betaRad: prePhononKS?.beta != null ? prePhononKS.beta * Math.PI / 180 : Math.PI / 2,
             vcRelaxStdout,
             phononPrepScfStdout,
             isMetallic: result.scf?.isMetallic,
@@ -8015,13 +8291,22 @@ ${r2Cell}
                 const dispLines = modeBlock.trim().split("\n").filter(l => l.trim().length > 0);
                 const displacements: Array<{dx: number; dy: number; dz: number}> = [];
                 for (const line of dispLines) {
-                  // Format: ( dx  0.000) ( dy  0.000) ( dz  0.000)
-                  const nums = line.match(/\(\s*([-\d.]+)\s+[-\d.]+\s*\)/g);
+                  // Format: ( dx_real  dx_imag ) ( dy_real  dy_imag ) ( dz_real  dz_imag )
+                  // Accept scientific notation (e/E/d/D exponent forms) — dynmat.x emits
+                  // small eigenvector components as e.g. "1.234E-05". The prior
+                  // `[-\d.]+` regex silently truncated those at the 'E', giving
+                  // e.g. 1.234 instead of 1.234e-5 (off by 5 orders of magnitude).
+                  // Matches the same pattern used in zone-boundary-softmode.ts's
+                  // parseEigenvectors for consistency.
+                  const numRe = "[-+]?(?:\\d+\\.?\\d*|\\.\\d+)(?:[eEdD][-+]?\\d+)?";
+                  const pairRegex = new RegExp(`\\(\\s*(${numRe})\\s+${numRe}\\s*\\)`, "g");
+                  const nums = line.match(pairRegex);
                   if (nums && nums.length >= 3) {
+                    const innerRe = new RegExp(`\\(\\s*(${numRe})`);
                     displacements.push({
-                      dx: parseFloat(nums[0].match(/([-\d.]+)/)?.[1] ?? "0"),
-                      dy: parseFloat(nums[1].match(/([-\d.]+)/)?.[1] ?? "0"),
-                      dz: parseFloat(nums[2].match(/([-\d.]+)/)?.[1] ?? "0"),
+                      dx: parseFloat((nums[0].match(innerRe)?.[1] ?? "0").replace(/[dD]/, "e")),
+                      dy: parseFloat((nums[1].match(innerRe)?.[1] ?? "0").replace(/[dD]/, "e")),
+                      dz: parseFloat((nums[2].match(innerRe)?.[1] ?? "0").replace(/[dD]/, "e")),
                     });
                   }
                 }
@@ -8648,6 +8933,12 @@ ${r2Cell}
           nspinBands,
           latticeBVal,
           ecutrhoForBands,
+          // Pseudo directory in QE-input form (WSL-translated on Windows).
+          // Without this, generateBandsInput hardcoded "/tmp/qe_pseudo" which
+          // only worked on Linux setups where the pseudos happened to land
+          // at /tmp — on Windows (WSL) and on any system using a non-/tmp
+          // TMPDIR, bands.x would fail with "pseudo file not found".
+          QE_PSEUDO_DIR_INPUT,
         );
 
         result.bandStructure = bandResult;
@@ -8766,6 +9057,11 @@ ${r2Cell}
             runQEBinary: (binary, inputFile, cwd, timeoutMs) => runQECommand(binary, inputFile, cwd, timeoutMs),
             getPseudoDirInput: () => QE_PSEUDO_DIR_INPUT,
             resolvePPFilename,
+            // Honor the project-wide QE_BIN_DIR so EPW can find pw.x /
+            // wannier90.x / pw2wannier90.x / epw.x on systems where QE
+            // isn't at /usr/local/bin (e.g. /usr/bin via apt, or a custom
+            // build directory pointed at by the QE_BIN_DIR env var).
+            getQEBinDir,
           },
         );
 
@@ -8805,11 +9101,16 @@ ${r2Cell}
         // omegaLog into a meV-expecting consumer, giving Tc estimates that
         // were ~11.6× too high whenever EPW was unavailable.
         const dfptOmegaLogK = (result.dfpt as any)?.omegaLog as number | undefined;
-        const K_PER_MEV = 0.086173;  // k_B in meV/K — convert K → meV
+        // k_B = 0.086173 meV/K. To convert K → meV: multiply by k_B[meV/K].
+        // The previous name `K_PER_MEV` was misleading — 0.086173 is meV per K
+        // (the inverse, K/meV, would be 11.605). Renamed for clarity since
+        // the multiplication direction was easy to get backwards while
+        // reading the code.
+        const MEV_PER_K = 0.086173;  // k_B in meV/K — multiply omegaLog[K] by this to get meV
         const harmonicOmegaLog: number | null =
           result.epw?.omegaLog
           ?? (typeof dfptOmegaLogK === "number" && dfptOmegaLogK > 0
-              ? dfptOmegaLogK * K_PER_MEV
+              ? dfptOmegaLogK * MEV_PER_K
               : null);
         const prefix = formula.replace(/[^a-zA-Z0-9]/g, "");
         // Adaptive nConfigs: scale with cell size (more atoms = more configs needed)
@@ -8874,6 +9175,11 @@ ${r2Cell}
             runQEBinary: (binary, inputFile, cwd, timeoutMs) => runQECommand(binary, inputFile, cwd, timeoutMs),
             getPseudoDirInput: () => QE_PSEUDO_DIR_INPUT,
             resolvePPFilename,
+            // Use the project-wide QE binary directory so ACBN0 finds pw.x
+            // and hp.x on systems where QE isn't at /usr/local/bin (e.g.
+            // /usr/bin via apt). Without this, ACBN0 would fail with
+            // "binary not found" on most non-Docker installations.
+            getQEBinDir,
           },
         );
         if (result.acbn0?.converged) {
@@ -8910,6 +9216,26 @@ ${r2Cell}
       }
     }
 
+    // --- Promote qualityTier based on phonon + e-ph completion ---
+    // Initial assignment at line 7707 caps at "relaxed". Comment at 7715 promises
+    // a later upgrade based on phonon/e-ph results, but the tier-cap block below
+    // only downgrades — so without this promotion DMFT eligibility (which requires
+    // final_converged+) never triggers even after a full DFPT+EPW run succeeded.
+    // Promote conservatively: phonons must be physically stable and forces must
+    // meet the DFPT-grade threshold for final_converged; publication_ready also
+    // requires real e-ph coupling (DFPT or EPW) and the tightest force criterion.
+    if (result.qualityTier === "relaxed" && phononHasResults && phononPhysicallyStable && scfForceOkDFPT) {
+      const hasRealEph = (result.dfpt != null && (result.dfpt as any).lambda > 0)
+        || (result.epw != null && result.epw.lambda > 0);
+      if (hasRealEph && publicationForce) {
+        result.qualityTier = "publication_ready";
+        console.log(`[QE-Worker] Tier promoted to publication_ready for ${formula}: full phonon stable + real e-ph (DFPT/EPW) + force < 0.001`);
+      } else {
+        result.qualityTier = "final_converged";
+        console.log(`[QE-Worker] Tier promoted to final_converged for ${formula}: phonon stable + force < 0.03${hasRealEph ? " (publication blocked: force >= 0.001)" : ""}`);
+      }
+    }
+
     // --- DMFT bundle export for correlated materials ---
     const dmftCheck = isDMFTEligible(result.hubbardWorkflow, result.qualityTier);
     if (dmftCheck.eligible && result.scf?.fermiEnergy != null) {
@@ -8929,7 +9255,16 @@ ${r2Cell}
 
         const dmftCOverA = estimateCOverA(elements, counts);
         const dmftBOverA = estimateBOverA(elements, counts);
-        const dmftLatticeVectors = latticeVectorsFromParams(latticeA, dmftCOverA, dmftBOverA, elements, counts);
+        // Honor known-structure angles so dmftLatticeVectors matches the
+        // monoclinic cell the QE NSCF actually runs with (see fix in the
+        // dmftNscfInput cellParameters block below). Without this, the
+        // .win file at line 8985 used orthorhombic vectors while NSCF
+        // used monoclinic — Wannier basis misaligned with the bands.
+        const dmftKS = lookupKnownStructure(formula);
+        const dmftLatticeVectors = latticeVectorsFromParams(
+          latticeA, dmftCOverA, dmftBOverA, elements, counts,
+          dmftKS?.alpha ?? 90, dmftKS?.beta ?? 90, dmftKS?.gamma ?? 90,
+        );
         const dmftOrbitals = countDMFTOrbitals(elements, counts);
         const dmftNumWann = dmftOrbitals.total;
         const dmftNbnd = Math.max(dmftNumWann + 4, Math.ceil(dmftNumWann * 1.3));
@@ -8945,11 +9280,12 @@ ${r2Cell}
           ecutwfc: dmftEcutwfc,
           ecutrho: dmftEcutrho,
           latticeA,
-          // Honor known-structure angles for monoclinic candidates.
-          cellParameters: (() => {
-            const ks = lookupKnownStructure(formula);
-            return generateCellParameters(latticeA, dmftCOverA, 0, dmftBOverA, elements, counts, ks?.alpha ?? 90, ks?.beta ?? 90, ks?.gamma ?? 90);
-          })(),
+          // Honor known-structure angles for monoclinic candidates —
+          // reuses dmftKS already looked up above for dmftLatticeVectors.
+          cellParameters: generateCellParameters(
+            latticeA, dmftCOverA, 0, dmftBOverA, elements, counts,
+            dmftKS?.alpha ?? 90, dmftKS?.beta ?? 90, dmftKS?.gamma ?? 90,
+          ),
           positions, elements,
           ppFilenames: Object.fromEntries(elements.map(el => [el, resolvePPFilename(el)])),
           kGrid: dmftKGrid,
@@ -8970,7 +9306,7 @@ ${r2Cell}
         }
 
         const nscfRes = await runQECommand(
-          path.posix.join("/usr/local/bin", "pw.x"), dmftNscfFile, dmftWannierDir, 3_600_000,
+          path.posix.join(getQEBinDir(), "pw.x"), dmftNscfFile, dmftWannierDir, 3_600_000,
         );
         if (nscfRes.exitCode !== 0) {
           console.log(`[QE-Worker] DMFT NSCF failed (exit ${nscfRes.exitCode}), skipping Wannier90`);
@@ -8988,7 +9324,7 @@ ${r2Cell}
           fs.writeFileSync(path.posix.join(dmftWannierDir, `${dmftPrefix}.win`), dmftWinContent);
 
           const w90ppRes = await runQECommand(
-            path.posix.join("/usr/local/bin", "wannier90.x"),
+            path.posix.join(getQEBinDir(), "wannier90.x"),
             `-pp ${dmftPrefix}`, dmftWannierDir, 600_000,
           );
 
@@ -9000,7 +9336,7 @@ ${r2Cell}
             fs.writeFileSync(pw2wFile, pw2wInput);
 
             const pw2wRes = await runQECommand(
-              path.posix.join("/usr/local/bin", "pw2wannier90.x"),
+              path.posix.join(getQEBinDir(), "pw2wannier90.x"),
               pw2wFile, dmftWannierDir, 1_800_000,
             );
 
@@ -9008,7 +9344,7 @@ ${r2Cell}
               // ── Step 4: Wannier90 full minimization ──
               console.log(`[QE-Worker] DMFT Wannier step 4/4: wannier90.x (full, DMFT projector)`);
               const w90Res = await runQECommand(
-                path.posix.join("/usr/local/bin", "wannier90.x"),
+                path.posix.join(getQEBinDir(), "wannier90.x"),
                 dmftPrefix, dmftWannierDir, 1_800_000,
               );
 
@@ -9213,8 +9549,9 @@ ${r2Cell}
     console.log(`[QE-Worker] ${formula} Tc uncertainty reason: ${result.uncertainty.tcUncertaintyReason}`);
 
     // --- Reproducibility bundle for screening_converged+ ---
-    // Note: at this point qualityTier is at most "relaxed" — final_converged/publication_ready
-    // are assigned later based on phonon/DFPT. Save bundle for any non-failed tier.
+    // Save bundle for any non-failed tier. Tier has already been promoted above
+    // (right before the DMFT check) based on phonon/e-ph completion, so the
+    // bundle reflects the final tier.
     const bundleTier = result.qualityTier ?? "failed";
     if (bundleTier !== "failed") {
       try {

@@ -89,9 +89,21 @@ export interface ZoneBoundarySoftModeResult {
 export function parseDyn0(dyn0Path: string): { nq: number; qPoints: Array<[number, number, number]> } {
   if (!fs.existsSync(dyn0Path)) return { nq: 0, qPoints: [] };
   const lines = fs.readFileSync(dyn0Path, "utf-8").trim().split("\n");
-  const nq = parseInt(lines[0]?.trim() ?? "0", 10);
+  // QE writes .dyn0 as:
+  //   Line 0: "nq1 nq2 nq3"        (q-grid dimensions, 3 integers)
+  //   Line 1: "nqs"                 (number of irreducible q-points)
+  //   Lines 2..2+nqs-1: q-coords    (3 floats per line, fractional reciprocal lattice)
+  // The previous parser read line 0 as the count, which for a "3 3 3" header
+  // gave nq=3 (the first integer) instead of the real irreducible-q count
+  // from line 1. Then q-points were read starting at line 1 — meaning the
+  // first real q-point was skipped (line 1 has just the count, fails the
+  // 3-number check), and qPoints[k] was misaligned with .dynN file indexing.
+  // findWorstInstability would then index past qPoints.length, falling back
+  // to qPoint=[0,0,0] (gamma) and applying a Γ-distortion at a zone-boundary
+  // soft-mode frequency — entirely wrong displacement pattern.
+  const nq = parseInt(lines[1]?.trim() ?? "0", 10);
   const qPoints: Array<[number, number, number]> = [];
-  for (let i = 1; i <= nq && i < lines.length; i++) {
+  for (let i = 2; i < 2 + nq && i < lines.length; i++) {
     const parts = lines[i].trim().split(/\s+/).map(Number);
     if (parts.length >= 3 && parts.every(Number.isFinite)) {
       qPoints.push([parts[0], parts[1], parts[2]]);
@@ -109,7 +121,13 @@ export function parseFrequenciesFromDynFile(dynPath: string): number[] {
   if (!fs.existsSync(dynPath)) return [];
   const content = fs.readFileSync(dynPath, "utf-8");
   const freqs: number[] = [];
-  const regex = /freq\s*\(\s*\d+\)\s*=\s*[-\d.]+\s*\[THz\]\s*=\s*([-\d.]+)\s*\[cm-1\]/g;
+  // `(?:\s*-\s*\d+)?` accommodates QE 7.x degenerate-mode range form
+  // `freq(1-3) = ...` emitted for degenerate modes in cubic/high-symmetry
+  // crystals. Without it those frequencies silently dropped from the parse,
+  // and findWorstInstability could miss the actual worst soft mode.
+  // Matches the same fix applied to parsePhononOutput, parseGammaPhononFrequencies,
+  // and the sscha-worker dyn-file parser in earlier iterations.
+  const regex = /freq\s*\(\s*\d+(?:\s*-\s*\d+)?\s*\)\s*=\s*[-\d.]+\s*\[THz\]\s*=\s*([-\d.]+)\s*\[cm-1\]/g;
   let match;
   while ((match = regex.exec(content)) !== null) {
     const f = parseFloat(match[1]);
@@ -167,15 +185,26 @@ export function generateMatdynEigenvectorInput(
   prefix: string,
   qPoint: [number, number, number],
 ): string {
+  // ASR = 'crystal' is the recommended choice for arbitrary q-points on
+  // arbitrary Bravais lattices (preserves Born-Huang invariants). 'simple'
+  // only works correctly at q=0 and high-symmetry points on cubic crystals;
+  // for the soft-mode q-points we're querying here (which by definition are
+  // off the high-symmetry path or on low-symmetry q-points of non-cubic
+  // grids), 'crystal' gives better eigenvectors. matdyn.x falls back to
+  // 'simple' silently if 'crystal' isn't applicable to the cell.
+  //
+  // With q_in_band_form = .false., matdyn.x reads each q-point as 3 numbers
+  // (no trailing weight/npts column). The previous trailing `1` was Fortran-
+  // tolerant but format-incorrect — strict matdyn builds reject it.
   return `&INPUT
-  asr = 'simple',
+  asr = 'crystal',
   flfrc = '${prefix}.fc',
   flvec = '${prefix}_softmode.vec',
   flfrq = '${prefix}_softmode.freq',
   q_in_band_form = .false.,
 /
 1
-  ${qPoint[0].toFixed(6)} ${qPoint[1].toFixed(6)} ${qPoint[2].toFixed(6)}  1
+  ${qPoint[0].toFixed(6)} ${qPoint[1].toFixed(6)} ${qPoint[2].toFixed(6)}
 `;
 }
 
@@ -201,15 +230,25 @@ export function parseEigenvectors(
   let i = 0;
 
   while (i < lines.length) {
-    // Look for frequency line
-    const freqMatch = lines[i]?.match(/freq\s*\(\s*\d+\)\s*=\s*[-\d.]+\s*\[THz\]\s*=\s*([-\d.]+)\s*\[cm-1\]/);
-    if (!freqMatch) {
-      // Also try cm⁻¹-only format
-      const freqMatch2 = lines[i]?.match(/freq\s*\(\s*\d+\)\s*=\s*([-\d.]+)/);
-      if (!freqMatch2) { i++; continue; }
-    }
-
-    const freq = parseFloat((freqMatch ?? lines[i]?.match(/=\s*([-\d.]+)\s*\[cm-1\]/))?.[1] ?? "0");
+    // Look for frequency line. `(?:\s*-\s*\d+)?` handles QE 7.x range form
+    // `freq(1-3) = ...` for degenerate modes — without it, eigenvectors at
+    // degenerate soft modes (common in cubic crystals) would silently parse
+    // as zero-mode entries and break the soft-mode-follower distortion step.
+    //
+    // Two output formats from matdyn:
+    //   Full:   "freq (  1) =   -2.34 [THz] =  -78.12 [cm-1]"
+    //   Short:  "freq (  1) =   -78.12"   (some older QE / matdyn builds)
+    // The previous fallback path detected the short format but then computed
+    // `freq` from a `[cm-1]`-anchored regex that didn't match the short form,
+    // silently zeroing every cm⁻¹-only-format frequency. Capture the freq
+    // value directly from whichever regex actually matched.
+    const fullFmt = lines[i]?.match(/freq\s*\(\s*\d+(?:\s*-\s*\d+)?\s*\)\s*=\s*[-\d.]+\s*\[THz\]\s*=\s*([-\d.]+)\s*\[cm-1\]/);
+    const shortFmt = !fullFmt
+      ? lines[i]?.match(/freq\s*\(\s*\d+(?:\s*-\s*\d+)?\s*\)\s*=\s*([-\d.]+)/)
+      : null;
+    if (!fullFmt && !shortFmt) { i++; continue; }
+    const freq = parseFloat((fullFmt ?? shortFmt)![1]);
+    if (!Number.isFinite(freq)) { i++; continue; }
     i++;
 
     // Read nAtoms lines of eigenvector data — parse BOTH real and imaginary
@@ -220,13 +259,17 @@ export function parseEigenvectors(
     const eigvecIm: Array<[number, number, number]> = [];
     for (let a = 0; a < nAtoms && i < lines.length; a++, i++) {
       // Parse "( dx_real  dx_imag ) ( dy_real  dy_imag ) ( dz_real  dz_imag )"
-      // Capture both numbers inside each parenthesized pair.
-      const pairRegex = /\(\s*([-\d.]+)\s+([-\d.]+)\s*\)/g;
+      // Capture both numbers inside each parenthesized pair. Accept scientific
+      // notation (e/E/d/D exponent forms) — matdyn.x emits small components as
+      // e.g. "-1.234E-05" depending on QE version + magnitude, and the prior
+      // [-\d.]+ regex silently truncated those at the 'e' to "-1.234".
+      const numRe = "[-+]?(?:\\d+\\.?\\d*|\\.\\d+)(?:[eEdD][-+]?\\d+)?";
+      const pairRegex = new RegExp(`\\(\\s*(${numRe})\\s+(${numRe})\\s*\\)`, "g");
       const pairs: Array<[number, number]> = [];
       let pm: RegExpExecArray | null;
       while ((pm = pairRegex.exec(lines[i] ?? "")) !== null) {
-        const re = parseFloat(pm[1]);
-        const im = parseFloat(pm[2]);
+        const re = parseFloat(pm[1].replace(/[dD]/, "e"));
+        const im = parseFloat(pm[2].replace(/[dD]/, "e"));
         pairs.push([Number.isFinite(re) ? re : 0, Number.isFinite(im) ? im : 0]);
       }
       if (pairs.length >= 3) {

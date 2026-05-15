@@ -105,16 +105,23 @@ const MATERIAL_SPECIFIC_U: Array<{
   pattern: RegExp;
   overrides: Record<string, { u: number; orbital: string; source: string }>;
 }> = [
-  // Iron oxides: Fe³⁺ in octahedral coordination
+  // Iron oxides: Fe³⁺ in octahedral coordination.
+  // Negative lookahead on `O` rules out `FeOs` (Fe-Os intermetallic),
+  // `FeOg` (hypothetical), etc. — O must be followed by digit, uppercase,
+  // open-paren, or end-of-string, not a lowercase letter.
   {
-    pattern: /^Fe[23]?O/,
+    pattern: /^Fe[23]?O(?![a-z])/,
     overrides: {
       Fe: { u: 4.3, orbital: "3d", source: "Materials Project Fe-oxide (Jain et al. 2013)" },
     },
   },
-  // Cuprates: Cu²⁺ in square-planar CuO₂
+  // Cuprates: Cu²⁺ in square-planar CuO₂. Includes hole-doped parents
+  // (La,Y,Ba,Sr,Bi,Tl,Hg,Ca families) AND electron-doped parents
+  // (Nd2CuO4, Pr2CuO4, Sm2CuO4 — previously missing). Bi2Sr2CaCu2O8
+  // (Bi2212) also needs Ca; the prior regex matched it via Bi but only
+  // by accident — now it's explicit.
   {
-    pattern: /(La|Y|Ba|Sr|Bi|Tl|Hg).*(Cu).*O/,
+    pattern: /(La|Y|Ba|Sr|Bi|Tl|Hg|Ca|Nd|Pr|Sm).*(Cu).*O/,
     overrides: {
       Cu: { u: 5.0, orbital: "3d", source: "Cuprate CuO₂ planes (Anisimov et al. 1991)" },
     },
@@ -127,8 +134,11 @@ const MATERIAL_SPECIFIC_U: Array<{
     },
   },
   // Iron pnictides: Fe²⁺ in tetrahedral coordination
+  // Negative lookahead `(?![a-z])` ensures "FeS" doesn't match "FeSi" (Kondo
+  // semimetal) or "FeSb" (Fe-antimonide); chalcogen letter must be followed
+  // by digit, end-of-string, or another element-starting uppercase.
   {
-    pattern: /(Ba|Sr|Ca|La|Nd|Sm).*Fe.*As|Fe(Se|Te|S)/,
+    pattern: /(Ba|Sr|Ca|La|Nd|Sm).*Fe.*As|Fe(?:Se|Te|S)(?![a-z])/,
     overrides: {
       Fe: { u: 3.0, orbital: "3d", source: "Fe-pnictide tetrahedral (Nakamura et al. 2009) — lower than octahedral" },
     },
@@ -215,32 +225,47 @@ const OXIDATION_AWARE_U: Record<string, { lowOx: number; highOx: number; orbital
   Gd: { lowOx: 6.0, highOx: 7.0, orbital: "4f" },
   Tb: { lowOx: 5.5, highOx: 7.0, orbital: "4f" },
   Dy: { lowOx: 5.5, highOx: 7.0, orbital: "4f" },
-  // 5f actinides
+  // 5f actinides — partially-filled 5f states need Hubbard correction just
+  // like the 4f lanthanides. Pa-Pu have growing 5f^n; Am-Cm are half-filled
+  // (5f⁷). U scales from ~3 eV (metal) to ~5 eV (oxidized, e.g., UO₂, PuO₂).
+  // Previously only Th and U were listed — Pa/Np/Pu/Am/Cm fell through to
+  // the elemental-data default (always 4.0 eV regardless of oxidation state).
   Th: { lowOx: 3.0, highOx: 5.0, orbital: "5f" },
+  Pa: { lowOx: 3.0, highOx: 4.5, orbital: "5f" },
   U:  { lowOx: 3.0, highOx: 4.5, orbital: "5f" },
+  Np: { lowOx: 3.5, highOx: 5.0, orbital: "5f" },
+  Pu: { lowOx: 4.0, highOx: 5.5, orbital: "5f" },
+  Am: { lowOx: 4.5, highOx: 6.0, orbital: "5f" },
+  Cm: { lowOx: 4.5, highOx: 6.0, orbital: "5f" },
 };
 
 /** Electronegative anions that indicate oxidized TM environment */
 const OXIDIZING_ANIONS = new Set(["O", "F", "Cl", "Br"]);
 
 /**
- * Hund's coupling J values (eV) for elements where orbital ordering matters.
- * Used when Liechtenstein (kind=1) is selected. Values from constrained-RPA
- * and linear-response calculations in the literature.
+ * Hund's coupling J values (eV) per element. Used when Liechtenstein (kind=1)
+ * is selected for QE, AND exported so the DMFT bundle exporter can supply a
+ * physical J for the multi-orbital interaction tensor even when QE itself ran
+ * with the Dudarev (kind=0) formulation. Values from constrained-RPA and
+ * linear-response calculations in the literature.
  *
  * @see A. I. Liechtenstein et al., Phys. Rev. B 52, R5467 (1995)
  * @see F. Aryasetiawan et al., Phys. Rev. B 74, 125106 (2006) — cRPA J values
  * @see L. Vaugier et al., Phys. Rev. B 86, 165105 (2012) — cRPA for 3d oxides
  */
-const HUNDS_J: Record<string, number> = {
+export const HUNDS_J: Record<string, number> = {
   // 3d — J ~ 0.7-1.0 eV from cRPA
   Ti: 0.64, V: 0.68, Cr: 0.70, Mn: 0.75, Fe: 0.89,
   Co: 0.92, Ni: 0.95, Cu: 0.98,
   // 4d — J ~ 0.3-0.6 eV (more delocalized)
   Zr: 0.35, Nb: 0.40, Mo: 0.45, Ru: 0.50, Rh: 0.55, Pd: 0.60,
+  // 5d — J ~ 0.4-0.7 eV from cRPA
+  Hf: 0.45, Ta: 0.50, W: 0.55, Re: 0.60, Os: 0.65, Ir: 0.68, Pt: 0.70,
   // Lanthanides — J ~ 0.6-0.7 eV for 4f
   Ce: 0.68, Pr: 0.65, Nd: 0.63, Sm: 0.60, Eu: 0.60,
   Gd: 0.60, Tb: 0.62, Dy: 0.63, Ho: 0.65, Er: 0.66, Tm: 0.67,
+  // Actinides — J ~ 0.4-0.6 eV for 5f (smaller than 4f, more itinerant)
+  Th: 0.50, Pa: 0.52, U: 0.55, Np: 0.55, Pu: 0.58, Am: 0.60, Cm: 0.60,
 };
 
 /**
@@ -279,6 +304,15 @@ function needsLiechtenstein(
 
 /** Elements where d/f electrons are localized enough to need +U */
 function needsHubbardU(element: string): boolean {
+  // La (4f⁰) and Lu (4f¹⁴, completely full) have NO partially-filled
+  // correlated shell: La³⁺ is 4f⁰/5d⁰ and Lu³⁺ has a filled, core-like 4f.
+  // Their Fermi-level states are 5d/6s. Applying +U to them shifts empty
+  // (La) or fully-occupied (Lu) bands that carry no on-site correlation —
+  // a spurious correction. Without this guard, isRareEarth() below pulls
+  // La in and the element-default path applies U=5.6 eV to La-5d for every
+  // La-cuprate / LaFeAsO / La-nickelate. Matches the F_DOMINANT_LN
+  // exclusion already used in dft-band-analysis.ts.
+  if (element === "La" || element === "Lu") return false;
   // 3d transition metals (most important for SC)
   if (["Sc", "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu"].includes(element)) return true;
   // 4d with localization tendency
@@ -295,19 +329,27 @@ function needsHubbardU(element: string): boolean {
 /**
  * Estimate whether the TM is in a high-oxidation environment.
  *
- * Heuristic: if the ratio of electronegative anions to TM atoms > 2,
- * the TM is likely in a high oxidation state (e.g., Fe₂O₃ → Fe³⁺).
+ * Weight each anion by its formal charge (O²⁻ → 2, halide⁻ → 1) so the
+ * charge-to-TM ratio approximates the TM oxidation state, then call
+ * trivalent-or-above "high". Counting O as a single unit (like a halide)
+ * made Fe₂O₃ score O/Fe = 1.5 — classified "low" despite being Fe³⁺ — and
+ * left MO₂ (M⁴⁺) at exactly 2.0, also missed. With that atom-count test the
+ * highOx U column was effectively dead for every oxide; the docstring's own
+ * Fe₂O₃ → Fe³⁺ example was wrong.
  */
 function estimateHighOxidation(
   elements: string[],
   counts: Record<string, number>,
   targetElement: string,
 ): boolean {
-  const anionCount = elements
+  const ANION_CHARGE: Record<string, number> = { O: 2, F: 1, Cl: 1, Br: 1 };
+  const totalAnionCharge = elements
     .filter(el => OXIDIZING_ANIONS.has(el))
-    .reduce((s, el) => s + (counts[el] || 0), 0);
+    .reduce((s, el) => s + (ANION_CHARGE[el] ?? 1) * (counts[el] || 0), 0);
   const tmCount = counts[targetElement] || 1;
-  return (anionCount / tmCount) > 2.0;
+  // totalAnionCharge / tmCount ≈ oxidation state; > 2.5 separates the
+  // trivalent-and-above ("high") states from divalent M²⁺ ("low").
+  return (totalAnionCharge / tmCount) > 2.5;
 }
 
 function getOrbitalManifold(element: string): "3d" | "4d" | "5d" | "4f" | "5f" | "3p" | "none" {
@@ -537,7 +579,16 @@ export function analyzeHubbardWorkflow(
     qeHubbardCard += `HUBBARD (${projector})\n`;
     for (const site of sites) {
       if (site.uEffective > 0 && site.orbitalManifold !== "none") {
-        qeHubbardCard += `U ${site.element}-${site.orbitalManifold} ${site.uEffective.toFixed(1)}\n`;
+        // The U tables (MATERIAL_SPECIFIC_U, OXIDATION_AWARE_U, ELEMENTAL_DATA)
+        // store Dudarev U_eff = U_bare - J. QE's Liechtenstein (kind=1) mode
+        // expects U_bare and J separately and computes U_eff = U_bare - J
+        // internally. If we emit U_eff as U and also emit J, QE applies
+        // (U_eff - J) — double-counting J and silently underestimating the
+        // on-site correlation by ~J (~0.5-1.0 eV for 3d).
+        const uForCard = hubbardKind === 1 && site.hunds > 0
+          ? site.uEffective + site.hunds
+          : site.uEffective;
+        qeHubbardCard += `U ${site.element}-${site.orbitalManifold} ${uForCard.toFixed(2)}\n`;
         if (hubbardKind === 1 && site.hunds > 0) {
           qeHubbardCard += `J ${site.element}-${site.orbitalManifold} ${site.hunds.toFixed(2)}\n`;
         }

@@ -1,6 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import { IS_WINDOWS, killProcessGracefully, spawnQE } from "./platform-utils";
+import { lookupKnownStructure } from "../learning/known-structures";
 
 const QE_BIN_DIR = process.env.QE_BIN_DIR ?? (IS_WINDOWS ? "/usr/bin" : "/nix/store/4rd771qjyb5mls5dkcs614clwdxsagql-quantum-espresso-7.2/bin");
 // Bands timeout scales with system size. Small cells (3-4 atoms) need
@@ -178,7 +179,46 @@ function guessCrystalSystem(
   elements: string[],
   counts: Record<string, number>,
   cOverA: number,
+  formula?: string,
 ): string {
+  // Tier 0: known-structure database has the authoritative crystal system
+  // when the formula is in our literature DB. Without this lookup the
+  // heuristic below can only return cubic / hexagonal / tetragonal — it
+  // never returns orthorhombic, monoclinic, triclinic, or rhombohedral
+  // even though CRYSTAL_SYSTEM_PATHS has the proper k-paths for all of
+  // them. Result: every monoclinic / triclinic / orthorhombic literature
+  // candidate (VO2, ZrO2, HfO2, MnWO4, FeWO4, LaPO4, CePO4, …) silently
+  // traversed a cubic high-symmetry k-path with wrong corner labels,
+  // producing band plots that didn't correspond to the actual Brillouin
+  // zone.
+  //
+  // known-structures.ts stores `latticeType` as plain "cubic" rather than
+  // distinguishing simple-cubic / fcc / bcc — those Bravais variants need
+  // different k-paths (cubic_sc Γ-X-M-Γ-R-X-M-R vs cubic_fcc
+  // Γ-X-W-K-Γ-L-U-W vs cubic_bcc Γ-H-N-Γ-P-H-P-N). Disambiguate via the
+  // first letter of the space-group symbol: P = primitive (sc), I = body-
+  // centered (bcc), F = face-centered (fcc). Without this, every cubic
+  // literature entry would map back through `CRYSTAL_SYSTEM_PATHS["cubic"]`
+  // = undefined and fall into the atom-count heuristic — LaH10 (Fm-3m,
+  // 11 atoms) would get cubic_sc instead of the correct cubic_fcc path.
+  if (formula) {
+    try {
+      const ks = lookupKnownStructure(formula);
+      if (ks) {
+        if (ks.latticeType === "cubic") {
+          const sg = ks.spaceGroup ?? "";
+          const centering = sg.charAt(0).toUpperCase();
+          if (centering === "F") return "cubic_fcc";
+          if (centering === "I") return "cubic_bcc";
+          if (centering === "P") return "cubic_sc";
+          // Unknown centering: fall through to heuristic
+        } else if (CRYSTAL_SYSTEM_PATHS[ks.latticeType]) {
+          return ks.latticeType;
+        }
+      }
+    } catch { /* fall through to heuristic */ }
+  }
+
   const hasCu = elements.includes("Cu");
   const hasO = elements.includes("O");
   const hasFe = elements.includes("Fe");
@@ -270,6 +310,7 @@ function generateBandsInput(
   cOverA: number = 1.0,
   latticeB: number = latticeA,
   ecutrhoOverride?: number,
+  pseudoDir?: string,
 ): string {
   const ELEMENT_DATA: Record<string, number> = {
     H: 1.008, He: 4.003, Li: 6.941, Be: 9.012, B: 10.811, C: 12.011,
@@ -283,13 +324,54 @@ function generateBandsInput(
     Cs: 132.91, Ba: 137.33, La: 138.91, Ce: 140.12, Hf: 178.49, Ta: 180.95,
     W: 183.84, Re: 186.21, Os: 190.23, Ir: 192.22, Pt: 195.08, Au: 196.97,
     Hg: 200.59, Tl: 204.38, Pb: 207.2, Bi: 208.98, Br: 79.904, Tc: 98.0,
-    Pr: 140.91, Nd: 144.24, Sm: 150.36, Eu: 151.96, Gd: 157.25, Tb: 158.93,
+    Pr: 140.91, Nd: 144.24, Pm: 145.0, Sm: 150.36, Eu: 151.96, Gd: 157.25, Tb: 158.93,
     Dy: 162.50, Ho: 164.93, Er: 167.26, Tm: 168.93, Yb: 173.04, Lu: 174.97,
-    Th: 232.04, U: 238.03, Pa: 231.04,
+    // Actinides — Pm and Np/Pu/Am/Cm/Bk/Cf were missing → band structure
+    // generation threw "Unknown element" for any actinide compound, blocking
+    // band plots for heavy-fermion SC candidates (UPt3, PuCoGa5, etc.).
+    Ac: 227.03, Th: 232.04, Pa: 231.04, U: 238.03, Np: 237.05, Pu: 244.0,
+    Am: 243.0, Cm: 247.0, Bk: 247.0, Cf: 251.0,
+  };
+
+  // Pseudo z_valence for each element — kept in sync with qe-worker.ts
+  // ELEMENT_DATA (verified against server/dft/pseudo/*.UPF). Used to size
+  // nbnd correctly: heavy elements with semicore (Cu=19, Au=19, Hg=20)
+  // need many more bands than a generic 4/atom heuristic.
+  const Z_VALENCE: Record<string, number> = {
+    H: 1, He: 2, Li: 3, Be: 4, B: 3, C: 4, N: 5, O: 6, F: 7,
+    Na: 9, Mg: 10, Al: 3, Si: 4, P: 5, S: 6, Cl: 7,
+    K: 9, Ca: 10, Sc: 11, Ti: 12, V: 13, Cr: 14, Mn: 15,
+    Fe: 16, Co: 17, Ni: 18, Cu: 19, Zn: 20, Ga: 13, Ge: 4,
+    As: 5, Se: 6, Br: 7, Rb: 9, Sr: 10, Y: 11, Zr: 12,
+    Nb: 13, Mo: 14, Tc: 15, Ru: 16, Rh: 17, Pd: 18, Ag: 19, Cd: 12,
+    In: 13, Sn: 4, Sb: 5, Te: 6, I: 7, Cs: 9, Ba: 10,
+    La: 11, Ce: 11, Pr: 13, Nd: 14, Pm: 15, Sm: 16, Eu: 17, Gd: 18,
+    Tb: 19, Dy: 20, Ho: 21, Er: 22, Tm: 23, Yb: 24, Lu: 25,
+    Hf: 12, Ta: 13, W: 14, Re: 15, Os: 16, Ir: 15, Pt: 16,
+    Au: 19, Hg: 20, Tl: 13, Pb: 4, Bi: 5,
+    // Actinides — Ac, Np, Pu, Am, Cm previously missing. Without these the
+    // band-structure nbnd computation fell through to ?? 8 (line 319),
+    // computing far too few conduction bands for the band path. For Pu
+    // (real z_val=16): 8 valence electrons assumed → nbnd undercounted by
+    // ~50%, causing the band plot to truncate states near E_F.
+    Ac: 11, Th: 12, Pa: 13, U: 14, Np: 15, Pu: 16, Am: 17, Cm: 18,
   };
 
   const totalAtoms = positions.length;
   const nTypes = elements.length;
+
+  // Count total valence electrons in the cell using actual per-position
+  // elements (handles supercells correctly). nbnd must cover at least
+  // ceil(nelec/2) occupied bands + a buffer for the conduction window we
+  // need along the k-path (10–30 extra is standard for band plots).
+  let cellElectrons = 0;
+  for (const pos of positions) {
+    cellElectrons += Z_VALENCE[pos.element] ?? 8;
+  }
+  const occupiedBands = Math.ceil(cellElectrons / 2);
+  const conductionBuffer = Math.max(15, Math.ceil(occupiedBands * 0.20));
+  const nbndComputed = (nspin === 2 ? 2 : 1) * (occupiedBands + conductionBuffer);
+  const nbndFinal = Math.max(nbndComputed, 20);
   // Default 4x (PAW/NC). Caller should pass ecutrhoOverride computed via ecutrhoMultiplier()
   // to use 8x for USPP. The old hardcoded 8x caused FFT OOM for PAW hydrides (LaH10 etc).
   const ecutrho = ecutrhoOverride ?? ecutwfc * 4;
@@ -309,27 +391,46 @@ function generateBandsInput(
     atomicPositions += `  ${pos.element}  ${pos.x.toFixed(6)}  ${pos.y.toFixed(6)}  ${pos.z.toFixed(6)}\n`;
   }
 
-  const ibrav = crystalSystemToIbrav(crystalSystem);
+  // Use ibrav=0 with explicit CELL_PARAMETERS so the bands input cell matches
+  // whatever cell the upstream SCF used (which goes via ibrav=0 + CELL_PARAMETERS
+  // and may be monoclinic). The previous ibrav-based approach forced a cubic
+  // cell (since guessCrystalSystem only returns cubic/tetragonal/hexagonal) and
+  // hardcoded β=100° for monoclinic — both of which mismatch the SCF .save
+  // cell. QE then either crashes on cell-inconsistency or silently uses the
+  // .save cell, but the input's k-path coordinates (in {crystal_b} units) are
+  // fractional reciprocal lattice — interpreting them in the wrong cell gave
+  // wrong band-path traversal for non-cubic crystals.
+  const ibrav = 0;
   const celldm1 = (latticeA * 1.8897259886).toFixed(6);
-  let celldmLines = `  celldm(1) = ${celldm1},\n`;
-  if ((ibrav === 4 || ibrav === 6) && cOverA > 0 && Math.abs(cOverA - 1.0) > 0.01) {
-    celldmLines += `  celldm(3) = ${cOverA.toFixed(6)},\n`;
-  }
-  if (ibrav === 8 || ibrav === 12) {
-    const bOverA = latticeB / latticeA;
-    celldmLines += `  celldm(2) = ${bOverA.toFixed(6)},\n`;
-    celldmLines += `  celldm(3) = ${cOverA.toFixed(6)},\n`;
-    if (ibrav === 12) {
-      celldmLines += `  celldm(4) = ${Math.cos(100 * Math.PI / 180).toFixed(6)},\n`;
-    }
-  }
+  const celldmLines = `  celldm(1) = ${celldm1},\n`;  // Still needed: K_POINTS {crystal_b} uses celldm(1) as length scale
+  // Build CELL_PARAMETERS using cOverA / latticeB (passed by caller from
+  // estimateCOverA/BOverA). For monoclinic candidates this still doesn't
+  // capture β (would need a separate lookup), but at least gets the
+  // a-b-c proportions right — orthorhombic shape matches what the SCF
+  // does for orthorhombic and is a better starting approximation for
+  // monoclinic than forced-cubic ibrav=1.
+  const cellB = latticeB > 0 ? latticeB : latticeA;
+  const cellC = cOverA > 0 ? latticeA * cOverA : latticeA;
+  const cellParamsBlock = `CELL_PARAMETERS {angstrom}
+  ${latticeA.toFixed(8)}  0.000000000  0.000000000
+  0.000000000  ${cellB.toFixed(8)}  0.000000000
+  0.000000000  0.000000000  ${cellC.toFixed(8)}`;
+  void crystalSystem;  // cell shape now comes from CELL_PARAMETERS — no longer routed via ibrav
 
+  // pseudo_dir: was hardcoded to "/tmp/qe_pseudo" which only worked on
+  // the specific Linux setup where pseudos happened to land at /tmp.
+  // On Windows the pseudos live under %TEMP% (translated to /mnt/c/.../
+  // qe_pseudo via WSL), and on Linux they may live under $TMPDIR/qe_pseudo
+  // or any other location set by getTempSubdir(). Accept the path from the
+  // caller (which has access to QE_PSEUDO_DIR_INPUT) so this input file
+  // matches the actual pseudo location on every platform.
+  const effPseudoDir = pseudoDir ?? "/tmp/qe_pseudo";
   return `&CONTROL
   calculation = 'bands',
   restart_mode = 'from_scratch',
   prefix = '${cleanPrefix}',
   outdir = './tmp',
-  pseudo_dir = '/tmp/qe_pseudo',
+  pseudo_dir = '${effPseudoDir}',
   verbosity = 'high',
 /
 &SYSTEM
@@ -343,7 +444,7 @@ ${celldmLines}  nat = ${totalAtoms},
   smearing = 'mv',
   degauss = 0.02,
   nspin = ${nspin},
-  nbnd = ${Math.max(totalAtoms * 4, 20)},
+  nbnd = ${nbndFinal},
 /
 &ELECTRONS
   electron_maxstep = 100,
@@ -353,6 +454,7 @@ ${celldmLines}  nat = ${totalAtoms},
 /
 ATOMIC_SPECIES
 ${atomicSpecies}
+${cellParamsBlock}
 ATOMIC_POSITIONS {crystal}
 ${atomicPositions}
 K_POINTS {crystal_b}
@@ -389,68 +491,28 @@ function parseProjwfcOutput(
   nKPoints: number,
   nBands: number,
 ): OrbitalWeight[][] | null {
-  const weights: OrbitalWeight[][] = [];
-
-  for (let ki = 0; ki < nKPoints; ki++) {
-    const bandWeights: OrbitalWeight[] = [];
-    for (let b = 0; b < nBands; b++) {
-      bandWeights.push({ s: 0, p: 0, d: 0, f: 0 });
-    }
-    weights.push(bandWeights);
-  }
-
-  const pdosFiles = fs.readdirSync(jobDir).filter(f => f.startsWith("pdos") && f.includes("atm"));
-  if (pdosFiles.length === 0) return null;
-
-  for (const pdosFile of pdosFiles) {
-    const lMatch = pdosFile.match(/wfc#\d+\((\w+)\)/i) || pdosFile.match(/\((\w+)\)/);
-    let orbType: "s" | "p" | "d" | "f" = "s";
-    if (lMatch) {
-      const label = lMatch[1].toLowerCase();
-      if (label === "s" || label.startsWith("s")) orbType = "s";
-      else if (label === "p" || label.startsWith("p")) orbType = "p";
-      else if (label === "d" || label.startsWith("d")) orbType = "d";
-      else if (label === "f" || label.startsWith("f")) orbType = "f";
-    }
-
-    try {
-      const content = fs.readFileSync(path.join(jobDir, pdosFile), "utf-8");
-      const lines = content.trim().split("\n").filter(l => !l.startsWith("#") && l.trim());
-
-      let kIdx = 0;
-      for (const line of lines) {
-        const nums = line.trim().split(/\s+/).map(Number).filter(n => !isNaN(n));
-        if (nums.length < 2) continue;
-
-        const kPt = Math.floor(kIdx / nBands);
-        const bandIdx = kIdx % nBands;
-
-        if (kPt < nKPoints && bandIdx < nBands) {
-          const projVal = nums[1] ?? 0;
-          weights[kPt][bandIdx][orbType] += projVal;
-        }
-        kIdx++;
-      }
-    } catch (err: any) {
-      console.debug(`[band-structure] PDOS parse failed for ${pdosFile}: ${err?.message ?? err}`);
-    }
-  }
-
-  let hasData = false;
-  for (const kw of weights) {
-    for (const bw of kw) {
-      const total = bw.s + bw.p + bw.d + bw.f;
-      if (total > 0.01) {
-        hasData = true;
-        bw.s /= total;
-        bw.p /= total;
-        bw.d /= total;
-        bw.f /= total;
-      }
-    }
-  }
-
-  return hasData ? weights : null;
+  // IMPORTANT: this parser previously read `filpdos`-style files (energy-grid
+  // resolved partial DOS, ~1000 rows per file) and incorrectly indexed them
+  // as `filproj`-style (k-point × band tuples). The resulting "weights" were
+  // energy-bin DOS values mis-mapped to (kpt, band), producing garbage
+  // orbital character for every band. Downstream consumers (extractFermiPockets
+  // orbital character, pairing-channel classification) silently used this
+  // garbage instead of the stoichiometric fallback.
+  //
+  // To get band-resolved projections we'd need to:
+  //   (a) Add `filproj = 'proj'` to the projwfc.x input (creates proj.projwfc_up
+  //       in the QE-specific band-by-band format), and
+  //   (b) Rewrite this function to parse that format.
+  //
+  // Until that refactor lands, return null so the stoichiometric fallback in
+  // extractFermiPockets (which now correctly separates f from d for heavy-
+  // fermion / lanthanide systems) provides the orbital character — better
+  // honest stoichiometric estimates than mis-indexed DOS values pretending
+  // to be band-resolved.
+  void jobDir;
+  void nKPoints;
+  void nBands;
+  return null;
 }
 
 function mergeOrbitalWeights(eigenvalues: BandEigenvalue[], orbWeights: OrbitalWeight[][] | null): void {
@@ -713,6 +775,7 @@ function estimateAnisotropicMass(
   bandIndex: number,
   kIndex: number,
   dkSq: number,
+  massConv: number,
 ): [number, number, number] {
   const ki = kIndex;
   if (ki < 1 || ki >= eigenvalues.length - 1) return [1.0, 1.0, 1.0];
@@ -730,7 +793,9 @@ function estimateAnisotropicMass(
   const d2E = ePrev + eNext - 2 * eCurr;
   if (Math.abs(d2E) < 1e-6) return [1.0, 1.0, 1.0];
 
-  const pathMass = 1.0 / (d2E / dkSq);
+  // m*/m_e = (ℏ²/m_e) / (d²E/dk²). `massConv` carries ℏ²/m_e together with
+  // the tpiba→Å⁻¹ unit conversion (see computeMassConv in analyzeBands).
+  const pathMass = massConv / (d2E / dkSq);
 
   const dkVec = [
     kNext[0] - kPrev[0],
@@ -773,6 +838,7 @@ function analyzeBands(
   eigenvalues: BandEigenvalue[],
   nBands: number,
   fermiEnergy: number,
+  latticeA: number,
 ): {
   bandCrossings: BandCrossing[];
   bandInversions: BandInversion[];
@@ -794,6 +860,21 @@ function analyzeBands(
   const bandInversions: BandInversion[] = [];
   const vanHoveSingularities: VanHoveSingularity[] = [];
   const effectiveMasses: EffectiveMass[] = [];
+
+  // Effective-mass unit conversion. QE bands.x writes k-points in tpiba
+  // units (2π/alat, alat = celldm(1) = the a-axis). The curvature 1/(d²E/dk²)
+  // is therefore in tpiba²/eV, NOT m*/m_e. The physical effective mass is
+  //   m*/m_e = (ℏ²/m_e) / (d²E/dk²[eV·Å²])
+  // and  d²E/dk²[eV·Å²] = (d2E/dkSq)[eV/tpiba²] / (2π/a[Å])²,
+  // so   m*/m_e = (ℏ²/m_e)·(2π/a)² / (d2E/dkSq).
+  // ℏ²/m_e = 7.61996 eV·Å² (= 2 × the ℏ²/2m_e = 3.80998 eV·Å² kinetic
+  // constant). Without this factor effective masses came out ~10-20× too
+  // small AND lattice-dependent, so they were neither m*/m_e nor comparable
+  // across materials. Falls back to 1 (old behavior) if latticeA is invalid.
+  const HBAR_SQ_OVER_ME_EV_ANG2 = 7.61996;
+  const massConv = latticeA > 0
+    ? HBAR_SQ_OVER_ME_EV_ANG2 * (2 * Math.PI / latticeA) ** 2
+    : 1;
 
   if (eigenvalues.length < 2 || nBands === 0) {
     return {
@@ -829,7 +910,14 @@ function analyzeBands(
       if (e1 === undefined || e2 === undefined) continue;
 
       if ((e1 <= 0 && e2 >= 0) || (e1 >= 0 && e2 <= 0)) {
-        const fraction = ki / eigenvalues.length;
+        // Normalize kFraction to [0, 1] using (length - 1) so the endpoint
+        // reaches exactly 1.0. The previous `ki / length` only reached
+        // (n-1)/n ≈ 0.983 for the last k-point — when downstream code
+        // round-trips via `Math.round(kFrac * (nK - 1))` (see
+        // dft-band-analysis.ts:113), that off-by-1/n shift caused the last
+        // k-point's crossings to map back to kIdx = n-2 instead of n-1,
+        // looking at the wrong eigenvalues for local-curvature analysis.
+        const fraction = eigenvalues.length > 1 ? ki / (eigenvalues.length - 1) : 0;
         const slope = (e2 - e1) / (eigenvalues[ki + 1].kDistance - eigenvalues[ki].kDistance || 1);
         bandCrossings.push({
           bandIndex: b,
@@ -843,25 +931,28 @@ function analyzeBands(
 
   const isMetallicAlongPath = bandCrossings.length > 0;
 
-  let bandGapAlongPath = Infinity;
+  let bandGapAlongPath = 0;
   if (!isMetallicAlongPath) {
+    // Fundamental (indirect) gap = min_k(CBM) - max_k(VBM), with the
+    // conduction-band minimum and valence-band maximum taken INDEPENDENTLY
+    // over all sampled k-points. The previous code computed min_k(CBM_k -
+    // VBM_k) — the minimum DIRECT gap — which overestimates the gap for any
+    // indirect-gap material (min(a-b) >= min(a) - max(b)). That pushed
+    // small-indirect-gap semiconductors into the "insulating" bucket in
+    // dft-band-analysis.ts, hiding pressure-induced-metal SC candidates.
+    // Energies are already E - E_F, so occupied = E < 0, unoccupied = E >= 0.
+    let globalVBM = -Infinity;  // highest occupied state over all path k-points
+    let globalCBM = Infinity;   // lowest unoccupied state over all path k-points
     for (const kpt of eigenvalues) {
-      let vbm = -Infinity;
-      let cbm = Infinity;
-      let hasBelow = false;
-      let hasAbove = false;
       for (const e of kpt.energies) {
-        if (e < 0) { hasBelow = true; if (e > vbm) vbm = e; }
-        else { hasAbove = true; if (e < cbm) cbm = e; }
-      }
-      if (hasBelow && hasAbove) {
-        const gap = cbm - vbm;
-        if (gap < bandGapAlongPath) bandGapAlongPath = gap;
+        if (e === undefined) continue;
+        if (e < 0) { if (e > globalVBM) globalVBM = e; }
+        else { if (e < globalCBM) globalCBM = e; }
       }
     }
-    if (bandGapAlongPath === Infinity) bandGapAlongPath = 0;
-  } else {
-    bandGapAlongPath = 0;
+    if (globalVBM > -Infinity && globalCBM < Infinity) {
+      bandGapAlongPath = Math.max(0, globalCBM - globalVBM);
+    }
   }
 
   for (let b = 0; b < nBands - 1; b++) {
@@ -944,29 +1035,36 @@ function analyzeBands(
       const d2E = ePrev + eNext - 2 * eCurr;
       const dkSq = ((eigenvalues[ki + 1].kDistance - eigenvalues[ki - 1].kDistance) / 2) ** 2 || 0.01;
 
-      if (Math.abs(d2E) < 0.005) {
-        let type: "saddle" | "minimum" | "maximum" = "saddle";
-        if (d2E > 0.001) type = "minimum";
-        else if (d2E < -0.001) type = "maximum";
-
+      // Van Hove singularity = band extremum (group velocity dE/dk = 0),
+      // detected as a sign change of the discrete slope across this k-point.
+      // The previous test |d2E| < 0.005 keyed on near-ZERO curvature — that
+      // identifies locally LINEAR stretches, the OPPOSITE of an extremum
+      // (a real band min/max has LARGE |d2E|). It mislabeled generic
+      // near-linear points as vHS and missed every actual band edge.
+      const vhsSlopeLeft = eCurr - ePrev;
+      const vhsSlopeRight = eNext - eCurr;
+      if (vhsSlopeLeft * vhsSlopeRight < 0 && Math.abs(eCurr) < 2.0) {
+        // Inside a strict slope sign change: eCurr below both neighbors → min.
+        const type: "saddle" | "minimum" | "maximum" = eCurr < ePrev ? "minimum" : "maximum";
+        // 1D DOS pile-up at a band edge grows as the extremum flattens, so a
+        // smaller |d2E| (flatter edge) → larger dosContribution.
         const dosContrib = 1.0 / (Math.abs(d2E) + 0.001);
-
-        if (Math.abs(eCurr) < 2.0) {
-          vanHoveSingularities.push({
-            bandIndex: b,
-            kIndex: ki,
-            energy: eCurr,
-            type,
-            dosContribution: Math.min(dosContrib, 100),
-            pathLimited: true,
-          });
-        }
+        vanHoveSingularities.push({
+          bandIndex: b,
+          kIndex: ki,
+          energy: eCurr,
+          type,
+          dosContribution: Math.min(dosContrib, 100),
+          pathLimited: true,
+        });
       }
 
       if (Math.abs(eCurr) < 1.0 && Math.abs(d2E) > 0.001) {
-        const mEff = 1.0 / (d2E / dkSq);
-        if (Math.abs(mEff) < 50 && Math.abs(mEff) > 0.01) {
-          const massComps = estimateAnisotropicMass(eigenvalues, b, ki, dkSq);
+        // m*/m_e = (ℏ²/m_e)·(2π/a)² / (d²E/dk²) — see massConv above.
+        const mEff = massConv / (d2E / dkSq);
+        const absM = Math.abs(mEff);
+        if (Number.isFinite(mEff) && absM > 1e-6 && absM < 10000) {
+          const massComps = estimateAnisotropicMass(eigenvalues, b, ki, dkSq, massConv);
           effectiveMasses.push({
             bandIndex: b,
             kLabel: eigenvalues[ki].kLabel || `k${ki}`,
@@ -1074,9 +1172,15 @@ export async function computeDFTBandStructure(
   nspin: number = 1,
   latticeB: number = latticeA,
   ecutrho?: number,
+  pseudoDir?: string,
 ): Promise<DFTBandStructureResult> {
   const startTime = Date.now();
-  const crystalSystem = guessCrystalSystem(elements, counts, cOverA);
+  // Pass `formula` so guessCrystalSystem can consult lookupKnownStructure
+  // and return monoclinic/triclinic/orthorhombic/rhombohedral for literature
+  // compounds — without it, the heuristic only returns cubic/hex/tetragonal
+  // and the k-path silently misrepresents the true Brillouin zone for any
+  // non-cubic literature candidate.
+  const crystalSystem = guessCrystalSystem(elements, counts, cOverA, formula);
   const kPath = getKPath(crystalSystem);
   const pathString = kPath.labels.join(" -> ");
 
@@ -1126,7 +1230,7 @@ export async function computeDFTBandStructure(
       return result;
     }
 
-    const bandsInput = generateBandsInput(formula, elements, counts, latticeA, positions, kPath, ecutwfc, nspin, crystalSystem, cOverA, latticeB, ecutrho);
+    const bandsInput = generateBandsInput(formula, elements, counts, latticeA, positions, kPath, ecutwfc, nspin, crystalSystem, cOverA, latticeB, ecutrho, pseudoDir);
     const bandsInputFile = path.join(jobDir, "bands.in");
     fs.writeFileSync(bandsInputFile, bandsInput);
 
@@ -1218,37 +1322,17 @@ export async function computeDFTBandStructure(
     result.nKPoints = parsed.nKPoints;
     result.converged = parsed.converged;
 
-    if (parsed.eigenvalues.length > 0 && parsed.nBands > 0) {
-      try {
-        const projwfcBin = path.posix.join(QE_BIN_DIR, "projwfc.x");
-        if (fs.existsSync(projwfcBin)) {
-          const projInput = generateProjwfcInput(formula);
-          const projInputFile = path.join(jobDir, "projwfc.in");
-          fs.writeFileSync(projInputFile, projInput);
-
-          console.log(`[BandCalc] Running projwfc.x for orbital weights on ${formula}`);
-          const projResult = await runQEBands(projwfcBin, projInputFile, jobDir);
-
-          if (projResult.exitCode === 0) {
-            const orbWeights = parseProjwfcOutput(jobDir, parsed.nKPoints, parsed.nBands);
-            if (orbWeights) {
-              mergeOrbitalWeights(parsed.eigenvalues, orbWeights);
-              const orbCount = parsed.eigenvalues.filter(kp => kp.weights && kp.weights.some(w => w.s + w.p + w.d + w.f > 0.01)).length;
-              console.log(`[BandCalc] Orbital weights merged for ${formula}: ${orbCount}/${parsed.nKPoints} k-points with data`);
-            } else {
-              console.log(`[BandCalc] projwfc.x completed but no orbital weights parsed for ${formula}`);
-            }
-          } else {
-            console.log(`[BandCalc] projwfc.x failed for ${formula} (non-critical, continuing without orbital weights)`);
-          }
-        }
-      } catch (projErr: any) {
-        console.log(`[BandCalc] projwfc.x error for ${formula}: ${projErr.message} (continuing without orbital weights)`);
-      }
-    }
+    // Skip projwfc.x: the existing parser reads filpdos files (energy-grid
+    // DOS) but indexes them as filproj (k-point × band) — see comment in
+    // parseProjwfcOutput. Running projwfc.x just wastes 30-60s per band-
+    // structure calc since the parser returns null. The downstream
+    // extractFermiPockets uses its stoichiometric orbital-character fallback
+    // (which now correctly separates f from d for heavy-fermion systems).
+    // Re-enable when parseProjwfcOutput is rewritten to parse filproj output
+    // (also requires adding `filproj = 'proj'` to generateProjwfcInput).
 
     if (parsed.eigenvalues.length > 0) {
-      const analysis = analyzeBands(parsed.eigenvalues, parsed.nBands, fermiEnergy);
+      const analysis = analyzeBands(parsed.eigenvalues, parsed.nBands, fermiEnergy, latticeA);
       result.bandCrossings = analysis.bandCrossings;
       result.bandInversions = analysis.bandInversions;
       result.vanHoveSingularities = analysis.vanHoveSingularities;

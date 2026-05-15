@@ -115,11 +115,19 @@ export async function predictWithLocalXGB(
   formula: string,
   pressureGpa: number = 0,
 ): Promise<LocalMLPrediction | null> {
-  // Ensure weights are loaded
-  if (!cachedEnsemble) {
-    const loaded = await loadLatestXGBWeights();
-    if (!loaded || !cachedEnsemble) return null;
-  }
+  // Ensure weights are loaded AND fresh. loadLatestXGBWeights() internally
+  // honors the 6h CACHE_TTL_MS: it returns immediately (just a timestamp
+  // compare, no DB query) when the cache is fresh, and re-queries the DB
+  // when stale. The previous `if (!cachedEnsemble)` guard skipped this call
+  // entirely once the cache was populated — so a long-running worker froze
+  // its XGB weights at first load and never picked up retraining updates,
+  // defeating the documented 6h refresh.
+  //
+  // Gate only on whether ANY ensemble is available: if a staleness-triggered
+  // reload fails (transient DB error), loadLatestXGBWeights returns false but
+  // leaves the previous cache intact — stale weights still beat no prediction.
+  await loadLatestXGBWeights();
+  if (!cachedEnsemble) return null;
 
   try {
     // Pass pressureGpa via the `mat` arg so extractFeatures populates the
@@ -157,14 +165,27 @@ export async function predictWithLocalXGB(
     const variance = predictions.reduce((s, p) => s + (p - tc) ** 2, 0) / predictions.length;
     const std = Math.sqrt(variance);
 
-    // CI95 from variance ensemble if available, else from ensemble spread
+    // CI95 from variance ensemble if available, else from ensemble spread.
+    // The variance ensemble's `isLogVariance` flag was declared on the
+    // interface but never consumed here — see gradient-boost.ts:1856 for the
+    // canonical handling. When the GCP training pipeline trains on log-
+    // transformed variance (the standard setup, isLogVariance=true), each
+    // model emits log(σ²), which must be exp'd to recover the variance.
+    // Without this conversion the aleatoric uncertainty was massively
+    // under-reported (varStd ≈ √log_var instead of √exp(log_var)).
     let varStd = std;
     if (cachedVarianceEnsemble && cachedVarianceEnsemble.models.length > 0) {
+      const isLogVar = cachedVarianceEnsemble.isLogVariance === true;
       const varPreds: number[] = [];
       for (const model of cachedVarianceEnsemble.models) {
         try {
-          const pred = gbPredictFromModel(model, featureArray);
-          if (Number.isFinite(pred) && pred > 0) varPreds.push(pred);
+          const rawPred = gbPredictFromModel(model, featureArray);
+          if (!Number.isFinite(rawPred)) continue;
+          // For log-variance models, the prediction is log(σ²); recover σ²
+          // via exp(). For raw-variance models, accept positive predictions
+          // directly. In both cases we want a positive σ² value.
+          const variancePred = isLogVar ? Math.exp(rawPred) : rawPred;
+          if (Number.isFinite(variancePred) && variancePred > 0) varPreds.push(variancePred);
         } catch {}
       }
       if (varPreds.length > 0) {

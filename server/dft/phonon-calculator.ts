@@ -19,7 +19,15 @@ const BOHR_TO_ANG = 0.529177210903;
 const AMU_TO_ELECTRONMASS = 1822.888486209;
 const HARTREE_CM1 = 219474.6313632;
 const PHONON_TIMEOUT_MS = 90_000;
+// 5000 cm⁻¹ is the upper edge of solid-state phonons (free-H₂ stretch is 4395
+// cm⁻¹; H-rich hydrides under pressure can approach 3500–4000). Frequencies
+// above 5000 are flagged as numerical artifacts by assessDynamicStability,
+// but we must NOT clamp them — clamping a real 4900 cm⁻¹ H stretch to 5000
+// silently biases ω_log (and therefore Allen-Dynes Tc) downward in exactly
+// the hydride regime we care about. NUMERICAL_SANITY_CEILING is only used
+// to guard against true blow-ups (NaN-like or > 8000 cm⁻¹).
 const MAX_PHYSICAL_FREQ_CM1 = 5000;
+const NUMERICAL_SANITY_CEILING_CM1 = 8000;
 const MAX_FC_ENTRY = 50.0;
 const FC_CLAMP_WARNING_THRESHOLD = 0.1;
 const JACOBI_TOLERANCE = 1e-12;
@@ -434,7 +442,12 @@ async function buildForceConstantMatrix(
       if (!result.plusForces || !result.minusForces) return null;
       const colIdx = result.atomIdx * 3 + result.dir;
       for (let j = 0; j < dim; j++) {
-        let fc = -(result.plusForces[j] - result.minusForces[j]) / (2 * displacementDeltaBohr);
+        // plusForces/minusForces hold the xTB GRADIENT g=dE/dx (the Turbomole
+        // `gradient` file / .engrad "current gradient" store dE/dx, not the
+        // force −dE/dx). Φ_ij = ∂g_j/∂x_i = +[g_j(+)−g_j(−)]/(2δ). A leading
+        // minus (the phonopy-style −ΔF/Δx, valid only for force-valued data)
+        // would yield −Φ and report every stable structure as fully imaginary.
+        let fc = (result.plusForces[j] - result.minusForces[j]) / (2 * displacementDeltaBohr);
         if (Math.abs(fc) > MAX_FC_ENTRY) {
           clampedEntries++;
           fc = Math.sign(fc) * MAX_FC_ENTRY;
@@ -628,8 +641,8 @@ function eigenvaluesToFrequencies(eigenvalues: number[]): number[] {
     } else {
       freq = Math.sqrt(ev) * CONV;
     }
-    if (Math.abs(freq) > MAX_PHYSICAL_FREQ_CM1) {
-      freq = Math.sign(freq) * MAX_PHYSICAL_FREQ_CM1;
+    if (Math.abs(freq) > NUMERICAL_SANITY_CEILING_CM1) {
+      freq = Math.sign(freq) * NUMERICAL_SANITY_CEILING_CM1;
     }
     return freq;
   });
@@ -703,7 +716,7 @@ function interpolateQPoints(
 export function computePhononDOS(frequencies: number[]): { dos: PhononDOSBin[]; omegaLog: number | null; lambdaContribution: number | null } {
   if (frequencies.length === 0) return { dos: [], omegaLog: null, lambdaContribution: null };
 
-  const allFreqs = frequencies.filter(f => Number.isFinite(f) && Math.abs(f) <= MAX_PHYSICAL_FREQ_CM1);
+  const allFreqs = frequencies.filter(f => Number.isFinite(f) && Math.abs(f) <= NUMERICAL_SANITY_CEILING_CM1);
   if (allFreqs.length === 0) return { dos: [], omegaLog: null, lambdaContribution: null };
   const minFreq = Math.min(...allFreqs);
   const maxFreq = Math.max(...allFreqs);
@@ -736,17 +749,44 @@ export function computePhononDOS(frequencies: number[]): { dos: PhononDOSBin[]; 
   }
 
   const positiveFreqs = allFreqs.filter(f => f > 1);
+  // Allen-Dynes ω_log = exp[ (2/λ) ∫ dω α²F(ω)/ω · ln(ω) ]. With α²F unknown,
+  // the DOS-only approximation is α²F(ω) ∝ F(ω) ≈ const per discrete mode,
+  // giving the 1/ω-weighted log-average below. An UNWEIGHTED mean of ln(ω)
+  // (the previous formula) overestimates ω_log — low-frequency acoustic modes
+  // dominate the true ω_log but were given the same weight as high-frequency
+  // optical modes. Since this ω_log overrides the analytical one in
+  // physics-engine.ts and feeds directly into Allen-Dynes Tc, the unweighted
+  // version inflated Tc predictions systematically.
   let omegaLog: number | null = null;
   if (positiveFreqs.length > 0) {
-    const logSum = positiveFreqs.reduce((s, f) => s + Math.log(f), 0);
-    omegaLog = Math.exp(logSum / positiveFreqs.length);
+    let invSum = 0;
+    let weightedLnSum = 0;
+    for (const f of positiveFreqs) {
+      const w = 1 / f;
+      invSum += w;
+      weightedLnSum += w * Math.log(f);
+    }
+    if (invSum > 0) {
+      omegaLog = Math.exp(weightedLnSum / invSum);
+    }
   }
 
+  // ω₂² uses the same 1/ω weighting for consistency, so ω_log²/ω₂² is the
+  // Allen-Dynes f₂ spectral-shape factor in the same DOS-only approximation.
+  // Σ_i (1/ω_i) ω_i² / Σ_i (1/ω_i) = Σ_i ω_i / Σ_i (1/ω_i).
   let lambdaContribution: number | null = null;
   if (omegaLog != null && omegaLog > 0 && positiveFreqs.length > 0) {
-    const omega2Avg = positiveFreqs.reduce((s, f) => s + f * f, 0) / positiveFreqs.length;
-    if (omega2Avg > 0) {
-      lambdaContribution = (omegaLog * omegaLog) / omega2Avg;
+    let invSum = 0;
+    let freqSum = 0;
+    for (const f of positiveFreqs) {
+      invSum += 1 / f;
+      freqSum += f;
+    }
+    if (invSum > 0) {
+      const omega2Avg = freqSum / invSum;
+      if (omega2Avg > 0) {
+        lambdaContribution = (omegaLog * omegaLog) / omega2Avg;
+      }
     }
   }
 
@@ -775,7 +815,11 @@ export function assessDynamicStability(dispersion: PhononDispersionPoint[]): {
   const ACOUSTIC_THRESHOLD = -5;
   const SOFT_MODE_THRESHOLD = -20;
   const ARTIFACT_THRESHOLD = -2000;
-  const POSITIVE_ARTIFACT_THRESHOLD = MAX_PHYSICAL_FREQ_CM1;
+  // Only treat frequencies above the numerical sanity ceiling as an artifact
+  // that flips stability to false. The 5000–8000 cm⁻¹ band is reserved for
+  // hard hydride H stretches (legitimate physics, but rare); we keep them
+  // for ω_log but do NOT use them to declare the structure unstable.
+  const POSITIVE_ARTIFACT_THRESHOLD = NUMERICAL_SANITY_CEILING_CM1;
 
   for (const point of dispersion) {
     for (const freq of point.frequencies) {
@@ -918,8 +962,10 @@ export async function computeFiniteDisplacementPhonons(
     const lowestFreq = allDispersionFreqs.length > 0 ? Math.min(...allDispersionFreqs) : 0;
     const rawHighestFreq = allDispersionFreqs.length > 0 ? Math.max(...allDispersionFreqs) : 0;
     const highestFreq = rawHighestFreq;
-    if (rawHighestFreq >= MAX_PHYSICAL_FREQ_CM1) {
-      console.log(`[Phonon] ${formula}: ARTIFACT CLAMPED — highest raw frequency ${rawHighestFreq.toFixed(0)} cm⁻¹ exceeds ${MAX_PHYSICAL_FREQ_CM1} cm⁻¹ physical limit, clamped to ±${MAX_PHYSICAL_FREQ_CM1}`);
+    if (rawHighestFreq >= NUMERICAL_SANITY_CEILING_CM1) {
+      console.log(`[Phonon] ${formula}: NUMERICAL CEILING HIT — highest frequency ${rawHighestFreq.toFixed(0)} cm⁻¹ ≥ ${NUMERICAL_SANITY_CEILING_CM1} cm⁻¹ (clamped, indicates force-constant blow-up).`);
+    } else if (rawHighestFreq >= MAX_PHYSICAL_FREQ_CM1) {
+      console.log(`[Phonon] ${formula}: HIGH-FREQUENCY MODE — highest frequency ${rawHighestFreq.toFixed(0)} cm⁻¹ exceeds ${MAX_PHYSICAL_FREQ_CM1} cm⁻¹ threshold (kept verbatim; flagged as artifact by stability check, but ω_log uses true value).`);
     }
 
     const wallTime = (Date.now() - startTime) / 1000;
@@ -965,7 +1011,7 @@ export async function computeFiniteDisplacementPhonons(
       console.log(`[Phonon] ${formula}: NEGATIVE ARTIFACT — ${negArtifactCount} mode(s) below -2000 cm⁻¹ are xTB numerical explosions (lowest=${lowestFreq.toFixed(0)} cm⁻¹), discarded. ${stability.physicalImaginaryCount} physical imaginary + ${stability.softModeCount} soft mode(s) remain.`);
     }
     if (stability.positiveArtifact) {
-      console.log(`[Phonon] ${formula}: POSITIVE ARTIFACT — frequencies ≥${MAX_PHYSICAL_FREQ_CM1} cm⁻¹ detected (highest=${highestFreq.toFixed(0)} cm⁻¹), indicates force constant blow-up.`);
+      console.log(`[Phonon] ${formula}: POSITIVE ARTIFACT — frequencies ≥${NUMERICAL_SANITY_CEILING_CM1} cm⁻¹ detected (highest=${highestFreq.toFixed(0)} cm⁻¹), indicates force constant blow-up.`);
     }
     if (stability.softModeCount > 0 && !stability.numericalArtifact) {
       console.log(`[Phonon] ${formula}: ${stability.softModeCount} soft mode(s) between -5 and -20 cm⁻¹ (likely ASR residuals from xTB).`);

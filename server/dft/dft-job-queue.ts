@@ -309,8 +309,12 @@ async function processNextJob(): Promise<boolean> {
 
     if (!claimed) {
       console.log(`[DFT-Queue] Job #${job.id} already claimed by another worker, skipping`);
-      activeWorkers--;
-      activeJobs.delete(job.id);
+      // Do NOT decrement activeWorkers here — the `finally` block at the end
+      // of processNextJob (line 643) does that unconditionally. Previously
+      // this returned after `activeWorkers--` AND the finally also fired,
+      // double-decrementing the counter. Over many failed claims activeWorkers
+      // would drift negative, defeating the `activeWorkers >= MAX_CONCURRENT`
+      // gate at line 282 and allowing unbounded concurrent worker spawns.
       return false;
     }
 
@@ -333,15 +337,27 @@ async function processNextJob(): Promise<boolean> {
         : undefined;
 
     // Look up ensembleScore so the worker can decide whether to run full DFPT EPC.
+    // Also look up the Stoner-ferromagnet flag set by the engine pre-screen
+    // (engine.ts:2065-2067). When I·N(Ef) > 1, the candidate is a Stoner FM
+    // and phonon-mediated SC is impossible — skip the expensive DFPT EPC.
+    // Previously this flag was written to mlFeatures but never read back when
+    // submitting DFT jobs, so DFPT EPC ran on flagged ferromagnets anyway
+    // (wasting ~8h per candidate on a calculation guaranteed to give λ ≈ 0).
     let ensembleScore: number | undefined;
+    let skipEph: boolean = false;
     try {
       const candidates = await storage.getSuperconductorsByFormula(job.formula);
       const bestScore = candidates.reduce((best, c) => Math.max(best, c.ensembleScore ?? 0), 0);
       if (bestScore > 0) ensembleScore = bestScore;
+      // Any candidate flagged as Stoner FM short-circuits the EPC step
+      skipEph = candidates.some(c => {
+        const mlf = (c.mlFeatures as Record<string, any> | null | undefined) ?? {};
+        return mlf.skipEph === true || mlf.stonerFerromagnet === true;
+      });
     } catch { /* non-fatal — worker will skip DFPT if undefined */ }
 
     if (isQEAvailable()) {
-      dftResult = await runFullDFT(job.formula, { startAttempt, pressureGpa: jobPressureGpa, ensembleScore, forceSpin: isTSCJob });
+      dftResult = await runFullDFT(job.formula, { startAttempt, pressureGpa: jobPressureGpa, ensembleScore, forceSpin: isTSCJob, skipEph });
     } else {
       dftResult = {
         formula: job.formula,
@@ -393,9 +409,24 @@ async function processNextJob(): Promise<boolean> {
           if (dftResult.scf.bandGap !== null) {
             scalarUpdates.bandGap = dftResult.scf.bandGap;
           }
-          if (dftResult.scf.totalEnergyPerAtom) {
-            scalarUpdates.formationEnergy = dftResult.scf.totalEnergyPerAtom;
-          }
+          // Do NOT overwrite formationEnergy from totalEnergyPerAtom — these
+          // are different quantities. totalEnergyPerAtom is the absolute DFT
+          // total energy per atom (typically -100 to -1000+ eV/atom for
+          // semicore-PP compounds, depending on number of explicit valence
+          // electrons). Formation energy is E_compound - Σ E_elemental_ref
+          // (typically ±2 eV/atom).
+          //
+          // The previous assignment silently corrupted formationEnergy for
+          // every DFT-completed candidate — feature_engineering downstream
+          // (stability-predictor.ts:68 `formationEnergy / 5`,
+          // structure-learning-loop.ts:106 `> 0.5`, family-filters.ts:1181
+          // `1 - |Ef|/2`) was getting values 100-1000× too large.
+          //
+          // The earlier xTB-derived formationEnergy from
+          // quantum-engine-pipeline.ts:587 is the correct value; leave it
+          // alone. Store the absolute DFT value in qeTotalEnergy / the
+          // mlFeaturePatch below so it's preserved for ML training but
+          // separated from the chemical "formation energy" concept.
         }
 
         if (dftResult.vcRelaxed && dftResult.relaxedLatticeA) {
@@ -418,9 +449,17 @@ async function processNextJob(): Promise<boolean> {
           qePhononImaginaryCount: dftResult.phonon?.imaginaryCount ?? 0,
           qePhononFreqs: dftResult.phonon?.frequencies?.length || 0,
           qeMagnetization: dftResult.scf?.magnetization ?? null,
-          qeIsMagnetic: dftResult.scf?.magnetization != null
-            ? Math.abs(dftResult.scf.magnetization) > 0.5
-            : null,
+          qeAbsoluteMagnetization: dftResult.scf?.absoluteMagnetization ?? null,
+          // Use ABSOLUTE magnetization (∫|m(r)| d³r) to flag magnetism — total
+          // magnetization is ~0 for AFM systems even when local moments are
+          // large (cuprates, Fe-pnictides). The previous `|total| > 0.5` test
+          // missed every AFM ground state, dropping the magnetic ML feature
+          // and routing AFM SCs through the non-magnetic prediction path.
+          qeIsMagnetic: dftResult.scf?.absoluteMagnetization != null
+            ? dftResult.scf.absoluteMagnetization > 0.5
+            : (dftResult.scf?.magnetization != null
+                ? Math.abs(dftResult.scf.magnetization) > 0.5
+                : null),
           dftConfidence: 1.0,
           qeBands: bandData?.converged || false,
           qeBandCrossings: bandData?.bandCrossings?.length || 0,
@@ -692,7 +731,21 @@ async function cleanupStaleJobs() {
     const staleRunning = await storage.getDftJobsByStatus("running");
     let requeued = 0;
     let failed = 0;
+    let skippedActive = 0;
     for (const job of staleRunning) {
+      // CRITICAL: skip jobs that THIS server is actively processing. The
+      // cleanup is meant to recover jobs left "running" by a previous server
+      // session, NOT to re-queue jobs the current worker loop is busy on.
+      // Without this guard, every job that ran longer than
+      // STALE_CLEANUP_INTERVAL_MS (5 min) would get re-queued every 5 min,
+      // duplicating work and racing the active worker for the same .save dir.
+      // 5-15 min DFT jobs (most of them) hit this — explains why the queue
+      // was occasionally re-processing the same formula 2-3× in production
+      // without any obvious failure trigger.
+      if (activeJobs.has(job.id)) {
+        skippedActive++;
+        continue;
+      }
       const attempts = (job as any).retryCount ?? 0;
       if (attempts < 2) {
         await storage.updateDftJob(job.id, {
@@ -713,7 +766,7 @@ async function cleanupStaleJobs() {
       }
     }
     if (staleRunning.length > 0) {
-      console.log(`[DFT-Queue] Stale job cleanup: ${requeued} re-queued, ${failed} failed (${staleRunning.length} total stale)`);
+      console.log(`[DFT-Queue] Stale job cleanup: ${requeued} re-queued, ${failed} failed, ${skippedActive} skipped (in-progress on this worker) — ${staleRunning.length} total`);
     }
   } catch (err: any) {
     console.log(`[DFT-Queue] Stale job cleanup error: ${err.message}`);
@@ -815,10 +868,16 @@ async function refillQueueIfLow(): Promise<number> {
         if (activeJob) return false;
         if (recentValidatedFailures >= 3) return false;
 
+        // Cap BOTH explore and exploit at 90 so manually-promoted candidates
+        // (priority 91–99) always win, regardless of which acquisition path
+        // selected them. Previously only exploit was capped — top-uncertainty
+        // explore candidates with uncertainty=1.0 AND discoveryScore=1.0
+        // hit priority=100, silently outranking manual promotions.
         const acquisitionPriority = source === "explore"
-          ? Math.round(((candidate.uncertaintyEstimate ?? 0) * 0.6 + (candidate.discoveryScore ?? 0) * 0.4) * 100)
+          ? Math.min(90, Math.round(
+              ((candidate.uncertaintyEstimate ?? 0) * 0.6 + (candidate.discoveryScore ?? 0) * 0.4) * 100
+            ))
           // Exploit: 70% predictedTc (normalised to 300 K) + 30% ensembleScore.
-          // Cap at 90 so manually promoted candidates (91–99) always win.
           : Math.min(90, Math.round(
               (0.7 * Math.min(1.0, (candidate.predictedTc ?? 0) / TC_NORM_SCALE) +
                0.3 * (candidate.ensembleScore ?? 0)) * 100
@@ -1219,6 +1278,7 @@ export async function getDFTQueueStats() {
         converged: out?.scf?.converged || false,
         totalEnergy: out?.scf?.totalEnergy || null,
         magnetization: out?.scf?.magnetization ?? null,
+        absoluteMagnetization: out?.scf?.absoluteMagnetization ?? null,
         retryCount: out?.retryCount || null,
         xtbPreRelaxed: out?.xtbPreRelaxed || null,
         vcRelaxed: out?.vcRelaxed || null,

@@ -6,6 +6,14 @@ export interface DFPTAlpha2FParsed {
   alpha2F: number[];
   lambda: number;
   omegaLog: number;
+  /** Allen-Dynes spectral second moment ⟨ω²⟩ = (2/λ)·∫ω·α²F(ω) dω, in
+   *  (cm⁻¹)². NOTE: this is in cm⁻¹ units even though `omegaLog` (above) is
+   *  in K — the two have intentionally different conventions because the
+   *  canonical Allen-Dynes f₂ formula in `tc-formulas.ts` expects
+   *  `omega2Avg` in (cm⁻¹)² and computes √omega2Avg/omegaLog_cm internally.
+   *  Used by the f₂ strong-coupling correction (5–15% Tc boost for hydrides
+   *  with √⟨ω²⟩/ω_log > 1.2). Returns 0 when not computable. */
+  omega2Avg?: number;
   nqPoints: number;
   source: "lambda.x" | "matdyn" | "reconstructed";
   unstableStructure?: boolean;
@@ -179,7 +187,16 @@ export function parseMatdynDOS(dosContent: string): DFPTPhononDOS {
     }
   }
 
-  const totalStates = dos.reduce((s, d) => s + d, 0);
+  // totalStates = ∫ DOS(ω) dω (number of phonon modes, should be ~3·N_atoms).
+  // The previous `dos.reduce(s + d)` summed RAW DOS values without bin width
+  // — for matdyn's default deltaE=1 cm⁻¹ this happened to be numerically
+  // close to the true integral, but for deltaE=2 it was off by 2×, etc.
+  // Proper trapezoidal integration on the frequency grid:
+  let totalStates = 0;
+  for (let i = 0; i < dos.length; i++) {
+    const dw = dynamicBinWidth(frequencies, i);
+    totalStates += dos[i] * dw;
+  }
   const maxFreq = frequencies.length > 0 ? Math.max(...frequencies) : 0;
 
   return { frequencies, dos, totalStates, maxFrequency: maxFreq, hasImaginaryModes: hasImaginary };
@@ -187,10 +204,26 @@ export function parseMatdynDOS(dosContent: string): DFPTPhononDOS {
 
 function dynamicBinWidth(freqs: number[], i: number): number {
   if (freqs.length < 2) return 1;
-  if (i === 0) return freqs[1] - freqs[0];
-  if (i === freqs.length - 1) return freqs[i] - freqs[i - 1];
+  // Trapezoidal weights: ∫f dx ≈ Σ w_i f(x_i)
+  //   endpoint w_0 = (x_1 - x_0)/2
+  //   interior w_i = (x_{i+1} - x_{i-1})/2
+  //   endpoint w_N = (x_N - x_{N-1})/2
+  // Previously endpoints used the full neighbor gap (no /2), which double-counted
+  // the endpoint contribution. Negligible for typical phonon DOS where the
+  // edges have ~zero density, but matters for α²F integrals because lambda.x
+  // a2F output often has nonzero α²F at the very first positive frequency bin.
+  if (i === 0) return (freqs[1] - freqs[0]) / 2;
+  if (i === freqs.length - 1) return (freqs[i] - freqs[i - 1]) / 2;
   return (freqs[i + 1] - freqs[i - 1]) / 2;
 }
+
+// Threshold (cm⁻¹) below which a negative phonon frequency in the α²F grid
+// counts as a GENUINE dynamic instability rather than numerical noise.
+// matdyn/lambda.x α²F grids routinely dip a few cm⁻¹ below zero from ASR
+// residuals and Gaussian-broadening tails around the Γ acoustic modes; a
+// bare `freq < 0` test flagged perfectly stable materials as unstable and
+// zeroed their λ. Matches the imaginary-mode threshold in parsePhDynmatOutput.
+const SIGNIFICANT_IMAG_CM1 = 50;
 
 export function parseAlpha2FOutput(content: string): DFPTAlpha2FParsed {
   const frequencies: number[] = [];
@@ -230,7 +263,13 @@ export function parseAlpha2FOutput(content: string): DFPTAlpha2FParsed {
       const a2f = parseFloat(parts[1]);
       if (!Number.isFinite(freq) || !Number.isFinite(a2f)) continue;
       if (freq < 0) {
-        hasImaginaryModes = true;
+        // Negative bins are always skipped from the arrays and the
+        // λ/ω_log integrals, but only a SIGNIFICANT imaginary mode marks
+        // the structure dynamically unstable (→ early return, λ=0). A
+        // few-cm⁻¹ negative bin is ASR/broadening noise around the Γ
+        // acoustic modes, not an instability — flagging it discarded the
+        // DFPT result of stable materials.
+        if (freq < -SIGNIFICANT_IMAG_CM1) hasImaginaryModes = true;
         continue;
       }
       frequencies.push(freq);
@@ -268,6 +307,8 @@ export function parseAlpha2FOutput(content: string): DFPTAlpha2FParsed {
     }
   }
 
+  const CM1_TO_K = 1.4387768775039338;  // hc/k_B in K·cm
+
   if (omegaLog === 0 && lambda > 0 && frequencies.length > 0) {
     let logSum = 0;
     for (let i = 0; i < frequencies.length; i++) {
@@ -285,9 +326,27 @@ export function parseAlpha2FOutput(content: string): DFPTAlpha2FParsed {
     // cm⁻¹, so the fallback Allen-Dynes Tc was off by a factor of 1/1.4388
     // (~30% under-predict) whenever the a2f file path was used.
     if (omegaLog > 0) {
-      const CM1_TO_K = 1.4387768775039338;  // hc/k_B in K·cm
       omegaLog *= CM1_TO_K;
     }
+  }
+
+  // Compute ⟨ω²⟩ for the Allen-Dynes f₂ correction. Formula:
+  //   ⟨ω²⟩ = (2/λ) · ∫ ω · α²F(ω) dω
+  // Output in (cm⁻¹)² — DELIBERATELY keeps cm⁻¹ units because the canonical
+  // Allen-Dynes consumers in tc-formulas.ts expect omega2Avg in (cm⁻¹)² and
+  // do the K↔cm⁻¹ conversion internally. (omegaLog above is in K because
+  // qe-worker.ts:4774 plugs it directly into a Tc[K] formula. The two
+  // unit conventions are intentional and documented.)
+  let omega2AvgCm2 = 0;
+  if (lambda > 0 && frequencies.length > 0) {
+    let omega2Sum = 0;
+    for (let i = 0; i < frequencies.length; i++) {
+      if (frequencies[i] < LOW_FREQ_CUTOFF || alpha2F[i] <= 0) continue;
+      const dw = dynamicBinWidth(frequencies, i);
+      omega2Sum += alpha2F[i] * frequencies[i] * dw;
+    }
+    omega2AvgCm2 = (2 / lambda) * omega2Sum;
+    if (!Number.isFinite(omega2AvgCm2) || omega2AvgCm2 < 0) omega2AvgCm2 = 0;
   }
 
   return {
@@ -295,6 +354,7 @@ export function parseAlpha2FOutput(content: string): DFPTAlpha2FParsed {
     alpha2F,
     lambda: Number(lambda.toFixed(4)),
     omegaLog: Number(omegaLog.toFixed(2)),  // in K (project convention)
+    omega2Avg: omega2AvgCm2 > 0 ? Number(omega2AvgCm2.toFixed(4)) : 0,  // in (cm⁻¹)²
     nqPoints,
     source: frequencies.length > 0 ? "lambda.x" : "reconstructed",
   };
@@ -318,29 +378,58 @@ export function parseLambdaOutput(stdout: string): {
     if (!trimmed) continue;
 
     if (lambda === 0) {
-      // ph.x electron_phonon='interpolated': "Electron-phonon coupling constant =   1.234"
-      // lambda.x: "lambda =   1.234"
+      // QE 7.x ph.x electron_phonon='interpolated' format (with `=`):
+      //   "Electron-phonon coupling constant =   1.234"
+      //   "lambda =   1.234   omega_log =   800.0 K"
+      // Older QE format (no `=` after the keyword):
+      //   "Electron-phonon coupling constant is    1.234"
+      //   "     lambda     1.234   omega_log=   800.00 K"
+      // lambda.x (always uses `=`):
+      //   "lambda =   1.234"
+      // The two original regexes only matched the `=`-form, so on older QE
+      // builds (and on the `is`-form newer prints) lambda stayed 0 and the
+      // Allen-Dynes Tc fallback was silently skipped. Cover both forms.
+      // First regex handles all three "Electron-phonon coupling constant"
+      // header variants emitted by different QE versions:
+      //   "Electron-phonon coupling constant = 1.234"     (newer QE, `=`)
+      //   "Electron-phonon coupling constant is 1.234"    (older QE, `is`)
+      //   "Electron-phonon coupling constant lambda is 1.234"  (some QE 6.x)
+      // Second regex handles the standalone summary line in newer QE 7.x:
+      //   "lambda = 1.234   omega_log = ..."     (with =)
+      //   "lambda    1.234   omega_log= ..."     (older, no =)
+      // `\s+` after `\blambda` is mandatory whitespace so the regex doesn't
+      // match per-q-point forms like `lambda(1)=` or `lambda_av=` that share
+      // the substring but have different semantics. `(?:[=:]\s*)?` then
+      // optionally consumes any `=`/`:` so the same regex covers both forms.
       const lm =
-        trimmed.match(/Electron-phonon coupling constant\s*=\s*([\d.]+)/i) ||
-        trimmed.match(/\blambda\s*=\s*([\d.]+)/i);
+        trimmed.match(/Electron-phonon coupling constant(?:\s+lambda)?\s*(?:is|=|:)?\s*([\d.]+)/i) ||
+        trimmed.match(/\blambda\s+(?:[=:]\s*)?([\d.]+)/i);
       if (lm) lambda = parseFloat(lm[1]);
     }
 
     if (omegaLog === 0) {
-      // ph.x: "Logarithmic average frequency (t.s.) =   1000.00 K"  (already Kelvin)
-      // lambda.x: "omega_log (K) =   800.0"  (K in parens before =)
-      // EPW 4.x / older: "omega_log (meV) = 80.0"
-      // older QE no annotation: "omega_log =   800.0"  (Kelvin)
+      // ph.x (newer 7.x): "Logarithmic average frequency (t.s.) =   1000.00 K"
+      // ph.x (older 6.x): "lambda  0.85  omega_log=  800.00 K"  (no space before =)
+      // ph.x (oldest):    "lambda  0.85  omega_log   800.00 K"  (no = at all)
+      // ph.x (alt name):  "omega_ln =   800.00 K"  (some QE versions)
+      // lambda.x:         "omega_log (K) =   800.0"  (K in parens before =)
+      // EPW 4.x:          "omega_log (meV) = 80.0"
       //
-      // The old regex matched any of these but treated the captured number
-      // as Kelvin regardless of the parenthesized unit. If lambda.x ever
-      // emits in meV (EPW 4.x style), Tc would be ~10× under-predicted.
-      // Explicitly inspect the parenthesized unit and convert.
+      // The previous regex required `=` between `omega_log` and the value
+      // — older QE builds without the `=` (paired with the `lambda` bare-
+      // whitespace summary line fixed above) silently returned omegaLog=0,
+      // which combined with the lambda=0 bug from iteration 116 to make
+      // the entire DFPT Allen-Dynes fallback skip. `(?:[=:]\s*)?` makes
+      // the `=` optional so the regex covers all four ph.x variants.
+      //
+      // Unit-aware: explicitly inspect the parenthesized unit (meV / cm⁻¹
+      // / THz / K) and convert. No annotation defaults to Kelvin per QE
+      // default. ph.x's "Logarithmic average frequency" form is always K.
       const phMatch = trimmed.match(/Logarithmic average frequency[^=]*=\s*([\d.]+)/i);
       if (phMatch) {
         omegaLog = parseFloat(phMatch[1]);  // ph.x always Kelvin
       } else {
-        const lambdaMatch = trimmed.match(/omega_log\s*(?:\(([^)]*)\)\s*)?=\s*([\d.]+)/i);
+        const lambdaMatch = trimmed.match(/omega_l(?:og|n)\s*(?:\(([^)]*)\)\s*)?(?:[=:]\s*)?([\d.]+)/i);
         if (lambdaMatch) {
           const unitRaw = (lambdaMatch[1] ?? "").toLowerCase().trim();
           let val = parseFloat(lambdaMatch[2]);

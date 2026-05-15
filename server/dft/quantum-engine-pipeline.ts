@@ -14,14 +14,29 @@ import { db } from "../db";
 import { quantumEngineDataset } from "@shared/schema";
 import { desc, count } from "drizzle-orm";
 
-function estimateDOSFromBands(bandResult: DFTBandStructureResult, fermiEnergy: number): number {
+// NOTE: This is a PATH-BIASED DOS estimate, not the true BZ-integrated DOS.
+// The bandStructure eigenvalues come from bands.x running on `K_POINTS
+// {crystal_b}` — a high-symmetry path, not a uniform grid. As such the
+// computed DOS averages over a 1D slice through the BZ rather than a 3D
+// integration. For materials with anisotropic Fermi surface (cuprates,
+// pnictides, quasi-2D systems) this can be off by 2-5×. The proper fix is
+// to run an NSCF on a uniform 20³+ grid and then dos.x — not yet wired up.
+// Until then the value is useful as a relative metallicity proxy but should
+// not be trusted as an absolute states/eV count.
+function estimateDOSFromBands(bandResult: DFTBandStructureResult): number {
   const smearingWidth = 0.15;
   let dos = 0;
   let totalWeight = 0;
   for (const kPt of bandResult.eigenvalues) {
     const kWeight = 1.0;
     for (const energy of kPt.energies) {
-      const x = (energy - fermiEnergy) / smearingWidth;
+      // bandResult.eigenvalues[].energies are ALREADY E_F-referenced — the
+      // band-structure parser stores `e - fermiEnergy`, so the Fermi level
+      // sits at energy = 0. The earlier `(energy - fermiEnergy)` subtracted
+      // the absolute Fermi energy a SECOND time, evaluating this Gaussian
+      // DOS at E_band ≈ 2·E_F instead of at the Fermi level — producing a
+      // meaningless DOS(E_F) that then corrupted metallicity / lambda / Tc.
+      const x = energy / smearingWidth;
       dos += kWeight * Math.exp(-0.5 * x * x) / (smearingWidth * Math.sqrt(2 * Math.PI));
       totalWeight += kWeight;
     }
@@ -29,7 +44,11 @@ function estimateDOSFromBands(bandResult: DFTBandStructureResult, fermiEnergy: n
   if (totalWeight > 0) {
     dos *= bandResult.nBands / totalWeight;
   }
-  return Math.max(0.1, dos);
+  // Return the true smeared DOS — do NOT floor at 0.1. A wide-gap insulator
+  // legitimately has DOS(E_F) ≈ 0 (e.g., 5 eV gap with 0.15 eV smearing →
+  // exp(−139) ≈ 0), and forcing a floor erases the metal/insulator boundary
+  // that downstream Eliashberg / Stoner / SC-screening logic depends on.
+  return Math.max(0, dos);
 }
 
 function metallicityFromDOS(dosAtFermi: number, isMetallic: boolean): number {
@@ -40,22 +59,34 @@ function metallicityFromDOS(dosAtFermi: number, isMetallic: boolean): number {
 function computeOmegaLog(freqs: number[]): number {
   const positive = freqs.filter(f => f > 1.0);
   if (positive.length === 0) return 0;
-  let sumLog = 0;
+  // Allen-Dynes omega_log is the alpha2F/omega-weighted log average; with no
+  // per-mode alpha2F available the DOS-only approximation (alpha2F ~ F(omega))
+  // reduces to the 1/omega-weighted log average:
+  //   omega_log = exp[ Σ (1/w_i) ln(w_i) / Σ (1/w_i) ].
+  // An unweighted geometric mean exp(mean(ln(w))) overweights stiff optical
+  // modes, overestimating omega_log and hence Allen-Dynes Tc. Same fix as
+  // phonon-calculator.ts:computePhononDOS and sscha-worker.py.
+  let invSum = 0;
+  let weightedLnSum = 0;
   for (const f of positive) {
-    sumLog += Math.log(f);
+    const w = 1 / f;
+    invSum += w;
+    weightedLnSum += w * Math.log(f);
   }
-  return Math.exp(sumLog / positive.length);
+  return invSum > 0 ? Math.exp(weightedLnSum / invSum) : 0;
 }
 
 function computeDebyeTemperature(freqs: number[]): number {
   const positive = freqs.filter(f => f > 1.0);
   if (positive.length === 0) return 0;
-  let sumSq = 0;
-  for (const f of positive) {
-    sumSq += f * f;
-  }
-  const omega2 = Math.sqrt(sumSq / positive.length);
-  return omega2 * 1.44;
+  // Debye T = ℏω_max / k_B. The canonical definition uses the spectrum cutoff
+  // ω_max, not RMS. Previously this used √⟨ω²⟩ which underestimates T_D by
+  // ~22% for a 3D Debye spectrum (ω_RMS = √(3/5) · ω_max), systematically
+  // biasing material classification and Hopfield-style λ estimates downward.
+  // Conversion factor 1.4388 K/cm⁻¹ = hc/k_B; phononFreqs are in cm⁻¹.
+  let omegaMax = 0;
+  for (const f of positive) if (f > omegaMax) omegaMax = f;
+  return omegaMax * 1.4388;
 }
 
 function buildDFTElectronicOverride(
@@ -491,13 +522,24 @@ export async function runQuantumEnginePipeline(
       if (dftResult.scf?.converged) {
         scfConverged = true;
         isMetallic = dftResult.scf.isMetallic;
-        formationEnergy = dftResult.scf.totalEnergyPerAtom;
+        // DO NOT assign totalEnergyPerAtom here. Despite the variable name
+        // `formationEnergy`, totalEnergyPerAtom is the ABSOLUTE DFT total
+        // energy per atom (~-100 to -1500 eV/atom with semicore PPs), not
+        // the chemical formation enthalpy. Downstream consumers
+        // (stability-predictor, family-filters, active-learning's
+        // decompositionEnergy passthrough) all assume ±2 eV/atom range.
+        // Setting formationEnergy from totalEnergyPerAtom silently
+        // corrupted Ef-based features for every DFT-completed candidate.
+        // Leave formationEnergy as null when DFT runs without an xTB
+        // fallback to provide proper E_compound - Σ E_ref. The absolute
+        // DFT energy is still preserved in dftResult.scf.totalEnergy for
+        // downstream ML consumers that want it (qeTotalEnergy field).
         bandGap = dftResult.scf.bandGap;
         tier = "full-dft";
 
         if (dftResult.scf.fermiEnergy !== null) {
           if (dftResult.bandStructure?.converged && dftResult.bandStructure.eigenvalues.length > 0) {
-            fermiDos = estimateDOSFromBands(dftResult.bandStructure, dftResult.scf.fermiEnergy);
+            fermiDos = estimateDOSFromBands(dftResult.bandStructure);
             console.log(`[Pipeline] DOS(EF) from DFT bands for ${formula}: ${fermiDos.toFixed(3)} states/eV`);
           } else {
             fermiDos = isMetallic ? 3.0 : 0.5;
@@ -569,10 +611,21 @@ export async function runQuantumEnginePipeline(
 
       if (xtbResult) {
         tier = "xtb";
-        formationEnergy = xtbResult.formationEnergy;
+        // XTBEnrichedFeatures exposes formationEnergyPerAtom, isMetallic, and
+        // phononStability — the previous `xtbResult.formationEnergy /
+        // .phononStable / .phononFrequencies` accesses all silently resolved
+        // to `undefined` (no TS error because xtbResult was untyped at this
+        // call site). Net effect: every xTB-fallback candidate had its
+        // formation energy zeroed, phonon-stable flag forced to false-ish,
+        // and phonon frequencies never propagated downstream.
+        formationEnergy = xtbResult.formationEnergyPerAtom;
         bandGap = xtbResult.bandGap;
-        isMetallic = (bandGap ?? 999) < 0.1;
-        phononStable = xtbResult.phononStable;
+        // Prefer xTB's explicit metallicity flag; bandGap < 0.1 eV is a
+        // fallback only when the flag is somehow missing.
+        isMetallic = xtbResult.isMetallic ?? ((bandGap ?? 999) < 0.1);
+        phononStable = xtbResult.phononStability
+          ? !xtbResult.phononStability.hasImaginaryModes
+          : false;
 
         if (surrogateElec) {
           fermiDos = surrogateElec.densityOfStatesAtFermi;
@@ -580,8 +633,10 @@ export async function runQuantumEnginePipeline(
           fermiDos = isMetallic ? 2.0 : 0.5;
         }
 
-        if (xtbResult.phononFrequencies && xtbResult.phononFrequencies.length > 0) {
-          phononFreqs = xtbResult.phononFrequencies;
+        const xtbPhononFreqs = xtbResult.phononStability?.frequencies
+          ?? xtbResult.finiteDisplacementPhonons?.gammaFrequencies;
+        if (xtbPhononFreqs && xtbPhononFreqs.length > 0) {
+          phononFreqs = xtbPhononFreqs;
         }
 
         steps.push({
@@ -660,6 +715,31 @@ export async function runQuantumEnginePipeline(
 
       if (phononFreqs.length > 0 && !dftPhononUnstable) {
         couplingOverride = computeElectronPhononCoupling(formula);
+        // Prefer the REAL electron-phonon lambda from a completed DFPT
+        // (runDFPTEPC) or EPW calculation over the heuristic Hopfield
+        // estimate. lambda is dimensionless, so this is unit-safe;
+        // runEliashbergPipeline -> buildAlpha2FSpectralFunction scales the
+        // alpha2F (whose SHAPE and omega_log already come from the real DFT
+        // phonon DOS via phononOverride above) to coupling.lambda, so the
+        // Allen-Dynes / Eliashberg Tc then reflects genuine DFPT/EPW physics
+        // rather than the heuristic. EPW (Migdal-Eliashberg) is preferred
+        // over coarse-grid DFPT when both are present. Without this the
+        // expensive DFPT result was discarded and the entry stored a
+        // heuristic lambda mislabeled 'dfpt_integrated_alpha2F'.
+        const epwLambda = dftResult?.epw?.lambda;
+        const dfptLambda = dftResult?.dfpt?.lambda;
+        const realLambda =
+          (typeof epwLambda === "number" && epwLambda > 0) ? epwLambda
+          : (typeof dfptLambda === "number" && dfptLambda > 0) ? dfptLambda
+          : null;
+        if (realLambda !== null) {
+          couplingOverride = {
+            ...couplingOverride,
+            lambda: realLambda,
+            lambdaUncorrected: realLambda,
+          };
+          console.log(`[Pipeline] ${formula}: using real ${epwLambda && epwLambda > 0 ? "EPW" : "DFPT"} lambda=${realLambda.toFixed(3)} for Eliashberg (heuristic Hopfield lambda overridden)`);
+        }
       }
     }
 

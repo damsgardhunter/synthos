@@ -19,6 +19,7 @@
 
 import * as fs from "fs";
 import * as path from "path";
+import { getElementData } from "../learning/elemental-data";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -63,6 +64,12 @@ export interface ACBN0PipelineCallbacks {
   ) => Promise<{ stdout: string; stderr: string; exitCode: number | null }>;
   getPseudoDirInput: () => string;
   resolvePPFilename: (el: string) => string;
+  /** Directory containing the QE binaries (pw.x, hp.x). Must match the
+   *  project-wide QE_BIN_DIR / getQEBinDir convention. Falls back to
+   *  /usr/local/bin for backwards compatibility, but apt-installed QE on
+   *  Ubuntu lives at /usr/bin — leaving this unset will silently fail to
+   *  find QE on most non-Docker installations. */
+  getQEBinDir?: () => string;
 }
 
 // ---------------------------------------------------------------------------
@@ -72,9 +79,10 @@ export interface ACBN0PipelineCallbacks {
 const ACBN0_TOTAL_TIMEOUT_MS = 2 * 60 * 60 * 1000; // 2 hours
 const SCF_TIMEOUT_MS = 30 * 60 * 1000;              // 30 min per SCF
 const HP_TIMEOUT_MS = 60 * 60 * 1000;               // 1 hour for hp.x
-const RY_TO_EV = 13.605698;
-const BOHR_TO_ANG = 0.529177249;
-const HARTREE_TO_EV = 27.211396;
+const RY_TO_EV = 13.605693122994;
+const BOHR_TO_ANG = 0.529177210903;
+const ANG_TO_BOHR = 1 / BOHR_TO_ANG;  // 1.8897259886... — for celldm(1) input
+const HARTREE_TO_EV = 27.211386245988;
 
 // Elements that can have meaningful Hubbard U corrections (d/f electrons)
 const HUBBARD_ELEMENTS = new Set([
@@ -103,10 +111,27 @@ const HUBBARD_MANIFOLD: Record<string, string> = {
   // 5d
   La: "5d", Hf: "5d", Ta: "5d", W: "5d", Re: "5d",
   Os: "5d", Ir: "5d", Pt: "5d", Au: "5d", Hg: "5d",
-  // Lanthanides
-  Ce: "4f", Pr: "4f", Nd: "4f", Eu: "4f", Gd: "4f",
-  // Actinides
-  Th: "5f", U: "5f",
+  // Lanthanides — full series. Previously only Ce/Pr/Nd/Eu/Gd were listed;
+  // Pm/Sm/Tb/Dy/Ho/Er/Tm/Yb/Lu were in HUBBARD_ELEMENTS but missing here,
+  // so the manifold-lookup fallback "3d" silently put Hubbard U on the
+  // (empty/core) 3d shell instead of the correlated 4f manifold. For
+  // Sm/Tb/Dy/Ho-based correlated compounds this meant ACBN0 was effectively
+  // computing U on a shell QE's pseudopotential may not even have as a
+  // projector → either no-op correction or hp.x error.
+  Ce: "4f", Pr: "4f", Nd: "4f", Pm: "4f", Sm: "4f", Eu: "4f", Gd: "4f",
+  Tb: "4f", Dy: "4f", Ho: "4f", Er: "4f", Tm: "4f", Yb: "4f", Lu: "4f",
+  // Actinides — same issue. Pa/Np/Pu were in HUBBARD_ELEMENTS but mapped
+  // to "3d" fallback. Correlated 5f manifold is the right target.
+  Th: "5f", Pa: "5f", U: "5f", Np: "5f", Pu: "5f",
+  // p-block with semicore d states. The HUBBARD_ELEMENTS set includes these
+  // for cases where +U on the d shell fixes d-p hybridization in narrow-gap
+  // semiconductors (e.g., GaAs needs +U on Ga 3d to lower the d band below
+  // E_F — Janotti & Van de Walle PRB 75, 121201 (2007)). Without these
+  // mapped, ACBN0 would target whichever default the fallback gave (3d for
+  // all, which is wrong for In/Sn 4d-semicore and Tl/Pb/Bi 5d-semicore).
+  Ga: "3d", Ge: "3d",  // 3d¹⁰ semicore
+  In: "4d", Sn: "4d",  // 4d¹⁰ semicore
+  Tl: "5d", Pb: "5d", Bi: "5d",  // 5d¹⁰ semicore
 };
 
 // ---------------------------------------------------------------------------
@@ -135,16 +160,33 @@ function generateDFTplusUInput(opts: {
   const ntyp = elements.length;
   const nat = positions.length;
 
+  // Use proper atomic masses (was hardcoded 1.0 for all species). hp.x and
+  // SCF don't use the mass directly, but inconsistency with the upstream
+  // SCF's atomic-species mass values means QE's .save consistency check
+  // can flag the ACBN0 SCF as incompatible — and any post-processing tool
+  // (matdyn, ph.x retry) reading this input would see m=1.0 and recompute
+  // phonons with wrong masses.
   const speciesBlock = elements
-    .map(el => `  ${el}  1.0  ${ppFilenames[el]}`)
+    .map(el => {
+      const data = getElementData(el);
+      const mass = (data as any)?.atomicMass ?? (data as any)?.mass ?? 1.0;
+      return `  ${el}  ${mass.toFixed(4)}  ${ppFilenames[el]}`;
+    })
     .join("\n");
 
   const posBlock = positions
     .map(p => `  ${p.element}  ${p.x.toFixed(10)}  ${p.y.toFixed(10)}  ${p.z.toFixed(10)}`)
     .join("\n");
 
+  // Detect whether cellParameters already includes the QE header. Callers
+  // now pass the full block from generateCellParameters() (header
+  // "CELL_PARAMETERS {angstrom}" + 3 rows). Double-wrapping with the legacy
+  // "CELL_PARAMETERS {alat}\n${...}" prefix made pw.x see two CELL_PARAMETERS
+  // lines back-to-back and reject the input.
   const cellBlock = cellParameters
-    ? `CELL_PARAMETERS {alat}\n${cellParameters}\n`
+    ? (cellParameters.trim().startsWith("CELL_PARAMETERS")
+        ? `${cellParameters}\n`
+        : `CELL_PARAMETERS {alat}\n${cellParameters}\n`)
     : "";
 
   // Build HUBBARD card (QE >= 7.1 new-style)
@@ -165,10 +207,13 @@ function generateDFTplusUInput(opts: {
     ? `HUBBARD {ortho-atomic}\n${hubbardLines.join("\n")}\n`
     : "";
 
-  // Use lda_plus_u_kind only if we have Hubbard elements
-  const hubbardSystemFlags = hasHubbardElements
-    ? `  lda_plus_u = .true.,\n`
-    : "";
+  // For QE 7.1+, the HUBBARD card (emitted below) is the canonical way to
+  // enable DFT+U; the legacy `lda_plus_u = .true.` in &SYSTEM is DEPRECATED
+  // and rejected by recent QE builds. Emitting both produced "lda_plus_u is
+  // no longer allowed" errors. Drop the &SYSTEM flag; HUBBARD card alone
+  // is sufficient (and matches the convention used in hubbard-workflow.ts
+  // and the main qe-worker generators).
+  const hubbardSystemFlags = "";
 
   return `&CONTROL
   calculation = 'scf',
@@ -180,7 +225,7 @@ function generateDFTplusUInput(opts: {
 /
 &SYSTEM
   ibrav = 0,
-  celldm(1) = ${(latticeA / 0.529177).toFixed(6)},
+  celldm(1) = ${(latticeA * ANG_TO_BOHR).toFixed(6)},
   nat = ${nat},
   ntyp = ${ntyp},
   ecutwfc = ${ecutwfc},
@@ -380,10 +425,16 @@ function parseHPOutput(stdout: string): HPResult {
     screeningLength = parseFloat(screenMatch[1]);
   }
 
-  // Convergence check
+  // Convergence check. "JOB DONE" alone is too lenient — hp.x prints it on
+  // clean exit even when reaching max iterations without converging. Only the
+  // explicit hp.x success markers should set converged. "JOB DONE" is now
+  // accepted ONLY as a weak fallback paired with at least one Hubbard U
+  // value successfully extracted from the output (Object.keys(hubbardU) > 0),
+  // which indicates the calculation completed enough to produce results.
   if (stdout.includes("Convergence achieved") ||
-      stdout.includes("HP run completed") ||
-      stdout.includes("JOB DONE")) {
+      stdout.includes("HP run completed")) {
+    converged = true;
+  } else if (stdout.includes("JOB DONE") && Object.keys(hubbardU).length > 0) {
     converged = true;
   }
 
@@ -553,8 +604,11 @@ function estimateDebyeFrequency(
     omegaD = 20 + 0.5 * pressureGPa;
   }
 
-  // Cap at physical limits
-  omegaD = Math.max(10, Math.min(omegaD, 300));
+  // Floor at 10 meV to keep the Morel-Anderson log finite. NO upper clamp:
+  // hydrides under pressure (LaH10 @ 170 GPa: ω_D ≈ 350–420 meV; H3S @ 200 GPa:
+  // ≈ 250–300 meV) have legitimately high Debye temperatures that drive their
+  // high Tc, and clamping at 300 meV silently suppressed exactly that signal.
+  omegaD = Math.max(10, omegaD);
 
   return omegaD;
 }
@@ -571,25 +625,49 @@ function estimateCellVolume(
     return latticeA ** 3; // cubic
   }
 
-  // Parse cell vectors and compute volume
-  const lines = cellParameters.trim().split("\n").filter(l => l.trim());
-  if (lines.length >= 3) {
-    try {
-      const v1 = lines[0].trim().split(/\s+/).map(Number);
-      const v2 = lines[1].trim().split(/\s+/).map(Number);
-      const v3 = lines[2].trim().split(/\s+/).map(Number);
+  // The supplied block may include the QE header line as line 0
+  // (e.g. "CELL_PARAMETERS {angstrom}") followed by three vector rows,
+  // OR it may already be the bare vector rows. Strip the header if present
+  // and remember the declared unit so the volume scaling is correct.
+  const rawLines = cellParameters.trim().split("\n").filter(l => l.trim());
+  let unit: "alat" | "angstrom" | "bohr" = "alat";
+  let vectorLines = rawLines;
+  if (rawLines[0] && /^\s*CELL_PARAMETERS/i.test(rawLines[0])) {
+    const unitMatch = rawLines[0].match(/\{?\s*(angstrom|alat|bohr)\s*\}?/i);
+    if (unitMatch) {
+      const u = unitMatch[1].toLowerCase();
+      if (u === "angstrom" || u === "alat" || u === "bohr") unit = u as typeof unit;
+    }
+    vectorLines = rawLines.slice(1);
+  }
 
-      if (v1.length >= 3 && v2.length >= 3 && v3.length >= 3) {
-        // Cross product v1 x v2
+  if (vectorLines.length >= 3) {
+    try {
+      const v1 = vectorLines[0].trim().split(/\s+/).map(Number);
+      const v2 = vectorLines[1].trim().split(/\s+/).map(Number);
+      const v3 = vectorLines[2].trim().split(/\s+/).map(Number);
+
+      if (v1.length >= 3 && v2.length >= 3 && v3.length >= 3
+          && v1.every(Number.isFinite) && v2.every(Number.isFinite) && v3.every(Number.isFinite)) {
         const cross = [
           v1[1] * v2[2] - v1[2] * v2[1],
           v1[2] * v2[0] - v1[0] * v2[2],
           v1[0] * v2[1] - v1[1] * v2[0],
         ];
-        // Dot with v3
-        const vol = Math.abs(cross[0] * v3[0] + cross[1] * v3[1] + cross[2] * v3[2]);
-        // In alat units -> Angstrom^3
-        return vol * (latticeA ** 3);
+        const volRaw = Math.abs(cross[0] * v3[0] + cross[1] * v3[1] + cross[2] * v3[2]);
+
+        // Convert to Å³ depending on the unit the vectors were expressed in.
+        // Without this, an {angstrom} block (where rows are already in Å) was
+        // being multiplied by latticeA³, inflating the cell volume by ~latticeA³
+        // and corrupting downstream μ* / Debye estimates that consume the volume.
+        if (unit === "angstrom") return volRaw;
+        if (unit === "bohr") {
+          const BOHR_TO_ANG = 0.529177210903;
+          return volRaw * BOHR_TO_ANG ** 3;
+        }
+        // alat: vectors are in units of celldm(1) (Bohr). Scaling factor
+        // here is latticeA (Å), so volRaw * latticeA³ gives Å³.
+        return volRaw * (latticeA ** 3);
       }
     } catch {}
   }
@@ -618,6 +696,11 @@ export async function runACBN0Pipeline(
 
   console.log(`[ACBN0] Starting first-principles μ* calculation for ${formula}`);
   console.log(`[ACBN0]   P=${pressureGPa} GPa, elements=[${elements.join(",")}]`);
+
+  // Resolve QE binary directory. Was hardcoded to /usr/local/bin for both
+  // pw.x and hp.x — broke ACBN0 on apt-installed QE (lives at /usr/bin) and
+  // on any system using QE_BIN_DIR to point at a custom build path.
+  const qeBinDir = callbacks.getQEBinDir?.() ?? "/usr/local/bin";
 
   const ecutrho = options.ecutrho ?? options.ecutwfc * 8;
   const nAtoms = positions.length;
@@ -693,7 +776,7 @@ export async function runACBN0Pipeline(
     }
 
     const scfResult = await safeRun(
-      callbacks, "/usr/local/bin/pw.x",
+      callbacks, path.posix.join(qeBinDir, "pw.x"),
       scfFile, jobDir, SCF_TIMEOUT_MS,
     );
     if (!scfResult || scfResult.exitCode !== 0) {
@@ -745,7 +828,7 @@ export async function runACBN0Pipeline(
     }
 
     const hpResult = await safeRun(
-      callbacks, "/usr/local/bin/hp.x",
+      callbacks, path.posix.join(qeBinDir, "hp.x"),
       hpFile, jobDir, HP_TIMEOUT_MS,
     );
     if (!hpResult || hpResult.exitCode !== 0) {
@@ -777,10 +860,18 @@ export async function runACBN0Pipeline(
 
     console.log(`[ACBN0] Max ΔU = ${maxDeltaU.toFixed(4)} eV (threshold: ${uThreshold})`);
 
-    if (maxDeltaU < uThreshold && scfIter > 1) {
+    // Convergence requires actually receiving U values from hp.x. If parsing
+    // failed (empty hubbardU map) maxDeltaU stays at its initial 0 — the
+    // previous check would then declare "converged" on iteration 2 even
+    // though hp.x produced nothing usable. Demand at least one U value.
+    const hpProducedUValues = Object.keys(lastHPResult.hubbardU).length > 0;
+    if (maxDeltaU < uThreshold && scfIter > 1 && hpProducedUValues) {
       uConverged = true;
       console.log(`[ACBN0] Hubbard U converged at iteration ${scfIter}`);
       break;
+    }
+    if (!hpProducedUValues) {
+      console.log(`[ACBN0] hp.x produced no Hubbard U values at iteration ${scfIter} — not treating as converged`);
     }
 
     currentU = newU;
