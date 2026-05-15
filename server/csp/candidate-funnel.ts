@@ -26,6 +26,7 @@ import { analyzeHydrideChemistry, type HydrideAnalysis } from "./candidate-metad
 import { deduplicateCandidates, clusterCandidates, type StructureCluster } from "./dedup-cluster";
 import { selectForDFT, type DFTSelectionResult } from "./dft-admission";
 import { runChgnetEvaluation, isChgnetAvailable } from "./chgnet-wrapper";
+import { saveVolumeBias } from "./volume-bias-cache";
 import { recordVolumeOutcome, recordGeneratorOutcome, recordCageSubtypeOutcome, logLearningState, getSignalWeight } from "./adaptive-learning";
 
 // ---------------------------------------------------------------------------
@@ -500,6 +501,14 @@ export async function runCandidateFunnel(
       if (chgnetResult.stats.evaluated > 0) {
         f6Candidates = chgnetResult.rankedCandidates;
         console.log(`[CSP-Funnel] F6 CHGNet: ${chgnetResult.stats.evaluated} evaluated, ${chgnetResult.stats.relaxed} relaxed, best=${chgnetResult.stats.bestEnergy?.toFixed(4) ?? "?"} eV/atom, time=${chgnetResult.stats.totalRelaxTimeS.toFixed(0)}s (timeout=${Math.round(timeoutMs / 1000)}s)`);
+      }
+      // Persist a systematic volume-bias correction so the NEXT CSP batch for
+      // this composition starts at corrected volumes (the AIRSS volume prior
+      // over-compresses high-P hydrides — e.g. YBeH8 @ 180 GPa had 275/300
+      // candidates expand ~90% under CHGNet, all then drift-rejected to raw).
+      if (Math.abs(chgnetResult.volumeBiasFactor - 1) > 0.05) {
+        saveVolumeBias(formula, pressureGPa, chgnetResult.volumeBiasFactor);
+        console.log(`[CSP-Funnel] Persisted volume-bias correction for ${formula} @ ${pressureGPa} GPa (×${chgnetResult.volumeBiasFactor.toFixed(2)}) — applies to the next CSP batch`);
       }
     } catch (chgnetErr: any) {
       console.log(`[CSP-Funnel] F6 CHGNet failed: ${chgnetErr.message?.slice(0, 100)} — continuing without`);

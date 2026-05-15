@@ -254,10 +254,16 @@ export async function runChgnetEvaluation(
   rankedCandidates: CSPCandidate[];
   results: ChgnetResult[];
   stats: { evaluated: number; relaxed: number; failed: number; bestEnergy: number | null; totalRelaxTimeS: number };
+  /**
+   * Recommended multiplier for the NEXT CSP batch's target volume. 1.0 means
+   * no systematic bias detected; >1 means CSP volumes were too compressed,
+   * <1 means too expanded. Damped relative to the raw CHGNet drift.
+   */
+  volumeBiasFactor: number;
 }> {
   if (!isChgnetAvailable()) {
     console.log("[CHGNet] Not available — skipping F6 MLIP evaluation");
-    return { rankedCandidates: candidates, results: [], stats: { evaluated: 0, relaxed: 0, failed: 0, bestEnergy: null, totalRelaxTimeS: 0 } };
+    return { rankedCandidates: candidates, results: [], stats: { evaluated: 0, relaxed: 0, failed: 0, bestEnergy: null, totalRelaxTimeS: 0 }, volumeBiasFactor: 1.0 };
   }
 
   const poscarDir = path.join(workDir, "chgnet_poscars");
@@ -276,7 +282,7 @@ export async function runChgnetEvaluation(
   }
 
   if (candidateMap.size === 0) {
-    return { rankedCandidates: candidates, results: [], stats: { evaluated: 0, relaxed: 0, failed: 0, bestEnergy: null, totalRelaxTimeS: 0 } };
+    return { rankedCandidates: candidates, results: [], stats: { evaluated: 0, relaxed: 0, failed: 0, bestEnergy: null, totalRelaxTimeS: 0 }, volumeBiasFactor: 1.0 };
   }
 
   // Generate and run CHGNet script
@@ -301,17 +307,17 @@ export async function runChgnetEvaluation(
     }
     if (output.includes("CHGNET_FATAL")) {
       console.log(`[CHGNet] Fatal error: ${output.slice(output.indexOf("CHGNET_FATAL"), output.indexOf("CHGNET_FATAL") + 200)}`);
-      return { rankedCandidates: candidates, results: [], stats: { evaluated: 0, relaxed: 0, failed: 0, bestEnergy: null, totalRelaxTimeS: 0 } };
+      return { rankedCandidates: candidates, results: [], stats: { evaluated: 0, relaxed: 0, failed: 0, bestEnergy: null, totalRelaxTimeS: 0 }, volumeBiasFactor: 1.0 };
     }
   } catch (err: any) {
     console.log(`[CHGNet] Evaluation failed: ${err.message?.slice(0, 100)}`);
-    return { rankedCandidates: candidates, results: [], stats: { evaluated: 0, relaxed: 0, failed: 0, bestEnergy: null, totalRelaxTimeS: 0 } };
+    return { rankedCandidates: candidates, results: [], stats: { evaluated: 0, relaxed: 0, failed: 0, bestEnergy: null, totalRelaxTimeS: 0 }, volumeBiasFactor: 1.0 };
   }
 
   // Parse results
   if (!fs.existsSync(outputPath)) {
     console.log("[CHGNet] No output file produced");
-    return { rankedCandidates: candidates, results: [], stats: { evaluated: 0, relaxed: 0, failed: 0, bestEnergy: null, totalRelaxTimeS: 0 } };
+    return { rankedCandidates: candidates, results: [], stats: { evaluated: 0, relaxed: 0, failed: 0, bestEnergy: null, totalRelaxTimeS: 0 }, volumeBiasFactor: 1.0 };
   }
 
   let parsed: any;
@@ -319,7 +325,7 @@ export async function runChgnetEvaluation(
     parsed = JSON.parse(fs.readFileSync(outputPath, "utf-8"));
   } catch {
     console.log("[CHGNet] Failed to parse output JSON");
-    return { rankedCandidates: candidates, results: [], stats: { evaluated: 0, relaxed: 0, failed: 0, bestEnergy: null, totalRelaxTimeS: 0 } };
+    return { rankedCandidates: candidates, results: [], stats: { evaluated: 0, relaxed: 0, failed: 0, bestEnergy: null, totalRelaxTimeS: 0 }, volumeBiasFactor: 1.0 };
   }
 
   const results: ChgnetResult[] = (parsed.results ?? []).map((r: any) => ({
@@ -433,16 +439,27 @@ export async function runChgnetEvaluation(
   if (driftRejected > 0) {
     console.log(`[CHGNet] Drift gate: ${driftRejected}/${results.length} candidates had excessive MLIP drift — raw CSP geometry preserved`);
   }
-  // Systematic-volume-bias hint: if most candidates are compressing or
-  // expanding by similar amounts, the candidate generators' volume prior is
-  // off and the prototype's TARGVOL needs adjustment.
+  // Systematic-volume-bias hint: if most candidates compress or expand by
+  // similar amounts, the CSP volume prior is off. We turn the hint into a
+  // damped correction multiplier (volumeBiasFactor) that the funnel persists
+  // so the NEXT CSP batch for this composition starts at corrected volumes.
+  // Damping (0.7 of the raw drift) avoids overshoot — a single CHGNet volume
+  // is not DFT-exact, and the correction compounds across runs anyway.
+  let volumeBiasFactor = 1.0;
   if (nCompressions + nExpansions >= 10) {
+    const total = nCompressions + nExpansions;
     const avgComp = nCompressions > 0 ? totalCompressionPct / nCompressions : 0;
     const avgExp = nExpansions > 0 ? totalExpansionPct / nExpansions : 0;
-    if (nCompressions > 0.7 * (nCompressions + nExpansions) && avgComp > 15) {
-      console.log(`[CHGNet] Volume-bias hint: ${nCompressions}/${nCompressions + nExpansions} candidates compressed by avg ${avgComp.toFixed(1)}% — CSP starting volumes look systematically too expanded`);
-    } else if (nExpansions > 0.7 * (nCompressions + nExpansions) && avgExp > 15) {
-      console.log(`[CHGNet] Volume-bias hint: ${nExpansions}/${nCompressions + nExpansions} candidates expanded by avg ${avgExp.toFixed(1)}% — CSP starting volumes look systematically too compressed`);
+    if (nCompressions > 0.7 * total && avgComp > 15) {
+      // Relaxed volumes smaller than raw → CSP volumes too large → shrink.
+      const observed = Math.max(0.4, 1 - avgComp / 100);
+      volumeBiasFactor = 1 + 0.7 * (observed - 1);
+      console.log(`[CHGNet] Volume-bias hint: ${nCompressions}/${total} candidates compressed by avg ${avgComp.toFixed(1)}% — CSP starting volumes look systematically too expanded (next-batch TARGVOL ×${volumeBiasFactor.toFixed(2)})`);
+    } else if (nExpansions > 0.7 * total && avgExp > 15) {
+      // Relaxed volumes larger than raw → CSP volumes too small → grow.
+      const observed = 1 + avgExp / 100;
+      volumeBiasFactor = 1 + 0.7 * (observed - 1);
+      console.log(`[CHGNet] Volume-bias hint: ${nExpansions}/${total} candidates expanded by avg ${avgExp.toFixed(1)}% — CSP starting volumes look systematically too compressed (next-batch TARGVOL ×${volumeBiasFactor.toFixed(2)})`);
     }
   }
 
@@ -467,5 +484,6 @@ export async function runChgnetEvaluation(
       bestEnergy: parsed.best_energy ?? null,
       totalRelaxTimeS: parsed.total_relax_time_s ?? 0,
     },
+    volumeBiasFactor,
   };
 }

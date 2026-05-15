@@ -21,6 +21,7 @@ import {
   pressureVolumeEnsemble,
   SCREENING_TIERS,
 } from "./csp-types";
+import { loadVolumeBias } from "./volume-bias-cache";
 
 const BUILDCELL_BIN = process.env.AIRSS_BIN
   ?? process.env.BUILDCELL_BIN
@@ -291,7 +292,18 @@ export const airssEngine: CSPEngine = {
     }
 
     const formulaAtoms = Object.values(counts).reduce((s, n) => s + Math.round(n), 0);
-    const volPerAtom = estimateVolumePerAtom(elements, counts);
+    // Apply any persisted volume-bias correction from a previous F6 CHGNet
+    // batch. The base volume prior over-compresses high-P hydrides; without
+    // this correction every batch restarts from the same too-small cells and
+    // CHGNet drift-rejects most candidates back to raw geometry.
+    const biasFormula = elements
+      .map(el => { const n = Math.round(counts[el] ?? 0); return el + (n > 1 ? n : ""); })
+      .join("");
+    const volumeBias = loadVolumeBias(biasFormula, config.pressureGPa);
+    const volPerAtom = estimateVolumePerAtom(elements, counts) * volumeBias;
+    if (Math.abs(volumeBias - 1) > 0.05) {
+      console.log(`[AIRSS] Applying cached volume-bias ×${volumeBias.toFixed(2)} for ${biasFormula} @ ${config.pressureGPa} GPa (from prior F6 CHGNet drift)`);
+    }
     const volumeTargets = pressureVolumeEnsemble(
       volPerAtom, config.pressureGPa, tierConfig.volumeEnsemble
     );
