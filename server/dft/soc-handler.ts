@@ -119,46 +119,59 @@ export const SOC_ELEMENTS: Record<string, { socEV: number; shell: string; priori
 };
 
 /**
- * Fully-relativistic pseudopotential URLs from PSLibrary.
- * These include SOC in the PP generation (rel- prefix).
- * Required when lspinorb=.true. is set in QE.
+ * Fully-relativistic (FR) pseudopotentials for spin-orbit-coupled DFT.
  *
- * Only populated for elements where SOC priority is "critical" or "recommended".
- * For "optional" elements, the standard scalar-relativistic PP is sufficient.
+ * QE's `lspinorb = .true.` requires pseudos generated WITH spin-orbit coupling
+ * — `relativistic="full"`, `has_so="T"`. These are Pseudo-DOJO ONCVPSP PBE
+ * norm-conserving FR pseudos (set ONCVPSP-PBE-FR-PDv0.4, Pt from v0.3 which
+ * v0.4 omits).
+ *
+ * The previous map here pointed at PSLibrary *scalar*-relativistic PAW files
+ * (filenames had no `rel-` prefix → `has_so="F"`). With those, QE silently
+ * runs lspinorb without the actual SO l±1/2 channel splitting, so every SOC
+ * calculation was downgraded by applySOCPseudoConstraint in qe-worker.
+ *
+ * `file` is bundled at server/dft/pseudo/oncv-fr/; `url` is the download
+ * fallback. `ecutwfc` is the Pseudo-DOJO high-accuracy hint (Ry) — the
+ * pipeline's SPECIES_ECUTWFC values all already exceed it, so no cutoff
+ * change is needed; it is recorded here for reference and future tuning.
+ *
+ * Coverage: 6p (Tl, Pb, Bi, Po) + 5d (Hf, Ta, W, Re, Os, Ir, Pt, Au, Hg) +
+ * Ba + La. Pseudo-DOJO's FR set has no actinides and no lanthanides past
+ * La/Ce (and Ce ships only as ABINIT .psp8, no QE .upf). Actinide and
+ * heavy-lanthanide SOC still falls back to scalar-relativistic PAW + DFT+U.
  */
-const GH_BASE = "https://raw.githubusercontent.com/dalcorso/pslibrary/master/pbe/PSEUDOPOTENTIALS";
+export interface FRPseudo {
+  /** Filename bundled in server/dft/pseudo/oncv-fr/. */
+  file: string;
+  /** Pseudo-DOJO raw-GitHub download URL (fallback if not bundled). */
+  url: string;
+  /** Pseudo-DOJO high-accuracy ecutwfc hint, Ry (informational). */
+  ecutwfc: number;
+}
 
-export const RELATIVISTIC_PP_URLS: Record<string, string> = {
-  // 6p — critical SOC
-  Tl: `${GH_BASE}/Tl.pbe-dn-kjpaw_psl.1.0.0.UPF`,   // rel PP when available
-  Pb: `${GH_BASE}/Pb.pbe-dn-kjpaw_psl.1.0.0.UPF`,
-  Bi: `${GH_BASE}/Bi.pbe-dn-kjpaw_psl.1.0.0.UPF`,
-  // 5d — recommended SOC
-  Hf: `${GH_BASE}/Hf.pbe-spn-kjpaw_psl.1.0.0.UPF`,
-  Ta: `${GH_BASE}/Ta.pbe-spn-kjpaw_psl.1.0.0.UPF`,
-  W:  `${GH_BASE}/W.pbe-spn-kjpaw_psl.1.0.0.UPF`,
-  Re: `${GH_BASE}/Re.pbe-spn-kjpaw_psl.1.0.0.UPF`,
-  Os: `${GH_BASE}/Os.pbe-spn-kjpaw_psl.1.0.0.UPF`,
-  Ir: `${GH_BASE}/Ir.pbe-spn-kjpaw_psl.1.0.0.UPF`,
-  Pt: `${GH_BASE}/Pt.pbe-spdn-kjpaw_psl.1.0.0.UPF`,
-  Au: `${GH_BASE}/Au.pbe-nd-kjpaw_psl.1.0.0.UPF`,
-  Hg: `${GH_BASE}/Hg.pbe-dn-kjpaw_psl.1.0.0.UPF`,
-  // Actinides — critical SOC
-  Th: `${GH_BASE}/Th.pbe-spfn-kjpaw_psl.1.0.0.UPF`,
-  U:  `${GH_BASE}/U.pbe-spfn-kjpaw_psl.1.0.0.UPF`,
-  // Lanthanides — differentiated by 4f occupation
-  La: `${GH_BASE}/La.pbe-spfn-kjpaw_psl.1.0.0.UPF`,
-  Ce: `${GH_BASE}/Ce.pbe-spdn-kjpaw_psl.1.0.0.UPF`,
-  Pr: `${GH_BASE}/Pr.pbe-spdn-kjpaw_psl.1.0.0.UPF`,
-  Nd: `${GH_BASE}/Nd.pbe-spdn-kjpaw_psl.1.0.0.UPF`,
-  Sm: `${GH_BASE}/Sm.pbe-spdn-kjpaw_psl.1.0.0.UPF`,
-  Eu: `${GH_BASE}/Eu.pbe-spdn-kjpaw_psl.1.0.0.UPF`,
-  Gd: `${GH_BASE}/Gd.pbe-spdn-kjpaw_psl.1.0.0.UPF`,
-  Tb: `${GH_BASE}/Tb.pbe-spdn-kjpaw_psl.1.0.0.UPF`,
-  Dy: `${GH_BASE}/Dy.pbe-spdn-kjpaw_psl.1.0.0.UPF`,
-  Ho: `${GH_BASE}/Ho.pbe-spdn-kjpaw_psl.1.0.0.UPF`,
-  Er: `${GH_BASE}/Er.pbe-spdn-kjpaw_psl.1.0.0.UPF`,
-  Tm: `${GH_BASE}/Tm.pbe-spdn-kjpaw_psl.1.0.0.UPF`,
+const DOJO_FR_V4 = "https://raw.githubusercontent.com/abinit/pseudo_dojo/master/pseudo_dojo/pseudos/ONCVPSP-PBE-FR-PDv0.4";
+const DOJO_FR_V3 = "https://raw.githubusercontent.com/abinit/pseudo_dojo/master/pseudo_dojo/pseudos/ONCVPSP-PBE-FR-PDv0.3";
+
+export const RELATIVISTIC_PP_URLS: Record<string, FRPseudo> = {
+  // 6p metals — SOC critical
+  Tl: { file: "Tl-d_r.upf",  url: `${DOJO_FR_V4}/Tl/Tl-d_r.upf`,  ecutwfc: 37 },
+  Pb: { file: "Pb-d_r.upf",  url: `${DOJO_FR_V4}/Pb/Pb-d_r.upf`,  ecutwfc: 34 },
+  Bi: { file: "Bi-d_r.upf",  url: `${DOJO_FR_V4}/Bi/Bi-d_r.upf`,  ecutwfc: 37 },
+  Po: { file: "Po-d_r.upf",  url: `${DOJO_FR_V4}/Po/Po-d_r.upf`,  ecutwfc: 38 },
+  // 5d transition metals — SOC recommended
+  Hf: { file: "Hf-sp_r.upf", url: `${DOJO_FR_V4}/Hf/Hf-sp_r.upf`, ecutwfc: 35 },
+  Ta: { file: "Ta-sp_r.upf", url: `${DOJO_FR_V4}/Ta/Ta-sp_r.upf`, ecutwfc: 35 },
+  W:  { file: "W-sp_r.upf",  url: `${DOJO_FR_V4}/W/W-sp_r.upf`,   ecutwfc: 41 },
+  Re: { file: "Re-sp_r.upf", url: `${DOJO_FR_V4}/Re/Re-sp_r.upf`, ecutwfc: 42 },
+  Os: { file: "Os-sp_r.upf", url: `${DOJO_FR_V4}/Os/Os-sp_r.upf`, ecutwfc: 43 },
+  Ir: { file: "Ir-sp_r.upf", url: `${DOJO_FR_V4}/Ir/Ir-sp_r.upf`, ecutwfc: 40 },
+  Pt: { file: "Pt-sp_r.upf", url: `${DOJO_FR_V3}/Pt/Pt-sp_r.upf`, ecutwfc: 48 },
+  Au: { file: "Au-sp_r.upf", url: `${DOJO_FR_V4}/Au/Au-sp_r.upf`, ecutwfc: 44 },
+  Hg: { file: "Hg-sp_r.upf", url: `${DOJO_FR_V4}/Hg/Hg-sp_r.upf`, ecutwfc: 39 },
+  // Heavy s-block + lanthanide present in the Pseudo-DOJO FR set
+  Ba: { file: "Ba-sp_r.upf", url: `${DOJO_FR_V4}/Ba/Ba-sp_r.upf`, ecutwfc: 28 },
+  La: { file: "La-sp_r.upf", url: `${DOJO_FR_V4}/La/La-sp_r.upf`, ecutwfc: 65 },
 };
 
 // ─── SOC analysis result ─────────────────────────────────────────────

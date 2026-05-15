@@ -30,7 +30,7 @@ import { generateStructureCandidates, vegardEstimate, type StructureCandidate, t
 import { runEPWPipeline, type EPWResult } from "./epw-pipeline";
 import { checkSSCHAEligibility, runSSCHAPipeline, type SSCHAResult } from "./sscha-pipeline";
 import { runACBN0Pipeline, type ACBN0Result } from "./acbn0-pipeline";
-import { analyzeSOCRequirement, type SOCAnalysis } from "./soc-handler";
+import { analyzeSOCRequirement, RELATIVISTIC_PP_URLS, type SOCAnalysis } from "./soc-handler";
 import { analyzeHubbardWorkflow, type HubbardWorkflowResult } from "./hubbard-workflow";
 import { followZoneBoundarySoftMode } from "./zone-boundary-softmode";
 import { exportDMFTBundle, isDMFTEligible, type DMFTBundleResult } from "./dmft-bundle-exporter";
@@ -1405,7 +1405,11 @@ cleanStaleQEJobDirs();
 // Pseudo-DOJO NC PPs as secondary — validated for DFPT, covers lanthanides/actinides.
 // QE website kept as fallback. GBRV ultrasoft PPs from Rutgers as last resort.
 const GH_BASE = "https://raw.githubusercontent.com/dalcorso/pslibrary/master/pbe/PSEUDOPOTENTIALS";
-const DOJO_BASE = "https://raw.githubusercontent.com/pseudo-dojo/pseudo-dojo/master/pseudo_dojo/pseudos/ONCVPSP-PBE-SR-PDv0.4";
+// Pseudo-DOJO ONCVPSP scalar-relativistic PBE set. The repo is abinit/
+// pseudo_dojo (NOT pseudo-dojo/pseudo-dojo, which 404s) and the scalar set
+// is ONCVPSP-PBE-PDv0.4 (there is no "-SR-" set — only the FR set carries an
+// explicit relativity tag). The old URL silently failed every DOJO fallback.
+const DOJO_BASE = "https://raw.githubusercontent.com/abinit/pseudo_dojo/master/pseudo_dojo/pseudos/ONCVPSP-PBE-PDv0.4";
 const QE_BASE = "https://pseudopotentials.quantum-espresso.org/upf_files";
 const GBRV_BASE = "https://www.physics.rutgers.edu/gbrv/pbe";
 
@@ -1524,29 +1528,17 @@ const PP_GBRV_URLS: Record<string, string> = {
 };
 
 // Pseudo-DOJO norm-conserving PPs — DFPT-validated, scalar-relativistic.
-// These work with lmaxx=6 and cover lanthanides/actinides that PAW PPs struggle with.
-// ONCVPSP (Optimized Norm-Conserving Vanderbilt) — good for phonon/EPW calculations.
+// These work with lmaxx=6 — good for phonon/EPW calculations. Fallback only;
+// PSLibrary (PP_DOWNLOAD_URLS) is primary.
+//
+// Only the elements actually present in the Pseudo-DOJO ONCVPSP-PBE-PDv0.4
+// set are listed. The set spans H–Rn and has NO actinides and no lanthanides
+// beyond La — the previous map listed Pr–Tm, Pa, U, Np, Ce, Th, which never
+// existed in Pseudo-DOJO and were guaranteed-404 dead fallbacks (those
+// elements are covered by the PSLibrary primary map). All present elements
+// use the `<El>-sp.upf` basename (verified against the set's standard.djson).
 const PP_DOJO_URLS: Record<string, string> = {
-  // Lanthanides (scalar-relativistic — no lmaxx issue)
-  Pr: `${DOJO_BASE}/Pr/Pr-sp.upf`,
-  Nd: `${DOJO_BASE}/Nd/Nd-sp.upf`,
-  Pm: `${DOJO_BASE}/Pm/Pm-sp.upf`,
-  Sm: `${DOJO_BASE}/Sm/Sm-sp.upf`,
-  Eu: `${DOJO_BASE}/Eu/Eu-sp.upf`,
-  Gd: `${DOJO_BASE}/Gd/Gd-sp.upf`,
-  Tb: `${DOJO_BASE}/Tb/Tb-sp.upf`,
-  Dy: `${DOJO_BASE}/Dy/Dy-sp.upf`,
-  Ho: `${DOJO_BASE}/Ho/Ho-sp.upf`,
-  Er: `${DOJO_BASE}/Er/Er-sp.upf`,
-  Tm: `${DOJO_BASE}/Tm/Tm-sp.upf`,
-  // Actinides
-  Pa: `${DOJO_BASE}/Pa/Pa-sp.upf`,
-  U:  `${DOJO_BASE}/U/U-sp.upf`,
-  Np: `${DOJO_BASE}/Np/Np-sp.upf`,
-  // Also good for elements where PAW PPs have convergence issues
   La: `${DOJO_BASE}/La/La-sp.upf`,
-  Ce: `${DOJO_BASE}/Ce/Ce-sp.upf`,
-  Th: `${DOJO_BASE}/Th/Th-sp.upf`,
   Y:  `${DOJO_BASE}/Y/Y-sp.upf`,
   Sc: `${DOJO_BASE}/Sc/Sc-sp.upf`,
   Ti: `${DOJO_BASE}/Ti/Ti-sp.upf`,
@@ -1802,6 +1794,56 @@ async function ensurePseudopotential(element: string): Promise<string> {
     }
     try { fs.unlinkSync(tmpFile); } catch {}
   }
+}
+
+/**
+ * Install the fully-relativistic (FR) pseudopotential for `element` into
+ * QE_PSEUDO_DIR, overwriting whatever scalar-relativistic pseudo is cached.
+ *
+ * QE's lspinorb=.true. requires FR pseudos (has_so="T"); the default
+ * provisioning installs scalar-relativistic PAW pseudos, so without this step
+ * applySOCPseudoConstraint downgrades every SOC calculation. Called once per
+ * SOC element before the SOC-constraint gate.
+ *
+ * Source order: bundled server/dft/pseudo/oncv-fr/ → Pseudo-DOJO download.
+ * A stale FR pseudo left in the cache for a later non-SOC job is harmless —
+ * QE averages the j=l±1/2 channels when lspinorb is off — so no cleanup is
+ * needed. Returns true if QE_PSEUDO_DIR holds an FR pseudo afterwards.
+ */
+async function ensureRelativisticPP(element: string): Promise<boolean> {
+  const fr = RELATIVISTIC_PP_URLS[element];
+  if (!fr) return false;
+
+  const ppFile = path.join(QE_PSEUDO_DIR, `${element}.UPF`);
+  // Already the FR pseudo (e.g. cached from a prior SOC job) — nothing to do.
+  if (fs.existsSync(ppFile) && detectPPHasSOC(element)) return true;
+
+  if (!fs.existsSync(QE_PSEUDO_DIR)) fs.mkdirSync(QE_PSEUDO_DIR, { recursive: true });
+  const tmpFile = ppFile + `.frtmp.${process.pid}`;
+
+  // 1. Bundled FR pseudo in the repo (server/dft/pseudo/oncv-fr/).
+  const bundled = path.join(PP_SOURCE_DIR, "oncv-fr", fr.file);
+  try {
+    if (fs.existsSync(bundled) && validatePseudopotential(bundled)) {
+      fs.copyFileSync(bundled, tmpFile);
+      fs.renameSync(tmpFile, ppFile);
+      console.log(`[QE-Worker] Installed FR pseudo for ${element} (oncv-fr/${fr.file}) — SOC enabled`);
+      return true;
+    }
+  } catch {}
+
+  // 2. Download from Pseudo-DOJO.
+  try {
+    if (await downloadPPToTemp(fr.url, tmpFile) && validatePseudopotential(tmpFile)) {
+      fs.renameSync(tmpFile, ppFile);
+      console.log(`[QE-Worker] Downloaded FR pseudo for ${element} from Pseudo-DOJO — SOC enabled`);
+      return true;
+    }
+  } catch {}
+  try { fs.unlinkSync(tmpFile); } catch {}
+
+  console.log(`[QE-Worker] No FR pseudo available for ${element} — SOC will downgrade to scalar-relativistic`);
+  return false;
 }
 
 function estimateCOverA(elements: string[], counts: Record<string, number>): number {
@@ -5371,6 +5413,24 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     if (socAnalysis.needsSOC) {
       console.log(`[QE-Worker] SOC analysis for ${formula}: ${socAnalysis.enableFullSOC ? "FULL SOC" : "scalar-rel"} ` +
         `(max SOC=${socAnalysis.maxSOCEnergy.toFixed(2)} eV, elements: ${socAnalysis.socElements.map(e => e.element).join(",")})`);
+    }
+
+    // --- Provision fully-relativistic pseudopotentials for SOC ---
+    // The default provisioning installs scalar-relativistic PAW pseudos. For
+    // a full-SOC run, swap in the Pseudo-DOJO FR (has_so="T") pseudo for each
+    // SOC element that has one — this MUST run before applySOCPseudoConstraint
+    // below, which reads QE_PSEUDO_DIR and downgrades lspinorb if no FR pseudo
+    // is present. Elements without an FR pseudo (actinides, heavy lanthanides)
+    // are left as-is and get the documented scalar-relativistic downgrade.
+    if (socAnalysis.enableFullSOC) {
+      for (const { element } of socAnalysis.socElements) {
+        if (!RELATIVISTIC_PP_URLS[element]) continue;
+        try {
+          await ensureRelativisticPP(element);
+        } catch (frErr: any) {
+          console.log(`[QE-Worker] FR pseudo provisioning failed for ${element}: ${frErr?.message?.slice(0, 120) ?? "unknown"}`);
+        }
+      }
     }
 
     // --- SOC pseudopotential availability check ---
