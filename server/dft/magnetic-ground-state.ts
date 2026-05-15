@@ -114,7 +114,7 @@ export interface MagneticGroundStateResult {
  *  SC parent compounds like UPt3, NpBe13, PuCoGa5 are all magnetic).  */
 const STRONG_MAGNETIC: Record<string, number> = {
   // 3d
-  Fe: 2.2, Co: 1.7, Ni: 0.6, Mn: 3.0, Cr: 1.5, V: 0.5,
+  Fe: 2.2, Co: 1.7, Ni: 0.6, Mn: 3.0, Cr: 1.5,
   // 4f (Ln³⁺ effective moments)
   Pr: 3.6, Nd: 3.0, Sm: 1.0, Eu: 7.0, Gd: 7.0,
   Tb: 9.7, Dy: 10.6, Ho: 10.6, Er: 9.6, Tm: 7.6,
@@ -122,9 +122,17 @@ const STRONG_MAGNETIC: Record<string, number> = {
   U: 3.0, Np: 2.5, Pu: 4.0, Am: 5.0, Cm: 7.0,
 };
 
-/** Elements that can develop induced moments in compounds */
+/** Elements that can develop induced moments in compounds.
+ *  V moved here from STRONG_MAGNETIC (May-2026): V's moment is strongly
+ *  environment-dependent — V3Si, V3Ga and most V intermetallics are
+ *  NON-magnetic A15 superconductors, V metal is a Pauli paramagnet, and
+ *  only correlated V oxides (V2O3, VO2) are magnetic. Seeding V at the
+ *  STRONG 0.5 μB moment made PBE over-stabilize a spurious itinerant
+ *  high-spin state — V3Si converged with M=8.9 μB (vc-relax) → 23.3 μB
+ *  (phonon-prep), both entirely unphysical. The WEAK 0.3 μB seed lets the
+ *  NM trial win for genuinely non-magnetic V compounds. */
 const WEAK_MAGNETIC = new Set([
-  "Ti", "Sc", "Cu", "Ru", "Rh", "Pd", "Os", "Ir", "Pt",
+  "Ti", "Sc", "V", "Cu", "Ru", "Rh", "Pd", "Os", "Ir", "Pt",
   "Ce", "Yb",  // 4f¹ and 4f¹³/¹⁴ — moments depend on valence; small intrinsic
 ]);
 
@@ -636,7 +644,28 @@ export function selectMagneticGroundState(
 
   // Sort by energy (lowest first)
   const sorted = [...convergedTrials].sort((a, b) => (a.totalEnergy ?? 0) - (b.totalEnergy ?? 0));
-  const winner = sorted[0];
+  let winner = sorted[0];
+
+  // NM-preference on near-degeneracy. If the lowest-energy trial is a magnetic
+  // ordering but the NM trial sits within NEAR_DEGENERATE_THRESHOLD_MEV/atom of
+  // it, pick NM instead. PBE systematically over-stabilizes itinerant magnetism
+  // for d-band metals — V3Si converged with a spurious M=8.9 μB because a
+  // marginally-lower "magnetic" trial beat NM by a few meV/atom. At that gap a
+  // magnetic state is far more likely a PBE artifact than a real ordered
+  // moment; choosing NM avoids carrying a fake moment into vc-relax + phonon
+  // (where it also blocks SCF convergence — V3Si's phonon-prep never settled).
+  // Genuinely magnetic systems (Fe/Mn/Cr/Co) have FM-AFM-NM gaps of tens to
+  // hundreds of meV/atom and are unaffected by this threshold.
+  if (winner.ordering !== "NM") {
+    const nmTrial = convergedTrials.find(t => t.ordering === "NM");
+    if (nmTrial && nmTrial.totalEnergy !== null && winner.totalEnergy !== null) {
+      const nmAboveWinnerMeV = ((nmTrial.totalEnergy - winner.totalEnergy) / totalAtoms) * 1000;
+      if (nmAboveWinnerMeV < NEAR_DEGENERATE_THRESHOLD_MEV) {
+        notes.push(`[MagSearch] NM is only ${nmAboveWinnerMeV.toFixed(2)} meV/atom above ${winner.ordering} — within the ${NEAR_DEGENERATE_THRESHOLD_MEV} meV near-degenerate threshold. Preferring NM (a marginal magnetic state at this gap is most likely a PBE itinerant-magnetism artifact, e.g. V3Si).`);
+        winner = nmTrial;
+      }
+    }
+  }
   const winnerConfig = configs.find(c => c.ordering === winner.ordering)!;
 
   // Energy gap to next-best. totalEnergy is in eV (per MagneticTrialResult
@@ -679,10 +708,15 @@ export function selectMagneticGroundState(
   );
 
   if (sorted.length >= 2) {
+    // energyGap is in eV/atom (totalEnergy is in eV per MagneticTrialResult
+    // docstring). The redundant "X mRy/atom (Y meV/atom)" log line was
+    // displaying `energyGap*1000` (= meV/atom) under the "mRy/atom" label —
+    // mRy is 13.6× larger than meV, so the first number was a real value
+    // with a wrong unit name. Drop the bogus mRy field and keep only the
+    // correct meV/atom display.
     notes.push(
       `[MagSearch] Energy gap to next state (${sorted[1].ordering}): ` +
-      `${(energyGap * 1000).toFixed(2)} mRy/atom ` +
-      `(${energyGapMeV.toFixed(1)} meV/atom)` +
+      `${energyGapMeV.toFixed(1)} meV/atom` +
       (wellSeparated ? " — well separated" : " — nearly degenerate, phonons may be sensitive to ordering")
     );
   }
@@ -792,7 +826,16 @@ export function shouldSearchMagneticGS(
   const hasSe = elements.includes("Se");
   const hasTe = elements.includes("Te");
 
-  if (hasFe && (hasAs || hasP || hasSe || hasTe)) {
+  // Include S in the chalcogenide check — Fe-S compounds (FeS mackinawite,
+  // FeS2 pyrite/marcasite, Fe3S, Fe7S8 pyrrhotite, mixed Fe-Mn-S sulfides)
+  // are antiferromagnetic ground states and need the same stripe-vs-
+  // checkerboard search as the As/P/Se/Te series. The sibling check in
+  // classifyMagneticLandscape at line 247 already includes S — this gate
+  // was the only place that left FeS-family candidates out of the magnetic
+  // search, so they ran FM-only and could converge to the wrong magnetic
+  // ground state.
+  const hasS = elements.includes("S");
+  if (hasFe && (hasAs || hasP || hasSe || hasTe || hasS)) {
     return { shouldSearch: true, reason: "Fe-pnictide/chalcogenide — stripe vs checkerboard AFM competition" };
   }
   if (hasCu && hasO) {
@@ -803,6 +846,17 @@ export function shouldSearchMagneticGS(
   }
   if (hasNi && hasO) {
     return { shouldSearch: true, reason: "Ni-oxide — competing magnetic orderings in nickelates" };
+  }
+
+  // [MagSearch] Spiral-magnet pairs (FeGe, MnSi, Cr-Al, etc.) — check BEFORE
+  // the single-magnetic-species early-return below, because canonical spiral
+  // magnets like FeGe (Fe+Ge), MnSi (Mn+Si), MnGe (Mn+Ge), Fe-Sn have
+  // exactly one strong-magnetic element and no anion mediator (Ge/Si/Sn/Al
+  // aren't in EXCHANGE_MEDIATORS). The prior order made the spiral check
+  // dead code for every classic B20/helimagnet candidate.
+  const spiral = detectSpiralMagnetism(elements);
+  if (spiral.flagged) {
+    return { shouldSearch: true, reason: `[MagSearch] Spiral-magnet candidate: ${spiral.systems.join(", ")}` };
   }
 
   // Multiple strong magnetic species
@@ -823,12 +877,6 @@ export function shouldSearchMagneticGS(
   // Weak magnetic only
   if (weakMag.length > 0 && strongMag.length === 0) {
     return { shouldSearch: false, reason: `Only weak magnetic elements (${weakMag.join(", ")}) — NM/FM sufficient` };
-  }
-
-  // [MagSearch] Spiral-magnet pairs (FeGe, MnSi, etc.)
-  const spiral = detectSpiralMagnetism(elements);
-  if (spiral.flagged) {
-    return { shouldSearch: true, reason: `[MagSearch] Spiral-magnet candidate: ${spiral.systems.join(", ")}` };
   }
 
   return { shouldSearch: false, reason: "Default: no complex magnetic landscape detected" };
@@ -868,12 +916,38 @@ export function parseMagnetizationFromOutput(output: string): {
   let totalMag: number | null = null;
   let absMag: number | null = null;
 
-  // Take the LAST occurrence (final SCF step)
-  const totalRegex = /total magnetization\s*=\s*([-\d.]+)\s*Bohr/g;
-  let totalMatch: RegExpExecArray | null;
-  while ((totalMatch = totalRegex.exec(output)) !== null) {
-    const val = parseFloat(totalMatch[1]);
-    if (Number.isFinite(val)) totalMag = val;
+  // Collinear (nspin=2):  "total magnetization =   1.23 Bohr mag/cell"
+  // Non-collinear:        "total magnetization =   0.00   0.00   1.23 Bohr mag/cell"
+  // The previous single-number regex captured only M_x, so non-collinear
+  // trials in the magnetic-ground-state search reported total ≈ 0 even when
+  // the trial converged to a FM/AFM state aligned along z. This made the
+  // canted-noncollinear and spiral-magnet trials look indistinguishable
+  // from each other in trial.totalMagnetization, undermining the energy-
+  // gap comparison's FM/AFM-character classification.
+  const totalLineRegex = /total magnetization\s*=\s*([^\n]+?Bohr\s*mag\s*\/?\s*cell)/g;
+  let totalLineMatch: RegExpExecArray | null;
+  while ((totalLineMatch = totalLineRegex.exec(output)) !== null) {
+    const line = totalLineMatch[1];
+    const nums = line.match(/-?\d+\.?\d*(?:[eE][-+]?\d+)?/g) ?? [];
+    const components = nums.map(parseFloat).filter(Number.isFinite);
+    if (components.length === 1) {
+      totalMag = components[0];
+    } else if (components.length >= 3) {
+      const [mx, my, mz] = components.slice(0, 3);
+      const norm = Math.sqrt(mx * mx + my * my + mz * mz);
+      const dominant = Math.abs(mx) >= Math.abs(my) && Math.abs(mx) >= Math.abs(mz) ? mx
+                     : Math.abs(my) >= Math.abs(mz) ? my : mz;
+      totalMag = norm * (dominant < 0 ? -1 : 1);
+    }
+  }
+  // Legacy single-number fallback for QE versions without the "Bohr mag/cell" tail.
+  if (totalMag === null) {
+    const totalRegex = /total magnetization\s*=\s*([-\d.]+)\s*Bohr/g;
+    let totalMatch: RegExpExecArray | null;
+    while ((totalMatch = totalRegex.exec(output)) !== null) {
+      const val = parseFloat(totalMatch[1]);
+      if (Number.isFinite(val)) totalMag = val;
+    }
   }
 
   const absRegex = /absolute magnetization\s*=\s*([-\d.]+)\s*Bohr/g;
