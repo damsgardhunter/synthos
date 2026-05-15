@@ -1003,7 +1003,10 @@ async function evaluateCandidate(formula: string): Promise<{ tc: number; lambda:
     if (electronic.metallicity < 0.4) {
       tc = tc * Math.max(0.02, electronic.metallicity);
     }
-    tc = Math.min(400, tc);
+    if (tc > 400) {
+      console.warn(`[StructureDiffusion] tc=${tc.toFixed(1)} K > 400 K for ${formula} (λ=${coupling.lambda.toFixed(2)}, μ*=${coupling.muStar.toFixed(2)}) — kept verbatim.`);
+    }
+    tc = Math.max(0, tc);
 
     let gbTc = 0;
     let gbScore = 0;

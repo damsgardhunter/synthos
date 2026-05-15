@@ -3,6 +3,23 @@ import { storage } from "../storage";
 import type { EventEmitter } from "./engine";
 import { classifyFamily } from "./utils";
 
+/**
+ * Properly check if a formula contains a specific element.
+ * Uses regex to avoid substring matches (e.g. "C" matching "Ca").
+ */
+function formulaHasElement(formula: string, el: string): boolean {
+  // Match element symbol followed by a digit, another uppercase, or end of string
+  // This prevents "C" from matching "Ca", "Co", "Cr", etc.
+  const regex = new RegExp(`${el}(?=[A-Z]|\\d|$)`);
+  return regex.test(formula);
+}
+
+/** Extract actual elements from a formula string */
+function extractElements(formula: string): string[] {
+  const matches = formula.match(/[A-Z][a-z]?/g);
+  return [...new Set(matches ?? [])];
+}
+
 const openai = new OpenAI({
   baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
   apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY,
@@ -113,6 +130,20 @@ const MATERIAL_SIGNALS: MaterialSignal[] = [
     datapointChecks: (c) => {
       let score = 0;
       const reasons: string[] = [];
+      // Carbon nanomaterials are C-dominated structures (graphene, CNT, fullerene).
+      // Multi-metal bulk compounds with some C are NOT nanomaterials — they're
+      // carbides, intermetallics, or alloys. Reject if metals outnumber C.
+      const formulaEls = extractElements(c.formula);
+      const metals = formulaEls.filter(e => !["C", "B", "N", "H", "O", "F", "S", "P", "Si"].includes(e));
+      if (metals.length >= 2) return { score: -1, reasons: ["Multi-metal compound — not a carbon nanomaterial"] };
+      // C must be dominant (>40% of non-H atoms)
+      const cMatch = c.formula.match(/C(\d+)/);
+      const cCount = cMatch ? parseInt(cMatch[1]) : (formulaEls.includes("C") ? 1 : 0);
+      const totalAtoms = (c.formula.match(/[A-Z][a-z]?\d*/g) || [])
+        .reduce((s, m) => { const n = m.match(/\d+/); return s + (n ? parseInt(n[0]) : 1); }, 0);
+      if (cCount / Math.max(1, totalAtoms) < 0.4) {
+        return { score: -1, reasons: ["Carbon fraction too low (<40%) — not a carbon nanomaterial"] };
+      }
       const dim = (c.dimensionality || "").toLowerCase();
       if (dim.includes("2d") || dim.includes("1d") || dim.includes("quasi-2d")) {
         score += 0.25;
@@ -185,14 +216,32 @@ const MATERIAL_SIGNALS: MaterialSignal[] = [
         reasons.push(`High stability ${c.stabilityScore.toFixed(2)} — resists degradation in physiological environment`);
       }
       // Elements that make a compound biomedically dangerous — disqualify outright
-      const disqualify = ["Hf", "Re", "Os", "Be", "Cd", "Hg", "Tl", "Pb", "As"];
-      const hasDisqualifying = disqualify.some(e => c.formula.includes(e));
+      const formulaEls = extractElements(c.formula);
+      const disqualify = ["Hf", "Re", "Os", "Be", "Cd", "Hg", "Tl", "Pb", "As", "Se", "Sb", "Ba"];
+      const hasDisqualifying = formulaEls.some(e => disqualify.includes(e));
       if (hasDisqualifying) return { score: -1, reasons: ["Contains elements disqualifying for biomedical use"] };
-      const toxic = ["Cr", "Co", "Ni"];
-      const hasToxic = toxic.some(e => c.formula.includes(e));
+      const toxic = ["Cr", "Co", "Ni", "V", "Cu", "Mn"];
+      const hasToxic = formulaEls.some(e => toxic.includes(e));
       if (!hasToxic) {
         score += 0.1;
         reasons.push("No toxic transition metals detected — biocompatibility favorable");
+      }
+      // High boron content is a toxicity flag — boric acid and many borates
+      // are toxic. B9Ca2HNSi7 is NOT biocompatible despite having Ca/Si.
+      const bMatch = c.formula.match(/B(\d+)/);
+      const bCount = bMatch ? parseInt(bMatch[1]) : (formulaEls.includes("B") ? 1 : 0);
+      const totalAtomsBC = (c.formula.match(/[A-Z][a-z]?\d*/g) || [])
+        .reduce((s, m) => { const n = m.match(/\d+/); return s + (n ? parseInt(n[0]) : 1); }, 0);
+      if (bCount / Math.max(1, totalAtomsBC) > 0.2) {
+        return { score: -1, reasons: ["High boron content (>20%) — boron compounds have toxicity concerns"] };
+      }
+      // Require known biocompatible structural family, not just element composition.
+      // "Ca + Si present" does NOT mean biocompatible — arbitrary phases have ZERO
+      // published biocompatibility data. Only hydroxyapatite analogs, Ti/Zr oxides,
+      // bioglasses, and specific Ca phosphates have established biocompatibility.
+      const knownBioFamilies = /Ca.*P.*O|Ti.*O|Zr.*O|Mg.*Ca.*O|hydroxyapatite/i;
+      if (!knownBioFamilies.test(c.formula)) {
+        return { score: -1, reasons: ["Not a known biocompatible structural family — biocompatibility unknown, requires in-vitro testing"] };
       }
       if (c.decompositionEnergy != null && c.decompositionEnergy > 0.1) {
         score += 0.1;
@@ -257,11 +306,15 @@ const MATERIAL_SIGNALS: MaterialSignal[] = [
     keywords: ["biodegradable", "recyclable", "green", "sustainable", "eco-friendly", "low-carbon"],
     elementHints: ["Fe", "Al", "Si", "Ca", "Mg", "Na", "K", "O", "C", "N"],
     formulaChecks: (f) => {
-      const earthAbundant = ["Fe", "Al", "Si", "Ca", "Mg", "Na", "K", "Ti", "Mn"];
-      const toxic = ["Cd", "Hg", "Tl", "Pb", "As", "Be"];
-      const hasToxic = toxic.some(e => f.includes(e));
-      const hasAbundant = earthAbundant.filter(e => f.includes(e)).length >= 2;
-      return hasAbundant && !hasToxic;
+      const els = extractElements(f);
+      const earthAbundant = ["Fe", "Al", "Si", "Ca", "Mg", "Na", "K", "Ti", "Mn", "H", "O", "N", "B", "C", "S", "P"];
+      const toxic = ["Cd", "Hg", "Tl", "Pb", "As", "Be", "Cr", "Sb"];
+      // NOT earth-abundant / supply-constrained — disqualify as "sustainable in bulk"
+      const notSustainable = ["Ge", "In", "Ga", "Te", "Co", "Se", "Rh", "Ir", "Os", "Ru", "Re", "Au", "Pt", "Pd", "Ag", "Ba", "W", "Bi"];
+      const hasToxic = els.some(e => toxic.includes(e));
+      const hasNotSustainable = els.some(e => notSustainable.includes(e));
+      const hasAbundant = els.filter(e => earthAbundant.includes(e)).length >= 2;
+      return hasAbundant && !hasToxic && !hasNotSustainable;
     },
     datapointChecks: (c) => {
       let score = 0;
@@ -278,11 +331,26 @@ const MATERIAL_SIGNALS: MaterialSignal[] = [
         score += 0.1;
         reasons.push(`Moderate stability (${c.stabilityScore.toFixed(2)}) — durable yet potentially recyclable`);
       }
-      const rare = ["Rh", "Ir", "Os", "Ru", "Re", "Au", "Pt", "Pd"];
-      const hasRare = rare.some(e => c.formula.includes(e));
+      const formulaEls = extractElements(c.formula);
+      const rare = ["Rh", "Ir", "Os", "Ru", "Re", "Au", "Pt", "Pd", "Ge", "In", "Ga", "Te", "Co", "Ba", "W", "Bi", "Sb"];
+      const hasRare = formulaEls.some(e => rare.includes(e));
+      const toxic = ["Cd", "Hg", "Tl", "Pb", "As", "Be", "Cr", "Sb"];
+      const hasToxic = formulaEls.some(e => toxic.includes(e));
+      if (hasToxic) return { score: -1, reasons: [`Contains toxic/regulated element — disqualifies as sustainable`] };
       if (!hasRare) {
         score += 0.1;
-        reasons.push("No rare/precious elements — low resource footprint");
+        reasons.push("No rare/precious/supply-constrained elements — low resource footprint");
+      }
+      // Air/water reactivity check: Li/Na/K-rich phases without anionic stabilizers
+      // (O, F, Cl) are highly reactive in air — not practical as sustainable materials
+      const alkaliCount = formulaEls.filter(e => ["Li", "Na", "K", "Rb", "Cs"].includes(e))
+        .reduce((s, e) => { const m = c.formula.match(new RegExp(`${e}(\\d+)`)); return s + (m ? parseInt(m[1]) : 1); }, 0);
+      const totalAtoms = (c.formula.match(/[A-Z][a-z]?\d*/g) || [])
+        .reduce((s, m) => { const n = m.match(/\d+/); return s + (n ? parseInt(n[0]) : 1); }, 0);
+      const hasStabilizer = formulaEls.some(e => ["O", "F", "Cl"].includes(e));
+      if (alkaliCount / Math.max(1, totalAtoms) > 0.3 && !hasStabilizer) {
+        score -= 0.2;
+        reasons.push("Alkali-rich without anionic stabilizers — likely air/water reactive");
       }
       return { score, reasons };
     },
@@ -307,8 +375,9 @@ const MATERIAL_SIGNALS: MaterialSignal[] = [
         score += 0.15;
         reasons.push(`High DOS at Fermi level (${c.dosAtEF.toFixed(1)}) supports strong optical response`);
       }
-      const hasNoble = ["Au", "Ag", "Cu"].some(e => c.formula.includes(e));
-      const hasDielectric = ["Si", "Ge", "Ti", "O", "Al"].some(e => c.formula.includes(e));
+      const metaEls = extractElements(c.formula);
+      const hasNoble = ["Au", "Ag", "Cu"].some(e => metaEls.includes(e));
+      const hasDielectric = ["Si", "Ge", "Ti", "O", "Al"].some(e => metaEls.includes(e));
       if (hasNoble && hasDielectric) {
         score += 0.2;
         reasons.push("Metal-dielectric combination ideal for plasmonic metamaterial");
@@ -373,18 +442,23 @@ const MATERIAL_SIGNALS: MaterialSignal[] = [
     datapointChecks: (c) => {
       let score = 0;
       const reasons: string[] = [];
-      if (c.bandGap != null) {
+      if (c.bandGap != null && c.bandGap > 0) {
         if (c.bandGap >= 0.5 && c.bandGap <= 3.5) {
           score += 0.3;
-          reasons.push(`Band gap ${c.bandGap.toFixed(2)} eV in semiconductor range (0.5-3.5 eV)`);
+          reasons.push(`Computed band gap ${c.bandGap.toFixed(2)} eV in semiconductor range (0.5-3.5 eV)`);
         }
         if (c.bandGap > 3.0) {
-          const hasConductive = ["Sn", "In", "Zn", "Cd", "Ga"].some(e => c.formula.includes(e));
+          const formulaEls = extractElements(c.formula);
+          const hasConductive = ["Sn", "In", "Zn", "Cd", "Ga"].some(e => formulaEls.includes(e));
           if (hasConductive) {
             score += 0.15;
             reasons.push(`Transparent conductor candidate: wide gap ${c.bandGap.toFixed(2)} eV + conductive elements`);
           }
         }
+      } else {
+        // No computed band gap — label as unverified, penalize confidence
+        score -= 0.1;
+        reasons.push("No computed band gap — semiconductor classification unverified, pending DFT");
       }
       if (c.correlationStrength != null && c.correlationStrength < 0.3) {
         score += 0.1;
@@ -426,7 +500,8 @@ function scoreCandidate(candidate: CandidateData, signal: MaterialSignal): Signa
   let score = 0;
   const reasons: string[] = [];
 
-  const elementMatches = signal.elementHints.filter(el => formula.includes(el));
+  const formulaElements = extractElements(formula);
+  const elementMatches = signal.elementHints.filter(el => formulaElements.includes(el));
   if (elementMatches.length >= 2) {
     score += 0.25;
     reasons.push(`Contains signal elements: ${elementMatches.join(", ")}`);

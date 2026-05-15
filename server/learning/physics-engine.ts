@@ -5733,14 +5733,22 @@ export async function runFullPhysicsAnalysis(
       });
     }
 
+    // NOTE: `fdp.lambdaContribution` is defined in phonon-calculator.ts:757 as
+    // `ω_log² / ⟨ω²⟩` — a phonon spectrum SHAPE factor in [0,1] (Allen-Dynes
+    // f₂ omegaRatio inverse squared), NOT the electron-phonon coupling λ.
+    // The previous code blended it 30% into `coupling.lambda`, which for
+    // (a) weak-coupling materials (λ≈0.3) inflated λ toward 0.4-0.7, and
+    // (b) strong-coupling hydrides (λ≈2-3) suppressed λ toward 1.0-2.0.
+    // Both directions corrupted Tc predictions and the ML training labels.
+    // The real electron-phonon λ requires N(E_F)⟨I²⟩/M⟨ω²⟩ (Hopfield) or
+    // the integrated α²F/ω — neither derivable from phonons alone. Drop
+    // the blend entirely; use FD ω_log (above) and ω_log²/⟨ω²⟩ as the
+    // f₂ spectral-moment hint when computing Allen-Dynes, not as a λ proxy.
     if (fdp.lambdaContribution != null && fdp.lambdaContribution > 0) {
-      const blendWeight = 0.3;
-      const analyticalLambda = coupling.lambda;
-      coupling.lambda = coupling.lambda * (1 - blendWeight) + fdp.lambdaContribution * blendWeight;
       emit("log", {
         phase: "phase-10",
-        event: "FD phonon lambda blend",
-        detail: `${formula}: coupling.lambda ${analyticalLambda.toFixed(4)} -> ${coupling.lambda.toFixed(4)} (blended ${(blendWeight * 100).toFixed(0)}% FD surrogate λ=${fdp.lambdaContribution.toFixed(4)})`,
+        event: "FD phonon shape factor noted",
+        detail: `${formula}: FD ω_log²/⟨ω²⟩=${fdp.lambdaContribution.toFixed(4)} (phonon shape factor, NOT used as λ)`,
         dataSource: "DFT Resolver",
       });
     }
@@ -5802,7 +5810,7 @@ export async function runFullPhysicsAnalysis(
       emit("log", {
         phase: "phase-10",
         event: "Eliashberg uses FD phonon coupling",
-        detail: `${formula}: Tc computed with FD-adjusted lambda=${coupling.lambda.toFixed(4)}, omegaLog=${coupling.omegaLog.toFixed(1)} cm⁻¹ (alpha2F bypassed in favor of FD data)`,
+        detail: `${formula}: Tc computed with surrogate lambda=${coupling.lambda.toFixed(4)}, FD omegaLog=${coupling.omegaLog.toFixed(1)} cm⁻¹ (alpha2F bypassed in favor of FD ω_log)`,
         dataSource: "DFT Resolver",
       });
     } else {

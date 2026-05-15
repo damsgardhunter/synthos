@@ -437,7 +437,11 @@ function mcMillanTc(lambda: number, omegaLog: number, muStar: number): number {
   const denom = lambda - muStar * (1 + 0.62 * lambda);
   if (denom <= 0.01) return 0;
   const tc = (omegaLog / 1.2) * Math.exp(-1.04 * (1 + lambda) / denom);
-  return Math.max(0, Math.min(tc, 300)); // cap at 300K — above that is unconventional regime
+  if (!Number.isFinite(tc)) return 0;
+  if (tc > 300) {
+    console.warn(`[MultiTaskGNN-AD] McMillan Tc=${tc.toFixed(1)} K > 300 K (λ=${lambda.toFixed(2)}, ω_log=${omegaLog.toFixed(0)}, μ*=${muStar.toFixed(2)}) — above conventional regime but kept verbatim.`);
+  }
+  return Math.max(0, tc);
 }
 
 function computeMagneticMoment(formula: string, magneticOut: number[], corrStrength?: number): number {

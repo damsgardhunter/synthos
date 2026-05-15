@@ -489,7 +489,19 @@ export async function fetchMagnetism(formula: string): Promise<MPMagnetismData |
 }
 
 export interface MPStructureData {
-  latticeParams: { a: number; b: number; c: number };
+  latticeParams: {
+    a: number; b: number; c: number;
+    /** Lattice angles in degrees — required for correct cell-volume
+     *  computation in non-orthogonal cells (monoclinic, triclinic,
+     *  hexagonal). Default 90° when MP returns no value. */
+    alpha?: number;
+    beta?: number;
+    gamma?: number;
+    /** Cell volume in Å³ as reported by MP. Use this directly when
+     *  available instead of a·b·c (which is only correct for orthogonal
+     *  cells). */
+    volume?: number;
+  };
   atomicPositions: { element: string; x: number; y: number; z: number }[];
   spaceGroup: string | null;
 }
@@ -516,6 +528,10 @@ export async function fetchMPStructureData(formula: string): Promise<MPStructure
       a: s.lattice.a ?? 5,
       b: s.lattice.b ?? 5,
       c: s.lattice.c ?? 5,
+      alpha: typeof s.lattice.alpha === "number" ? s.lattice.alpha : 90,
+      beta: typeof s.lattice.beta === "number" ? s.lattice.beta : 90,
+      gamma: typeof s.lattice.gamma === "number" ? s.lattice.gamma : 90,
+      volume: typeof s.lattice.volume === "number" ? s.lattice.volume : undefined,
     },
     atomicPositions: s.sites.map((site: any) => ({
       element: site.species?.[0]?.element ?? "X",

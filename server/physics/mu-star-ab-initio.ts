@@ -93,10 +93,10 @@ export interface MuStarAbInitioResult {
   notes: string[];
 }
 
-// Physical constants in atomic units / SI
-const RY_TO_EV = 13.6057;     // Rydberg to eV
-const BOHR_TO_ANG = 0.529177;
-const CM1_TO_EV = 1.2398e-4;
+// Physical constants in atomic units / SI — CODATA 2018, matches qe-worker.ts
+const RY_TO_EV = 13.605693122994;  // Rydberg to eV
+const BOHR_TO_ANG = 0.529177210903;
+const CM1_TO_EV = 1.2398419843e-4;  // 1/8065.543937 cm⁻¹/eV
 
 function parseFormulaCounts(formula: string): Record<string, number> {
   let cleaned = formula.replace(/[₀-₉]/g, c => String("₀₁₂₃₄₅₆₇₈₉".indexOf(c)));

@@ -1028,6 +1028,57 @@ const UNCONVENTIONAL_SEEDS: string[][] = [
   ["Mg", "Ca", "H"], ["Mg", "La", "H"], ["Mg", "Y", "H"],
   ["Sc", "La", "H"], ["Ba", "La", "H"], ["Sr", "La", "H"],
   ["Nb", "Se", "S"], ["Ta", "Se", "Te"], ["Mo", "S", "Se"],
+  // ── UNDEREXPLORED: 3d-TM hydrides (7 candidates, highest avg Tc=85K) ──
+  ["Fe", "H"], ["Co", "H"], ["Ni", "H"], ["Cu", "H"], ["Mn", "H"],
+  ["Fe", "La", "H"], ["Cu", "La", "H"], ["Ni", "Y", "H"], ["Co", "Y", "H"],
+  ["Fe", "Ca", "H"], ["Cu", "Ca", "H"], ["Fe", "Sr", "H"],
+  // ── UNDEREXPLORED: Borohydrides (8 candidates) ──
+  ["Sc", "B", "H"], ["Y", "B", "H"], ["La", "B", "H"], ["Ca", "B", "H"],
+  ["Mg", "B", "H"], ["Ti", "B", "H"], ["Zr", "B", "H"],
+  // ── UNDEREXPLORED: Iron pnictides (24 candidates) ──
+  ["La", "Fe", "As"], ["Ba", "Fe", "As"], ["Sr", "Fe", "As"],
+  ["Ca", "Fe", "As"], ["La", "Fe", "P"], ["Ba", "Fe", "P"],
+  ["La", "Co", "As"], ["Ba", "Co", "As"],
+  ["Sr", "Fe", "Se"], ["Ba", "Fe", "Se"],
+  ["La", "Ni", "As"], ["Ba", "Ni", "As"],
+  // ── Mixed chalcogenide-hydrides (novel, barely explored) ──
+  ["Fe", "S", "H"], ["Nb", "S", "H"], ["Mo", "Se", "H"],
+  // ── UNDEREXPLORED: Kagome metals (Tc=0.9-2.5K but exotic physics) ──
+  ["Cs", "V", "Sb"], ["K", "V", "Sb"], ["Rb", "V", "Sb"],
+  ["Cs", "V", "Sn"], ["K", "V", "Sn"],
+  // ── UNDEREXPLORED: Nickelates (La3Ni2O7 = 80K, recent discovery!) ──
+  ["La", "Ni", "O"], ["Nd", "Ni", "O"], ["Pr", "Ni", "O"],
+  ["La", "Ni", "H"], ["Nd", "Ni", "H"],  // nickelate-hydrides (novel)
+  // ── UNDEREXPLORED: Heavy fermion (0 candidates, exotic SC) ──
+  ["Ce", "Co", "In"], ["Ce", "Ir", "In"], ["Ce", "Rh", "In"],
+  ["U", "Pt"], ["U", "Be"], ["U", "Ru"], ["Ce", "Cu", "Si"],
+  // ── UNDEREXPLORED: Ru/Ir/Pd compounds ──
+  ["Sr", "Ru", "O"], ["Ru", "Se"], ["Ir", "Te"], ["Ir", "Se"],
+  ["Pd", "H"], ["Pd", "Te"], ["Pd", "Se"],
+  // ── UNDEREXPLORED: Heusler alloys (high DOS, tunable) ──
+  ["Ni", "Mn", "Ga"], ["Co", "Mn", "Si"], ["Fe", "V", "Al"],
+  ["Ni", "Ti", "Sn"], ["Co", "Fe", "Si"], ["Pd", "Mn", "Ga"],
+  // ── Rare earth hydrides at pressure ──
+  ["Nd", "H"], ["Pr", "H"], ["Eu", "H"], ["Gd", "H"],
+  ["Sm", "H"], ["Dy", "H"], ["Er", "H"], ["Lu", "H"], ["Yb", "H"],
+  // ── NOVEL: Platinum-group metal hydrides (5d + H cage = high SOC + high phonon) ──
+  ["Pt", "H"], ["Ir", "H"], ["Ru", "H"], ["Rh", "H"], ["Os", "H"],
+  // ── NOVEL: Hydride-borides (MgB2 physics + H cage modes) ──
+  ["Mg", "B", "H"], ["Ca", "B", "H"], ["Sc", "B", "H"], ["Y", "B", "H"], ["La", "B", "H"],
+  // ── NOVEL: Mixed-anion hydrides (oxyhydrides, sulfide-hydrides, etc.) ──
+  ["La", "H", "N"], ["Y", "H", "N"], ["Sc", "H", "N"], ["Ca", "H", "N"], ["Ba", "H", "N"],
+  ["La", "H", "P"], ["Y", "H", "P"], ["Ca", "H", "P"],
+  ["Ca", "S", "H"], ["La", "S", "H"], ["Y", "S", "H"], ["Ba", "S", "H"],
+  ["La", "Se", "H"], ["Y", "Se", "H"], ["Nb", "Se", "H"],
+  ["La", "H", "O"], ["Ba", "H", "O"], ["Sr", "H", "O"], ["Ca", "H", "O"],
+  // ── NOVEL: Carbide-hydrides ──
+  ["La", "C", "H"], ["Y", "C", "H"], ["Sc", "C", "H"], ["Ti", "C", "H"], ["Nb", "C", "H"],
+  // ── NOVEL: Multi-metal hydrides (high-entropy hydrides) ──
+  ["Nb", "Ti", "H"], ["V", "Ti", "H"], ["Nb", "Zr", "H"], ["Mo", "W", "H"],
+  ["Nb", "V", "H"], ["Ta", "Nb", "H"], ["Zr", "Hf", "H"],
+  // ── NOVEL: High-entropy alloys ──
+  ["Nb", "Ti", "V", "Zr"], ["Mo", "Nb", "Ta", "W"], ["Nb", "Ti", "V", "Cr"],
+  ["Hf", "Nb", "Ti", "Zr"], ["Mo", "Nb", "V", "W"],
 ];
 
 export function getSeedsFromClusterGuidance(_clusters: any): string[] {
@@ -1036,8 +1087,8 @@ export function getSeedsFromClusterGuidance(_clusters: any): string[] {
 
 export function selectSeedPairs(focusArea: string): string[][] {
   const focusPairs = FOCUS_ELEMENTS[focusArea] || FOCUS_ELEMENTS["Carbides"];
-  const biasedSubset = fisherYatesShuffle(SC_BIASED_SEEDS).slice(0, 6);
-  const unconvSubset = fisherYatesShuffle(UNCONVENTIONAL_SEEDS).slice(0, 16);
+  const biasedSubset = fisherYatesShuffle(SC_BIASED_SEEDS).slice(0, 8);
+  const unconvSubset = fisherYatesShuffle(UNCONVENTIONAL_SEEDS).slice(0, 32);
   return [...focusPairs, ...biasedSubset, ...unconvSubset];
 }
 

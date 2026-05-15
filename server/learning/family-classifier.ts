@@ -349,7 +349,11 @@ function _allenDynesFull(lambda: number, omegaLog: number, muStar: number): numb
     : 1.0;
 
   const tc = (omegaLog / 1.2) * f1 * f2 * Math.exp(-1.04 * (1 + lambda) / denom);
-  return Math.max(0, Math.min(500, tc));
+  if (!Number.isFinite(tc)) return 0;
+  if (tc > 500) {
+    console.warn(`[FamilyClassifier-AD] Tc=${tc.toFixed(1)} K > 500 K (λ=${lambda.toFixed(2)}, ω_log=${omegaLog.toFixed(0)}, μ*=${muStar.toFixed(2)}) — kept verbatim.`);
+  }
+  return Math.max(0, tc);
 }
 
 /**

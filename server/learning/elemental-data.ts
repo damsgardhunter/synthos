@@ -1186,10 +1186,16 @@ export function isRareEarth(symbol: string): boolean {
 }
 
 export function isActinide(symbol: string): boolean {
-  const data = ELEMENTAL_DATA[symbol];
-  if (!data) return false;
-  const z = data.atomicNumber;
-  return z >= 89 && z <= 96;
+  // Use explicit symbol set so Bk/Cf are recognized even though they're
+  // not in ELEMENTAL_DATA. The previous Z-range check (89-96 via lookup)
+  // returned false for Bk/Cf because their elemental records were missing,
+  // and the range stopped at 96 anyway — silently excluding Bk (Z=97),
+  // Cf (Z=98), Es-Lr (99-103) from `isActinide` checks downstream.
+  const ACTINIDE_SYMBOLS = new Set([
+    "Ac", "Th", "Pa", "U", "Np", "Pu", "Am", "Cm", "Bk", "Cf",
+    "Es", "Fm", "Md", "No", "Lr",
+  ]);
+  return ACTINIDE_SYMBOLS.has(symbol);
 }
 
 export function hasDOrFElectrons(symbol: string): boolean {

@@ -3782,18 +3782,25 @@ async function runPhase10_Physics() {
           try {
             const dfptJob = await submitDFTJob(candidate.formula, null, 90, "scf");
             const promoted = dfptJob ? await promoteDFTJob(candidate.formula, 90) : false;
+            // `lambdaContribution` is ω_log²/⟨ω²⟩ — a phonon spectrum
+            // peakedness factor in [0,1], not the electron-phonon λ.
+            // Using >0.5 here gates on "peaked phonon spectrum +
+            // dynamically stable" as a promotion heuristic; the labels
+            // below say "phonon-peaked" rather than "high-lambda" to
+            // avoid misrepresenting what this quantity is.
+            const phononShape = result.fdPhononSummary.lambdaContribution;
             if (dfptJob && promoted) {
               emit("log", {
                 phase: "phase-10",
-                event: "DFPT promotion: high-lambda stable candidate",
-                detail: `${candidate.formula}: FD stable, λ_FD=${result.fdPhononSummary.lambdaContribution.toFixed(3)}, Tc=${updatedTc.toFixed(1)}K — promoted to full DFPT queue (priority=90)`,
+                event: "DFPT promotion: phonon-peaked stable candidate",
+                detail: `${candidate.formula}: FD stable, ω_log²/⟨ω²⟩=${phononShape.toFixed(3)}, Tc=${updatedTc.toFixed(1)}K — promoted to full DFPT queue (priority=90)`,
                 dataSource: "Physics Engine",
               });
             } else if (dfptJob) {
               emit("log", {
                 phase: "phase-10",
                 event: "DFPT queued (not promoted)",
-                detail: `${candidate.formula}: FD stable, λ_FD=${result.fdPhononSummary.lambdaContribution.toFixed(3)} — queued but promotion returned false`,
+                detail: `${candidate.formula}: FD stable, ω_log²/⟨ω²⟩=${phononShape.toFixed(3)} — queued but promotion returned false`,
                 dataSource: "Physics Engine",
               });
             }

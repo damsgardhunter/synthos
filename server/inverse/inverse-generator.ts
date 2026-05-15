@@ -2,7 +2,8 @@ import { TargetProperties, CompositionBias, InverseCandidate } from "./target-sc
 import { getTSCElementBias, getTSCPrototypeBias } from "../physics/tsc-generator-bias";
 import { defaultSynthesisVector, mutateSynthesisVector, optimizeSynthesisPath } from "../physics/synthesis-simulator";
 import { isValidFormula } from "../learning/utils";
-import { passesElementCountCap } from "../learning/candidate-generator";
+import { passesElementCountCap, estimateFamilyPressure } from "../learning/candidate-generator";
+import { computePhysicsTcUQ } from "../learning/physics-engine";
 
 const LIGHT_PHONON_ELEMENTS = ["H", "B", "C", "N", "O"];
 const HIGH_COUPLING_TM = ["Nb", "V", "Ti", "Ta", "Mo", "W", "Zr", "Hf"];
@@ -140,27 +141,17 @@ function parseFormulaElements(formula: string): Map<string, number> {
   return elMap;
 }
 
-function estimateQuickTc(formula: string, prototype: string, target: TargetProperties): number {
-  const protoInfo = PROTOTYPE_TC_AFFINITY[prototype];
-  if (!protoInfo) return 10;
-  const baseTc = (protoInfo.minTc + protoInfo.maxTc) / 2;
-  const elMap = parseFormulaElements(formula);
-  const elements = Array.from(elMap.keys());
-  const hasH = elMap.has("H");
-  const hCount = elMap.get("H") || 0;
-  let tc = baseTc;
-  if (hasH && hCount >= 10) tc *= 1.5;
-  else if (hasH && hCount >= 6) tc *= 1.3;
-  else if (hasH && hCount >= 3) tc *= 1.1;
-  const hasTM = HIGH_COUPLING_TM.some(el => elements.includes(el));
-  if (hasTM) tc *= 1.15;
-  const hasRE = RARE_EARTH.some(el => elements.includes(el));
-  if (hasRE) tc *= 1.1;
-  if (prototype === "Clathrate" && hasH) tc *= 1.5;
-  if (prototype === "A15" && hasTM) tc *= 1.2;
-  if (elements.length >= 3) tc *= 1.05;
-  if (elements.length >= 4) tc *= 1.05;
-  return Math.min(400, Math.max(1, tc + (Math.random() - 0.5) * 10));
+function estimateQuickTc(formula: string, _prototype: string, _target: TargetProperties): number {
+  // Use the physics UQ function instead of heuristic multipliers.
+  // This gives real Allen-Dynes Tc with anharmonic corrections and
+  // pressure-aware coupling — not pattern-matched guesses.
+  try {
+    const pressure = estimateFamilyPressure(formula);
+    const uq = computePhysicsTcUQ(formula, pressure);
+    return Math.max(0, uq.mean);
+  } catch {
+    return 5; // safe fallback if formula can't be parsed
+  }
 }
 
 function selectPrototypes(target: TargetProperties): string[] {

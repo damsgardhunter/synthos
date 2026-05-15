@@ -509,7 +509,11 @@ function computeAllenDynesTc(
   }
   let tc = (omegaLogK / 1.2) * f1 * f2 * Math.exp(exponent);
 
-  tc = Number.isFinite(tc) ? Math.max(0, Math.min(500, tc)) : 0;
+  if (!Number.isFinite(tc)) tc = 0;
+  if (tc > 500) {
+    console.warn(`[Eliashberg-AD] Tc=${tc.toFixed(1)} K > 500 K (λ=${lambda.toFixed(2)}, ω_log=${omegaLogK.toFixed(0)} K, μ*=${muStar.toFixed(2)}) — out-of-distribution but kept verbatim.`);
+  }
+  tc = Math.max(0, tc);
 
   return {
     tc: Number(tc.toFixed(2)),
@@ -972,7 +976,15 @@ export function runEliashbergPipeline(
       const data = getElementData(el);
       return sum + (data?.hubbardU ?? 0);
     }, 0) / Math.max(1, pairingElements.length);
-    const estBandwidth = Math.max(0.5, electronic.correlationStrength > 0 ? 3.0 / electronic.correlationStrength : 5.0);
+    // Estimate electronic bandwidth from correlation strength. Physically,
+    // W ~ U / (U/W) where U/W is the correlation strength, with U ≈ 3–6 eV
+    // for d-band systems. We clamp to [0.5, 15] eV: 0.5 eV is the heavy-fermion
+    // floor (CeCu₂Si₂-like quasiparticle bandwidth), 15 eV is the upper limit
+    // for itinerant sp metals. Previous formula `3.0/correlationStrength`
+    // diverged at low correlation, giving 30–60 eV bandwidths that broke the
+    // downstream spin-susceptibility calculation.
+    const estBandwidth = Math.max(0.5, Math.min(15.0,
+      electronic.correlationStrength > 0 ? 3.0 / electronic.correlationStrength : 5.0));
 
     const pairing = classifyPairingChannel(
       electronic, null, // no magnetic GS in surrogate tier

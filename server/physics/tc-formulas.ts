@@ -330,7 +330,11 @@ export function mcMillanTc(
   const exponent = -1.04 * (1 + lambda) / denominator;
   if (exponent < -50) return 0;
   const tc = (thetaD / 1.45) * Math.exp(exponent);
-  return Number.isFinite(tc) ? Math.max(0, Math.min(500, tc)) : 0;
+  if (!Number.isFinite(tc)) return 0;
+  if (tc > 500) {
+    console.warn(`[McMillan] Tc=${tc.toFixed(1)} K > 500 K (λ=${lambda.toFixed(2)}, θ_D=${thetaD.toFixed(0)} K, μ*=${muStar.toFixed(2)}) — out-of-distribution but kept verbatim.`);
+  }
+  return Math.max(0, tc);
 }
 
 // ---------------------------------------------------------------------------
@@ -405,9 +409,11 @@ function cuprateSpinFluctuationTc(
 
   let tc = (omegaSfK / 1.5) * Math.exp(exponent);
 
-  // Physical cap: HgBa₂Ca₂Cu₃O₈ holds the record at ~165 K
-  tc = Math.max(0, Math.min(185, tc));
-  return Number.isFinite(tc) ? Number(tc.toFixed(2)) : 0;
+  if (!Number.isFinite(tc)) return 0;
+  if (tc > 185) {
+    console.warn(`[CuprateSpinFluc] Tc=${tc.toFixed(1)} K exceeds Hg-1223 record (~165 K) — λ=${lambda.toFixed(2)}, ω_log=${omegaLogK.toFixed(0)} K. Kept verbatim for ML/extrapolation; downstream should flag as out-of-distribution.`);
+  }
+  return Number(Math.max(0, tc).toFixed(2));
 }
 
 /**
@@ -465,9 +471,11 @@ function heavyFermionQCPTc(
 
   let tc = (omegaSfK / 1.2) * massSuppression * Math.exp(exponent);
 
-  // Empirical cap: CeRhIn₅ under pressure ~2 K; PuCoGa₅ outlier ~18 K
-  tc = Math.max(0, Math.min(25, tc));
-  return Number.isFinite(tc) ? Number(tc.toFixed(3)) : 0;
+  if (!Number.isFinite(tc)) return 0;
+  if (tc > 25) {
+    console.warn(`[HF-QCP] Tc=${tc.toFixed(2)} K exceeds PuCoGa₅ outlier (~18 K) — λ=${lambda.toFixed(2)}, ω_log=${omegaLogK.toFixed(0)} K, m*_est=${massEst.toFixed(1)}. Kept verbatim; downstream should flag as out-of-distribution.`);
+  }
+  return Number(Math.max(0, tc).toFixed(3));
 }
 
 /**
@@ -579,7 +587,11 @@ export function allenDynesTcFull(input: AllenDynesTcInput): AllenDynesTcResult {
     }
   }
 
-  tc = Math.max(0, Math.min(500, tc));
+  if (!Number.isFinite(tc)) tc = 0;
+  if (tc > 500) {
+    console.warn(`[AllenDynes] Predicted Tc=${tc.toFixed(1)} K > 500 K (λ=${lambda.toFixed(2)}, ω_log=${omegaLogK.toFixed(0)} K, μ*=${muStar.toFixed(2)}, method=${method}) — out-of-distribution but kept verbatim.`);
+  }
+  tc = Math.max(0, tc);
 
   return {
     tc: Number(tc.toFixed(2)),
@@ -740,7 +752,10 @@ export function allenDynesTcFromKelvin(
     tc = Math.max(tc, tcSisso, tcXie);
   }
 
-  return Math.max(0, Math.min(500, tc));
+  if (tc > 500) {
+    console.warn(`[AllenDynes] Predicted Tc=${tc.toFixed(1)} K exceeds 500 K (λ=${lambda.toFixed(2)}, ω_log=${omegaLogK.toFixed(0)} K, μ*=${muStar.toFixed(2)}) — flag as out-of-distribution for ML training but keep raw value.`);
+  }
+  return Math.max(0, tc);
 }
 
 /**

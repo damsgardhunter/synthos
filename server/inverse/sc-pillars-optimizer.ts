@@ -2,6 +2,7 @@ import {
   computeElectronicStructure,
   computePhononSpectrum,
   computeElectronPhononCoupling,
+  computePhysicsTcUQ,
   computeDynamicSpinSusceptibility,
   evaluateCompetingPhases,
   classifyHydrogenBonding,
@@ -727,9 +728,10 @@ export async function evaluatePillars(
   const elements = parseFormulaElements(formula);
   const counts = parseCounts(formula);
 
+  const pillarPressure = options?.maxPressureGPa ?? 0;
   const electronic = computeElectronicStructure(formula, null);
-  const phonon = computePhononSpectrum(formula, electronic);
-  const coupling = computeElectronPhononCoupling(electronic, phonon, formula, 0);
+  const phonon = computePhononSpectrum(formula, electronic, pillarPressure);
+  const coupling = computeElectronPhononCoupling(electronic, phonon, formula, pillarPressure);
 
   const lambda = coupling.lambda;
   const omegaLogK = coupling.omegaLog * 1.4388;
@@ -856,11 +858,13 @@ export async function evaluatePillars(
     ? activeEntries.reduce((a, b) => a[1] < b[1] ? a : b)[0]
     : "coupling";
 
+  // Use physics UQ for Tc prediction — single source of truth.
+  // The old gbPredict path returned ambient-pressure XGBoost scores
+  // that badly underestimate high-pressure hydrides.
   let tcPredicted = 0;
   try {
-    const features = await extractFeatures(formula);
-    const gb = await gbPredict(features);
-    tcPredicted = gb.tcPredicted;
+    const uq = computePhysicsTcUQ(formula, pillarPressure);
+    tcPredicted = uq.mean;
   } catch {}
 
   const constraint = checkPhysicsConstraints(formula, { maxPressureGPa: options?.maxPressureGPa });
