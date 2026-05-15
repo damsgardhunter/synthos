@@ -254,14 +254,23 @@ function computeStage1Params(elements: string[], totalAtoms: number, counts?: Re
   const heavyCount = elements.filter(e => HEAVY_ELEMENTS.has(e)).length;
   const hasMagnetic = elements.some(e => MAGNETIC_ELS.has(e));
 
-  // Cuprate detection: Cu + ≥2 O + (heavy alkaline-earth Ba/Sr OR rare-earth La/Y/Nd).
-  // Cuprate-class compounds have Cu d⁹ electrons whose forces are extremely
-  // sensitive to ecutwfc convergence. The default `heavyCount ≥ 3 → ecutwfcScale
-  // = 0.75` rule cut HgBa2CuO4's effective cutoff to ~37 Ry, well below the
-  // 70-80 Ry that Cu d-electron forces require. Result: La2CuO4 Stage 1 ended
-  // at force=0.125 Ry/bohr (50× the 2.5e-3 publication threshold). Skip the
-  // cutoff reduction for cuprates and use a denser k-grid (Cu Fermi surface
-  // near van Hove singularity needs more k-points than coarse kspacing gives).
+  // Open-d-shell TMs (3d V→Cu and 4d Ru/Rh/Pd) have valence d-electrons whose
+  // SCF forces require ecutwfc ≥ 60–80 Ry to converge. The default heavy-atom
+  // ecutwfc reduction (0.75 for heavyCount≥3 or totalAtoms≥10) was cutting
+  // effective cutoffs to 37–45 Ry — wrong physics for these systems.
+  //   - HgBa2CuO4 (Cu): Stage 1 ecutwfc=37 Ry → force=0.125 (50× over publication)
+  //   - V3Si (V):       Stage 1 ecutwfc=45 Ry → noisy Stage 1 force gradients
+  //   - BaFe2As2 (Fe), LiFeAs (Fe): same risk
+  // Don't reduce ecutwfc for ANY open-d TM. Cuprate-class gets a further bump
+  // (1.10) + tighter k-grid because Cu d⁹ + Cu-O Fermi surface near van Hove
+  // need both extra cutoff headroom AND denser k-sampling.
+  const TM_NEEDING_FULL_CUTOFF = new Set([
+    // 3d open-shell
+    "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu",
+    // 4d open-shell (partial)
+    "Ru", "Rh", "Pd",
+  ]);
+  const hasOpenDTM = elements.some(e => TM_NEEDING_FULL_CUTOFF.has(e));
   const cuprateAnions = (counts?.["Cu"] ?? 0) >= 1 && (counts?.["O"] ?? 0) >= 2;
   const cuprateCations = elements.some(e => ["Ba", "Sr", "La", "Y", "Nd", "Pr", "Sm", "Ca"].includes(e));
   const isCuprate = cuprateAnions && cuprateCations;
@@ -270,7 +279,9 @@ function computeStage1Params(elements: string[], totalAtoms: number, counts?: Re
   let ecutwfcScale = 1.0;
   if (heavyCount >= 2 || totalAtoms >= 6) ecutwfcScale = 0.85;
   if (heavyCount >= 3 || totalAtoms >= 10) ecutwfcScale = 0.75;
-  if (isCuprate) ecutwfcScale = 1.10; // bump above default — Cu d needs full cutoff + headroom
+  // Open-d TMs: never go below 1.0 (full cutoff). Cuprates: bump to 1.10.
+  if (hasOpenDTM && !isCuprate) ecutwfcScale = Math.max(ecutwfcScale, 1.0);
+  if (isCuprate) ecutwfcScale = 1.10;
 
   let kspacing = KSPACING_RELAX; // 0.40 base
   if (heavyCount >= 1 || totalAtoms >= 5) kspacing = 0.50;
@@ -280,6 +291,9 @@ function computeStage1Params(elements: string[], totalAtoms: number, counts?: Re
 
   if (isCuprate) {
     console.log(`[Staged-Relax] Cuprate detected (Cu + ${counts?.O ?? "?"}O + heavy cation): bumping ecutwfcScale=1.10, kspacing=${kspacing}`);
+  } else if (hasOpenDTM) {
+    const tmElement = elements.find(e => TM_NEEDING_FULL_CUTOFF.has(e));
+    console.log(`[Staged-Relax] Open-d TM detected (${tmElement}): holding ecutwfcScale at 1.0 (d-electron forces need full cutoff)`);
   }
 
   // --- Physics-based cost model ---
