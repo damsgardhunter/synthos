@@ -251,6 +251,7 @@ function computeStage1Params(elements: string[], totalAtoms: number, counts?: Re
   ecutwfcScale: number;
   kspacingOverride: number;
   maxSeconds: number;
+  isCuprate: boolean;
 } {
   const heavyCount = elements.filter(e => HEAVY_ELEMENTS.has(e)).length;
   const hasMagnetic = elements.some(e => MAGNETIC_ELS.has(e));
@@ -318,8 +319,11 @@ function computeStage1Params(elements: string[], totalAtoms: number, counts?: Re
   const kPerDir = Math.max(2, Math.ceil((2 * Math.PI) / (kspacing * typicalLattice)));
   const nKpoints = kPerDir * kPerDir * kPerDir;
 
-  // Step 3: nspin factor — spin-polarized doubles the work
-  const nspinFactor = hasMagnetic ? 2.0 : 1.0;
+  // Step 3: nspin factor — spin-polarized doubles the work. Cuprates are the
+  // exception: Stage 1 relaxes them at nspin=1 (geometry is insensitive to the
+  // AFM order) and adds only one nspin=2 AFM SCF, so the effective cost is the
+  // nspin=1 relax plus ~20% for that single magnetic SCF.
+  const nspinFactor = isCuprate ? 1.2 : hasMagnetic ? 2.0 : 1.0;
 
   // Step 4: Number of SCF iterations for relax (typically 50-150 per ionic step,
   // ~5-20 ionic steps for Stage 1's nstep=100)
@@ -393,7 +397,7 @@ function computeStage1Params(elements: string[], totalAtoms: number, counts?: Re
 
   console.log(`[Staged-Relax] Cost model: ${totalAtoms} atoms, ${cellElectrons.toFixed(0)} e-, ${nKpoints} kpts, nspin=${nspinFactor} → cost=${costFactor.toFixed(0)}, est=${estimatedSeconds.toFixed(0)}s, timeout=${clampedTimeoutS.toFixed(0)}s${hasMagnetic ? " (magnetic)" : ""}`);
 
-  return { timeoutMs, ecutwfcScale, kspacingOverride: kspacing, maxSeconds };
+  return { timeoutMs, ecutwfcScale, kspacingOverride: kspacing, maxSeconds, isCuprate };
 }
 
 // ---------------------------------------------------------------------------
@@ -688,8 +692,24 @@ async function runStage1AtomicRelax(
   const kpoints = cb.autoKPoints(latticeA, cOverA, s1Params.kspacingOverride);
 
   const hasMag = cb.hasMagneticElements(elements);
-  const nspin = hasMag ? 2 : 1;
-  const magLines = hasMag ? cb.generateMagnetizationLines(elements, counts) : "";
+  const isCuprate = s1Params.isCuprate;
+  // Cuprate geometry/magnetism decoupling: the CuO2-plane geometry is
+  // insensitive to the AFM spin order (magnetostriction shifts Cu-O bonds
+  // < 0.02 Å), so the relax runs at nspin=1 — much cheaper and far better
+  // converging — and the magnetic energy comes from one nspin=2 AFM SCF on
+  // the relaxed cell (below). Stage 2 vc-relax still does the fully magnetic
+  // relaxation. Non-cuprate magnets (Fe-pnictides) keep the coupled nspin=2
+  // relax: their orthorhombic distortion tracks the stripe-AFM order.
+  const relaxMagnetic = hasMag && !isCuprate;
+  const nspin = relaxMagnetic ? 2 : 1;
+  const magLines = relaxMagnetic ? cb.generateMagnetizationLines(elements, counts) : "";
+  // Cuprates split the Stage 1 budget: ~70% for the nspin=1 relax, the rest
+  // for the nspin=2 AFM SCF afterwards. Non-cuprates use the full budget for
+  // their single relax run.
+  const relaxTimeoutMs = isCuprate ? Math.round(s1Params.timeoutMs * 0.7) : s1Params.timeoutMs;
+  const relaxMaxSeconds = isCuprate
+    ? Math.max(300, Math.round(relaxTimeoutMs / 1000) - 60)
+    : s1Params.maxSeconds;
 
   let atomicSpecies = "";
   for (const el of elements) {
@@ -714,11 +734,14 @@ async function runStage1AtomicRelax(
   // let BFGS use forces from a still-oscillating SCF — the "directionally
   // correct" comment was wrong for magnetic systems. Now we tighten everything
   // when hasMag and let SCF converge before each ionic step.
-  const scfConvThr = hasMag ? "1.0d-7" : "1.0d-4";        // tighter for magnetic
-  const mixingBeta = hasMag ? 0.2 : 0.4;                  // gentler nspin=2 mixing
-  const degauss = hasMag ? 0.005 : 0.015;                 // narrower smearing for metallic magnets
-  const electronMaxstep = hasMag ? 300 : 200;             // give magnetic SCF more room
-  const scfMustConvergeLine = hasMag ? "" : "  scf_must_converge = .false.,\n"; // require convergence for magnetic
+  // Keyed on relaxMagnetic, not hasMag: a cuprate relax is nspin=1 and gets
+  // the cheaper screening-quality SCF settings (the tight magnetic settings
+  // are reserved for the nspin=2 AFM SCF that follows the relax).
+  const scfConvThr = relaxMagnetic ? "1.0d-7" : "1.0d-4";        // tighter for magnetic
+  const mixingBeta = relaxMagnetic ? 0.2 : 0.4;                  // gentler nspin=2 mixing
+  const degauss = relaxMagnetic ? 0.005 : 0.015;                 // narrower smearing for metallic magnets
+  const electronMaxstep = relaxMagnetic ? 300 : 200;             // give magnetic SCF more room
+  const scfMustConvergeLine = relaxMagnetic ? "" : "  scf_must_converge = .false.,\n"; // require convergence for magnetic
 
   const input = `&CONTROL
   calculation = 'relax',
@@ -732,7 +755,7 @@ async function runStage1AtomicRelax(
   forc_conv_thr = ${STAGE1_FORCE_THR.toExponential(1).replace(/e([+-])/, "d$1")},
   etot_conv_thr = 1.0d-4,
   nstep = 100,
-  max_seconds = ${s1Params.maxSeconds},
+  max_seconds = ${relaxMaxSeconds},
 /
 &SYSTEM
   ibrav = 0,
@@ -771,15 +794,109 @@ ${cellBlock}
   const inputFile = path.join(stageDir, "relax.in");
   fs.writeFileSync(inputFile, input);
 
-  console.log(`[Staged-Relax] ${formula} S1 params: timeout=${Math.round(s1Params.timeoutMs/1000)}s, ecutwfc=${ecutwfc}Ry, kspacing=${s1Params.kspacingOverride}, lattice=${latticeA.toFixed(3)} Å, P=${pressureGPa} GPa`);
-  const result = await cb.runPwx(inputFile, stageDir, s1Params.timeoutMs);
+  console.log(`[Staged-Relax] ${formula} S1 params: timeout=${Math.round(relaxTimeoutMs/1000)}s, ecutwfc=${ecutwfc}Ry, kspacing=${s1Params.kspacingOverride}, lattice=${latticeA.toFixed(3)} Å, P=${pressureGPa} GPa${isCuprate ? `, nspin=1 relax + AFM SCF` : ""}`);
+  const result = await cb.runPwx(inputFile, stageDir, relaxTimeoutMs);
   fs.writeFileSync(path.join(stageDir, "relax.out"), result.stdout);
-
-  const wallTime = (Date.now() - t0) / 1000;
 
   // Parse output
   const parsed = parseRelaxOutput(result.stdout);
   cb.cleanTmpDir(path.join(stageDir, "tmp"));
+
+  // --- Cuprate magnetic energy: one nspin=2 AFM SCF on the relaxed cell ---
+  // The relax above ran nspin=1 (geometry only). For a meaningful enthalpy
+  // ranking the cuprate energy must include the antiferromagnetic Cu order, so
+  // do one SCF here. QE's starting_magnetization is per-SPECIES, so true AFM
+  // requires splitting Cu into two species (Cu1/Cu2, same pseudo) with
+  // opposite seed moments; Cu atoms are alternated between them so neither
+  // sublattice is empty. QE then relaxes the spins to the broken-symmetry
+  // ground state. If the SCF fails, the nspin=1 relax energy is kept.
+  let stage1Energy = parsed.totalEnergy;
+  if (isCuprate && hasMag && parsed.positions.length > 0) {
+    try {
+      const MAG_EL = "Cu";
+      const CU_SEED = 0.5; // Cu(2+) d9, S=1/2 — moderate AFM seed; QE relaxes it
+      const speciesList: string[] = [];
+      for (const el of elements) {
+        if (el === MAG_EL) speciesList.push("Cu1", "Cu2");
+        else speciesList.push(el);
+      }
+      let afmSpecies = "";
+      for (const sp of speciesList) {
+        const baseEl = (sp === "Cu1" || sp === "Cu2") ? MAG_EL : sp;
+        afmSpecies += `  ${sp}  ${cb.getAtomicMass(baseEl).toFixed(3)}  ${cb.resolvePPFilename(baseEl)}\n`;
+      }
+      let cuCounter = 0;
+      let afmPositions = "";
+      for (const pos of parsed.positions) {
+        const label = pos.element === MAG_EL
+          ? (cuCounter++ % 2 === 0 ? "Cu1" : "Cu2")
+          : pos.element;
+        afmPositions += `  ${label}  ${pos.x.toFixed(6)}  ${pos.y.toFixed(6)}  ${pos.z.toFixed(6)}\n`;
+      }
+      const iCu1 = speciesList.indexOf("Cu1") + 1;
+      const iCu2 = speciesList.indexOf("Cu2") + 1;
+      const afmMag =
+        `  starting_magnetization(${iCu1}) = ${CU_SEED.toFixed(1)},\n` +
+        `  starting_magnetization(${iCu2}) = ${(-CU_SEED).toFixed(1)},\n`;
+      const afmTimeoutMs = Math.round(s1Params.timeoutMs * 0.35);
+      const afmMaxSeconds = Math.max(300, Math.round(afmTimeoutMs / 1000) - 60);
+      const afmInput = `&CONTROL
+  calculation = 'scf',
+  restart_mode = 'from_scratch',
+  prefix = '${prefix}_s1_${candidateIdx}_afm',
+  outdir = './tmp',
+  disk_io = 'low',
+  pseudo_dir = '${cb.getPseudoDirInput()}',
+  tprnfor = .true.,
+  max_seconds = ${afmMaxSeconds},
+/
+&SYSTEM
+  ibrav = 0,
+  nat = ${totalAtoms},
+  ntyp = ${speciesList.length},
+  ecutwfc = ${ecutwfc},
+  ecutrho = ${ecutrho},
+  input_dft = 'PBE',
+  occupations = 'smearing',
+  smearing = 'mv',
+  degauss = 0.005,
+  nspin = 2,
+${afmMag}/
+&ELECTRONS
+  electron_maxstep = 300,
+  conv_thr = 1.0d-7,
+  mixing_beta = 0.2,
+  mixing_mode = 'local-TF',
+  diagonalization = 'david',
+/
+ATOMIC_SPECIES
+${afmSpecies}
+ATOMIC_POSITIONS {crystal}
+${afmPositions}
+K_POINTS {automatic}
+${kpoints}
+
+${cellBlock}
+`;
+      const afmFile = path.join(stageDir, "scf_afm.in");
+      fs.writeFileSync(afmFile, afmInput);
+      console.log(`[Staged-Relax] ${formula} S1 cuprate AFM SCF: Cu split into Cu1/Cu2 (${cuCounter} Cu atoms), nspin=2, seed=±${CU_SEED}`);
+      const afmResult = await cb.runPwx(afmFile, stageDir, afmTimeoutMs);
+      fs.writeFileSync(path.join(stageDir, "scf_afm.out"), afmResult.stdout);
+      const afmParsed = parseRelaxOutput(afmResult.stdout);
+      cb.cleanTmpDir(path.join(stageDir, "tmp"));
+      if (afmParsed.totalEnergy !== 0 && Number.isFinite(afmParsed.totalEnergy)) {
+        console.log(`[Staged-Relax] ${formula} S1 cuprate AFM energy=${afmParsed.totalEnergy.toFixed(4)} eV (nspin=1 relax energy was ${parsed.totalEnergy.toFixed(4)} eV)`);
+        stage1Energy = afmParsed.totalEnergy;
+      } else {
+        console.log(`[Staged-Relax] ${formula} S1 cuprate AFM SCF produced no energy — keeping nspin=1 relax energy`);
+      }
+    } catch (afmErr: any) {
+      console.log(`[Staged-Relax] ${formula} S1 cuprate AFM SCF failed: ${afmErr?.message?.slice(0, 120)} — keeping nspin=1 relax energy`);
+    }
+  }
+
+  const wallTime = (Date.now() - t0) / 1000;
 
   // Check pass criteria — Stage 1 is screening quality, so we're lenient:
   // - SCF convergence is NOT required (scf_must_converge=.false. lets BFGS run
@@ -815,7 +932,7 @@ ${cellBlock}
     failReason: failReasons.length > 0 ? failReasons.join("; ") : undefined,
     positions: parsed.positions.length > 0 ? parsed.positions : positions,
     latticeA,
-    totalEnergy: parsed.totalEnergy,
+    totalEnergy: stage1Energy,
     maxForce: parsed.maxForce ?? undefined,
     wallTimeSeconds: wallTime,
     scfConverged: parsed.scfConverged,

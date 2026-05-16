@@ -2761,19 +2761,27 @@ function repairStructureGeometry(
   positions: Array<{ element: string; x: number; y: number; z: number }>,
   latticeA: number,
   pressureGPa: number = 0,
+  cOverA: number = 1.0,
+  bOverA: number = 1.0,
 ): { positions: Array<{ element: string; x: number; y: number; z: number }>; latticeA: number; repaired: boolean } {
+  // Repairs atom overlaps by nudging colliding pairs apart in fractional
+  // coordinates within the GIVEN cell — it never rescales the cell. The
+  // generator (AIRSS/PyXtal/prototype) already produced the cell shape; the
+  // repair must respect it. The previous version called fracDistAngstrom with
+  // no cOverA/bOverA, i.e. assumed a CUBIC cell, so for a layered candidate
+  // (c/a ~ 3-10) it read z-separations ~c/a× too small, saw spurious overlaps,
+  // and rescaled the scalar lattice — inflating e.g. TlBa2CaCu2O7 from 6.5 to
+  // 13.1 Å. Passing the candidate's real c/a and b/a fixes the distances; the
+  // cubic rescale is removed entirely. Genuinely overlapping candidates are
+  // left for the funnel's F1 / CHGNet filters to reject.
   const MAX_REPAIR_ROUNDS = 8;
-  const MAX_RESCALES = 3;
-  let rescaleCount = 0;
   let repaired = false;
   const repairEls = Array.from(new Set(positions.map(p => p.element)));
   const pressureScale = pressureGPa > 50 ? computePressureScale(pressureGPa, repairEls) : 1.0;
   let curPositions = positions.map(p => ({ ...p }));
-  let curLattice = latticeA;
 
   for (let round = 0; round < MAX_REPAIR_ROUNDS; round++) {
     let violations = 0;
-    let worstRatio = 1.0;
 
     for (let i = 0; i < curPositions.length; i++) {
       for (let j = i + 1; j < curPositions.length; j++) {
@@ -2783,13 +2791,11 @@ function repairStructureGeometry(
         fdx -= Math.round(fdx);
         fdy -= Math.round(fdy);
         fdz -= Math.round(fdz);
-        const dist = fracDistAngstrom(fdx, fdy, fdz, curLattice);
+        const dist = fracDistAngstrom(fdx, fdy, fdz, latticeA, cOverA, bOverA);
         const dMin = 0.7 * ((COVALENT_RADIUS[curPositions[i].element] ?? 1.4) + (COVALENT_RADIUS[curPositions[j].element] ?? 1.4)) * pressureScale;
 
         if (dist < dMin && dist > 0.01) {
           violations++;
-          const ratio = dist / dMin;
-          if (ratio < worstRatio) worstRatio = ratio;
 
           const pushFactor = (dMin / dist - 1.0) * 0.6;
           const pushX = fdx * pushFactor;
@@ -2818,17 +2824,10 @@ function repairStructureGeometry(
       break;
     }
 
-    if (worstRatio < 0.7 && rescaleCount < MAX_RESCALES) {
-      const scaleFactor = 1.0 + (1.0 - worstRatio) * 0.3;
-      curLattice *= scaleFactor;
-      rescaleCount++;
-      repaired = true;
-    }
-
     if (round > 0) repaired = true;
   }
 
-  return { positions: curPositions, latticeA: curLattice, repaired };
+  return { positions: curPositions, latticeA, repaired };
 }
 
 function inferCrystalSystem(elements: string[], counts: Record<string, number>): string {
@@ -5873,7 +5872,7 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     // like La2CuO4 where a=3.78 c=13.23 gets inflated to a=7.30).
     const isKnownStructureOverride = ksOverride && ksOverride.latticeA > 0;
     if (!isKnownStructureOverride) {
-      const initRepair = repairStructureGeometry(positions, latticeA, workerPressure);
+      const initRepair = repairStructureGeometry(positions, latticeA, workerPressure, estimateCOverA(elements, counts), estimateBOverA(elements, counts));
       if (initRepair.repaired) {
         positions = initRepair.positions;
         latticeA = initRepair.latticeA;
@@ -5963,7 +5962,7 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
 
       const postXtbGeom = softValidateGeometry(positions, latticeA, true, workerPressure, fpCoverA, fpGamma);
       if (!postXtbGeom.valid) {
-        const xtbRepair = repairStructureGeometry(positions, latticeA, workerPressure);
+        const xtbRepair = repairStructureGeometry(positions, latticeA, workerPressure, estimateCOverA(elements, counts), estimateBOverA(elements, counts));
         if (xtbRepair.repaired) {
           positions = xtbRepair.positions;
           latticeA = xtbRepair.latticeA;
