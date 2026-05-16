@@ -292,21 +292,43 @@ export const airssEngine: CSPEngine = {
     }
 
     const formulaAtoms = Object.values(counts).reduce((s, n) => s + Math.round(n), 0);
-    // Apply any persisted volume-bias correction from a previous F6 CHGNet
-    // batch. The base volume prior over-compresses high-P hydrides; without
-    // this correction every batch restarts from the same too-small cells and
-    // CHGNet drift-rejects most candidates back to raw geometry.
+
+    // Persisted volume-bias correction from a prior F6 CHGNet batch — see
+    // server/csp/volume-bias-cache.ts. Applied as a multiplier on whichever
+    // volume base we pick below.
     const biasFormula = elements
       .map(el => { const n = Math.round(counts[el] ?? 0); return el + (n > 1 ? n : ""); })
       .join("");
     const volumeBias = loadVolumeBias(biasFormula, config.pressureGPa);
-    const volPerAtom = estimateVolumePerAtom(elements, counts) * volumeBias;
-    if (Math.abs(volumeBias - 1) > 0.05) {
-      console.log(`[AIRSS] Applying cached volume-bias ×${volumeBias.toFixed(2)} for ${biasFormula} @ ${config.pressureGPa} GPa (from prior F6 CHGNet drift)`);
+
+    // Volume targeting. Prefer the LLM structure advice's estimatedLattice:
+    // the model is prompted with the target pressure, so its lattice is both
+    // composition- AND pressure-aware. The fallback — estimateVolumePerAtom
+    // (ambient per-element radii) fed through pressureVolumeEnsemble's
+    // (1+4P/100)^(-1/4) compression — assumes an effective bulk modulus of
+    // ~100 GPa, far too soft for high-P hydrides, and was over-compressing
+    // every cell ~2x (F6 then drift-rejected most candidates). The LLM
+    // lattice already accounts for pressure, so it does NOT go through the
+    // pressureVolumeEnsemble compression — the tier's volumeEnsemble fractions
+    // are spread directly around it for exploration. Any residual offset
+    // (e.g. the model returning a multi-formula-unit cell) is caught by the
+    // compounding volume-bias cache after the first F6 cycle.
+    const llmLat = config.structureAdvice?.estimatedLattice;
+    let volumeTargets: number[];
+    let volSource: string;
+    if (llmLat && llmLat.a > 0 && llmLat.b > 0 && llmLat.c > 0 && formulaAtoms > 0) {
+      const llmVolPerAtom = (llmLat.a * llmLat.b * llmLat.c) / formulaAtoms;
+      // Clamp to a physically sane band before applying the learned bias.
+      const base = Math.max(2, Math.min(40, llmVolPerAtom)) * volumeBias;
+      volumeTargets = tierConfig.volumeEnsemble.map(f => base * f);
+      volSource = `LLM lattice ${llmLat.a.toFixed(2)}x${llmLat.b.toFixed(2)}x${llmLat.c.toFixed(2)} A -> ${base.toFixed(2)} A^3/atom`;
+    } else {
+      const volPerAtom = estimateVolumePerAtom(elements, counts) * volumeBias;
+      volumeTargets = pressureVolumeEnsemble(volPerAtom, config.pressureGPa, tierConfig.volumeEnsemble);
+      volSource = `volume-sum heuristic ${volPerAtom.toFixed(2)} A^3/atom`;
     }
-    const volumeTargets = pressureVolumeEnsemble(
-      volPerAtom, config.pressureGPa, tierConfig.volumeEnsemble
-    );
+    console.log(`[AIRSS] Volume target for ${biasFormula} @ ${config.pressureGPa} GPa: ${volSource}` +
+      `${Math.abs(volumeBias - 1) > 0.05 ? ` (volume-bias x${volumeBias.toFixed(2)})` : ""}, ${volumeTargets.length} ensemble points`);
 
     // Filter Z values by atom count cap
     const validZ = tierConfig.zValues.filter(z => formulaAtoms * z <= tierConfig.maxAtoms);
