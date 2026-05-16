@@ -1,0 +1,5 @@
+# Pseudopotential files: store byte-for-byte, no line-ending conversion.
+# QE input parsers and downstream pseudo validators are sensitive to the
+# exact file content, and a Windows checkout must not rewrite LF -> CRLF.
+*.upf binary
+*.UPF binary
