@@ -449,7 +449,15 @@ export async function runStagedRelaxation(opts: StagedRelaxationOpts): Promise<S
       deep: 50,
       publication: 60,
     };
-    const atomCap = maxAtomsForS1[tier] ?? 30;
+    const tierCap = maxAtomsForS1[tier] ?? 30;
+    // Also cap relative to the formula unit. The absolute tier cap alone let
+    // a Z=4 PyXtal candidate for ScYH10 through (48 atoms < 50 deep cap) —
+    // cost-model est 31387s vs the 14400s timeout, guaranteed to time out
+    // with no result. A Z=1/2 cell screens the same chemistry far cheaper,
+    // so allow at most ~2 formula units; floor at 12 atoms so tiny formulas
+    // still get supercell headroom. Genuine supercell ground states are
+    // found later (Stage 2 vc-relax), not in Stage 1 screening.
+    const atomCap = Math.min(tierCap, Math.max(12, totalAtoms * 2));
 
     // First pass: take the top maxS1 candidates that fit under the atom cap.
     // If an oversized candidate is skipped, backfill from the remaining pool
@@ -650,6 +658,33 @@ export async function runStagedRelaxation(opts: StagedRelaxationOpts): Promise<S
 // Stage 1: Atomic relax (fixed cell, positions only)
 // ---------------------------------------------------------------------------
 
+/**
+ * Verify a QE input file was written intact before invoking pw.x.
+ *
+ * A truncated or partially-written input makes QE abort instantly with
+ * "could not find namelist &control" — observed as a burst of sub-second
+ * Stage 1 candidate failures (write race / interrupted write on a busy or
+ * restarting worker). The generated `expected` string always contains the
+ * &CONTROL namelist, so any on-disk mismatch is an I/O problem: rewrite
+ * once, and throw with diagnostics if it still cannot be persisted.
+ */
+function verifyQEInputWritten(file: string, expected: string, formula: string, label: string): void {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let onDisk = "";
+    try { onDisk = fs.readFileSync(file, "utf-8"); } catch {}
+    if (onDisk.length === expected.length && /&control/i.test(onDisk)) return;
+    console.log(`[Staged-Relax] ${formula} ${label}: input file mismatch (on-disk ${onDisk.length}B vs ${expected.length}B, hasControl=${/&control/i.test(onDisk)}) — rewriting (attempt ${attempt + 1})`);
+    try { fs.writeFileSync(file, expected); } catch (wErr: any) {
+      console.log(`[Staged-Relax] ${formula} ${label}: rewrite failed — ${wErr?.message?.slice(0, 120)}`);
+    }
+  }
+  let finalCheck = "";
+  try { finalCheck = fs.readFileSync(file, "utf-8"); } catch {}
+  if (!/&control/i.test(finalCheck)) {
+    throw new Error(`${label} input for ${formula} could not be written intact (${finalCheck.length}B on disk, no &control namelist) — disk/IO failure`);
+  }
+}
+
 async function runStage1AtomicRelax(
   formula: string,
   elements: string[],
@@ -793,6 +828,7 @@ ${cellBlock}
   fs.mkdirSync(stageDir, { recursive: true });
   const inputFile = path.join(stageDir, "relax.in");
   fs.writeFileSync(inputFile, input);
+  verifyQEInputWritten(inputFile, input, formula, "Stage 1 relax");
 
   console.log(`[Staged-Relax] ${formula} S1 params: timeout=${Math.round(relaxTimeoutMs/1000)}s, ecutwfc=${ecutwfc}Ry, kspacing=${s1Params.kspacingOverride}, lattice=${latticeA.toFixed(3)} Å, P=${pressureGPa} GPa${isCuprate ? `, nspin=1 relax + AFM SCF` : ""}`);
   const result = await cb.runPwx(inputFile, stageDir, relaxTimeoutMs);
@@ -880,6 +916,7 @@ ${cellBlock}
 `;
       const afmFile = path.join(stageDir, "scf_afm.in");
       fs.writeFileSync(afmFile, afmInput);
+      verifyQEInputWritten(afmFile, afmInput, formula, "Stage 1 AFM SCF");
       console.log(`[Staged-Relax] ${formula} S1 cuprate AFM SCF: Cu split into Cu1/Cu2 (${cuCounter} Cu atoms), nspin=2, seed=±${CU_SEED}`);
       const afmResult = await cb.runPwx(afmFile, stageDir, afmTimeoutMs);
       fs.writeFileSync(path.join(stageDir, "scf_afm.out"), afmResult.stdout);
@@ -1047,6 +1084,7 @@ ${cellBlock}
   fs.mkdirSync(stageDir, { recursive: true });
   const inputFile = path.join(stageDir, "vc_relax.in");
   fs.writeFileSync(inputFile, input);
+  verifyQEInputWritten(inputFile, input, formula, "Stage 2 vc-relax");
 
   const result = await cb.runPwx(inputFile, stageDir, STAGE2_TIMEOUT_MS);
   fs.writeFileSync(path.join(stageDir, "vc_relax.out"), result.stdout);
@@ -1114,6 +1152,9 @@ export interface Stage4Opts {
   jobDir: string;
   callbacks: QERunnerCallbacks;
   ecutwfc: number;
+  /** SCF metallicity — gates the ph.x `epsil` flag (ph.x aborts on
+   *  `epsil=.true.` for metals). Undefined = treated as metal (epsil omitted). */
+  isMetallic?: boolean;
 }
 
 /**
@@ -1196,12 +1237,14 @@ export async function runStage4GammaPhonon(opts: Stage4Opts): Promise<StageResul
 
   console.log(`[Staged-Relax] ${formula} Stage 4 cost model: ${nReps} reps, ${phElectrons} e-, ${phNkpts} kpts, nspin=${phNspin} → cost/rep=${costPerRep.toFixed(0)}, est=${estimatedPhSeconds.toFixed(0)}s, timeout=${phTimeoutS.toFixed(0)}s (${(phTimeoutS/60).toFixed(0)} min)`);
 
-  // Born effective charges + macroscopic dielectric: required for LO-TO
-  // splitting at Γ in any ionic/polar system (hydrides, oxides, fluorides,
-  // pnictides). ph.x auto-skips if Ef is inside the conduction manifold
-  // (metallic), so this is unconditionally safe and only costs compute on
-  // insulators where it's mandatory for correct frequencies.
-  const epsilFlags = "  epsil = .true.,\n  trans = .true.,\n";
+  // Born effective charges + macroscopic dielectric (epsil) require the
+  // electric-field response. ph.x ABORTS on `epsil=.true.` for metals —
+  // "Error in routine phq_readin (1): no elec. field with metals" — it does
+  // NOT auto-skip. So epsil is emitted ONLY for confirmed insulators
+  // (isMetallic === false); metals and unknown metallicity omit it. ph.x
+  // computes phonons fine without it (LO-TO splitting matters only for polar
+  // insulators). trans=.true. is the phonon response itself — always required.
+  const epsilFlags = (opts.isMetallic === false ? "  epsil = .true.,\n" : "") + "  trans = .true.,\n";
 
   // 2-attempt retry matching production phonon pipeline (qe-worker.ts lines 4580-4644):
   //   Attempt 1: tr2_ph=1e-12, alpha_mix=0.5 (production defaults)
@@ -1726,22 +1769,35 @@ function parseGammaPhononFrequencies(stdout: string): number[] {
   // number on the line, which is the THz value (off by 33.36× from cm-1),
   // and then required "cm-1" immediately after — so for this format the
   // regex failed to match at all and frequencies came back empty.
-  // The `(?:\s*-\s*\d+)?` clause handles QE 7.x range form `omega(1-3)`
-  // emitted for degenerate modes in cubic/high-symmetry crystals — without
-  // it those phonons silently dropped from the parsed set.
-  const dualUnitPattern = /(?:freq|omega)\s*\(\s*\d+(?:\s*-\s*\d+)?\s*\)\s*=\s*[-\d.eE+]+\s*\[THz\]\s*=\s*([-\d.eE+]+)\s*\[?\s*cm\^?-?1\]?/gi;
+  // QE 7.x emits degenerate modes as a RANGE — `freq(1-3) = ...` is one
+  // line for 3 modes. Capture the mode-index bounds and push the frequency
+  // (hi-lo+1) times so the parsed count equals the true 3N mode count.
+  // Otherwise the Stage 4 `frequencies.length < expectedModes` gate fails
+  // dynamically-stable high-symmetry structures whose modes are degenerate.
+  // Single-mode lines `freq(1)` have no `hi` group and push once — QE emits
+  // the range form OR the per-mode form, never both, so no double-count.
+  const dualUnitPattern = /(?:freq|omega)\s*\(\s*(\d+)(?:\s*-\s*(\d+))?\s*\)\s*=\s*[-\d.eE+]+\s*\[THz\]\s*=\s*([-\d.eE+]+)\s*\[?\s*cm\^?-?1\]?/gi;
   let match: RegExpExecArray | null;
   while ((match = dualUnitPattern.exec(stdout)) !== null) {
-    const v = parseFloat(match[1]);
-    if (Number.isFinite(v)) frequencies.push(v);
+    const v = parseFloat(match[3]);
+    if (!Number.isFinite(v)) continue;
+    const lo = parseInt(match[1], 10);
+    const hi = match[2] ? parseInt(match[2], 10) : lo;
+    const count = hi >= lo ? Math.min(hi - lo + 1, 64) : 1;
+    for (let k = 0; k < count; k++) frequencies.push(v);
   }
 
-  // Fallback: simple "freq( N) = X cm-1" or "omega( N) = X cm-1" (no THz)
+  // Fallback: simple "freq( N) = X cm-1" or "omega( N) = X cm-1" (no THz).
+  // Same degenerate-range expansion as above.
   if (frequencies.length === 0) {
-    const simplePattern = /(?:freq|omega)\s*\(\s*\d+(?:\s*-\s*\d+)?\s*\)\s*=\s*([-\d.eE+]+)\s*\[?\s*cm\^?-?1\]?/gi;
+    const simplePattern = /(?:freq|omega)\s*\(\s*(\d+)(?:\s*-\s*(\d+))?\s*\)\s*=\s*([-\d.eE+]+)\s*\[?\s*cm\^?-?1\]?/gi;
     while ((match = simplePattern.exec(stdout)) !== null) {
-      const v = parseFloat(match[1]);
-      if (Number.isFinite(v)) frequencies.push(v);
+      const v = parseFloat(match[3]);
+      if (!Number.isFinite(v)) continue;
+      const lo = parseInt(match[1], 10);
+      const hi = match[2] ? parseInt(match[2], 10) : lo;
+      const count = hi >= lo ? Math.min(hi - lo + 1, 64) : 1;
+      for (let k = 0; k < count; k++) frequencies.push(v);
     }
   }
 
