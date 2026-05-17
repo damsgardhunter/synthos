@@ -1392,25 +1392,48 @@ function normalizeFormula(formula: string): string {
 // Public API
 // ---------------------------------------------------------------------------
 
+// The known-structures database is DISABLED by default. The Quantum Alchemy
+// Engine is a structure-DISCOVERY pipeline — it must find crystal structures
+// on its own via CSP (AIRSS/PyXtal + LLM structure advice + DFT relaxation),
+// not short-circuit to literature answers. Handing the pipeline a literature
+// structure (as a starting geometry, an injected funnel candidate, a lattice
+// override, or even a c/a hint) masks whether the discovery path actually
+// works. Every consumer of these functions already handles the "unknown
+// formula" case (most formulas were never in the DB), so disabling at the
+// API boundary makes the whole pipeline fall back to genuine discovery.
+//
+// The KNOWN_STRUCTURES data is kept for reference/validation only. To
+// re-enable consumption (NOT recommended for production discovery runs),
+// set QAE_USE_KNOWN_STRUCTURES=1.
+const KNOWN_STRUCTURES_ENABLED = process.env.QAE_USE_KNOWN_STRUCTURES === "1";
+if (!KNOWN_STRUCTURES_ENABLED) {
+  console.log("[KnownStructures] Database DISABLED — the pipeline discovers all structures via CSP (set QAE_USE_KNOWN_STRUCTURES=1 to re-enable)");
+}
+
 /**
  * Look up exact literature structure for a known compound.
- * Returns primitive-cell fractional coordinates suitable for QE input.
+ * Returns null when the known-structures database is disabled (the default).
  */
 export function lookupKnownStructure(formula: string): KnownStructure | null {
+  if (!KNOWN_STRUCTURES_ENABLED) return null;
   const norm = normalizeFormula(formula);
   return KNOWN_STRUCTURES[norm] ?? null;
 }
 
 /**
  * Check if a formula has a known structure in the database.
+ * Always false when the database is disabled (the default).
  */
 export function hasKnownStructure(formula: string): boolean {
+  if (!KNOWN_STRUCTURES_ENABLED) return false;
   return normalizeFormula(formula) in KNOWN_STRUCTURES;
 }
 
 /**
  * Get all known structure formulas (for logging/diagnostics).
+ * Empty when the database is disabled (the default).
  */
 export function getKnownStructureFormulas(): string[] {
+  if (!KNOWN_STRUCTURES_ENABLED) return [];
   return Object.keys(KNOWN_STRUCTURES);
 }

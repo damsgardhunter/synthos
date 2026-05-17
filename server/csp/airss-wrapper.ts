@@ -107,27 +107,49 @@ function generateCellInput(
     lattA = lattB = lattC = Math.pow(cellVol, 1 / 3);
   }
 
-  // Global MINSEP: use the smallest pair distance.
-  // If LLM structure advice provides pair distances, use the smallest one as a
-  // better-informed global minimum. Don't use per-pair #MINSEP syntax — buildcell
-  // can't satisfy multiple pair constraints simultaneously in small high-P cells.
-  let globalMin = Infinity;
-  for (const el1 of elements) {
-    for (const el2 of elements) {
-      globalMin = Math.min(globalMin, getGeneratorMinsep(el1, el2, pressureGPa));
+  // Global MINSEP — the closest any two atoms may approach in buildcell.
+  // Don't use per-pair #MINSEP syntax — buildcell can't satisfy multiple pair
+  // constraints simultaneously in small high-P cells. Floor: the covalent-
+  // radii heuristic (getGeneratorMinsep). The LLM may advise tighter per-pair
+  // minima, but each advised distance is first cross-checked against the
+  // covalent-radii sum for that element pair — a hallucinated value (too
+  // small → atom overlap, or too large → buildcell can't place atoms) is
+  // logged and ignored, never allowed to drive MINSEP.
+  const elementSymbols = Array.from(new Set(elements));
+  let heuristicMin = Infinity;
+  for (const el1 of elementSymbols) {
+    for (const el2 of elementSymbols) {
+      heuristicMin = Math.min(heuristicMin, getGeneratorMinsep(el1, el2, pressureGPa));
     }
   }
-  // If advice gives a smallest pair distance, use it as the global MINSEP
-  // (only if it's more informed than the heuristic)
-  const heuristicMin = globalMin;
+  if (!Number.isFinite(heuristicMin) || heuristicMin <= 0) heuristicMin = 0.7;
+  let globalMin = heuristicMin;
   if (advisedPairDistances && Object.keys(advisedPairDistances).length > 0) {
-    const advisedValues = Object.values(advisedPairDistances).filter(d => d > 0.3);
-    if (advisedValues.length > 0) {
-      const advisedMin = Math.min(...advisedValues);
+    const plausible: number[] = [];
+    const suspect: string[] = [];
+    for (const [pair, dist] of Object.entries(advisedPairDistances)) {
+      if (typeof dist !== "number" || !(dist > 0)) continue;
+      const els = pair.split(/[-_/ ]+/).filter(Boolean);
+      const covSum = (COVALENT_RADII[els[0]] ?? 1.0) + (COVALENT_RADII[els[1] ?? els[0]] ?? 1.0);
+      // A valid minimum-separation sits within 0.35x (extreme compression) to
+      // 1.5x (no closer than a long bond) of the covalent-radii sum.
+      const lo = 0.35 * covSum, hi = 1.5 * covSum;
+      if (dist >= lo && dist <= hi) {
+        plausible.push(dist);
+      } else {
+        suspect.push(`${pair}=${dist.toFixed(2)} (physical range ${lo.toFixed(2)}-${hi.toFixed(2)})`);
+      }
+    }
+    if (suspect.length > 0) {
+      logOnce(`[AIRSS] MINSEP validation for ${elements.join("")}: ${suspect.length} advised pair distance(s) implausible vs covalent radii — ignored: ${suspect.join("; ")}`);
+    }
+    if (plausible.length > 0) {
+      const advisedMin = Math.min(...plausible);
       const advisedMinsep = advisedMin * 0.75;
-      const oldMin = globalMin;
-      globalMin = Math.max(globalMin, advisedMinsep);
-      logOnce(`[AIRSS] LLM-advised MINSEP: smallest pair=${advisedMin.toFixed(2)} Å × 0.75 = ${advisedMinsep.toFixed(2)} Å, heuristic=${oldMin.toFixed(2)} Å → using ${globalMin.toFixed(2)} Å`);
+      globalMin = Math.max(heuristicMin, advisedMinsep);
+      logOnce(`[AIRSS] LLM-advised MINSEP for ${elements.join("")}: smallest plausible pair=${advisedMin.toFixed(2)} A x 0.75 = ${advisedMinsep.toFixed(2)} A, heuristic floor=${heuristicMin.toFixed(2)} A -> MINSEP=${globalMin.toFixed(2)} A`);
+    } else {
+      logOnce(`[AIRSS] MINSEP for ${elements.join("")}: no plausible advised pair distances — using heuristic floor ${heuristicMin.toFixed(2)} A`);
     }
   }
 
@@ -284,8 +306,16 @@ export const airssEngine: CSPEngine = {
 
     if (config.structureAdvice) {
       const adv = config.structureAdvice;
-      const pairCount = Object.keys(adv.pairDistances ?? {}).length;
-      console.log(`[AIRSS] Structure advice active: type=${adv.structureType ?? "?"}, SG=${adv.likelySpaceGroup ?? "?"}, ${pairCount} pair distances`);
+      const pairs = adv.pairDistances ?? {};
+      const pairStr = Object.keys(pairs).length > 0
+        ? Object.entries(pairs).map(([k, v]) => `${k}=${(v as number).toFixed(2)}`).join(", ")
+        : "none";
+      const lat = adv.estimatedLattice;
+      const latStr = lat && lat.a > 0 ? `${lat.a.toFixed(2)}x${lat.b.toFixed(2)}x${lat.c.toFixed(2)} A` : "none";
+      const altSG = (adv.alternativeSpaceGroups ?? []).length > 0
+        ? ` (alt: ${adv.alternativeSpaceGroups!.join(",")})` : "";
+      console.log(`[AIRSS] LLM structure advice for ${elements.join("")}: type=${adv.structureType ?? "?"}, SG=${adv.likelySpaceGroup ?? "?"}${altSG}, estimatedLattice=${latStr}`);
+      console.log(`[AIRSS]   advised pair distances (A): ${pairStr}`);
     }
 
     // Determine screening tier from budget

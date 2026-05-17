@@ -146,6 +146,35 @@ The "prefilterMinsepMultiplier" controls how strict the pre-DFT geometry filter 
 For space groups: use the international number (1-230). Common hydride space groups: 225 (Fm-3m, clathrate), 229 (Im-3m, sodalite/BCC), 194 (P63/mmc, hex), 139 (I4/mmm), 221 (Pm-3m, perovskite).`;
 }
 
+// ─── Logging ─────────────────────────────────────────────────────────
+
+/**
+ * Log the COMPLETE structure advice — everything the model suggested — so the
+ * CSP/MINSEP behaviour downstream is fully auditable from the logs. Used for
+ * both cache hits and fresh calls.
+ */
+function logStructureAdvice(formula: string, pressureGpa: number, advice: StructureAdvice, elapsedMs?: number): void {
+  const src = advice.fromCache ? "cache" : `LLM ${elapsedMs ?? "?"}ms`;
+  const lat = advice.estimatedLattice;
+  const latStr = lat.a > 0
+    ? `${lat.a.toFixed(2)}x${lat.b.toFixed(2)}x${lat.c.toFixed(2)} A`
+    : "unspecified";
+  const altSG = advice.alternativeSpaceGroups.length > 0
+    ? ` (alt: ${advice.alternativeSpaceGroups.join(",")})` : "";
+  const pairs = Object.entries(advice.pairDistances);
+  const pairStr = pairs.length > 0 ? pairs.map(([k, v]) => `${k}=${v}`).join(", ") : "none";
+  const coord = Object.entries(advice.coordinationHints);
+  const coordStr = coord.length > 0
+    ? coord.map(([el, h]) => `${el}:${h?.role ?? "?"}/CN${h?.typicalCoordination ?? "?"}/nn=${h?.nearestNeighbor ?? "?"}`).join(", ")
+    : "none";
+  console.log(`[StructAdvisor] ${formula} @ ${pressureGpa} GPa [${src}, confidence=${advice.confidence}]`);
+  console.log(`[StructAdvisor]   structureType=${advice.structureType}, spaceGroup=${advice.likelySpaceGroup}${altSG}`);
+  console.log(`[StructAdvisor]   estimatedLattice=${latStr}, prefilterMinsepMultiplier=${advice.prefilterMinsepMultiplier}`);
+  console.log(`[StructAdvisor]   pairDistances (A): ${pairStr}`);
+  console.log(`[StructAdvisor]   coordinationHints: ${coordStr}`);
+  if (advice.reasoning) console.log(`[StructAdvisor]   reasoning: ${advice.reasoning}`);
+}
+
 // ─── Main entry ──────────────────────────────────────────────────────
 
 /**
@@ -160,7 +189,7 @@ export async function getStructureAdvice(
   // Check disk cache first
   const cached = loadFromCache(formula, pressureGpa);
   if (cached) {
-    console.log(`[StructAdvisor] ${formula} @ ${pressureGpa} GPa: loaded from cache (${cached.structureType}, SG=${cached.likelySpaceGroup})`);
+    logStructureAdvice(formula, pressureGpa, cached);
     return cached;
   }
 
@@ -228,11 +257,20 @@ export async function getStructureAdvice(
     // Cache to disk
     saveToCache(formula, pressureGpa, advice);
 
-    const pairStr = Object.entries(advice.pairDistances).map(([k, v]) => `${k}=${v}`).join(", ");
-    console.log(
-      `[StructAdvisor] ${formula} @ ${pressureGpa} GPa: ${advice.structureType}, SG=${advice.likelySpaceGroup}, ` +
-      `a=${advice.estimatedLattice.a.toFixed(2)} Å, pairs=[${pairStr}], conf=${advice.confidence} (${elapsed}ms)`
-    );
+    // Surface how much of the model's raw output survived validation — a
+    // large drop means the LLM produced unphysical numbers (overlapping pair
+    // distances, sub-2 Å lattices) that validatePairDistances/validateLattice
+    // clamped away. Worth knowing when judging whether the advice is trustworthy.
+    const rawPairCount = (parsed.pairDistances && typeof parsed.pairDistances === "object")
+      ? Object.keys(parsed.pairDistances).length : 0;
+    const keptPairCount = Object.keys(advice.pairDistances).length;
+    if (rawPairCount > keptPairCount) {
+      console.log(`[StructAdvisor] ${formula}: WARNING — ${rawPairCount - keptPairCount}/${rawPairCount} advised pair distances were unphysical (<0.5 or >10 Å) and dropped`);
+    }
+    if (advice.estimatedLattice.a === 0) {
+      console.log(`[StructAdvisor] ${formula}: WARNING — advised lattice was unphysical (outside 2-30 Å) and discarded`);
+    }
+    logStructureAdvice(formula, pressureGpa, advice, elapsed);
 
     return advice;
   } catch (err: any) {
