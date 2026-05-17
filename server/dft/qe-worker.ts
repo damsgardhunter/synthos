@@ -7250,6 +7250,21 @@ ${cellBlockEos}
             : null;
           console.log(`[QE-Worker] Smearing-polish pass ${pi + 1} for ${formula}: ΔE/atom=${Number.isFinite(dEMevPerAtom) ? dEMevPerAtom.toFixed(3) + " meV" : "N/A (no reference)"}, force=${polishForce?.toFixed(6) ?? "N/A"} Ry/bohr, P=${polishPress?.toFixed(1) ?? "N/A"} kbar, a=${newLat.toFixed(3)} Å, wall=${polishParsed.wallTimeSeconds.toFixed(0)}s`);
 
+          // Divergence gate: a smearing-polish pass only tightens degauss, so
+          // the energy should shift by at most a few meV/atom (the change in
+          // the smearing-entropy correction). A ΔE/atom of hundreds of meV
+          // means the polish vc-relax left the basin and relaxed into a
+          // DIFFERENT structure (observed: ScH9 pass 2 ΔE=917 meV, YH9 pass 2
+          // ΔE=4024 meV — both also blew the pressure to ~2× target). Such a
+          // pass must NOT overwrite the geometry — reject it and keep the
+          // pre-pass structure. 50 meV/atom is 100× the convergence gate and
+          // ~10× any legitimate smearing correction.
+          const POLISH_DIVERGENCE_MEV = 50;
+          if (Number.isFinite(dEMevPerAtom) && dEMevPerAtom > POLISH_DIVERGENCE_MEV) {
+            console.log(`[QE-Worker] Smearing-polish pass ${pi + 1} for ${formula} DIVERGED: ΔE/atom=${dEMevPerAtom.toFixed(1)} meV > ${POLISH_DIVERGENCE_MEV} meV — the pass relaxed out of the basin into a different structure, not a smearing correction. Rejecting this pass, keeping pre-pass geometry, stopping polish loop.`);
+            break;
+          }
+
           positions = newPos;
           latticeA = newLat;
           result.relaxedLatticeA = latticeA;

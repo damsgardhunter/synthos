@@ -169,10 +169,16 @@ export async function screenRound2(
 
   // CHGNet energy ranking
   if (isChgnetAvailable() && unique.length > 5) {
+    // Timeout scales with the relaxation workload. A flat 15 min starved
+    // batches of 20+ relaxing candidates — each CHGNet relax of a ~10-atom
+    // high-P hydride runs ~40 s, so a 20-candidate round-2 eval needs ~13 min
+    // of pure compute and was ETIMEDOUT'ing (then silently falling back to
+    // the Round 1 structure). 90 s/candidate gives generous headroom.
+    const r2Count = Math.min(unique.length, 50);
     const chgnetResult = await runChgnetEvaluation(
       unique, workDir, true, // relax=true for round 2
-      Math.min(unique.length, 50),
-      900000, // 15 min — 5 min was too tight for 20+ atom cells with relaxation
+      r2Count,
+      Math.max(900_000, r2Count * 90_000),
     );
 
     if (chgnetResult.stats.evaluated > 0) {

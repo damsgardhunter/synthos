@@ -401,8 +401,13 @@ function generateBandsInput(
   // fractional reciprocal lattice — interpreting them in the wrong cell gave
   // wrong band-path traversal for non-cubic crystals.
   const ibrav = 0;
-  const celldm1 = (latticeA * 1.8897259886).toFixed(6);
-  const celldmLines = `  celldm(1) = ${celldm1},\n`;  // Still needed: K_POINTS {crystal_b} uses celldm(1) as length scale
+  // NO celldm(1)/A: with ibrav=0 the cell is fully defined by CELL_PARAMETERS
+  // {angstrom} below. Specifying celldm(1) as well makes QE abort with
+  // "lattice parameter specified twice" (the cell scale is given twice —
+  // absolute Å in CELL_PARAMETERS AND via celldm). K_POINTS {crystal_b} uses
+  // fractional reciprocal-lattice coordinates, which QE derives from
+  // CELL_PARAMETERS — it does not need an explicit length scale (only the
+  // {tpiba_b} unit would, and we don't use it).
   // Build CELL_PARAMETERS using cOverA / latticeB (passed by caller from
   // estimateCOverA/BOverA). For monoclinic candidates this still doesn't
   // capture β (would need a separate lookup), but at least gets the
@@ -435,7 +440,7 @@ function generateBandsInput(
 /
 &SYSTEM
   ibrav = ${ibrav},
-${celldmLines}  nat = ${totalAtoms},
+  nat = ${totalAtoms},
   ntyp = ${nTypes},
   ecutwfc = ${ecutwfc},
   ecutrho = ${ecutrho},
