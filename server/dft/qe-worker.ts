@@ -7230,6 +7230,9 @@ ${cellBlockEos}
 
           if (!polishParsed.finalPositions || polishParsed.finalPositions.length === 0) {
             console.log(`[QE-Worker] Smearing-polish pass ${pi + 1} for ${formula} produced no positions (exit=${polishResult.exitCode}) — keeping previous geometry, stopping polish loop`);
+            // Discard this pass's output file so the downstream "latest polish
+            // output" SCF-reuse glob does not pick a crashed/rejected pass.
+            try { fs.unlinkSync(path.join(jobDir, `vc_relax_smearing_polish_${pi + 1}.out`)); } catch {}
             break;
           }
 
@@ -7262,6 +7265,10 @@ ${cellBlockEos}
           const POLISH_DIVERGENCE_MEV = 50;
           if (Number.isFinite(dEMevPerAtom) && dEMevPerAtom > POLISH_DIVERGENCE_MEV) {
             console.log(`[QE-Worker] Smearing-polish pass ${pi + 1} for ${formula} DIVERGED: ΔE/atom=${dEMevPerAtom.toFixed(1)} meV > ${POLISH_DIVERGENCE_MEV} meV — the pass relaxed out of the basin into a different structure, not a smearing correction. Rejecting this pass, keeping pre-pass geometry, stopping polish loop.`);
+            // Discard the diverged pass's output file so the downstream "latest
+            // polish output" SCF-reuse glob keeps the last GOOD pass, not this
+            // rejected one (geometry/SCF would otherwise be mismatched).
+            try { fs.unlinkSync(path.join(jobDir, `vc_relax_smearing_polish_${pi + 1}.out`)); } catch {}
             break;
           }
 
