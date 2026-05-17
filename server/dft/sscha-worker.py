@@ -80,6 +80,19 @@ MAX_SSCHA_ITERATIONS = 20
 # the harmonic-vs-anharmonic stability comparison is on equal footing.
 IMAGINARY_MODE_THRESHOLD_CM = -5.0
 MAX_FORCE_CALCS = 2000  # absolute safety cap on total DFT calls
+
+
+def base_element(label):
+    """Strip a trailing AFM-sublattice index from a QE species label.
+
+    Collinear-AFM structures declare the magnetic element as two species
+    (e.g. "Fe1", "Fe2", same pseudopotential). Atomic-mass and
+    pseudopotential lookups must resolve "Fe1"/"Fe2" -> "Fe". No real
+    element symbol ends in a digit, so this is unambiguous.
+    """
+    return re.sub(r"\d+$", "", str(label))
+
+
 PW_TIMEOUT_S = 3600  # 1 hour per SCF
 TOTAL_TIMEOUT_S = 86400  # 24 hours total
 
@@ -479,14 +492,18 @@ def run_sscha_with_library(args) -> dict:
                 # for element "C" we must NOT pick "Ca.UPF" / "Cu.UPF" / etc.
                 # Match patterns: "C.UPF", "C.pbe-...-kjpaw_psl.1.0.0.UPF",
                 # "C_PBE_OPTHARDER.UPF" — i.e., element followed by "." or "_".
+                # base_element resolves AFM sublattice labels (Fe1/Fe2 -> Fe)
+                # so a split structure finds the shared pseudopotential.
+                eb = base_element(el)
                 pp_files = [
                     f for f in os.listdir(args.pseudo_dir)
                     if f.endswith(".UPF")
-                    and (f == f"{el}.UPF" or f.startswith(f"{el}.") or f.startswith(f"{el}_"))
+                    and (f == f"{eb}.UPF" or f.startswith(f"{eb}.") or f.startswith(f"{eb}_"))
                 ]
-                # Prefer the exact-match "{el}.UPF" if multiple variants exist
-                pp_files.sort(key=lambda f: 0 if f == f"{el}.UPF" else 1)
-                pp = pp_files[0] if pp_files else f"{el}.UPF"
+                # Prefer the exact-match "{eb}.UPF" if multiple variants exist
+                pp_files.sort(key=lambda f: 0 if f == f"{eb}.UPF" else 1)
+                pp = pp_files[0] if pp_files else f"{eb}.UPF"
+                # Keep the (possibly split) label as the QE species name.
                 species_set[el] = (el, mass, pp)
         species_list = list(species_set.values())
 
@@ -716,17 +733,19 @@ def run_sscha_fallback(args) -> dict:
     species_set = {}
     for el in atom_labels:
         if el not in species_set:
-            # Exact element match: filename must start with "{el}." or "{el}_"
+            # Exact element match: filename must start with "{eb}." or "{eb}_"
             # so "C" doesn't match "Ca.UPF". Case-sensitive — QE elements
-            # are capitalized.
+            # are capitalized. base_element resolves AFM sublattice labels
+            # (Fe1/Fe2 -> Fe) for the pseudopotential and mass lookup.
+            eb = base_element(el)
             pp_files = [
                 f for f in os.listdir(args.pseudo_dir)
                 if f.endswith(".UPF")
-                and (f == f"{el}.UPF" or f.startswith(f"{el}.") or f.startswith(f"{el}_"))
+                and (f == f"{eb}.UPF" or f.startswith(f"{eb}.") or f.startswith(f"{eb}_"))
             ]
-            pp_files.sort(key=lambda f: 0 if f == f"{el}.UPF" else 1)
-            pp = pp_files[0] if pp_files else f"{el}.UPF"
-            mass = ATOMIC_MASSES_AMU.get(el, 50.0)
+            pp_files.sort(key=lambda f: 0 if f == f"{eb}.UPF" else 1)
+            pp = pp_files[0] if pp_files else f"{eb}.UPF"
+            mass = ATOMIC_MASSES_AMU.get(eb, 50.0)
             species_set[el] = (el, mass, pp)
     species_list = list(species_set.values())
 
@@ -738,7 +757,7 @@ def run_sscha_fallback(args) -> dict:
     # Per-atom mass in amu (used to scale ZPE amplitude per atom — light atoms
     # like H vibrate with larger amplitude than heavy atoms like U).
     atom_masses_amu = np.array(
-        [ATOMIC_MASSES_AMU.get(el, 50.0) for el in atom_labels],
+        [ATOMIC_MASSES_AMU.get(base_element(el), 50.0) for el in atom_labels],
         dtype=float,
     )
     # Effective "reduced" mass for a mode where we don't have an eigenvector:
@@ -903,7 +922,7 @@ def run_sscha_fallback(args) -> dict:
         # heavy elements end up with ω too high by sqrt(m_amu): Li by 2.6×,
         # Fe by 7.5×, U by 15.4×. Critical for any non-H-only system.
         masses_per_atom = np.array(
-            [ATOMIC_MASSES_AMU.get(el, 50.0) for el in atom_labels],
+            [ATOMIC_MASSES_AMU.get(base_element(el), 50.0) for el in atom_labels],
             dtype=float,
         )
         # Expand to 3N components (each atom has x, y, z)

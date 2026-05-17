@@ -521,7 +521,21 @@ function getAtomicNumber(el: string): number {
 const RY_TO_EV = 13.605693122994;
 const BOHR_TO_ANG = 0.529177210903;
 
+/**
+ * Strip a trailing sublattice index from a QE species label.
+ * Collinear AFM requires the magnetic element to appear as two distinct
+ * species (e.g. "Fe1", "Fe2") with opposite starting_magnetization but the
+ * SAME pseudopotential — see buildAFMSublattices in magnetic-ground-state.ts.
+ * Every element-keyed lookup (mass, pseudopotential, valence, cutoffs,
+ * magnetic/heavy classification) must resolve "Fe1"/"Fe2" → "Fe". No real
+ * element symbol ends in a digit, so this is unambiguous.
+ */
+function baseElement(label: string): string {
+  return label.replace(/[0-9]+$/, "");
+}
+
 function resolvePPFilename(element: string): string {
+  element = baseElement(element);
   const ppDir = QE_PSEUDO_DIR;
   const simpleName = `${element}.UPF`;
   if (fs.existsSync(path.join(ppDir, simpleName))) return simpleName;
@@ -647,6 +661,7 @@ const HARD_PAW_ELEMENTS = new Set<string>([
 ]);
 
 function ecutrhoMultiplier(elements: string[]): number {
+  elements = elements.map(baseElement);  // resolve AFM sublattice labels
   // USPP requires ≥8x cutoff due to augmentation charges (any element).
   // PAW with semicore valence ("hard PAW") also needs 8x: charge density has
   // sharp core-region features that the dense grid must resolve. Without it,
@@ -665,6 +680,7 @@ function ecutrhoMultiplier(elements: string[]): number {
 }
 
 function getAtomicMass(el: string): number {
+  el = baseElement(el);
   const local = ELEMENT_DATA[el];
   if (local) return local.mass;
   const central = getElementData(el);
@@ -678,10 +694,16 @@ function getAtomicMass(el: string): number {
 }
 
 function getZValence(el: string): number {
+  el = baseElement(el);
   const local = ELEMENT_DATA[el];
   if (local) return local.zValence;
   const central = getElementData(el);
-  return central ? central.valenceElectrons : 4;
+  if (central) return central.valenceElectrons;
+  // No valence data anywhere — falling back to 4 silently corrupts the
+  // electron count → nbnd → Fermi level. Warn so the misclassification
+  // surfaces (mirrors getAtomicMass's behaviour).
+  console.warn(`[QE-Worker] getZValence: no valence-electron count for "${el}" in ELEMENT_DATA or central elemental-data — falling back to 4. nbnd and the electron count for this species will be wrong.`);
+  return 4;
 }
 
 function computeStructureFingerprint(
@@ -1847,6 +1869,7 @@ async function ensureRelativisticPP(element: string): Promise<boolean> {
 }
 
 function estimateCOverA(elements: string[], counts: Record<string, number>): number {
+  elements = elements.map(baseElement);  // resolve AFM sublattice labels
   const hasCu = elements.includes("Cu");
   const hasO = elements.includes("O");
   const hasFe = elements.includes("Fe");
@@ -1878,6 +1901,7 @@ function estimateCOverA(elements: string[], counts: Record<string, number>): num
 }
 
 function estimateBOverA(elements: string[], counts: Record<string, number>): number {
+  elements = elements.map(baseElement);  // resolve AFM sublattice labels
   const hasCu = elements.includes("Cu");
   const hasO = elements.includes("O");
   const hasBa = elements.includes("Ba");
@@ -2064,6 +2088,7 @@ const SPECIES_ECUTWFC: Record<string, number> = {
 // of 80 Ry when hydrogen is present (the raw SSSP cutoff of 60 Ry
 // under-converges small-volume hydrides), plus any caller-requested boost.
 function computeEcutwfc(elements: string[], extraBoost: number = 0, hydrogenFloor: number = 80, nonHFloor: number = 45): number {
+  elements = elements.map(baseElement);  // resolve AFM sublattice labels (Fe1/Fe2 → Fe)
   const hasH = elements.includes("H");
   const raw = elements.reduce((max, el) => Math.max(max, SPECIES_ECUTWFC[el] ?? 45), hasH ? hydrogenFloor : nonHFloor);
   return raw + extraBoost;
@@ -2140,6 +2165,7 @@ const HEAVY_ELEMENTS = new Set([
 ]);
 
 function computeMaxSeconds(elements: string[], pressureGpa: number = 0): number {
+  elements = elements.map(baseElement);  // resolve AFM sublattice labels
   const base = QE_MAX_SECONDS;
   const heavyCount = elements.filter(el => HEAVY_ELEMENTS.has(el)).length;
   const hasH = elements.includes("H");
@@ -2159,6 +2185,7 @@ function computeMaxSeconds(elements: string[], pressureGpa: number = 0): number 
 // list misses: 4d/5d TMs (Ru, Pd, Ta, W…), TM-hydrides, TM-nitrides, and
 // multi-TM systems where d-band frustration drives moment formation.
 function mayHaveMagneticMoment(elements: string[]): boolean {
+  elements = elements.map(baseElement);  // resolve AFM sublattice labels
   if (elements.some(el => el in MAGNETIC_ELEMENTS)) return true;
   const tmCount = elements.filter(el => TRANSITION_METALS.has(el)).length;
   if (tmCount === 0) return false;
@@ -3071,6 +3098,7 @@ function generateHydrideCagePositions(
 }
 
 function autoPhononQGrid(elements: string[], totalAtoms?: number, residualForce?: number): [number, number, number] {
+  elements = elements.map(baseElement);  // resolve AFM sublattice labels
   // Tiered q-grid based on structure quality (residual force) and system size.
   // Cost scales as n_atoms × n_q × 3*n_atoms perturbations per q-point.
   //
@@ -3248,6 +3276,7 @@ function generatePhononPrepSCFInput(
     socFlags?: string;
     forceNoncolin?: boolean;
     maxSecondsOverride?: number;
+    siteLabels?: string[];
   },
 ): string {
   return generateSCFInputWithParams(formula, elements, counts, latticeA, positions, {
@@ -3273,6 +3302,7 @@ function generatePhononPrepSCFInput(
     hubbardCard: opts.hubbardCard,
     socFlags: opts.socFlags,
     forceNoncolin: opts.forceNoncolin,
+    siteLabels: opts.siteLabels,
   }).replace(
     /K_POINTS \{automatic\}\s*\n\s*\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+/,
     opts.kPointsCard,
@@ -4325,7 +4355,7 @@ function parseXTBOptXyz(
       fx = fx - Math.floor(fx);
       fy = fy - Math.floor(fy);
       fz = fz - Math.floor(fz);
-      relaxed.push({ element: parts[0], x: fx, y: fy, z: fz });
+      relaxed.push({ element: baseElement(parts[0]), x: fx, y: fy, z: fz });
     }
   }
   return relaxed.length === nExpected ? relaxed : null;
@@ -4541,10 +4571,18 @@ function generateSCFInputWithParams(
   counts: Record<string, number>,
   latticeA: number,
   positions: Array<{ element: string; x: number; y: number; z: number }>,
-  params: { mixingBeta: number; maxSteps: number; diag: string; smearing?: string; degauss?: number; ecutwfcBoost?: number; ecutrhoMultiplierOverride?: number; convThr?: string; forcConvThr?: string; etotConvThr?: string; dftPlusULines?: string; dftPlusUNspin2?: boolean; mixingMode?: string; mixingNdim?: number; startingwfc?: string; startingpot?: string; diagoThrInit?: string; restartFromScratch?: boolean; maxSecondsOverride?: number; socFlags?: string; forceNspin?: 1 | 2; forceMagBlock?: string; forceNoncolin?: boolean; hubbardCard?: string; nbndOverride?: number; nbndScale?: number },
+  params: { mixingBeta: number; maxSteps: number; diag: string; smearing?: string; degauss?: number; ecutwfcBoost?: number; ecutrhoMultiplierOverride?: number; convThr?: string; forcConvThr?: string; etotConvThr?: string; dftPlusULines?: string; dftPlusUNspin2?: boolean; mixingMode?: string; mixingNdim?: number; startingwfc?: string; startingpot?: string; diagoThrInit?: string; restartFromScratch?: boolean; maxSecondsOverride?: number; socFlags?: string; forceNspin?: 1 | 2; forceMagBlock?: string; forceNoncolin?: boolean; hubbardCard?: string; nbndOverride?: number; nbndScale?: number; siteLabels?: string[] },
 ): string {
   const totalAtoms = positions.length;
-  const nTypes = elements.length;
+  // AFM sublattice splitting: when siteLabels is supplied, the magnetic
+  // element is emitted as two QE species (Fe1/Fe2 → same pseudopotential),
+  // so ntyp is the number of distinct species labels, not distinct elements.
+  const useSiteLabels = !!params.siteLabels && params.siteLabels.length === positions.length;
+  const speciesLabels: string[] = [];
+  if (useSiteLabels) {
+    for (const l of params.siteLabels!) if (!speciesLabels.includes(l)) speciesLabels.push(l);
+  }
+  const nTypes = useSiteLabels ? speciesLabels.length : elements.length;
   // Uses module-level SPECIES_ECUTWFC table. Screening minimum: 45 Ry non-H,
   // 80 Ry H (PAW needs less than NCPP; saves ~30% vs 60/100). ecutwfcBoost
   // comes from the retry ladder to escalate cutoff on non-convergence.
@@ -4561,18 +4599,26 @@ function generateSCFInputWithParams(
   const forcConvThr = params.forcConvThr ?? "1.0d-2";
   const etotConvThr = params.etotConvThr ?? "1.0d-4";
 
+  // ATOMIC_SPECIES: one line per distinct species label. With siteLabels the
+  // species are the split labels (Fe1/Fe2); mass and pseudopotential resolve
+  // via baseElement(), so Fe1 and Fe2 both get Fe's mass and Fe.UPF.
   let atomicSpecies = "";
-  for (const el of elements) {
-    const mass = getAtomicMass(el);
+  const speciesForCard = useSiteLabels ? speciesLabels : elements;
+  for (const sp of speciesForCard) {
+    const mass = getAtomicMass(sp);
     if (!mass) {
-      throw new Error(`Unknown element "${el}" — no atomic mass data available. Cannot generate valid QE input.`);
+      throw new Error(`Unknown element "${sp}" — no atomic mass data available. Cannot generate valid QE input.`);
     }
-    atomicSpecies += `  ${el}  ${mass.toFixed(3)}  ${resolvePPFilename(el)}\n`;
+    atomicSpecies += `  ${sp}  ${mass.toFixed(3)}  ${resolvePPFilename(sp)}\n`;
   }
 
+  // ATOMIC_POSITIONS: use the per-atom species label when splitting AFM
+  // sublattices, otherwise the plain element symbol.
   let atomicPositions = "";
-  for (const pos of positions) {
-    atomicPositions += `  ${pos.element}  ${pos.x.toFixed(6)}  ${pos.y.toFixed(6)}  ${pos.z.toFixed(6)}\n`;
+  for (let i = 0; i < positions.length; i++) {
+    const pos = positions[i];
+    const label = useSiteLabels ? params.siteLabels![i] : pos.element;
+    atomicPositions += `  ${label}  ${pos.x.toFixed(6)}  ${pos.y.toFixed(6)}  ${pos.z.toFixed(6)}\n`;
   }
 
   // Use known-structure lattice parameters when available (monoclinic/triclinic need angles)
@@ -4693,10 +4739,17 @@ function generateVCRelaxInput(
   positions: Array<{ element: string; x: number; y: number; z: number }>,
   pressureGPa: number = 0,
   nstepOverride?: number,
-  opts?: { socFlags?: string; forceNspin?: 1 | 2; forceMagBlock?: string; hubbardBlock?: string; hubbardCard?: string; pressurePriority?: boolean; degaussOverride?: number; convThrOverride?: string; ecutwfcBoost?: number; ecutrhoMultiplierOverride?: number; maxSecondsOverride?: number },
+  opts?: { socFlags?: string; forceNspin?: 1 | 2; forceMagBlock?: string; hubbardBlock?: string; hubbardCard?: string; pressurePriority?: boolean; degaussOverride?: number; convThrOverride?: string; ecutwfcBoost?: number; ecutrhoMultiplierOverride?: number; maxSecondsOverride?: number; siteLabels?: string[] },
 ): string {
   const totalAtoms = positions.length;
-  const nTypes = elements.length;
+  // AFM sublattice splitting (see generateSCFInputWithParams): with siteLabels
+  // the magnetic element is emitted as two species (Fe1/Fe2 → same pseudo).
+  const useSiteLabels = !!opts?.siteLabels && opts.siteLabels.length === positions.length;
+  const speciesLabels: string[] = [];
+  if (useSiteLabels) {
+    for (const l of opts!.siteLabels!) if (!speciesLabels.includes(l)) speciesLabels.push(l);
+  }
+  const nTypes = useSiteLabels ? speciesLabels.length : elements.length;
   // Uses module-level SPECIES_ECUTWFC table. vc-relax path historically
   // used a trimmed table (no lanthanides) but the full table is safe here —
   // unknown elements fall through to the 45 Ry default.
@@ -4719,17 +4772,20 @@ function generateVCRelaxInput(
   }
 
   let atomicSpecies = "";
-  for (const el of elements) {
-    const mass = getAtomicMass(el);
+  const speciesForCard = useSiteLabels ? speciesLabels : elements;
+  for (const sp of speciesForCard) {
+    const mass = getAtomicMass(sp);
     if (!mass) {
-      throw new Error(`Unknown element "${el}" — no atomic mass data available. Cannot generate valid QE input.`);
+      throw new Error(`Unknown element "${sp}" — no atomic mass data available. Cannot generate valid QE input.`);
     }
-    atomicSpecies += `  ${el}  ${mass.toFixed(3)}  ${resolvePPFilename(el)}\n`;
+    atomicSpecies += `  ${sp}  ${mass.toFixed(3)}  ${resolvePPFilename(sp)}\n`;
   }
 
   let atomicPositions = "";
-  for (const pos of positions) {
-    atomicPositions += `  ${pos.element}  ${pos.x.toFixed(6)}  ${pos.y.toFixed(6)}  ${pos.z.toFixed(6)}\n`;
+  for (let i = 0; i < positions.length; i++) {
+    const pos = positions[i];
+    const label = useSiteLabels ? opts!.siteLabels![i] : pos.element;
+    atomicPositions += `  ${label}  ${pos.x.toFixed(6)}  ${pos.y.toFixed(6)}  ${pos.z.toFixed(6)}\n`;
   }
 
   const prefix = formula.replace(/[^a-zA-Z0-9]/g, "");
@@ -6364,7 +6420,7 @@ ${guardCell}
               for (const line of lines) {
                 const parts = line.trim().split(/\s+/);
                 if (parts.length >= 4) {
-                  relaxedPositions.push({ element: parts[0], x: parseFloat(parts[1]), y: parseFloat(parts[2]), z: parseFloat(parts[3]) });
+                  relaxedPositions.push({ element: baseElement(parts[0]), x: parseFloat(parts[1]), y: parseFloat(parts[2]), z: parseFloat(parts[3]) });
                 }
               }
               if (relaxedPositions.length === positions.length) {
@@ -6519,7 +6575,7 @@ ${cellBlockRelax}
             const parsedPositions: Array<{ element: string; x: number; y: number; z: number }> = [];
             for (const line of lastBlock.split("\n").slice(1)) {
               const m = line.trim().match(/^([A-Z][a-z]?)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)/);
-              if (m) parsedPositions.push({ element: m[1], x: parseFloat(m[2]), y: parseFloat(m[3]), z: parseFloat(m[4]) });
+              if (m) parsedPositions.push({ element: baseElement(m[1]), x: parseFloat(m[2]), y: parseFloat(m[3]), z: parseFloat(m[4]) });
             }
             if (parsedPositions.length === positions.length) {
               positions = parsedPositions;
@@ -6657,7 +6713,7 @@ ${cellBlockEos}
     // Runs short SCF trials with different spin orderings BEFORE the expensive
     // vc-relax, so phonons are computed on the correct magnetic state.
     if (magSearchDecision.shouldSearch && !result.vcRelaxed) {
-      const magConfigs = classifyMagneticLandscape(elements, counts, socAnalysis?.enableFullSOC ?? false);
+      const magConfigs = classifyMagneticLandscape(elements, counts, socAnalysis?.enableFullSOC ?? false, positions);
       if (magConfigs.length >= 2) {
         const magAtomsPre = positions.length;
         const magElecPre = positions.reduce((s, p) => s + (getZValence(p.element) ?? 10), 0);
@@ -6689,6 +6745,7 @@ ${cellBlockEos}
               convThr: config.convThr ? `${config.convThr}` : "1.0d-6",
               forceNspin: config.noncolin ? 2 : (config.nspin === 1 ? 1 : 2),
               forceMagBlock: config.magnetizationBlock,
+              siteLabels: config.siteLabels,
               forceNoncolin: config.noncolin ?? false,
               maxSecondsOverride: magMaxSeconds,
             });
@@ -6787,6 +6844,7 @@ ${cellBlockEos}
         socFlags: socAnalysis?.enableFullSOC ? socAnalysis.qeSystemFlags : undefined,
         forceNspin: result.magneticGroundState?.winningNspin,
         forceMagBlock: result.magneticGroundState?.winningMagBlock || undefined,
+        siteLabels: result.magneticGroundState?.winningSiteLabels,
         hubbardCard: hubbardResult?.applyToVCRelax ? hubbardResult.qeHubbardCard : undefined,
         maxSecondsOverride: vcRelaxMaxSec,
       });
@@ -7010,6 +7068,7 @@ ${cellBlockEos}
             socFlags: socAnalysis?.enableFullSOC ? socAnalysis.qeSystemFlags : undefined,
             forceNspin: result.magneticGroundState?.winningNspin,
             forceMagBlock: result.magneticGroundState?.winningMagBlock || undefined,
+        siteLabels: result.magneticGroundState?.winningSiteLabels,
             hubbardCard: hubbardResult?.applyToVCRelax ? hubbardResult.qeHubbardCard : undefined,
             pressurePriority: isPressurePriority,
             maxSecondsOverride: refineMaxSec,
@@ -7223,6 +7282,7 @@ ${cellBlockEos}
               socFlags: socAnalysis?.enableFullSOC ? socAnalysis.qeSystemFlags : undefined,
               forceNspin: result.magneticGroundState?.winningNspin,
               forceMagBlock: result.magneticGroundState?.winningMagBlock || undefined,
+        siteLabels: result.magneticGroundState?.winningSiteLabels,
               hubbardCard: hubbardResult?.applyToVCRelax ? hubbardResult.qeHubbardCard : undefined,
               degaussOverride: degauss,
               convThrOverride: convThr,
@@ -7648,6 +7708,7 @@ ${cellBlockEos}
         socFlags: socAnalysis?.enableFullSOC ? socAnalysis.qeSystemFlags : undefined,
         forceNspin: result.magneticGroundState?.winningNspin,
         forceMagBlock: result.magneticGroundState?.winningMagBlock || undefined,
+        siteLabels: result.magneticGroundState?.winningSiteLabels,
       });
       const scfInputFile = path.join(jobDir, `scf_attempt${attempt}.in`);
       fs.writeFileSync(scfInputFile, scfInput);
@@ -8177,7 +8238,7 @@ ${r2Cell}
                         const r2ParsedPos: Array<{ element: string; x: number; y: number; z: number }> = [];
                         for (const line of r2LastBlock.split("\n").slice(1)) {
                           const m = line.trim().match(/^([A-Z][a-z]?)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)/);
-                          if (m) r2ParsedPos.push({ element: m[1], x: parseFloat(m[2]), y: parseFloat(m[3]), z: parseFloat(m[4]) });
+                          if (m) r2ParsedPos.push({ element: baseElement(m[1]), x: parseFloat(m[2]), y: parseFloat(m[3]), z: parseFloat(m[4]) });
                         }
                         if (r2ParsedPos.length === positions.length) {
                           positions = r2ParsedPos;
@@ -8298,6 +8359,7 @@ ${r2Cell}
                       ? 2
                       : undefined)),
             forceMagBlock: result.magneticGroundState?.winningMagBlock || undefined,
+        siteLabels: result.magneticGroundState?.winningSiteLabels,
             dftPlusULines: dftPlusULines || undefined,
             dftPlusUNspin2: dftPlusUNspin2 || undefined,
             hubbardCard: scfHubbardCard || undefined,
@@ -8959,6 +9021,7 @@ ${r2Cell}
                   hubbardCard: hubbardResult?.applyToVCRelax ? hubbardResult.qeHubbardCard : undefined,
                   forceNspin: result.magneticGroundState?.winningNspin,
                   forceMagBlock: result.magneticGroundState?.winningMagBlock || undefined,
+        siteLabels: result.magneticGroundState?.winningSiteLabels,
                 },
               );
               const zbFile = path.join(jobDir, "vc_relax_zbsm.in");
@@ -9187,7 +9250,16 @@ ${r2Cell}
     // EPW interpolates e-ph matrix elements from the coarse DFPT q-grid to ultra-fine
     // k/q grids, then solves the anisotropic Migdal-Eliashberg equations for Tc.
     const publicationForce = residualForce != null && residualForce < 0.001;
-    if (scfUsable && dfptGatePass && publicationForce && phononPhysicallyStable && !opts?.skipEph) {
+    // EPW is skipped for AFM-split materials: the whole Wannier chain (its
+    // own SCF/NSCF, .win, epw.x) would have to emit the Fe1/Fe2 sublattice
+    // species consistently with the DFPT .dvscf files, and spin-polarized
+    // Wannier interpolation is a deeper problem than this pass addresses.
+    // DFPT-EPC above already provides λ in the correct AFM state.
+    const afmSplitActive = !!result.magneticGroundState?.winningSiteLabels;
+    if (afmSplitActive && scfUsable && dfptGatePass && publicationForce && phononPhysicallyStable && !opts?.skipEph) {
+      console.log(`[QE-Worker] ${formula}: EPW pipeline skipped — material uses an AFM sublattice split (Fe1/Fe2); EPW Wannier interpolation for split-species magnets is not yet supported. DFPT-EPC λ is used instead.`);
+    }
+    if (scfUsable && dfptGatePass && publicationForce && phononPhysicallyStable && !opts?.skipEph && !afmSplitActive) {
       try {
         const epwCOverA = estimateCOverA(elements, counts);
         const epwBOverA = estimateBOverA(elements, counts);
@@ -9303,7 +9375,10 @@ ${r2Cell}
     // --- ACBN0 First-Principles μ* ---
     // For publication-ready materials, compute μ* from electronic structure
     // instead of using the conventional fixed 0.10-0.13.
-    if (publicationForce && scfUsable && dfptGatePass && result.scf?.fermiEnergy != null) {
+    if (afmSplitActive && publicationForce && scfUsable && dfptGatePass && result.scf?.fermiEnergy != null) {
+      console.log(`[QE-Worker] ${formula}: ACBN0 μ* skipped — material uses an AFM sublattice split; ACBN0 would run its SCF/hp.x in the wrong magnetic state. The default μ* is used instead.`);
+    }
+    if (!afmSplitActive && publicationForce && scfUsable && dfptGatePass && result.scf?.fermiEnergy != null) {
       try {
         console.log(`[QE-Worker] ${formula} qualifies for ACBN0 first-principles μ*`);
         const acbn0Prefix = formula.replace(/[^a-zA-Z0-9]/g, "");
@@ -9399,7 +9474,10 @@ ${r2Cell}
 
     // --- DMFT bundle export for correlated materials ---
     const dmftCheck = isDMFTEligible(result.hubbardWorkflow, result.qualityTier);
-    if (dmftCheck.eligible && result.scf?.fermiEnergy != null) {
+    if (dmftCheck.eligible && result.scf?.fermiEnergy != null && afmSplitActive) {
+      console.log(`[QE-Worker] ${formula}: DMFT bundle skipped — material uses an AFM sublattice split; its Wannier chain would not be consistent with the split-species .save.`);
+    }
+    if (dmftCheck.eligible && result.scf?.fermiEnergy != null && !afmSplitActive) {
       try {
         console.log(`[QE-Worker] ${formula} eligible for DMFT bundle: ${dmftCheck.reason}`);
         const dmftPrefix = formula.replace(/[^a-zA-Z0-9]/g, "");

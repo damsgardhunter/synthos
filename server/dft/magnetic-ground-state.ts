@@ -46,6 +46,14 @@ export interface MagneticTrialConfig {
   rationale: string;
   /** conv_thr override for this trial (default uses the triage value) */
   convThr?: number;
+  /**
+   * Per-atom QE species labels (parallel to the structure's positions array),
+   * e.g. ["Ba","Fe1","Fe2","As"]. Set only for collinear AFM trials on a
+   * single magnetic species, where the magnetic element is split into two
+   * sublattices (Fe1/Fe2) so QE can represent the antiferromagnetic state.
+   * Undefined → every atom uses its plain element symbol.
+   */
+  siteLabels?: string[];
 }
 
 export interface MagneticTrialResult {
@@ -91,6 +99,14 @@ export interface MagneticGroundStateResult {
   winningNspin: 1 | 2;
   /** Whether the winning state requires non-collinear mode */
   winningNoncolin: boolean;
+  /**
+   * Per-atom QE species labels for the winning ordering, when it uses AFM
+   * sublattice splitting (single magnetic element → two species Fe1/Fe2).
+   * Undefined → no split; atoms use plain element symbols. Downstream QE
+   * runs (vc-relax, phonon SCF, DFPT, EPW) must thread this so the relaxed
+   * structure and phonons are computed in the correct magnetic state.
+   */
+  winningSiteLabels?: string[];
   /** Whether a tighter-convergence rerun was performed for near-degenerate states */
   tightConvergenceRerun: boolean;
   /** Whether a non-collinear test phase was triggered */
@@ -225,6 +241,7 @@ export function classifyMagneticLandscape(
   elements: string[],
   counts: Record<string, number>,
   socRequiresNoncolin: boolean = false,
+  positions: Array<{ element: string; x: number; y: number; z: number }> = [],
 ): MagneticTrialConfig[] {
   const configs: MagneticTrialConfig[] = [];
   const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
@@ -238,6 +255,36 @@ export function classifyMagneticLandscape(
   if (allMagElements.length === 0) {
     return [];
   }
+
+  // A compound with a SINGLE magnetic species needs explicit AFM sublattice
+  // splitting (magnetic element → two QE species) — otherwise QE's
+  // per-species starting_magnetization cannot represent AFM and every AFM
+  // trial silently collapses to FM. makeAFM() builds either a split config
+  // (single magnetic species, atom positions available) or the legacy
+  // per-species block (≥2 magnetic species, where alternation already works).
+  const splitMagEl = (
+    positions.length > 0
+    && allMagElements.length === 1
+    && Math.round(counts[allMagElements[0]] ?? 0) >= 2
+  ) ? allMagElements[0] : null;
+  let afmSplitCache: { siteLabels: string[]; magnetizationBlock: string } | null | undefined;
+  const makeAFM = (ordering: MagneticOrdering, rationale: string): MagneticTrialConfig | null => {
+    if (splitMagEl) {
+      if (afmSplitCache === undefined) afmSplitCache = buildAFMSublattices(positions, splitMagEl);
+      if (!afmSplitCache) return null;
+      return {
+        ordering, nspin: 2,
+        magnetizationBlock: afmSplitCache.magnetizationBlock,
+        siteLabels: afmSplitCache.siteLabels,
+        costFactor: 1.5, rationale,
+      };
+    }
+    return {
+      ordering, nspin: 2,
+      magnetizationBlock: buildMagnetizationBlock(elements, counts, ordering),
+      costFactor: 1.5, rationale,
+    };
+  };
 
   // Always try NM as baseline
   configs.push({
@@ -273,80 +320,40 @@ export function classifyMagneticLandscape(
 
   // [MagSearch] Fe-pnictide/chalcogenide: stripe AFM is almost always the ground state
   if (hasFe && (hasAs || hasP || hasSe || hasTe || hasS)) {
-    configs.push({
-      ordering: "AFM-stripe",
-      nspin: 2,
-      magnetizationBlock: buildMagnetizationBlock(elements, counts, "AFM-stripe"),
-      costFactor: 1.5,
-      rationale: "Stripe AFM — ground state for most Fe-pnictides (Mazin et al., PRL 101, 057003 (2008))",
-    });
-    configs.push({
-      ordering: "AFM-checkerboard",
-      nspin: 2,
-      magnetizationBlock: buildMagnetizationBlock(elements, counts, "AFM-checkerboard"),
-      costFactor: 1.5,
-      rationale: "Checkerboard AFM — competitor to stripe in Fe-pnictides",
-    });
-    // [MagSearch] Double-stripe / bicollinear ordering for Fe-pnictides
-    // (↑↑↓↓ along one axis, ↑↓ along the other — relevant for FeTe, some 122s)
-    configs.push({
-      ordering: "AFM-double-stripe",
-      nspin: 2,
-      magnetizationBlock: buildMagnetizationBlock(elements, counts, "AFM-double-stripe"),
-      costFactor: 1.5,
-      rationale: "Double-stripe (bicollinear) AFM — ground state for FeTe, competitor in Fe-pnictides (Bao et al., PRL 102, 247001 (2009))",
-    });
+    const afm: Array<MagneticTrialConfig | null> = [
+      makeAFM("AFM-stripe", "Stripe AFM — ground state for most Fe-pnictides (Mazin et al., PRL 101, 057003 (2008))"),
+      makeAFM("AFM-checkerboard", "Checkerboard AFM — competitor to stripe in Fe-pnictides"),
+      // Double-stripe / bicollinear (↑↑↓↓ along one axis) — relevant for FeTe
+      makeAFM("AFM-double-stripe", "Double-stripe (bicollinear) AFM — ground state for FeTe, competitor in Fe-pnictides (Bao et al., PRL 102, 247001 (2009))"),
+    ];
+    for (const c of afm) if (c) configs.push(c);
   }
 
   // Cuprate: layered AFM (Neel order in CuO2 planes)
   else if (hasCu && hasO) {
-    configs.push({
-      ordering: "AFM-layered",
-      nspin: 2,
-      magnetizationBlock: buildMagnetizationBlock(elements, counts, "AFM-layered"),
-      costFactor: 1.5,
-      rationale: "Layered AFM — Neel order in CuO2 planes (parent cuprate state)",
-    });
+    const c = makeAFM("AFM-layered", "Layered AFM — Neel order in CuO2 planes (parent cuprate state)");
+    if (c) configs.push(c);
   }
 
   // Mn-O, Cr-O: multiple AFM patterns possible
   else if ((hasMn || hasCr) && hasO) {
-    configs.push({
-      ordering: "AFM-checkerboard",
-      nspin: 2,
-      magnetizationBlock: buildMagnetizationBlock(elements, counts, "AFM-checkerboard"),
-      costFactor: 1.5,
-      rationale: `${hasMn ? "Mn" : "Cr"}-oxide: checkerboard AFM via superexchange`,
-    });
-    configs.push({
-      ordering: "AFM-alternating",
-      nspin: 2,
-      magnetizationBlock: buildMagnetizationBlock(elements, counts, "AFM-alternating"),
-      costFactor: 1.5,
-      rationale: `${hasMn ? "Mn" : "Cr"}-oxide: alternating AFM pattern`,
-    });
+    const afm: Array<MagneticTrialConfig | null> = [
+      makeAFM("AFM-checkerboard", `${hasMn ? "Mn" : "Cr"}-oxide: checkerboard AFM via superexchange`),
+      makeAFM("AFM-alternating", `${hasMn ? "Mn" : "Cr"}-oxide: alternating AFM pattern`),
+    ];
+    for (const c of afm) if (c) configs.push(c);
   }
 
   // Ni compounds (nickelates)
   else if (hasNi && hasO) {
-    configs.push({
-      ordering: "AFM-checkerboard",
-      nspin: 2,
-      magnetizationBlock: buildMagnetizationBlock(elements, counts, "AFM-checkerboard"),
-      costFactor: 1.5,
-      rationale: "Ni-oxide: checkerboard AFM (NiO-type superexchange)",
-    });
+    const c = makeAFM("AFM-checkerboard", "Ni-oxide: checkerboard AFM (NiO-type superexchange)");
+    if (c) configs.push(c);
   }
 
   // General: any magnetic element + exchange mediator → try AFM
   else if (strongMagElements.length > 0 && hasMediators) {
-    configs.push({
-      ordering: "AFM-alternating",
-      nspin: 2,
-      magnetizationBlock: buildMagnetizationBlock(elements, counts, "AFM-alternating"),
-      costFactor: 1.5,
-      rationale: "Generic AFM — superexchange via anion mediator",
-    });
+    const c = makeAFM("AFM-alternating", "Generic AFM — superexchange via anion mediator");
+    if (c) configs.push(c);
   }
 
   // Multiple magnetic species → try ferrimagnetic
@@ -388,22 +395,23 @@ export function classifyMagneticLandscape(
     }
   }
 
-  // QE's `starting_magnetization(i)` is per-species, not per-atom. For a cell
-  // with only ONE strong-magnetic species (e.g., BaFe2As2 → species Ba, Fe,
-  // As — only Fe is magnetic), every collinear AFM-* trial produces the
-  // identical FM input because all Fe atoms share `starting_magnetization(Fe)`
-  // and there's nothing to alternate against. Without species-splitting (Fe1,
-  // Fe2 pointing to the same pseudo with opposite signs — not implemented
-  // here yet), running 3 AFM-* trials wastes 3× SCF time and returns
-  // identical energies. Deduplicate by magnetization-block content; keep
-  // only the first occurrence and mark the duplicates as dropped.
+  // Deduplicate trials that would produce an identical QE input. For a
+  // single-magnetic-species cell, buildAFMSublattices yields ONE genuine
+  // two-sublattice AFM, so the several AFM-* ordering labels all map to the
+  // same split — keep one, drop the rest. (When no atom positions are
+  // available the split cannot be built and the AFM configs are absent
+  // entirely, leaving only NM + FM.) The dedup key includes siteLabels so
+  // two configs with the same magnetization line but different sublattice
+  // assignments are never merged.
   const seenBlocks = new Set<string>();
   const dedupedConfigs: MagneticTrialConfig[] = [];
   const droppedOrderings: MagneticOrdering[] = [];
   for (const cfg of configs) {
     // Non-collinear blocks legitimately differ in angle1/angle2 and should
     // not be deduplicated on the collinear magnetization line alone.
-    const key = cfg.noncolin ? `nc:${cfg.magnetizationBlock}` : cfg.magnetizationBlock;
+    const key = (cfg.noncolin ? "nc:" : "")
+      + (cfg.siteLabels ? cfg.siteLabels.join(",") + "|" : "")
+      + cfg.magnetizationBlock;
     if (seenBlocks.has(key)) {
       droppedOrderings.push(cfg.ordering);
       continue;
@@ -411,10 +419,14 @@ export function classifyMagneticLandscape(
     seenBlocks.add(key);
     dedupedConfigs.push(cfg);
   }
-  if (droppedOrderings.length > 0 && strongMagElements.length <= 1) {
-    console.warn(`[MagSearch] Single magnetic species (${strongMagElements.join(",") || "weak-mag only"}): ` +
-      `AFM trials ${droppedOrderings.join(", ")} collapse to FM (QE starting_magnetization is per-species). ` +
-      `True AFM requires species-splitting (e.g. Fe1/Fe2 → opposite signs); skipped duplicates to save SCF time.`);
+  if (droppedOrderings.length > 0 && splitMagEl) {
+    const kept = dedupedConfigs.find(c => c.siteLabels)?.ordering ?? "AFM";
+    console.warn(`[MagSearch] Single magnetic species (${splitMagEl}): AFM ordering ` +
+      `labels ${droppedOrderings.join(", ")} all map to one ${splitMagEl}1/${splitMagEl}2 ` +
+      `sublattice split — kept "${kept}", dropped the redundant duplicates.`);
+  } else if (droppedOrderings.length > 0 && allMagElements.length <= 1) {
+    console.warn(`[MagSearch] Single magnetic species, no atom positions supplied — ` +
+      `cannot build an AFM sublattice split; AFM orderings ${droppedOrderings.join(", ")} dropped.`);
   }
 
   return dedupedConfigs;
@@ -504,6 +516,72 @@ function buildMagnetizationBlock(
   }
 
   return lines;
+}
+
+/**
+ * Build an antiferromagnetic sublattice split for a compound with a SINGLE
+ * magnetic species.
+ *
+ * QE's `starting_magnetization(i)` is per-species, so a compound whose only
+ * magnetic element is, say, Fe cannot be given an AFM seed — every Fe atom
+ * shares one `starting_magnetization(Fe)` and the SCF collapses to FM. The
+ * fix QE itself prescribes: declare the magnetic element as TWO species
+ * (e.g. Fe1, Fe2) in ATOMIC_SPECIES — both pointing to the same
+ * pseudopotential — assign the atoms to two sublattices, and seed the
+ * sublattices with opposite-sign moments.
+ *
+ * The two sublattices are assigned by sorting the magnetic atoms in space
+ * (x→y→z) and alternating: a genuine zero-net-moment two-sublattice
+ * antiferromagnet. (The exact stripe-vs-checkerboard pattern is a
+ * refinement; what the ground-state search needs is a real AFM state to
+ * compare against FM/NM, which this provides.)
+ *
+ * Returns per-atom `siteLabels` and the matching `starting_magnetization`
+ * block, keyed to the species list in first-occurrence order of siteLabels
+ * — the SAME order the QE-input generator builds ATOMIC_SPECIES in. Returns
+ * null if the element has fewer than 2 atoms.
+ */
+export function buildAFMSublattices(
+  positions: Array<{ element: string; x: number; y: number; z: number }>,
+  magElement: string,
+): { siteLabels: string[]; magnetizationBlock: string } | null {
+  const magIdx = positions
+    .map((p, i) => ({ p, i }))
+    .filter(o => o.p.element === magElement)
+    .map(o => o.i);
+  if (magIdx.length < 2) return null;
+
+  // Sort the magnetic atoms in space and alternate sublattice assignment.
+  const sorted = [...magIdx].sort((a, b) => {
+    const pa = positions[a], pb = positions[b];
+    return (pa.x - pb.x) || (pa.y - pb.y) || (pa.z - pb.z);
+  });
+  const sublattice = new Map<number, 0 | 1>();
+  sorted.forEach((idx, k) => sublattice.set(idx, (k % 2) as 0 | 1));
+
+  // Per-atom QE species label: magElement → magElement1 / magElement2.
+  const siteLabels = positions.map((p, i) => {
+    if (p.element !== magElement) return p.element;
+    return magElement + (sublattice.get(i) === 0 ? "1" : "2");
+  });
+
+  // Species list in first-occurrence order (= ATOMIC_SPECIES emission order).
+  const speciesList: string[] = [];
+  for (const l of siteLabels) if (!speciesList.includes(l)) speciesList.push(l);
+
+  // Opposite-sign fractional seeds on the two sublattices; other species 0.
+  const seed = toFractionalSeed(
+    STRONG_MAGNETIC[magElement] ?? (WEAK_MAGNETIC.has(magElement) ? 0.3 : 2.0),
+  );
+  let magnetizationBlock = "";
+  speciesList.forEach((sp, si) => {
+    let mag = 0;
+    if (sp === magElement + "1") mag = seed;
+    else if (sp === magElement + "2") mag = -seed;
+    magnetizationBlock += `  starting_magnetization(${si + 1}) = ${mag.toFixed(2)},\n`;
+  });
+
+  return { siteLabels, magnetizationBlock };
 }
 
 /**
@@ -639,6 +717,7 @@ export function selectMagneticGroundState(
         winningMagBlock: "",
         winningNspin: 1,         // tell downstream NOT to spin-polarize
         winningNoncolin: false,
+        winningSiteLabels: undefined,
         tightConvergenceRerun: false,
         noncollinearTestTriggered: false,
         spiralMagnetFlagged: false,
@@ -657,6 +736,7 @@ export function selectMagneticGroundState(
       winningMagBlock: fmConfig?.magnetizationBlock ?? "",
       winningNspin: 2,
       winningNoncolin: fmConfig?.noncolin ?? false,
+      winningSiteLabels: fmConfig?.siteLabels,
       tightConvergenceRerun: false,
       noncollinearTestTriggered: false,
       spiralMagnetFlagged: false,
@@ -803,6 +883,7 @@ export function selectMagneticGroundState(
     winningMagBlock: winnerConfig?.magnetizationBlock ?? "",
     winningNspin: winnerConfig?.nspin ?? 2,
     winningNoncolin: winnerConfig?.noncolin ?? false,
+    winningSiteLabels: winnerConfig?.siteLabels,
     tightConvergenceRerun: needsTightRerun,
     noncollinearTestTriggered: needsNoncollinearTest,
     spiralMagnetFlagged: hasSpiralTrial,
