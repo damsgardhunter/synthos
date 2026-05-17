@@ -12,8 +12,10 @@ import * as fs from "fs";
 import * as path from "path";
 import { execSync } from "child_process";
 import type { CSPCandidate, CSPEngine, CSPEngineConfig, ScreeningTierConfig } from "./csp-types";
-import { SCREENING_TIERS } from "./csp-types";
+import { SCREENING_TIERS, pressureVolumeEnsemble } from "./csp-types";
 import { parsePOSCAR } from "./poscar-io";
+import { estimateVolumePerAtom } from "./airss-wrapper";
+import { estimateBulkModulusFromElements } from "../dft/vegard-lattice";
 
 const PYTHON_BIN = process.env.PYTHON_BIN ?? "python3";
 
@@ -89,6 +91,7 @@ function generatePyXtalScript(
   baseSeed: number,
   outputDir: string,
   maxAtoms: number,
+  targetVpa: number,
   spaceGroups?: number[],
 ): string {
   const sgs = spaceGroups ?? ALL_SPACE_GROUPS;
@@ -117,6 +120,12 @@ try:
     base_seed = ${baseSeed}
     pressure_gpa = ${pressureGPa}
     max_atoms = ${maxAtoms}
+    # EOS-compressed target volume per atom (A^3/atom) — computed in TS from
+    # the ambient volume and the element-based Murnaghan bulk modulus, the
+    # SAME equation of state the Vegard lattice path uses. Each generated
+    # cell is rescaled to this volume (× a small exploration jitter) so the
+    # PyXtal starting structures are pressure-correct.
+    target_vpa = ${targetVpa}
     output_dir = ${JSON.stringify(outputDir.replace(/\\/g, "/"))}
     space_groups = ${JSON.stringify(sgs)}
 
@@ -174,15 +183,15 @@ try:
         else:
             sg = random.choice(all_compatible)
         seed = base_seed + attempts
-        # Pressure-aware volume jitter
-        if pressure_gpa < 20:
-            vf = 1.1 + random.uniform(-0.25, 0.40)   # 0.85-1.50
-        elif pressure_gpa < 100:
-            vf = 1.0 + random.uniform(-0.25, 0.25)    # 0.75-1.25
-        elif pressure_gpa < 200:
-            vf = 0.85 + random.uniform(-0.20, 0.25)   # 0.65-1.10
-        else:
-            vf = 0.75 + random.uniform(-0.20, 0.25)   # 0.55-1.00
+        # PyXtal's generation factor only needs to be roomy enough for pyxtal
+        # to place the atoms — the physical cell volume is set by
+        # scale_lattice below (to the EOS-compressed target_vpa). The old code
+        # used the factor as the pressure-compression knob, but max(0.9, vf)
+        # clamped it so high-P cells were barely compressed and CHGNet then
+        # drift-rejected them. gen_factor stays >=1.0 so generation succeeds;
+        # vol_jitter spreads the final volume around the EOS target.
+        gen_factor = random.uniform(1.0, 1.3)
+        vol_jitter = random.uniform(0.88, 1.15)
 
         try:
             crystal = None
@@ -198,7 +207,7 @@ try:
                         group=sg,
                         species=elements,
                         numIons=comp,
-                        factor=max(0.9, vf),
+                        factor=gen_factor,
                         seed=seed,
                     )
                     if crystal.valid:
@@ -210,9 +219,17 @@ try:
                 continue
 
             if crystal.valid:
+                struct_check = crystal.to_pymatgen()
+                # Rescale the cell to the EOS-compressed target volume BEFORE
+                # any geometry check, so H-H distances and overlaps reflect
+                # the pressure-correct cell. scale_lattice keeps fractional
+                # coords and symmetry; only the volume changes.
+                try:
+                    struct_check.scale_lattice(target_vpa * len(struct_check) * vol_jitter)
+                except Exception:
+                    pass
                 # Reject H₂-molecular structures: check if any H-H pair < 0.90 Å
                 # This prevents wasting DFT on structures that are just molecular hydrogen
-                struct_check = crystal.to_pymatgen()
                 has_h2 = False
                 h_sites = [s for s in struct_check if str(s.specie) == "H"]
                 if len(h_sites) >= 2:
@@ -261,7 +278,7 @@ try:
                     if attempts <= 3:
                         print(f"PYXTAL_DEBUG attempt={attempts} sg={sg} write_error={str(e2)[:60]}", flush=True)
             elif attempts <= 3:
-                print(f"PYXTAL_DEBUG attempt={attempts} sg={sg} valid=False factor={vf:.2f}", flush=True)
+                print(f"PYXTAL_DEBUG attempt={attempts} sg={sg} valid=False factor={gen_factor:.2f}", flush=True)
 
         except Exception as e:
             if attempts <= 3:
@@ -342,13 +359,26 @@ export const pyxtalEngine: CSPEngine = {
       }
     }
 
+    // EOS-compressed target volume per atom — the SAME Murnaghan EOS and
+    // element-based bulk modulus the Vegard lattice and AIRSS paths use.
+    // Each generated cell is rescaled to this volume so the PyXtal starting
+    // structures are pressure-correct (was: pyxtal's radius-based estimate
+    // with a `factor` clamped to >=0.9, which left high-P cells far too
+    // large and CHGNet drift-rejected them).
+    const fractions: Record<string, number> = {};
+    for (const el of elements) fractions[el] = Math.round(counts[el] ?? 0);
+    const b0 = estimateBulkModulusFromElements(elements, fractions);
+    const ambientVpa = estimateVolumePerAtom(elements, counts);
+    const eosEns = pressureVolumeEnsemble(ambientVpa, config.pressureGPa, [1.0], b0);
+    const targetVpa = eosEns[eosEns.length - 1] || ambientVpa;
+
     const script = generatePyXtalScript(
       elements, baseComp, validZ, config.maxStructures,
-      config.pressureGPa, baseSeed, outputDir, tierConfig.maxAtoms, targetSGs
+      config.pressureGPa, baseSeed, outputDir, tierConfig.maxAtoms, targetVpa, targetSGs
     );
     fs.writeFileSync(scriptPath, script);
 
-    console.log(`[PyXtal] Generating ${config.maxStructures} structures for ${elements.join("")} at ${config.pressureGPa} GPa (Z=[${validZ.join(",")}], maxAtoms=${tierConfig.maxAtoms}, ${tierConfig.tier} tier)`);
+    console.log(`[PyXtal] Generating ${config.maxStructures} structures for ${elements.join("")} at ${config.pressureGPa} GPa (Z=[${validZ.join(",")}], maxAtoms=${tierConfig.maxAtoms}, ${tierConfig.tier} tier, EOS target ${targetVpa.toFixed(1)} A^3/atom, B0=${b0.toFixed(0)} GPa)`);
 
     try {
       const result = execSync(

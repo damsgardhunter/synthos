@@ -400,16 +400,24 @@ export function getGeneratorMinsep(el1: string, el2: string, pressureGPa: number
 /**
  * Pressure-conditioned volume estimates (Angstrom^3/atom).
  * Returns an array of target volumes for the volume ensemble.
+ *
+ * @param bulkModulusGPa  Compound bulk modulus B0 for the Murnaghan EOS.
+ *   The DEFAULT of 100 GPa is far too soft for high-pressure hydrides
+ *   (B0 ~ 250-400 GPa) — callers should pass a real estimate
+ *   (estimateBulkModulusFromElements). With B0 too low the EOS
+ *   over-compresses; with the cell left uncompressed it stays too large.
  */
 export function pressureVolumeEnsemble(
   volumePerAtom: number,
   pressureGPa: number,
   fractions: number[],
+  bulkModulusGPa: number = 100,
 ): number[] {
-  // Apply Birch-Murnaghan-like compression to the base volume
+  // Murnaghan EOS: V(P)/V0 = (1 + B0'·P/B0)^(-1/B0'), with B0' = 4.
   let compressedV0 = volumePerAtom;
   if (pressureGPa > 0) {
-    const compressionFactor = Math.pow(1 + 4 * pressureGPa / 100, -1 / 4);
+    const B0 = bulkModulusGPa > 0 ? bulkModulusGPa : 100;
+    const compressionFactor = Math.pow(1 + 4 * pressureGPa / B0, -1 / 4);
     compressedV0 = volumePerAtom * Math.max(0.4, compressionFactor);
   }
 

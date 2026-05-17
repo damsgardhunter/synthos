@@ -398,7 +398,14 @@ export async function vegardEstimate(
   };
 }
 
-function estimateBulkModulusFromElements(
+/**
+ * Estimate the compound bulk modulus B0 (GPa) from elemental data.
+ * Exported so the CSP structure generators (AIRSS, PyXtal) compress their
+ * starting cells with the SAME equation of state the Vegard lattice path
+ * uses — instead of a hardcoded soft B0 that left high-pressure cells
+ * factors-of-two too large.
+ */
+export function estimateBulkModulusFromElements(
   elements: string[],
   fractions?: Record<string, number>,
 ): number {
