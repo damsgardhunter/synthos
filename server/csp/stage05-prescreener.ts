@@ -161,14 +161,22 @@ export async function runStage05PreScreen(
               // Step 3: xTB phonon on CHGNet-relaxed best structure
               if (best.positions && best.positions.length > 0) {
                 try {
+                  const latA = best.latticeA ?? 5;
+                  const latB = best.latticeB ?? best.latticeA ?? 5;
+                  const latC = best.latticeC ?? best.latticeA ?? 5;
                   const atoms = best.positions.map(p => ({
                     element: p.element,
-                    x: p.x * (best.latticeA ?? 5),
-                    y: p.y * (best.latticeB ?? best.latticeA ?? 5),
-                    z: p.z * (best.latticeC ?? best.latticeA ?? 5),
+                    x: p.x * latA,
+                    y: p.y * latB,
+                    z: p.z * latC,
                   }));
+                  // Pass the (diagonal) lattice vectors matching the embedding
+                  // above so the phonon calculator can build a periodic
+                  // supercell and compute a real q≠0 dispersion via the
+                  // lattice sum, rather than a Γ-only spectrum.
+                  const latticeVectors = [[latA, 0, 0], [0, latB, 0], [0, 0, latC]];
                   const phononResult = await computeFiniteDisplacementPhonons(
-                    formula, atoms, best.crystalSystem ?? "cubic", 0.015
+                    formula, atoms, best.crystalSystem ?? "cubic", 0.015, latticeVectors
                   );
                   if (phononResult) {
                     phononStable = phononResult.dynamicallyStable;

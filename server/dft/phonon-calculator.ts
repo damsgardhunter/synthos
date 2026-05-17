@@ -579,6 +579,286 @@ function buildDynamicalMatrix(
   return { realPart, imagPart };
 }
 
+// ─── Periodic supercell phonons (real dispersion via lattice sum) ──────────
+//
+// buildDynamicalMatrix above can only be trusted at Γ. Its q≠0 phase uses an
+// atom bounding box as a fake lattice and there is no sum over periodic
+// images, so the resulting "dispersion" is not real phonon physics — it is a
+// finite-cluster vibration twisted by a fictitious phase.
+//
+// A correct dispersion ω(q) is the eigenspectrum of
+//     D_{iα,jβ}(q) = (1/√mᵢmⱼ) Σ_R Φ_{iα,jβ}(0,R) · e^{2πi q·R}
+// where R runs over lattice translations and Φ(0,R) is the force constant
+// between atom i in the home cell and atom j in cell R. Those inter-cell
+// force constants are obtained with the supercell (frozen-phonon) method:
+// build an n₁×n₂×n₃ periodic supercell, displace each atom of one interior
+// reference cell, and read the forces induced on every supercell atom.
+//
+// xTB is run molecularly on the supercell-as-cluster, so this is still a
+// screening-grade approximation (the cluster has surfaces), but the
+// reference cell sits in the interior and — crucially — the lattice sum is
+// now real physics rather than a fabricated phase.
+
+interface SupercellLayout {
+  superAtoms: AtomPosition[];
+  /** indices into superAtoms of the N reference-cell atoms */
+  refIndices: number[];
+  /** per super-atom: which primitive atom (0..N-1) it is an image of */
+  primitiveIndex: number[];
+  /** per super-atom: integer cell offset (l − l_ref) from the reference cell */
+  cellOffset: Array<[number, number, number]>;
+  dims: [number, number, number];
+}
+
+/**
+ * Choose supercell dimensions. Each axis spans at least MIN_SUPERCELL_SPAN Å
+ * so the truncated lattice sum captures the (short-ranged) force constants,
+ * while the total atom count is capped to keep xTB cost bounded. Never goes
+ * below 2 cells per axis — a dispersion needs ≥2 cells along each direction.
+ */
+function chooseSupercellDims(latticeVectors: number[][], N: number): [number, number, number] {
+  const MIN_SUPERCELL_SPAN = 8.0;   // Å
+  const MAX_SUPERCELL_ATOMS = 64;
+  const axisLen = latticeVectors.map(v => Math.hypot(v[0], v[1], v[2]));
+  const dims: [number, number, number] = [
+    Math.max(2, Math.ceil(MIN_SUPERCELL_SPAN / Math.max(axisLen[0], 0.5))),
+    Math.max(2, Math.ceil(MIN_SUPERCELL_SPAN / Math.max(axisLen[1], 0.5))),
+    Math.max(2, Math.ceil(MIN_SUPERCELL_SPAN / Math.max(axisLen[2], 0.5))),
+  ];
+  while (dims[0] * dims[1] * dims[2] * N > MAX_SUPERCELL_ATOMS) {
+    const maxAxis = dims.indexOf(Math.max(...dims));
+    if (dims[maxAxis] <= 2) break;
+    dims[maxAxis]--;
+  }
+  return dims;
+}
+
+/** Tile the primitive cell into an n₁×n₂×n₃ supercell of Cartesian atoms. */
+function buildSupercell(
+  primitiveAtoms: AtomPosition[],
+  latticeVectors: number[][],
+  dims: [number, number, number],
+): SupercellLayout {
+  const N = primitiveAtoms.length;
+  const [n1, n2, n3] = dims;
+  // Reference cell sits in the interior so it is surrounded on all sides.
+  const lRef: [number, number, number] = [n1 >> 1, n2 >> 1, n3 >> 1];
+  const superAtoms: AtomPosition[] = [];
+  const primitiveIndex: number[] = [];
+  const cellOffset: Array<[number, number, number]> = [];
+  const refIndices: number[] = [];
+  for (let l1 = 0; l1 < n1; l1++) {
+    for (let l2 = 0; l2 < n2; l2++) {
+      for (let l3 = 0; l3 < n3; l3++) {
+        const sx = l1 * latticeVectors[0][0] + l2 * latticeVectors[1][0] + l3 * latticeVectors[2][0];
+        const sy = l1 * latticeVectors[0][1] + l2 * latticeVectors[1][1] + l3 * latticeVectors[2][1];
+        const sz = l1 * latticeVectors[0][2] + l2 * latticeVectors[1][2] + l3 * latticeVectors[2][2];
+        const isRef = l1 === lRef[0] && l2 === lRef[1] && l3 === lRef[2];
+        for (let i = 0; i < N; i++) {
+          if (isRef) refIndices.push(superAtoms.length);
+          superAtoms.push({
+            element: primitiveAtoms[i].element,
+            x: primitiveAtoms[i].x + sx,
+            y: primitiveAtoms[i].y + sy,
+            z: primitiveAtoms[i].z + sz,
+          });
+          primitiveIndex.push(i);
+          cellOffset.push([l1 - lRef[0], l2 - lRef[1], l3 - lRef[2]]);
+        }
+      }
+    }
+  }
+  return { superAtoms, refIndices, primitiveIndex, cellOffset, dims };
+}
+
+/**
+ * Supercell force constants: displace each reference-cell atom on the full
+ * supercell and read the induced gradient on every supercell atom.
+ * Returns fc[i*3+α][s*3+β] = Φ_{iα,sβ} = ∂g_{s,β}/∂x_{i,α}, where i is a
+ * reference-cell atom (0..N-1) and s is a super-atom (0..nSuper-1).
+ */
+async function buildSupercellForceConstants(
+  layout: SupercellLayout,
+  calcDir: string,
+  displacementDelta: number,
+): Promise<{ fc: number[][]; calcCount: number; clampedEntries: number } | null> {
+  const { superAtoms, refIndices } = layout;
+  const N = refIndices.length;
+  const nSuper = superAtoms.length;
+  const displacementDeltaBohr = displacementDelta / BOHR_TO_ANG;
+  const fc: number[][] = Array.from({ length: 3 * N }, () => new Array(3 * nSuper).fill(0));
+  let clampedEntries = 0;
+  let calcCount = 0;
+
+  interface Task { i: number; dir: number; plus: AtomPosition[]; minus: AtomPosition[]; }
+  const tasks: Task[] = [];
+  for (let i = 0; i < N; i++) {
+    const superIdx = refIndices[i];
+    for (let dir = 0; dir < 3; dir++) {
+      const plus = superAtoms.map(a => ({ ...a }));
+      const minus = superAtoms.map(a => ({ ...a }));
+      const key = dir === 0 ? "x" : dir === 1 ? "y" : "z";
+      (plus[superIdx] as any)[key] += displacementDelta;
+      (minus[superIdx] as any)[key] -= displacementDelta;
+      tasks.push({ i, dir, plus, minus });
+    }
+  }
+
+  const tasksPerBatch = Math.max(1, Math.floor(MAX_PARALLEL_XTB / 2));
+  for (let batchStart = 0; batchStart < tasks.length; batchStart += tasksPerBatch) {
+    const batch = tasks.slice(batchStart, batchStart + tasksPerBatch);
+    const results = await Promise.all(batch.map(async (t) => {
+      const [plusForces, minusForces] = await Promise.all([
+        runXTBSinglePointAsync(t.plus, calcDir, `sc_p_${t.i}_${t.dir}`),
+        runXTBSinglePointAsync(t.minus, calcDir, `sc_m_${t.i}_${t.dir}`),
+      ]);
+      return { ...t, plusForces, minusForces };
+    }));
+    for (const r of results) {
+      if (!r.plusForces || !r.minusForces) return null;
+      calcCount += 2;
+      const row = r.i * 3 + r.dir;
+      const nComp = 3 * nSuper;
+      for (let comp = 0; comp < nComp; comp++) {
+        // xTB writes the GRADIENT g = ∂E/∂x; Φ = ∂g/∂x = +Δg/(2δ). See the
+        // sign note in buildForceConstantMatrix.
+        let v = (r.plusForces[comp] - r.minusForces[comp]) / (2 * displacementDeltaBohr);
+        if (Math.abs(v) > MAX_FC_ENTRY) {
+          clampedEntries++;
+          v = Math.sign(v) * MAX_FC_ENTRY;
+        }
+        fc[row][comp] = v;
+      }
+    }
+  }
+  return { fc, calcCount, clampedEntries };
+}
+
+/**
+ * Acoustic sum rule on the supercell force constants: a rigid translation of
+ * the whole crystal costs zero energy, so Σ_s Φ_{iα,sβ} = 0 for every
+ * reference atom i. xTB's finite-difference noise violates this; enforce it
+ * exactly by absorbing the residual into each atom's self term (the
+ * super-atom that IS the reference atom). One pass suffices — the reference
+ * rows are independent so no symmetrization is needed.
+ */
+function enforceSupercellASR(fc: number[][], refIndices: number[]): void {
+  const N = refIndices.length;
+  for (let i = 0; i < N; i++) {
+    const selfS = refIndices[i];
+    for (let a = 0; a < 3; a++) {
+      const row = i * 3 + a;
+      const nSuper = fc[row].length / 3;
+      for (let b = 0; b < 3; b++) {
+        let sum = 0;
+        for (let s = 0; s < nSuper; s++) {
+          if (s !== selfS) sum += fc[row][s * 3 + b];
+        }
+        fc[row][selfS * 3 + b] = -sum;
+      }
+    }
+  }
+}
+
+/**
+ * Dynamical matrix at wavevector q via the lattice sum
+ *   D_{iα,jβ}(q) = (1/√mᵢmⱼ) Σ_{s: image of j} Φ_{iα,sβ} · e^{2πi q·n(s)}
+ * q is in fractional reciprocal coordinates, n(s) the integer cell offset.
+ */
+function buildDynamicalMatrixSupercell(
+  fc: number[][],
+  masses: number[],
+  q: [number, number, number],
+  layout: SupercellLayout,
+): { realPart: number[][]; imagPart: number[][] } {
+  const N = masses.length;
+  const dim = 3 * N;
+  const { primitiveIndex, cellOffset } = layout;
+  const nSuper = primitiveIndex.length;
+  const realPart: number[][] = Array.from({ length: dim }, () => new Array(dim).fill(0));
+  const imagPart: number[][] = Array.from({ length: dim }, () => new Array(dim).fill(0));
+
+  for (let s = 0; s < nSuper; s++) {
+    const j = primitiveIndex[s];
+    const n = cellOffset[s];
+    const phase = 2 * Math.PI * (q[0] * n[0] + q[1] * n[1] + q[2] * n[2]);
+    const cosP = Math.cos(phase);
+    const sinP = Math.sin(phase);
+    for (let i = 0; i < N; i++) {
+      const massFactor = 1.0 / Math.sqrt(
+        masses[i] * AMU_TO_ELECTRONMASS * masses[j] * AMU_TO_ELECTRONMASS,
+      );
+      for (let a = 0; a < 3; a++) {
+        const row = i * 3 + a;
+        for (let b = 0; b < 3; b++) {
+          const phi = fc[row][s * 3 + b];
+          realPart[row][j * 3 + b] += phi * massFactor * cosP;
+          imagPart[row][j * 3 + b] += phi * massFactor * sinP;
+        }
+      }
+    }
+  }
+
+  // Hermitian-symmetrize: D(q) must be Hermitian, but xTB force constants are
+  // not exactly symmetric, so the raw sum has a small non-Hermitian part.
+  for (let i = 0; i < dim; i++) {
+    imagPart[i][i] = 0;
+    for (let j = i + 1; j < dim; j++) {
+      const re = (realPart[i][j] + realPart[j][i]) / 2;
+      realPart[i][j] = re;
+      realPart[j][i] = re;
+      const im = (imagPart[i][j] - imagPart[j][i]) / 2;
+      imagPart[i][j] = im;
+      imagPart[j][i] = -im;
+    }
+  }
+  return { realPart, imagPart };
+}
+
+/**
+ * Eigenvalues (ω², atomic units) of a dynamical matrix. At Γ the matrix is
+ * real symmetric; at q≠0 it is Hermitian and is solved via the standard
+ * 2N×2N real-symmetric embedding [[Re,−Im],[Im,Re]] whose 2N eigenvalues
+ * come in equal pairs — one per physical mode.
+ */
+function solveDynamicalMatrix(
+  dyn: { realPart: number[][]; imagPart: number[][] },
+  isGamma: boolean,
+  qLabel: string,
+): number[] {
+  if (isGamma) {
+    return eigenvaluesSymmetric(dyn.realPart);
+  }
+  const dim = dyn.realPart.length;
+  const blockDim = 2 * dim;
+  const block: number[][] = Array.from({ length: blockDim }, () => new Array(blockDim).fill(0));
+  for (let i = 0; i < dim; i++) {
+    for (let j = 0; j < dim; j++) {
+      const re = dyn.realPart[i][j];
+      const im = dyn.imagPart[i][j];
+      block[i][j] = re;
+      block[i][j + dim] = -im;
+      block[i + dim][j] = im;
+      block[i + dim][j + dim] = re;
+    }
+  }
+  const blockEigs = [...eigenvaluesSymmetric(block)].sort((a, b) => a - b);
+  const physicalEigs: number[] = [];
+  let degenerateWarnings = 0;
+  for (let i = 0; i < blockEigs.length; i += 2) {
+    const e1 = blockEigs[i];
+    const e2 = i + 1 < blockEigs.length ? blockEigs[i + 1] : e1;
+    const avg = (e1 + e2) / 2;
+    const relDiff = Math.abs(e1 - e2) / Math.max(Math.abs(avg), 1e-10);
+    if (relDiff > DEGENERATE_PAIR_TOLERANCE) degenerateWarnings++;
+    physicalEigs.push(avg);
+  }
+  if (degenerateWarnings > 0) {
+    console.warn(`[Phonon] q=${qLabel}: ${degenerateWarnings}/${physicalEigs.length} eigenvalue pairs exceed relative tolerance ${DEGENERATE_PAIR_TOLERANCE}`);
+  }
+  return physicalEigs.sort((a, b) => a - b);
+}
+
 function eigenvaluesSymmetric(matrix: number[][]): number[] {
   const n = matrix.length;
   const A: number[][] = matrix.map(row => [...row]);
@@ -874,9 +1154,20 @@ export async function computeFiniteDisplacementPhonons(
   atoms: AtomPosition[],
   crystalSystem: string = "cubic",
   displacementDelta: number = DEFAULT_DISPLACEMENT_DELTA,
+  latticeVectors?: number[][],
 ): Promise<FiniteDisplacementPhononResult | null> {
+  // The supercell (real-dispersion) path is taken only when the caller
+  // supplies lattice vectors (3×3, Å). Without them, single-cell molecular
+  // force constants only support a correct Γ-point spectrum.
+  const hasLattice = !!latticeVectors
+    && latticeVectors.length === 3
+    && latticeVectors.every(v => Array.isArray(v) && v.length === 3);
+
   const structFingerprint = atoms.map(a => `${a.element}:${a.x.toFixed(3)},${a.y.toFixed(3)},${a.z.toFixed(3)}`).sort().join(";");
-  const cacheKey = `${formula.replace(/\s+/g, "")}|${crystalSystem}|d=${displacementDelta}|${structFingerprint.length > 200 ? structFingerprint.slice(0, 200) : structFingerprint}`;
+  const latTag = hasLattice
+    ? `|L=${latticeVectors!.flat().map(x => x.toFixed(2)).join(",")}`
+    : "|noL";
+  const cacheKey = `${formula.replace(/\s+/g, "")}|${crystalSystem}|d=${displacementDelta}${latTag}|${structFingerprint.length > 200 ? structFingerprint.slice(0, 200) : structFingerprint}`;
   const cached = getCachedResult(cacheKey);
   if (cached) {
     return cached;
@@ -892,74 +1183,77 @@ export async function computeFiniteDisplacementPhonons(
     if (atoms.length < 2) return null;
 
     const N = atoms.length;
-    const expectedCalcs = 6 * N + 1;
-    console.log(`[Phonon] ${formula}: Starting finite displacement phonon calculation (${N} atoms, ${expectedCalcs} xTB calculations)`);
-
-    const fcResult = await buildForceConstantMatrix(atoms, calcDir, displacementDelta);
-    if (!fcResult) {
-      console.log(`[Phonon] ${formula}: Force constant matrix construction failed`);
-      return null;
-    }
-
     const masses = atoms.map(a => getAtomicMass(a.element));
-
-    const gammaDynMatrix = buildDynamicalMatrix(fcResult.matrix, masses, [0, 0, 0], atoms);
-    const gammaEigenvalues = eigenvaluesSymmetric(gammaDynMatrix.realPart);
-    const gammaFrequencies = eigenvaluesToFrequencies(gammaEigenvalues);
 
     const symPath = getHighSymmetryPath(N, crystalSystem);
     const qDensity = N <= 3 ? 16 : N <= 6 ? 12 : N <= 10 ? 8 : 6;
     const qPoints = interpolateQPoints(symPath, qDensity);
+    const isGammaQ = (q: [number, number, number]) => q[0] === 0 && q[1] === 0 && q[2] === 0;
 
-    const dispersion: PhononDispersionPoint[] = [];
-    for (const qp of qPoints) {
-      const dynMatrix = buildDynamicalMatrix(fcResult.matrix, masses, qp.q, atoms);
-      const isGamma = qp.q[0] === 0 && qp.q[1] === 0 && qp.q[2] === 0;
-      let eigenvalues: number[];
-      if (isGamma) {
-        eigenvalues = eigenvaluesSymmetric(dynMatrix.realPart);
-      } else {
-        const dim = dynMatrix.realPart.length;
-        const blockDim = 2 * dim;
-        const block: number[][] = Array.from({ length: blockDim }, () => new Array(blockDim).fill(0));
-        for (let i = 0; i < dim; i++) {
-          for (let j = 0; j < dim; j++) {
-            const re = dynMatrix.realPart[i][j];
-            const im = dynMatrix.imagPart[i][j];
-            block[i][j] = re;
-            block[i][j + dim] = -im;
-            block[i + dim][j] = im;
-            block[i + dim][j + dim] = re;
-          }
-        }
-        const blockEigs = eigenvaluesSymmetric(block);
-        const sorted = [...blockEigs].sort((a, b) => a - b);
-        const physicalEigs: number[] = [];
-        let degenerateWarnings = 0;
-        for (let i = 0; i < sorted.length; i += 2) {
-          const e1 = sorted[i];
-          const e2 = i + 1 < sorted.length ? sorted[i + 1] : e1;
-          const avg = (e1 + e2) / 2;
-          const diff = Math.abs(e1 - e2);
-          const scale = Math.max(Math.abs(avg), 1e-10);
-          const relDiff = diff / scale;
-          if (relDiff > DEGENERATE_PAIR_TOLERANCE) {
-            degenerateWarnings++;
-          }
-          physicalEigs.push(avg);
-        }
-        if (degenerateWarnings > 0) {
-          console.warn(`[Phonon] q=[${qp.q.map(v => v.toFixed(3)).join(",")}]: ${degenerateWarnings}/${physicalEigs.length} eigenvalue pairs exceed relative tolerance ${DEGENERATE_PAIR_TOLERANCE}`);
-        }
-        eigenvalues = physicalEigs.sort((a, b) => a - b);
+    let dispersion: PhononDispersionPoint[];
+    let gammaFrequencies: number[];
+    let fcMatrixForCache: number[][];
+    let fcCalcCount: number;
+    let fcClampedEntries: number;
+    let fcEntryCount: number;
+
+    // The supercell must be at least 2×2×2; for large unit cells that
+    // exceeds the xTB cost budget, so fall back to Γ-only there.
+    const SUPERCELL_ATOM_CEILING = 96;
+    const scDims = hasLattice ? chooseSupercellDims(latticeVectors!, N) : null;
+    const scAtomCount = scDims ? scDims[0] * scDims[1] * scDims[2] * N : 0;
+    const doSupercell = hasLattice && scAtomCount <= SUPERCELL_ATOM_CEILING;
+    if (hasLattice && !doSupercell) {
+      console.log(`[Phonon] ${formula}: unit cell too large for the supercell method (would be ${scAtomCount} atoms > ${SUPERCELL_ATOM_CEILING}); falling back to Γ-only.`);
+    }
+
+    if (doSupercell) {
+      // ── Real dispersion: supercell finite-displacement + lattice sum ──
+      const dims = scDims!;
+      const layout = buildSupercell(atoms, latticeVectors!, dims);
+      const nSuper = layout.superAtoms.length;
+      console.log(`[Phonon] ${formula}: supercell phonons — ${dims.join("×")} supercell (${nSuper} atoms), ${6 * N} xTB calculations`);
+
+      const sc = await buildSupercellForceConstants(layout, calcDir, displacementDelta);
+      if (!sc) {
+        console.log(`[Phonon] ${formula}: supercell force-constant construction failed`);
+        return null;
       }
-      const frequencies = eigenvaluesToFrequencies(eigenvalues);
+      enforceSupercellASR(sc.fc, layout.refIndices);
 
-      dispersion.push({
-        qLabel: qp.label,
-        qFrac: qp.q,
-        frequencies,
-      });
+      const gammaDyn = buildDynamicalMatrixSupercell(sc.fc, masses, [0, 0, 0], layout);
+      gammaFrequencies = eigenvaluesToFrequencies(solveDynamicalMatrix(gammaDyn, true, "Γ"));
+
+      dispersion = [];
+      for (const qp of qPoints) {
+        const dyn = buildDynamicalMatrixSupercell(sc.fc, masses, qp.q, layout);
+        const label = qp.label || `(${qp.q.map(v => v.toFixed(2)).join(",")})`;
+        const eigs = solveDynamicalMatrix(dyn, isGammaQ(qp.q), label);
+        dispersion.push({ qLabel: qp.label, qFrac: qp.q, frequencies: eigenvaluesToFrequencies(eigs) });
+      }
+
+      fcMatrixForCache = sc.fc;
+      fcCalcCount = sc.calcCount;
+      fcClampedEntries = sc.clampedEntries;
+      fcEntryCount = (3 * N) * (3 * nSuper);
+    } else {
+      // ── Honest fallback: single-cell molecular force constants give a
+      //    physically correct spectrum only at Γ. Emit Γ alone rather than
+      //    a fabricated q≠0 dispersion (the old bounding-box phase had no
+      //    physical meaning). Supply latticeVectors for a real dispersion.
+      console.log(`[Phonon] ${formula}: no lattice vectors supplied — Γ-point phonons only (${6 * N + 1} xTB calculations); a real q≠0 dispersion needs the supercell method.`);
+      const fcResult = await buildForceConstantMatrix(atoms, calcDir, displacementDelta);
+      if (!fcResult) {
+        console.log(`[Phonon] ${formula}: Force constant matrix construction failed`);
+        return null;
+      }
+      const gammaDyn = buildDynamicalMatrix(fcResult.matrix, masses, [0, 0, 0], atoms);
+      gammaFrequencies = eigenvaluesToFrequencies(eigenvaluesSymmetric(gammaDyn.realPart));
+      dispersion = [{ qLabel: "Γ", qFrac: [0, 0, 0], frequencies: gammaFrequencies }];
+      fcMatrixForCache = fcResult.matrix;
+      fcCalcCount = fcResult.calcCount;
+      fcClampedEntries = fcResult.clampedEntries;
+      fcEntryCount = (3 * N) * (3 * N);
     }
 
     const allDispersionFreqs = dispersion.flatMap(d => d.frequencies);
@@ -985,8 +1279,7 @@ export async function computeFiniteDisplacementPhonons(
       ? stability.physicalImaginaryCount === 0 && !stability.positiveArtifact
       : stability.stable;
 
-    const dim = 3 * N;
-    const clampFraction = fcResult.clampedEntries / (dim * dim);
+    const clampFraction = fcClampedEntries / Math.max(1, fcEntryCount);
     const fcClampedUnreliable = clampFraction > FC_CLAMP_WARNING_THRESHOLD;
 
     if (fcClampedUnreliable) {
@@ -998,7 +1291,7 @@ export async function computeFiniteDisplacementPhonons(
     const result: FiniteDisplacementPhononResult = {
       formula,
       atomCount: N,
-      forceConstantMatrix: fcResult.matrix,
+      forceConstantMatrix: fcMatrixForCache,
       gammaFrequencies,
       dispersion,
       dos,
@@ -1009,9 +1302,9 @@ export async function computeFiniteDisplacementPhonons(
       lowestFrequency: lowestFreq,
       highestFrequency: highestFreq,
       dynamicallyStable: finalStable,
-      calculationCount: fcResult.calcCount,
+      calculationCount: fcCalcCount,
       wallTimeSeconds: wallTime,
-      forceConstantClampedEntries: fcResult.clampedEntries,
+      forceConstantClampedEntries: fcClampedEntries,
     };
 
     if (stability.numericalArtifact) {
@@ -1024,7 +1317,7 @@ export async function computeFiniteDisplacementPhonons(
     if (stability.softModeCount > 0 && !stability.numericalArtifact) {
       console.log(`[Phonon] ${formula}: ${stability.softModeCount} soft mode(s) between -5 and -20 cm⁻¹ (likely ASR residuals from xTB).`);
     }
-    console.log(`[Phonon] ${formula}: Finite displacement complete in ${wallTime.toFixed(1)}s — ${fcResult.calcCount} calcs, stable=${finalStable}, physImag=${stability.physicalImaginaryCount}, softModes=${stability.softModeCount}, freq range [${lowestFreq.toFixed(1)}, ${highestFreq.toFixed(1)}] cm⁻¹${omegaLog ? `, ω_log=${omegaLog.toFixed(1)} cm⁻¹` : ""}${fcResult.clampedEntries > 0 ? `, fc_clamped=${fcResult.clampedEntries}` : ""}`);
+    console.log(`[Phonon] ${formula}: Finite displacement complete in ${wallTime.toFixed(1)}s — ${fcCalcCount} calcs, ${dispersion.length} q-point(s), stable=${finalStable}, physImag=${stability.physicalImaginaryCount}, softModes=${stability.softModeCount}, freq range [${lowestFreq.toFixed(1)}, ${highestFreq.toFixed(1)}] cm⁻¹${omegaLog ? `, ω_log=${omegaLog.toFixed(1)} cm⁻¹` : ""}${fcClampedEntries > 0 ? `, fc_clamped=${fcClampedEntries}` : ""}`);
 
     setCachedResult(cacheKey, result);
 
