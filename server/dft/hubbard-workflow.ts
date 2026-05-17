@@ -568,14 +568,17 @@ export function analyzeHubbardWorkflow(
   let qeHubbardCard = "";
   const qeBlock = ""; // empty — no Hubbard params in &SYSTEM for QE ≥7.1
   if (applyDFTplusU) {
-    // QE ≥7.1 recommends "ortho-atomic" universally — it's more accurate
-    // than plain "atomic" because the projectors are properly orthogonalized
-    // across overlapping orbitals (avoids over/undercounting near bonded
-    // atoms). The old conditional `kind===1 ? "ortho-atomic" : "ortho-atomic"`
-    // was dead code from a refactor; both formulations (Dudarev kind=0,
-    // Liechtenstein kind=1) work with the orthogonalized projector.
-    // See: QE 7.1 Release Notes; Mahajan et al., PRB 104, 134402 (2021).
-    const projector = "ortho-atomic";
+    // Projector type MUST be "atomic". ortho-atomic is more accurate for SCF
+    // (orthogonalized projectors avoid over/undercounting near bonded atoms),
+    // but QE's DFPT+U phonon code (ph.x) does NOT implement ortho-atomic —
+    // it aborts "Error in routine phq_readin: The phonon code for this
+    // Hubbard projectors type is not implemented" (observed for NbC). Since
+    // every QAE candidate goes through the phonon stage for the e-ph coupling
+    // / Tc, the SCF and phonon must share a projector type ph.x supports, and
+    // only "atomic" is implemented in DFPT+U. The small SCF-accuracy loss is
+    // worth a phonon calculation that actually runs.
+    // See: A. Floris et al., PRB 84, 161102 (2011) — DFPT+U (atomic).
+    const projector = "atomic";
     qeHubbardCard += `HUBBARD (${projector})\n`;
     for (const site of sites) {
       if (site.uEffective > 0 && site.orbitalManifold !== "none") {
