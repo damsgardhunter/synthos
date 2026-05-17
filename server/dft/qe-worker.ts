@@ -5106,23 +5106,36 @@ async function runDFPTEPC(
   counts: Record<string, number>,
   jobDir: string,
   pressureGpa: number,
+  residualForce?: number,
 ): Promise<QEDFPTResult> {
   const t0 = Date.now();
   const warnings: string[] = [];
   const prefix = formula.replace(/[^a-zA-Z0-9]/g, "");
-  // Spec: 2×2×2 coarse q-grid for speed.
-  const nqGrid: [number, number, number] = [2, 2, 2];
+  // The DFPT-EPC q-grid is the dominant convergence knob for λ and ω_log.
+  // A fixed 2×2×2 under-converges λ by 20-40% for hydrides — so use the
+  // quality-tiered autoPhononQGrid (which already scales 3-6× for
+  // well-relaxed light systems and stays coarse for large/heavy ones), but
+  // floor every axis at 2: DFPT-EPC with electron_phonon='interpolated'
+  // needs a real q-mesh and cannot run Γ-only.
+  const totalAtoms = Object.values(counts).reduce((s, c) => s + Math.round(c), 0);
+  const autoQ = autoPhononQGrid(elements, totalAtoms, residualForce);
+  const nqGrid: [number, number, number] = [
+    Math.max(2, autoQ[0]), Math.max(2, autoQ[1]), Math.max(2, autoQ[2]),
+  ];
 
   // --- ph.x with electron_phonon = 'interpolated' ---
   const phInput = generatePhononGridInput(prefix, nqGrid[0], nqGrid[1], nqGrid[2]);
   const phInputFile = path.join(jobDir, "dfpt_ph.in");
   fs.writeFileSync(phInputFile, phInput);
 
-  // DFPT ph.x on 2×2×2 is much heavier than screening phonon: each of 8
-  // q-points × 3N perturbations is a mini-SCF. Budget 8 hours (heavy systems
-  // need it), capped below the main phonon 24h cap since DFPT is secondary.
-  const DFPT_PH_TIMEOUT_MS = 8 * 3600 * 1000;
-  console.log(`[QE-Worker] DFPT EPC: running ph.x for ${formula} (${nqGrid.join("×")} q-grid, P=${pressureGpa} GPa, timeout=8h)`);
+  // DFPT ph.x is heavy: each q-point × 3N perturbations is a mini-SCF.
+  // The 8h budget was sized for 2×2×2 (8 q-points); scale it with the
+  // q-point count so a denser grid gets proportionally more wall time,
+  // capped at 20h (below the main phonon 24h cap — DFPT is secondary).
+  const qPointCount = nqGrid[0] * nqGrid[1] * nqGrid[2];
+  const dfptTimeoutHours = Math.min(20, 8 * Math.max(1, qPointCount / 8));
+  const DFPT_PH_TIMEOUT_MS = dfptTimeoutHours * 3600 * 1000;
+  console.log(`[QE-Worker] DFPT EPC: running ph.x for ${formula} (${nqGrid.join("×")} q-grid, ${qPointCount} q-points, P=${pressureGpa} GPa, timeout=${dfptTimeoutHours.toFixed(1)}h)`);
   const phResult = await runQECommand(
     path.posix.join(getQEBinDir(), "ph.x"),
     phInputFile,
@@ -9153,7 +9166,7 @@ ${r2Cell}
     if (scfUsable && dfptGatePass && (opts?.ensembleScore ?? 0) > 0.7 && !opts?.skipEph) {
       console.log(`[QE-Worker] ${formula} qualifies for DFPT EPC (ensembleScore=${opts!.ensembleScore!.toFixed(3)}, phononModes=${result.phonon!.frequencies.length}, lowestFreq=${result.phonon!.lowestFrequency.toFixed(1)} cm⁻¹)`);
       try {
-        result.dfpt = await runDFPTEPC(formula, elements, counts, jobDir, workerPressure);
+        result.dfpt = await runDFPTEPC(formula, elements, counts, jobDir, workerPressure, result.scf?.totalForce ?? undefined);
 
         // Quality-weighted learning: DFPT e-ph success is the strongest signal (weight 4.0)
         if (result.dfpt && (result.dfpt as any).lambda > 0) {

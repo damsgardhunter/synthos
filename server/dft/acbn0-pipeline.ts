@@ -319,19 +319,11 @@ function parseSCFOutput(stdout: string): SCFDOSInfo | null {
     }
   }
 
-  // Another alternative: estimate from the smearing-corrected output
-  // "     number of electrons       =    24.00" and degauss
-  if (isNaN(nEF)) {
-    // Fallback: estimate N(E_F) from total electron count and bandwidth
-    // This is rough but better than nothing
-    const nElMatch = stdout.match(/number of electrons\s*=\s*([\d.]+)/);
-    if (nElMatch) {
-      const nEl = parseFloat(nElMatch[1]);
-      // Very rough estimate: N(E_F) ~ nEl / (2 * bandwidth)
-      // Assume bandwidth ~ 10 eV for metals
-      nEF = nEl / 20.0;
-    }
-  }
+  // If N(E_F) could not be parsed, leave it as NaN → 0 below. Do NOT
+  // fabricate it from electron count / assumed bandwidth (the old
+  // `nEl/20` estimate had no relation to the real DOS and silently fed a
+  // bogus number into μ*); a 0 routes computeMuStar to its honest
+  // default-fallback instead.
 
   if (isNaN(fermiEnergy)) {
     return null;
@@ -446,129 +438,81 @@ function parseHPOutput(stdout: string): HPResult {
 // ---------------------------------------------------------------------------
 
 /**
- * Compute μ* from first-principles screening data.
+ * Compute the Coulomb pseudopotential μ* from the density of states.
  *
- * Uses the Morel-Anderson formula:
- *   μ* = μ / (1 + μ * ln(E_F / ω_D))
+ * μ* enters Tc exponentially, so it must be physically right. We use the
+ * Thomas-Fermi screened-Coulomb model in the free-electron limit, which is
+ * fully determined by the DOS at the Fermi level — no empirical fits:
  *
- * where μ = N(E_F) * V_c is the bare Coulomb pseudopotential,
- * and V_c is estimated from the screened Coulomb interaction.
+ *   bare Coulomb parameter   μ = ⟨⟨N(E_F)·V_screened⟩⟩_FS = ln(1+y)/y
+ *   with                     y = (2k_F/q_TF)² = π³·g(E_F)
  *
- * When hp.x screening data is available, we use:
- *   V_c = 1 / (N(E_F) * ε_eff)
- * where ε_eff is the effective dielectric screening from chi0/chi.
+ * Derivation: for the Thomas-Fermi screened interaction V(q)=4πe²/(q²+q_TF²),
+ * the Fermi-surface average (momentum transfer q∈[0,2k_F], weight q dq) of
+ * N(E_F)·V is q_TF²·ln(1+4k_F²/q_TF²)/(4k_F²) = ln(1+y)/y. In the free-electron
+ * gas g(E_F)=k_F/π² and q_TF²=4π·g(E_F), so y=4k_F²/q_TF²=π³·g(E_F): μ is fixed
+ * by g(E_F) alone. This gives μ≈0.4–0.5 for typical metals (the known range)
+ * and correctly makes high-DOS metals screen harder → lower μ.
  *
- * When only N(E_F) is available, we use the Lindhard/RPA estimate:
- *   μ = N(E_F) * (4π e² / q_TF²)
- * where q_TF is the Thomas-Fermi screening wavevector.
+ * The previous code used μ=1/ε (a screening *ratio*, no N(E_F) dependence at
+ * all) and μ=0.4·√N(E_F) (a √ law with no basis — μ=N(E_F)·V_c is linear in
+ * N(E_F) at fixed V_c). Both are dropped.
+ *
+ * Retardation (Morel-Anderson): μ* = μ / (1 + μ·ln(E_el/ω_ph)), where the
+ * electronic cutoff E_el is the free-electron occupied bandwidth
+ * E_F^band = k_F²/2 (measured from the band bottom — NOT the absolute QE
+ * Fermi level, which is referenced to an arbitrary pseudopotential zero).
+ *
+ * @see P. Morel & P. W. Anderson, Phys. Rev. 125, 1263 (1962)
+ * @see G. Grimvall, "The Electron-Phonon Interaction in Metals" (1981)
  */
 function computeMuStar(opts: {
   nEF: number;                   // states/eV/cell
   fermiEnergy: number;           // eV
   debyeFrequency: number;        // meV
-  chi0?: Record<string, number>; // bare susceptibility per site
-  chi?: Record<string, number>;  // screened susceptibility per site
-  screeningLength?: number;      // Bohr
+  chi0?: Record<string, number>; // (unused — see derivation above)
+  chi?: Record<string, number>;  // (unused)
+  screeningLength?: number;      // (unused)
   cellVolume?: number;           // Angstrom^3
 }): { muStar: number; muBare: number; method: string } {
-  const { nEF, fermiEnergy, debyeFrequency, chi0, chi, screeningLength, cellVolume } = opts;
-  const warnings: string[] = [];
+  const { nEF, debyeFrequency, cellVolume } = opts;
 
-  if (nEF <= 0 || fermiEnergy <= 0 || debyeFrequency <= 0) {
+  if (nEF <= 0 || debyeFrequency <= 0 || !cellVolume || cellVolume <= 0) {
     return { muStar: 0.10, muBare: 0.0, method: "default-fallback" };
   }
 
-  const omegaD_eV = debyeFrequency / 1000.0; // meV to eV
-  let muBare: number;
-  let method: string;
+  // g(E_F): DOS at the Fermi level in atomic units — states/Hartree/Bohr³.
+  const cellVolBohr3 = cellVolume / (BOHR_TO_ANG ** 3);
+  const gEF = (nEF * HARTREE_TO_EV) / cellVolBohr3;
 
-  // Method 1: Use hp.x screening data (chi0, chi)
-  if (chi0 && chi && Object.keys(chi0).length > 0) {
-    // Effective dielectric function: ε = chi0 / chi (for each site)
-    // Average over all Hubbard sites
-    let epsilonSum = 0;
-    let count = 0;
-    for (const el of Object.keys(chi0)) {
-      const c0 = chi0[el];
-      const c = chi[el];
-      if (c0 !== 0 && c !== 0 && Math.abs(c) > 1e-12) {
-        const epsilon = Math.abs(c0 / c);
-        if (epsilon > 0.1 && epsilon < 100) { // sanity check
-          epsilonSum += epsilon;
-          count++;
-        }
-      }
-    }
+  // Bare Coulomb parameter, Thomas-Fermi free-electron model: μ = ln(1+y)/y.
+  const y = Math.PI ** 3 * gEF;
+  const muBare = y > 1e-6 ? Math.log(1 + y) / y : 1.0;
 
-    if (count > 0) {
-      const epsilonEff = epsilonSum / count;
-      // V_c = 1 / (N(E_F) * ε_eff) gives μ = N(E_F) * V_c = 1/ε_eff
-      // But this is too simplified. More accurately:
-      // μ = N(E_F) * <V_screened> where V_screened ~ V_bare / ε
-      // For a metallic system, μ ~ 0.3-0.5 typically
-      muBare = 1.0 / epsilonEff;
-      method = "ACBN0-hp.x-chi";
-    } else {
-      // Fallback to Thomas-Fermi estimate
-      muBare = computeThomasFermiMu(nEF, fermiEnergy, cellVolume);
-      method = "ACBN0-TF-fallback";
-    }
-  }
-  // Method 2: Use Thomas-Fermi screening length
-  else if (screeningLength && screeningLength > 0) {
-    // q_TF = 1/screeningLength (in Bohr^-1)
-    // V_TF(0) = 4π/(q_TF^2) in atomic units
-    // μ = N(E_F) * V_TF(0) / Ω (cell volume)
-    const q_TF = 1.0 / screeningLength; // Bohr^-1
-    const V_TF = 4 * Math.PI / (q_TF * q_TF); // a.u.
-    const cellVolBohr3 = (cellVolume ?? 100) / (BOHR_TO_ANG ** 3);
-    // N(E_F) in states/eV/cell -> states/Hartree/cell
-    const nEF_Ha = nEF * HARTREE_TO_EV;
-    muBare = nEF_Ha * V_TF / cellVolBohr3;
-    method = "ACBN0-TF-screening";
-  }
-  // Method 3: Pure Thomas-Fermi estimate from N(E_F)
-  else {
-    muBare = computeThomasFermiMu(nEF, fermiEnergy, cellVolume);
-    method = "ACBN0-TF-estimate";
-  }
+  // Free-electron occupied bandwidth as the retardation cutoff:
+  // k_F = π²·g(E_F)  [Bohr⁻¹],  E_F^band = k_F²/2  [Hartree].
+  const kF = Math.PI * Math.PI * gEF;
+  const eElEV = Math.max(1.0, 0.5 * kF * kF * HARTREE_TO_EV);
+  const omegaPhEV = debyeFrequency / 1000.0;
 
-  // Sanity check the bare Coulomb parameter — warn for out-of-range values
-  // but don't silently clamp. μ_bare outside [0.05, 2.0] usually signals
-  // either a numerical issue (cellVolume off, N(E_F)=0 in a gap, etc.) or
-  // an extreme regime (very high screening, very low DOS). Clamping
-  // silently corrupts the ML training signal in either case; warning lets
-  // downstream treat the calculation as out-of-distribution.
-  if (muBare < 0.0) {
-    console.warn(`[ACBN0] μ_bare = ${muBare.toFixed(3)} < 0 — unphysical, ` +
-      `forcing to 0.05 as numerical floor. Check N(E_F) extraction and dielectric inputs.`);
-    muBare = 0.05;
-  } else if (muBare < 0.05) {
-    console.warn(`[ACBN0] μ_bare = ${muBare.toFixed(3)} < 0.05 — very small; ` +
-      `expected range 0.1-1.0 for typical metals. Check ε_eff and N(E_F).`);
-  } else if (muBare > 2.0) {
-    console.warn(`[ACBN0] μ_bare = ${muBare.toFixed(3)} > 2.0 — very large; ` +
-      `expected range 0.1-1.0 for typical metals. Check cellVolume and screening.`);
-  }
+  // Morel-Anderson retardation.
+  const logRatio = Math.log(Math.max(eElEV / omegaPhEV, 1.01));
+  let muStar = muBare / (1 + muBare * logRatio);
 
-  // Morel-Anderson retardation
-  const logRatio = Math.log(Math.max(fermiEnergy / omegaD_eV, 1.01));
-  const muStar = muBare / (1 + muBare * logRatio);
+  // μ* is confined to ~0.08–0.20 for conventional superconductors. A value
+  // outside that band signals bad inputs (DOS extracted in a gap, wrong
+  // cell volume, …) rather than exotic physics — warn and clamp so one bad
+  // input cannot blow up the exponential Tc dependence.
+  let method = "thomas-fermi-DOS";
+  if (muStar < 0.08 || muStar > 0.20) {
+    console.warn(`[ACBN0] μ* = ${muStar.toFixed(3)} outside the physical ` +
+      `0.08–0.20 band (μ_bare=${muBare.toFixed(3)}, g(E_F)=${gEF.toExponential(2)} ` +
+      `st/Ha/Bohr³, E_el=${eElEV.toFixed(1)} eV) — clamping; check N(E_F)/cellVolume.`);
+    muStar = Math.min(0.20, Math.max(0.08, muStar));
+    method = "thomas-fermi-DOS-clamped";
+  }
 
   return { muStar, muBare, method };
-}
-
-function computeThomasFermiMu(nEF: number, fermiEnergy: number, cellVolume?: number): number {
-  // Thomas-Fermi screening: q_TF^2 = 4π e^2 N(E_F) / Ω
-  // μ = N(E_F) * V_TF(0) = N(E_F) * 4π/(q_TF^2) * (1/Ω) = 1 (in free electron model)
-  // For real metals, μ ~ 0.3-0.5 due to band structure effects
-  // Empirical correction: μ ~ 0.5 * sqrt(N(E_F)) for typical metals
-  if (nEF <= 0) return 0.3;
-  // Use the dimensionless Coulomb parameter
-  // μ = N(E_F) * V_c where V_c ~ 1/N(E_F) in metals (screening cancels)
-  // The net result is μ ~ 0.3-0.6 for most metals
-  // Scale with sqrt(nEF/typical_nEF) where typical is ~2 states/eV/cell
-  return 0.4 * Math.sqrt(nEF / 2.0);
 }
 
 // ---------------------------------------------------------------------------
