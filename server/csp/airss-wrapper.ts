@@ -78,6 +78,7 @@ function generateCellInput(
   targetVolume: number,
   pressureGPa: number,
   advisedPairDistances?: Record<string, number>,
+  advisedLattice?: { a: number; b: number; c: number },
 ): string {
   // Scale counts by Z
   const scaledCounts: Record<string, number> = {};
@@ -88,7 +89,23 @@ function generateCellInput(
   }
 
   const cellVol = targetVolume * totalAtoms;
-  const a = Math.pow(cellVol, 1 / 3);
+  // Cell SHAPE: honor the LLM-advised lattice anisotropy. A cubic a×a×a seed
+  // forced layered compounds — cuprates have c/a ≈ 3-3.5 — into a cube, so
+  // buildcell could not form the CuO2 planes and produced garbage geometry.
+  // Preserve the advised a:b:c ratios (clamped against LLM hallucination),
+  // scaled to the target cell volume; buildcell rescales the LATTICE_CART to
+  // #TARGVOL while keeping the shape. Falls back to cubic with no advice.
+  let lattA: number, lattB: number, lattC: number;
+  if (advisedLattice && advisedLattice.a > 0 && advisedLattice.b > 0 && advisedLattice.c > 0) {
+    const clampRatio = (r: number) => Math.max(0.25, Math.min(8.0, r));
+    const rB = clampRatio(advisedLattice.b / advisedLattice.a);
+    const rC = clampRatio(advisedLattice.c / advisedLattice.a);
+    lattA = Math.pow(cellVol / (rB * rC), 1 / 3);
+    lattB = lattA * rB;
+    lattC = lattA * rC;
+  } else {
+    lattA = lattB = lattC = Math.pow(cellVol, 1 / 3);
+  }
 
   // Global MINSEP: use the smallest pair distance.
   // If LLM structure advice provides pair distances, use the smallest one as a
@@ -118,9 +135,9 @@ function generateCellInput(
   cell += `#MINSEP=${Math.max(0.5, globalMin).toFixed(2)}\n`;
 
   cell += `\n%BLOCK LATTICE_CART\n`;
-  cell += `${a.toFixed(4)} 0.0000 0.0000\n`;
-  cell += `0.0000 ${a.toFixed(4)} 0.0000\n`;
-  cell += `0.0000 0.0000 ${a.toFixed(4)}\n`;
+  cell += `${lattA.toFixed(4)} 0.0000 0.0000\n`;
+  cell += `0.0000 ${lattB.toFixed(4)} 0.0000\n`;
+  cell += `0.0000 0.0000 ${lattC.toFixed(4)}\n`;
   cell += `%ENDBLOCK LATTICE_CART\n`;
 
   cell += `\n%BLOCK POSITIONS_FRAC\n`;
@@ -317,11 +334,28 @@ export const airssEngine: CSPEngine = {
     let volumeTargets: number[];
     let volSource: string;
     if (llmLat && llmLat.a > 0 && llmLat.b > 0 && llmLat.c > 0 && formulaAtoms > 0) {
-      const llmVolPerAtom = (llmLat.a * llmLat.b * llmLat.c) / formulaAtoms;
+      const llmCellVol = llmLat.a * llmLat.b * llmLat.c;
+      // The LLM returns a conventional/primitive cell — NOT necessarily one
+      // formula unit. For rocksalt NbC it returned the 8-atom conventional
+      // cube (4.5 Å), so dividing by the 2-atom formula unit gave 4× the real
+      // per-atom volume and CHGNet drift-rejected 32/50 candidates. Infer how
+      // many formula units the LLM cell holds by comparing its volume to a
+      // pressure-aware reference per-atom volume, then divide correctly. When
+      // the LLM cell is physical this recovers the true per-atom volume; when
+      // the LLM volume is wildly off, the inferred count absorbs the error and
+      // the result degrades gracefully toward the reference estimate.
+      // (pressureVolumeEnsemble prepends extra-compressed points at P≥100 GPa,
+      // so the central compressed volume is always the LAST element.)
+      const refEns = pressureVolumeEnsemble(estimateVolumePerAtom(elements, counts), config.pressureGPa, [1.0]);
+      const refVPA = refEns[refEns.length - 1] || estimateVolumePerAtom(elements, counts);
+      const cellFormulaUnits = refVPA > 0
+        ? Math.max(1, Math.round(llmCellVol / (formulaAtoms * refVPA)))
+        : 1;
+      const llmVolPerAtom = llmCellVol / (formulaAtoms * cellFormulaUnits);
       // Clamp to a physically sane band before applying the learned bias.
       const base = Math.max(2, Math.min(40, llmVolPerAtom)) * volumeBias;
       volumeTargets = tierConfig.volumeEnsemble.map(f => base * f);
-      volSource = `LLM lattice ${llmLat.a.toFixed(2)}x${llmLat.b.toFixed(2)}x${llmLat.c.toFixed(2)} A -> ${base.toFixed(2)} A^3/atom`;
+      volSource = `LLM lattice ${llmLat.a.toFixed(2)}x${llmLat.b.toFixed(2)}x${llmLat.c.toFixed(2)} A (${cellFormulaUnits} f.u./cell) -> ${base.toFixed(2)} A^3/atom`;
     } else {
       const volPerAtom = estimateVolumePerAtom(elements, counts) * volumeBias;
       volumeTargets = pressureVolumeEnsemble(volPerAtom, config.pressureGPa, tierConfig.volumeEnsemble);
@@ -355,7 +389,7 @@ export const airssEngine: CSPEngine = {
         for (let i = 0; i < batchBudget; i++) {
           const seed = baseSeed + seedCounter++;
           try {
-            const cellInput = generateCellInput(elements, counts, z, targetVol, config.pressureGPa, config.structureAdvice?.pairDistances);
+            const cellInput = generateCellInput(elements, counts, z, targetVol, config.pressureGPa, config.structureAdvice?.pairDistances, config.structureAdvice?.estimatedLattice);
             const inputPath = path.join(workDir, `airss_${seed}.cell`);
             fs.writeFileSync(inputPath, cellInput);
 
