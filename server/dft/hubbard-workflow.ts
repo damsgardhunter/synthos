@@ -242,6 +242,24 @@ const OXIDATION_AWARE_U: Record<string, { lowOx: number; highOx: number; orbital
 /** Electronegative anions that indicate oxidized TM environment */
 const OXIDIZING_ANIONS = new Set(["O", "F", "Cl", "Br"]);
 
+// Electronegative p-block anions whose ionic/covalent-polar bonds pull a
+// transition-metal d-shell into LOCALIZED states — the regime where a Hubbard
+// +U correction is physically meaningful (oxides, fluorides, halides,
+// nitrides, chalcogenides, pnictides). A d-element +U is justified only when
+// at least one of these is present.
+//
+// Carbon, boron, silicon, hydrogen are deliberately EXCLUDED: carbides,
+// borides, silicides and hydrides bond covalently/metallically and leave the
+// TM d-electrons ITINERANT. Pure intermetallics (no p-block anion at all) are
+// likewise itinerant. Applying +U there localizes electrons that are not
+// localized — it inflated NbC's lattice ~8% (a=4.85 vs ~4.47 Å) and pushed
+// the cell to a wrong, negative-pressure minimum. f-shells (4f/5f) are
+// core-like and stay localized regardless of environment, so this gate
+// applies ONLY to the d-manifolds.
+const D_LOCALIZING_ANIONS = new Set([
+  "O", "F", "N", "S", "Se", "Cl", "Br", "I", "P", "As", "Te",
+]);
+
 /**
  * Hund's coupling J values (eV) per element. Used when Liechtenstein (kind=1)
  * is selected for QE, AND exported so the DMFT bundle exporter can supply a
@@ -435,13 +453,29 @@ export function analyzeHubbardWorkflow(
     }
   }
 
+  // A d-manifold +U is physical only in a localizing environment (an
+  // electronegative p-block anion present). Carbides/borides/silicides/
+  // hydrides and pure intermetallics leave the TM d-electrons itinerant —
+  // see D_LOCALIZING_ANIONS.
+  const hasLocalizingAnion = elements.some(el => D_LOCALIZING_ANIONS.has(el));
+
   // Build per-site Hubbard configuration
   for (let i = 0; i < elements.length; i++) {
     const el = elements[i];
     const needs = needsHubbardU(el);
     const orbital = getOrbitalManifold(el);
 
-    if (!needs) {
+    // Itinerant-d gate: skip +U on a d-manifold element when no localizing
+    // anion is present (f-shells stay localized regardless, so this is
+    // d-only). Without it, NbC got +U on itinerant Nb-4d, inflating the
+    // lattice ~8% and pushing vc-relax to a wrong negative-pressure minimum.
+    const isDmanifold = orbital === "3d" || orbital === "4d" || orbital === "5d";
+    const itinerantD = needs && isDmanifold && !hasLocalizingAnion;
+    if (itinerantD) {
+      notes.push(`${el}: +U skipped — ${orbital} electrons are itinerant (no localizing anion present; carbide/boride/silicide/hydride/intermetallic)`);
+    }
+
+    if (!needs || itinerantD) {
       sites.push({
         element: el,
         speciesIndex: i + 1,
