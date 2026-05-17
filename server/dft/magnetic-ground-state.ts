@@ -139,6 +139,26 @@ const WEAK_MAGNETIC = new Set([
 /** Anion/ligand elements that mediate superexchange */
 const EXCHANGE_MEDIATORS = new Set(["O", "F", "S", "Se", "Te", "As", "P", "N"]);
 
+/**
+ * Convert a moment in Bohr magnetons (μB) to a QE `starting_magnetization`
+ * seed, which is a FRACTIONAL spin polarization in [-1, 1] — NOT a moment.
+ *
+ * QE defines `starting_magnetization(i)` as (n_up - n_dw)/(n_up + n_dw) over
+ * the valence electrons of species i; the physical moment relaxes from there.
+ * The STRONG_MAGNETIC table stores μB moments (Fe 2.2 … Ho 10.6), so feeding
+ * them in raw makes QE clamp every value > 1 to 1.0 — all strong magnets seed
+ * identically and per-element differentiation is lost.
+ *
+ * For a symmetry-breaking SEED the exact magnitude is not critical; what
+ * matters is the sign and a non-trivial fraction. Map μB → [0.3, 0.9] so
+ * relative ordering is preserved in the mid-range while extremes saturate.
+ */
+function toFractionalSeed(momentMuB: number): number {
+  const sign = momentMuB < 0 ? -1 : 1;
+  const frac = Math.min(0.9, Math.max(0.3, Math.abs(momentMuB) / 4.0));
+  return sign * frac;
+}
+
 // ─── Convergence thresholds ──────────────────────────────────────────
 
 /** Initial triage conv_thr — tightened from 1e-5 to 1e-6 for reliable energy ordering */
@@ -415,7 +435,9 @@ function buildMagnetizationBlock(
     const el = elements[i];
     const strongMag = STRONG_MAGNETIC[el];
     const isWeak = WEAK_MAGNETIC.has(el);
-    let mag = strongMag ?? (isWeak ? 0.3 : 0.0);
+    // strongMag is a μB moment — convert to a QE fractional seed. The 0.3 weak
+    // seed is already a valid fraction.
+    let mag = strongMag !== undefined ? toFractionalSeed(strongMag) : (isWeak ? 0.3 : 0.0);
 
     switch (ordering) {
       case "NM":
@@ -478,7 +500,7 @@ function buildMagnetizationBlock(
         break;
     }
 
-    lines += `  starting_magnetization(${i + 1}) = ${mag.toFixed(1)},\n`;
+    lines += `  starting_magnetization(${i + 1}) = ${mag.toFixed(2)},\n`;
   }
 
   return lines;
@@ -508,7 +530,8 @@ function buildNoncollinearMagBlock(
     // for some structures (e.g., cuprates near AFM Néel point) could trap
     // SCF in a wrong magnetic configuration. Magnetic species below
     // dominate symmetry-breaking via their strong_mag / weak_mag values.
-    const mag = strongMag ?? (isWeak ? 0.3 : 0.0);
+    // strongMag is a μB moment — convert to a QE fractional seed in [-1,1].
+    const mag = strongMag !== undefined ? toFractionalSeed(strongMag) : (isWeak ? 0.3 : 0.0);
 
     lines += `  starting_magnetization(${i + 1}) = ${mag.toFixed(2)},\n`;
 
@@ -549,7 +572,7 @@ function convertToAngleFormat(collinearBlock: string): string {
       const mag = parseFloat(match[2]);
       const absMag = Math.abs(mag);
       const angle1 = mag < 0 ? 180.0 : 0.0;
-      result += `  starting_magnetization(${idx}) = ${absMag.toFixed(1)},\n`;
+      result += `  starting_magnetization(${idx}) = ${absMag.toFixed(2)},\n`;
       result += `  angle1(${idx}) = ${angle1.toFixed(1)},\n`;
       result += `  angle2(${idx}) = 0.0,\n`;
     }

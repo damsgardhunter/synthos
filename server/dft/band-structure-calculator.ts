@@ -934,7 +934,22 @@ function analyzeBands(
     }
   }
 
-  const isMetallicAlongPath = bandCrossings.length > 0;
+  // A band that never changes sign across E_F can still be partially
+  // occupied — metallic — if it grazes within the electronic smearing
+  // window. The SCF uses Marzari-Vanderbilt smearing (degauss = 0.02 Ry);
+  // a state within ~0.1 eV of E_F carries fractional occupation. The pure
+  // sign-change test above misses such grazing bands (e.g. a band whose
+  // maximum sits 0.05 eV below E_F), wrongly classifying the material
+  // insulating. Detect near-Fermi bands in addition to true crossings.
+  const FERMI_WINDOW_EV = 0.10;
+  let hasNearFermiBand = false;
+  for (const kpt of eigenvalues) {
+    for (const e of kpt.energies) {
+      if (e !== undefined && Math.abs(e) < FERMI_WINDOW_EV) { hasNearFermiBand = true; break; }
+    }
+    if (hasNearFermiBand) break;
+  }
+  const isMetallicAlongPath = bandCrossings.length > 0 || hasNearFermiBand;
 
   let bandGapAlongPath = 0;
   if (!isMetallicAlongPath) {
@@ -1304,23 +1319,42 @@ export async function computeDFTBandStructure(
     // For nspin=2, QE's bands.x writes "bands.dat.spinup" and
     // "bands.dat.spindown" instead of "bands.dat". Try the spin-resolved
     // files first; if absent fall back to the non-spin-polarized name.
-    // (Properly merging spin-up + spin-down into a single tagged band
-    // structure is a larger refactor — for now we read spin-up as the
-    // representative path, which is correct for non-magnetic systems
-    // and for systems where the two spin channels are similar.)
     const bandsDatCandidates = [
       path.join(jobDir, "bands.dat"),
       path.join(jobDir, "bands.dat.spinup"),
     ];
     const bandsDatPath = bandsDatCandidates.find(p => fs.existsSync(p))
       ?? bandsDatCandidates[0];
-    const bandsDatSpinDownPath = path.join(jobDir, "bands.dat.spindown");
-    if (fs.existsSync(bandsDatSpinDownPath) && !bandsDatPath.endsWith("bands.dat")) {
-      console.log(`[BandCalc] nspin=2 detected — reading spin-up bands from ` +
-        `bands.dat.spinup. Spin-down channel not currently merged into the ` +
-        `returned band structure; gap/metallicity reflect spin-up only.`);
-    }
     const parsed = parseBandsOutput(pwResult.stdout, bandsDatPath, kPath, fermiEnergy);
+
+    // Merge the spin-down channel. Without it, a half-metal (gap in one
+    // spin channel, metallic in the other) is misclassified from the
+    // spin-up channel alone. Both channels share the same k-path and band
+    // count, so concatenating their energies per k-point lets analyzeBands
+    // see the union of states — correct for gap, metallicity and crossings.
+    const bandsDatSpinDownPath = path.join(jobDir, "bands.dat.spindown");
+    if (fs.existsSync(bandsDatSpinDownPath) && !bandsDatPath.endsWith("bands.dat")
+        && parsed.eigenvalues.length > 0) {
+      try {
+        const parsedDown = parseBandsOutput(pwResult.stdout, bandsDatSpinDownPath, kPath, fermiEnergy);
+        if (parsedDown.eigenvalues.length === parsed.eigenvalues.length) {
+          for (let ki = 0; ki < parsed.eigenvalues.length; ki++) {
+            parsed.eigenvalues[ki].energies = [
+              ...parsed.eigenvalues[ki].energies,
+              ...parsedDown.eigenvalues[ki].energies,
+            ];
+          }
+          parsed.nBands += parsedDown.nBands;
+          console.log(`[BandCalc] nspin=2 — merged spin-down channel ` +
+            `(+${parsedDown.nBands} bands); gap/metallicity now reflect both spins`);
+        } else {
+          console.log(`[BandCalc] nspin=2 — spin-down k-point count mismatch ` +
+            `(${parsedDown.eigenvalues.length} vs ${parsed.eigenvalues.length}); using spin-up only`);
+        }
+      } catch (e: any) {
+        console.log(`[BandCalc] nspin=2 — failed to parse spin-down channel: ${e?.message ?? e}`);
+      }
+    }
 
     result.eigenvalues = parsed.eigenvalues;
     result.nBands = parsed.nBands;

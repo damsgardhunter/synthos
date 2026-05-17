@@ -749,6 +749,14 @@ export function computePhononDOS(frequencies: number[]): { dos: PhononDOSBin[]; 
   }
 
   const positiveFreqs = allFreqs.filter(f => f > 1);
+  // A genuine soft/imaginary mode (below -20 cm⁻¹, i.e. beyond ASR/acoustic
+  // numerical residuals) means the structure is dynamically UNSTABLE. ω_log
+  // and the Allen-Dynes Tc derived from it are then physically meaningless —
+  // computing them from only the positive-mode subset silently hides the
+  // instability and yields a Tc for a structure that cannot exist. Return
+  // ω_log = null in that case so downstream Tc estimation is skipped.
+  const SOFT_MODE_CM1 = -20;
+  const hasSoftMode = allFreqs.some(f => f < SOFT_MODE_CM1);
   // Allen-Dynes ω_log = exp[ (2/λ) ∫ dω α²F(ω)/ω · ln(ω) ]. With α²F unknown,
   // the DOS-only approximation is α²F(ω) ∝ F(ω) ≈ const per discrete mode,
   // giving the 1/ω-weighted log-average below. An UNWEIGHTED mean of ln(ω)
@@ -758,7 +766,7 @@ export function computePhononDOS(frequencies: number[]): { dos: PhononDOSBin[]; 
   // physics-engine.ts and feeds directly into Allen-Dynes Tc, the unweighted
   // version inflated Tc predictions systematically.
   let omegaLog: number | null = null;
-  if (positiveFreqs.length > 0) {
+  if (positiveFreqs.length > 0 && !hasSoftMode) {
     let invSum = 0;
     let weightedLnSum = 0;
     for (const f of positiveFreqs) {

@@ -74,6 +74,11 @@ RY_TO_MEV = RY_TO_EV * 1000.0
 K_BOLTZMANN_EV = 8.617333262e-5  # eV/K
 HBAR_EV_S = 6.582119569e-16  # eV·s
 MAX_SSCHA_ITERATIONS = 20
+# A mode is counted as a genuine imaginary (dynamically unstable) mode only
+# below this threshold. Modes in (-5, 0) cm^-1 are ASR/numerical residuals,
+# not real instabilities. Used for BOTH harmonic and anharmonic counts so
+# the harmonic-vs-anharmonic stability comparison is on equal footing.
+IMAGINARY_MODE_THRESHOLD_CM = -5.0
 MAX_FORCE_CALCS = 2000  # absolute safety cap on total DFT calls
 PW_TIMEOUT_S = 3600  # 1 hour per SCF
 TOTAL_TIMEOUT_S = 86400  # 24 hours total
@@ -379,8 +384,14 @@ def omega_log_inv_weighted(freqs_cm: np.ndarray) -> float:
     modes and underweights the low-frequency acoustic modes that physically
     dominate omega_log, systematically overestimating it -> overestimating the
     Allen-Dynes Tc. Returns omega_log in cm^-1, or 0.0 if no positive modes.
+
+    The 5.0 cm^-1 floor excludes the 3 Gamma acoustic branches (which are ~0
+    by translational symmetry but land at a few cm^-1 from ASR residuals).
+    Without it, the pure 1/w weighting gives an acoustic residual at ~2 cm^-1
+    several hundred times the weight of a real optical mode, collapsing
+    omega_log toward zero. Matches the one-shot fallback path's cutoff.
     """
-    w = freqs_cm[freqs_cm > 1.0]
+    w = freqs_cm[freqs_cm > 5.0]
     if w.size == 0:
         return 0.0
     inv = 1.0 / w
@@ -420,8 +431,8 @@ def run_sscha_with_library(args) -> dict:
     dyn = CC.Phonons.Phonons(args.dyn_prefix, nqirr=args.nqirr)
 
     # Check for imaginary frequencies (stability)
-    w_harm, _ = dyn.DyagDinQ(0)  # Gamma point
-    n_imag = np.sum(w_harm < 0)
+    w_harm, _ = dyn.DyagDinQ(0)  # Gamma point, frequencies in Ry
+    n_imag = int(np.sum(np.asarray(w_harm) * CC.Units.RY_TO_CM < IMAGINARY_MODE_THRESHOLD_CM))
     if n_imag > 0:
         log(f"  {n_imag} imaginary modes at Gamma — structure may be dynamically unstable")
 
@@ -512,8 +523,13 @@ def run_sscha_with_library(args) -> dict:
             total_force_calcs += 1
 
             if result["success"]:
-                ensemble.forces[ic] = result["forces"]
-                ensemble.energies[ic] = result["energy"]
+                # pw.x reports forces in Ry/Bohr and energy in Ry, but the
+                # python-sscha Ensemble (cellconstructor convention) expects
+                # forces in eV/Angstrom and energies in eV. Without this
+                # conversion the SSCHA gradient is wrong by RY_TO_EV/BOHR_TO_ANG
+                # (~25.7x) and the minimizer diverges or yields garbage modes.
+                ensemble.forces[ic] = result["forces"] * (RY_TO_EV / BOHR_TO_ANG)
+                ensemble.energies[ic] = result["energy"] * RY_TO_EV
             else:
                 failed_configs += 1
                 log(f"    config {ic} failed: {result.get('error', 'unknown')}")
@@ -555,13 +571,31 @@ def run_sscha_with_library(args) -> dict:
     # latest minimizer dyn — the converged one when converged (captured in
     # the is_converged() branch above), or the last iteration's otherwise.
     final_dyn = supercell
+    # The physically meaningful anharmonic phonon spectrum is the eigenvalues
+    # of the FREE-ENERGY HESSIAN d2F/du2, NOT minim.dyn. minim.dyn is the SSCHA
+    # AUXILIARY dynamical matrix — the trial Gaussian's force constants — which
+    # is positive-definite by construction near a minimum and therefore can
+    # never reveal the anharmonic instabilities this pipeline is meant to
+    # detect. The Hessian, by contrast, can have imaginary eigenvalues even
+    # when the auxiliary matrix is real (cellconstructor get_free_energy_hessian).
+    hessian_source = "free-energy-hessian"
+    try:
+        # Reweight the last ensemble onto the final (converged) dyn, then
+        # take the free-energy Hessian.
+        ensemble.update_weights(final_dyn, T)
+        hessian_dyn = ensemble.get_free_energy_hessian()
+        w_anh, _ = hessian_dyn.DyagDinQ(0)
+    except Exception as e:
+        log(f"  WARNING: free-energy Hessian unavailable ({e}); falling back to "
+            f"SSCHA auxiliary matrix — anharmonic instabilities will NOT be detected")
+        hessian_source = "auxiliary-matrix"
+        w_anh, _ = final_dyn.DyagDinQ(0)
     # cellconstructor's DyagDinQ returns Gamma frequencies in RYDBERG atomic
     # units (per its docstring), NOT cm^-1. Every consumer below — the >1.0
     # positive-mode filter, the <-5.0 imaginary count, omega_log_inv_weighted,
     # and the *0.12398 cm^-1->meV conversion — assumes cm^-1. Without this
     # rescaling w_anh stays ~0.009 Ry for a real ~1000 cm^-1 phonon, so
     # positive_w is always empty and omegaLogAnharmonic is silently always 0.
-    w_anh, _ = final_dyn.DyagDinQ(0)
     w_anh = np.asarray(w_anh) * CC.Units.RY_TO_CM
 
     # Compute omega_log (anharmonic)
@@ -581,7 +615,7 @@ def run_sscha_with_library(args) -> dict:
     final_free_energy = free_energy_history[-1] if free_energy_history else 0.0
 
     # Check for remaining imaginary modes (anharmonic stability)
-    n_imag_anh = int(np.sum(w_anh < -5.0))  # threshold: -5 cm^-1
+    n_imag_anh = int(np.sum(w_anh < IMAGINARY_MODE_THRESHOLD_CM))
 
     elapsed_total = time.time() - start_time
 
@@ -598,6 +632,7 @@ def run_sscha_with_library(args) -> dict:
         "nImaginaryModes": n_imag_anh,
         "anharmonicFreqsCm": [float(x) for x in w_anh.tolist()],
         "harmonicImaginaryCount": int(n_imag),
+        "hessianSource": hessian_source,
         "elapsedSeconds": round(elapsed_total, 1),
         "method": "SSCHA-full",
     }
@@ -668,7 +703,7 @@ def run_sscha_fallback(args) -> dict:
     log(f"  Unit cell: {nat} atoms, {len(harmonic_freqs_cm)} modes")
     log(f"  Harmonic freqs (cm^-1): {harmonic_freqs_cm[:6]}")
 
-    n_imag_harm = int(np.sum(np.array(harmonic_freqs_cm) < -1.0))
+    n_imag_harm = int(np.sum(np.array(harmonic_freqs_cm) < IMAGINARY_MODE_THRESHOLD_CM))
 
     # Build species list from pseudopotential directory. Two bugs in the
     # previous version:
@@ -845,6 +880,24 @@ def run_sscha_fallback(args) -> dict:
         # Symmetrize force constant matrix
         Phi = 0.5 * (Phi + Phi.T)
 
+        # Acoustic sum rule: a rigid translation of the whole crystal must
+        # cost zero energy, i.e. sum_j Phi[3i+a, 3j+b] = 0 for every atom i.
+        # A least-squares fit from noisy stochastic displacements violates
+        # this, so the three Gamma acoustic branches come out at spurious
+        # nonzero (often imaginary) frequencies — and ASR violation also
+        # shifts the optical modes. Enforce it on the self-blocks and
+        # re-symmetrize; iterate so both constraints hold to numerical noise.
+        nat_fit = Phi.shape[0] // 3
+        for _ in range(5):
+            for i in range(nat_fit):
+                si = slice(3 * i, 3 * i + 3)
+                off_diag_sum = np.zeros((3, 3))
+                for j in range(nat_fit):
+                    if j != i:
+                        off_diag_sum += Phi[si, 3 * j:3 * j + 3]
+                Phi[si, si] = -off_diag_sum
+            Phi = 0.5 * (Phi + Phi.T)
+
         # Mass-weight the dynamical matrix: D_ij = Phi_ij / sqrt(m_i · m_j).
         # Without this, the diagonalization assumes m=1 amu for every atom —
         # heavy elements end up with ω too high by sqrt(m_amu): Li by 2.6×,
@@ -890,7 +943,7 @@ def run_sscha_fallback(args) -> dict:
         else:
             omega_log_meV = 0.0
 
-        n_imag_anh = int(np.sum(anh_freqs_cm < -5.0))
+        n_imag_anh = int(np.sum(anh_freqs_cm < IMAGINARY_MODE_THRESHOLD_CM))
         fit_converged = True
 
     except Exception as e:
@@ -900,15 +953,36 @@ def run_sscha_fallback(args) -> dict:
         n_imag_anh = n_imag_harm
         fit_converged = False
 
-    # Estimate free energy from energies
-    mean_energy = np.mean(energies_list) if energies_list else 0.0
+    # Free energy. The mean DFT total energy ⟨E⟩ is NOT a free energy — it has
+    # no vibrational entropy, no zero-point energy. Add the harmonic vibrational
+    # free energy evaluated on the fitted (anharmonic-effective) frequencies:
+    #   F(T) = ⟨E⟩ + Σ_modes [ ½ħω + k_BT·ln(1 - e^(-ħω/k_BT)) ]
+    # This omits the ⟨V - V_harm⟩ correction of full SSCHA, so it is a
+    # self-consistent-harmonic free energy, not the exact SSCHA F — but it is
+    # a genuine free energy. Returned in Ry to match the library path's
+    # minim.get_free_energy(). Imaginary modes have no real free-energy
+    # contribution and are skipped; freeEnergy is None if any are present.
+    mean_energy_ry = float(np.mean(energies_list)) if energies_list else 0.0
+    free_energy = None
+    if mean_energy_ry != 0.0 and n_imag_anh == 0:
+        f_vib_eV = 0.0
+        for fcm in anh_freqs_cm:
+            if fcm <= 5.0:
+                continue  # skip acoustic/near-zero modes
+            hbar_omega_eV = float(fcm) * 1.239841984e-4  # cm^-1 → eV
+            f_vib_eV += 0.5 * hbar_omega_eV
+            if T > 0:
+                x = hbar_omega_eV / (K_BOLTZMANN_EV * T)
+                if x < 50:
+                    f_vib_eV += K_BOLTZMANN_EV * T * np.log(1.0 - np.exp(-x))
+        free_energy = mean_energy_ry + f_vib_eV / RY_TO_EV
 
     elapsed_total = time.time() - start_time
 
     return {
         "omegaLogAnharmonic": float(omega_log_meV),
         "lambdaAnharmonic": None,  # needs EPW coupling data
-        "freeEnergy": float(mean_energy),
+        "freeEnergy": (float(free_energy) if free_energy is not None else None),
         "converged": fit_converged,
         "iterations": 1,
         "nConfigs": total_force_calcs,

@@ -773,6 +773,10 @@ async function runStage1AtomicRelax(
   // the cheaper screening-quality SCF settings (the tight magnetic settings
   // are reserved for the nspin=2 AFM SCF that follows the relax).
   const scfConvThr = relaxMagnetic ? "1.0d-7" : "1.0d-4";        // tighter for magnetic
+  // Ionic (BFGS) energy-convergence threshold. 1e-4 Ry ≈ 1.4 meV/atom — too
+  // coarse to resolve a magnetic ground state, where FM/AFM configurations
+  // differ by only a few meV/atom. Tighten to 1e-5 Ry for magnetic relaxations.
+  const etotConvThr = relaxMagnetic ? "1.0d-5" : "1.0d-4";
   const mixingBeta = relaxMagnetic ? 0.2 : 0.4;                  // gentler nspin=2 mixing
   const degauss = relaxMagnetic ? 0.005 : 0.015;                 // narrower smearing for metallic magnets
   const electronMaxstep = relaxMagnetic ? 300 : 200;             // give magnetic SCF more room
@@ -788,7 +792,7 @@ async function runStage1AtomicRelax(
   tprnfor = .true.,
   tstress = .true.,
   forc_conv_thr = ${STAGE1_FORCE_THR.toExponential(1).replace(/e([+-])/, "d$1")},
-  etot_conv_thr = 1.0d-4,
+  etot_conv_thr = ${etotConvThr},
   nstep = 100,
   max_seconds = ${relaxMaxSeconds},
 /
@@ -1111,11 +1115,14 @@ ${cellBlock}
   // Residual pressure check. For ambient (P=0), absolute |P| must be small.
   // For finite-pressure calcs, the residual must be close to the TARGET
   // (QE's press_conv_thr handles this internally but we double-check the
-  // parsed value). 5 kbar tolerance for high-P; tightens to 2 kbar ambient.
+  // parsed value). The tolerance is ABSOLUTE (10 kbar high-P, 2 kbar ambient),
+  // NOT a fraction of the target: a 2%-of-target tolerance reached 60 kbar
+  // (6 GPa) at 300 GPa, which shifts a hydride volume by ~2% and materially
+  // changes λ/Tc — far looser than QE's own press_conv_thr (~0.5-1 kbar).
   if (parsed.pressure != null) {
     const targetKbar = pressureGPa * 10.0;
     const residualKbar = Math.abs(parsed.pressure - targetKbar);
-    const tolKbar = pressureGPa === 0 ? 2.0 : Math.max(5.0, 0.02 * targetKbar);
+    const tolKbar = pressureGPa === 0 ? 2.0 : 10.0;
     if (residualKbar > tolKbar) {
       failReasons.push(
         `residual pressure ${parsed.pressure.toFixed(1)} kbar deviates from target ` +

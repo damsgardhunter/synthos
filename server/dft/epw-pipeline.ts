@@ -518,6 +518,7 @@ export function generateEPWInput(opts: {
   degaussw?: number;  // eV
   isHydride?: boolean;
   fermiEnergy?: number; // eV (absolute) — needed to align disentanglement window
+  muc?: number;       // Morel-Anderson Coulomb pseudopotential μ*
 }): string {
   const {
     prefix, coarseKGrid, coarseQGrid, fineKGrid, fineQGrid,
@@ -528,6 +529,12 @@ export function generateEPWInput(opts: {
     isHydride = false,
     fermiEnergy = 0.0,
   } = opts;
+
+  // Morel-Anderson Coulomb pseudopotential μ* for the Eliashberg solver.
+  // EPW's `muc` default is build-dependent (0.0 in some builds), and μ*=0
+  // grossly overestimates Tc. Set it explicitly: 0.13 for hydrides (typical
+  // range 0.10-0.16 in the LaH10/H3S literature), 0.10 for conventional BCS.
+  const muc = opts.muc ?? (isHydride ? 0.13 : 0.10);
 
   const fsthick = opts.fsthick ?? (isHydride ? 1.0 : 0.4);
   const ntyp = elements.length;
@@ -653,6 +660,7 @@ ${elements.map((el, i) => {
   laniso = .true.,
   limag = .true.,
   lpade = .true.,
+  muc = ${muc.toFixed(3)},
   nstemp = ${nstemp},
   temps = ${temps_min} ${temps_max},
 

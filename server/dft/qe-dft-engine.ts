@@ -2018,6 +2018,28 @@ function fracToCart(
   ];
 }
 
+/**
+ * Inverse of fracToCart: Cartesian → fractional coordinates.
+ *
+ * fracToCart computes cart = f · L where L's ROWS are the lattice vectors,
+ * so f = cart · L⁻¹, i.e. f[j] = Σ_k cart[k]·L⁻¹[k][j]. Note the index
+ * order: it contracts the FIRST index of L⁻¹, not the second. Multiplying
+ * L⁻¹·cart as a plain matrix-vector product (contracting the second index)
+ * gives (L⁻¹)·d instead of (L⁻¹)ᵀ·d — correct only for orthogonal cells
+ * where L⁻¹ is diagonal, but wrong for hexagonal/monoclinic/triclinic cells.
+ */
+function cartToFrac(
+  cx: number, cy: number, cz: number,
+  vecs: LatticeVectors,
+): [number, number, number] {
+  const inv = invertLattice3x3(vecs);
+  return [
+    cx * inv[0][0] + cy * inv[1][0] + cz * inv[2][0],
+    cx * inv[0][1] + cy * inv[1][1] + cz * inv[2][1],
+    cx * inv[0][2] + cy * inv[1][2] + cz * inv[2][2],
+  ];
+}
+
 function invertLattice3x3(vecs: LatticeVectors): LatticeVectors {
   const [a, b, c] = vecs;
   const det =
@@ -2041,10 +2063,7 @@ function pbcMinImageDist(
   const dy = by - ay;
   const dz = bz - az;
 
-  const inv = invertLattice3x3(vecs);
-  let f1 = inv[0][0] * dx + inv[0][1] * dy + inv[0][2] * dz;
-  let f2 = inv[1][0] * dx + inv[1][1] * dy + inv[1][2] * dz;
-  let f3 = inv[2][0] * dx + inv[2][1] * dy + inv[2][2] * dz;
+  let [f1, f2, f3] = cartToFrac(dx, dy, dz, vecs);
 
   f1 -= Math.round(f1);
   f2 -= Math.round(f2);
@@ -2236,7 +2255,6 @@ function findPairwiseMinDistSpatial(
     return computePairwiseDistances(atoms, pressureGPa, latticeVecs);
   }
 
-  const inv = invertLattice3x3(latticeVecs);
   const nGrid = 4;
 
   const grid = new Map<string, number[]>();
@@ -2244,9 +2262,7 @@ function findPairwiseMinDistSpatial(
 
   for (let i = 0; i < atoms.length; i++) {
     const a = atoms[i];
-    let f1 = inv[0][0] * a.x + inv[0][1] * a.y + inv[0][2] * a.z;
-    let f2 = inv[1][0] * a.x + inv[1][1] * a.y + inv[1][2] * a.z;
-    let f3 = inv[2][0] * a.x + inv[2][1] * a.y + inv[2][2] * a.z;
+    let [f1, f2, f3] = cartToFrac(a.x, a.y, a.z, latticeVecs);
     f1 = f1 - Math.floor(f1);
     f2 = f2 - Math.floor(f2);
     f3 = f3 - Math.floor(f3);
@@ -2966,12 +2982,9 @@ function scaleStructureAnisotropic(
   for (const a of atoms) { cx += a.x; cy += a.y; cz += a.z; }
   cx /= atoms.length; cy /= atoms.length; cz /= atoms.length;
 
-  const inv = invertLattice3x3(latticeVecs);
   const scaledAtoms = atoms.map(a => {
     const dx = a.x - cx, dy = a.y - cy, dz = a.z - cz;
-    const f1 = inv[0][0] * dx + inv[0][1] * dy + inv[0][2] * dz;
-    const f2 = inv[1][0] * dx + inv[1][1] * dy + inv[1][2] * dz;
-    const f3 = inv[2][0] * dx + inv[2][1] * dy + inv[2][2] * dz;
+    const [f1, f2, f3] = cartToFrac(dx, dy, dz, latticeVecs);
     const sf1 = f1 * abScale, sf2 = f2 * abScale, sf3 = f3 * cScale;
     const x = sf1 * v0[0] + sf2 * v1[0] + sf3 * v2[0] + cx;
     const y = sf1 * v0[1] + sf2 * v1[1] + sf3 * v2[1] + cy;
@@ -3708,7 +3721,7 @@ export async function runXTBOptimization(formula: string, pressureGpa: number = 
   const calcDir = path.join(WORK_DIR, calcId);
   fs.mkdirSync(calcDir, { recursive: true });
 
-  let { atoms, prototype, latticeVecs: structLatticeVecs } = generateCrystalStructure(formula, pressureGpa);
+  let { atoms, prototype } = generateCrystalStructure(formula, pressureGpa);
   if (atoms.length < 2) return null;
 
   if (pressureGpa > 0) {
@@ -3755,17 +3768,18 @@ export async function runXTBOptimization(formula: string, pressureGpa: number = 
       optimizedAtoms = atoms;
     }
 
-    let optimizedEnergy = parseXTBEnergy(output) ?? 0;
+    const optimizedEnergy = parseXTBEnergy(output) ?? 0;
 
-    if (pressureGpa > 0 && optimizedAtoms.length > 0) {
-      const pvLattice = structLatticeVecs ?? estimateLatticeFromAtoms(optimizedAtoms);
-      const vol_A3 = Math.max(1, Math.abs(lattice3x3Det(pvLattice)));
-      const eV_per_GPa_A3 = 0.00624151;
-      const pvCorrection = pressureGpa * vol_A3 * eV_per_GPa_A3;
-      const pvHartree = pvCorrection / 27.211386;
-      optimizedEnergy += pvHartree;
-      dftLog(`[DFT] ${formula}: PV correction at ${pressureGpa} GPa: +${pvHartree.toFixed(6)} Eh (V~${vol_A3.toFixed(1)} A^3)`);
-    }
+    // NOTE: no PV / enthalpy correction is applied here. A previous version
+    // added P·V to convert E into an enthalpy H = E + PV, but this was
+    // physically inconsistent: xTB --opt has no cell/pressure constraint, so
+    // the structure relaxes back toward its AMBIENT minimum. The energy is
+    // therefore an ambient-minimum energy, not a compressed-cell energy, and
+    // V here is the ambient/estimated volume — adding P·V_ambient produced
+    // neither E nor a correct H. Worse, optimizedEnergy feeds computeFormationEnergy
+    // whose element references are NOT PV-corrected, so the term corrupted
+    // every high-pressure formation energy by tens of eV. xTB cannot relax at
+    // pressure; the raw total energy is the only self-consistent quantity.
 
     const result: OptimizationResult = {
       optimizedAtoms,

@@ -425,6 +425,11 @@ export function analyzeSOCRequirement(
  *
  * For FM: all atoms angle1=0
  * For AFM: alternate angle1=0 and angle1=180
+ *
+ * `magneticElements` values are moments in Bohr magnetons (μB). QE's
+ * `starting_magnetization` is a FRACTIONAL polarization in [-1, 1], so raw μB
+ * moments > 1 (Fe 2.2, lanthanides 7-11) would be silently clamped to 1.0.
+ * Each moment is mapped to a [0.3, 0.9] fractional seed before emission.
  */
 export function generateNoncollinearMagLines(
   elements: string[],
@@ -439,12 +444,20 @@ export function generateNoncollinearMagLines(
     const mag = magneticElements[el];
     if (mag !== undefined && mag > 0) {
       const angle1 = (isAFM && magIdx % 2 === 1) ? 180.0 : 0.0;
-      lines += `  starting_magnetization(${i + 1}) = ${mag.toFixed(1)},\n`;
+      // μB moment → QE fractional seed in [0.3, 0.9]
+      const seed = Math.min(0.9, Math.max(0.3, mag / 4.0));
+      lines += `  starting_magnetization(${i + 1}) = ${seed.toFixed(2)},\n`;
       lines += `  angle1(${i + 1}) = ${angle1.toFixed(1)},\n`;
       lines += `  angle2(${i + 1}) = 0.0,\n`;
       magIdx++;
     } else {
-      lines += `  starting_magnetization(${i + 1}) = 0.1,\n`;
+      // Non-magnetic atoms (ligands: O, N, As, Te, halogens) start at zero
+      // moment. A nonzero seed (was 0.1) puts a spurious moment on ligands
+      // that QE must relax away — wasted SCF iterations, and near an AFM
+      // Néel point it can trap SCF in the wrong magnetic configuration.
+      // Magnetic species above carry the symmetry-breaking seed. Matches
+      // buildNoncollinearMagBlock in magnetic-ground-state.ts.
+      lines += `  starting_magnetization(${i + 1}) = 0.0,\n`;
       lines += `  angle1(${i + 1}) = 0.0,\n`;
       lines += `  angle2(${i + 1}) = 0.0,\n`;
     }
