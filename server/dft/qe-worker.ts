@@ -2473,7 +2473,11 @@ ${atomicSpecies}
 ATOMIC_POSITIONS {crystal}
 ${atomicPositions}
 K_POINTS {automatic}
-${autoKPoints(latticeA, cOverA, bOverA, undefined, DEFAULT_KSPACING, { stage: "scf", totalAtoms: positions.length })}
+${/* k-grid must use effCOverA (the cell's actual c/a, known-structure value
+     when available) — the SAME c/a generateCellParameters used above. Passing
+     the estimateCOverA heuristic instead mis-sizes the c-axis k-point density
+     for every known-structure compound (LaH10, La2CuO4, MgB2, H3S, ...). */
+  autoKPoints(latticeA, effCOverA, bOverA, undefined, DEFAULT_KSPACING, { stage: "scf", totalAtoms: positions.length })}
 ${cellBlock}
 `;
 }
@@ -3109,7 +3113,7 @@ function autoPhononQGrid(elements: string[], totalAtoms?: number, residualForce?
   return [2, 2, 2];
 }
 
-function generatePhononInput(formula: string, elements: string[] = [], totalAtoms: number = 6, opts?: { maxSeconds?: number; recover?: boolean; tr2Ph?: string; alphaMix?: number; residualForce?: number }): string {
+function generatePhononInput(formula: string, elements: string[] = [], totalAtoms: number = 6, opts?: { maxSeconds?: number; recover?: boolean; tr2Ph?: string; alphaMix?: number; residualForce?: number; isMetallic?: boolean }): string {
   const prefix = formula.replace(/[^a-zA-Z0-9]/g, "");
   const [nq1, nq2, nq3] = autoPhononQGrid(elements, totalAtoms, opts?.residualForce);
   // tr2_ph=1.0d-10: screening threshold — saves 30-50% iterations vs 1e-12
@@ -3137,13 +3141,18 @@ function generatePhononInput(formula: string, elements: string[] = [], totalAtom
   // binary/numerical format that dynmat.x must post-process, and the various
   // parsers fail to match dynmat.x's tabular output → "0 modes" bug.
   const isGammaOnly = nq1 === 1 && nq2 === 1 && nq3 === 1;
-  // Born effective charges Z*_αβ and high-frequency dielectric ε∞.
-  // Required for LO-TO splitting at q=Γ in any system with non-zero ionic
-  // character. ph.x auto-skips Z*/ε∞ if the system is metallic at Ef, so
-  // we can set it unconditionally — cost is only paid for insulators.
-  // Only active when q=Γ is in the q-mesh, which is true for both the
-  // ldisp=.false. (Γ-only) and ldisp=.true. (Γ-included grids) paths.
-  const epsilFlags = "  epsil = .true.,\n  trans = .true.,\n";
+  // No `epsil` — only `trans=.true.` (the lattice-displacement response, i.e.
+  // the phonons themselves). ph.x's phq_readin ABORTS with "no elec. field
+  // with metals" whenever an electric-field response (epsil/zeu/zue) is
+  // requested AND the SCF used smearing occupations (lgauss=.true.). Every QAE
+  // SCF runs `occupations='smearing'` — this is a superconductor pipeline, the
+  // systems are metals — so lgauss is always true and epsil can NEVER be used.
+  // The old `isMetallic===false` gate keyed on parseSCFOutput's gap detection,
+  // which is unrelated to ph.x's occupation-based lgauss check, so epsil still
+  // leaked through for systems QE treats as metallic (BaFe2As2, CaFe2As2 →
+  // crashed phonon runs). Born charges / LO-TO splitting only matter for polar
+  // insulators, which are not superconductors — dropping epsil costs nothing.
+  const epsilFlags = "  trans = .true.,\n";
   if (isGammaOnly) {
     // QE ph.x with ldisp=.false. REQUIRES an explicit q-point card after the
     // namelist. Without it, some QE versions read garbage or crash. Specify
@@ -4157,6 +4166,7 @@ function softValidateGeometry(
   pressureGPa: number = 0,
   cOverA: number = 1.0,
   gammaRad: number = Math.PI / 2,
+  bOverA: number = 1.0,
 ): { valid: boolean; reason: string; warnings: string[] } {
   const warnings: string[] = [];
   if (positions.length === 0) return { valid: false, reason: "No atomic positions", warnings };
@@ -4169,7 +4179,10 @@ function softValidateGeometry(
 
   const totalAtoms = positions.length;
   const sinG = Math.sin(gammaRad);
-  const volumeAng3 = latticeA * latticeA * latticeA * cOverA * sinG;
+  // V = a·b·c·sinγ. Must include bOverA — assuming b=a mis-sized the cell
+  // volume for orthorhombic candidates (b≠a), spuriously failing the
+  // volume-per-atom floor (b>a) or passing an over-dense cell (b<a).
+  const volumeAng3 = latticeA * latticeA * latticeA * bOverA * cOverA * sinG;
   const volumePerAtom = volumeAng3 / totalAtoms;
   const hasHydrogen = positions.some(p => p.element === "H");
   const minVolPerAtom = isHighPressure ? (hasHydrogen ? 1.5 : 3.0) : (hasHydrogen ? 2.5 : 5.0);
@@ -4190,7 +4203,7 @@ function softValidateGeometry(
       fdx -= Math.round(fdx);
       fdy -= Math.round(fdy);
       fdz -= Math.round(fdz);
-      const dist = fracDistAngstrom(fdx, fdy, fdz, latticeA, cOverA, 1.0, gammaRad);
+      const dist = fracDistAngstrom(fdx, fdy, fdz, latticeA, cOverA, bOverA, gammaRad);
       const dMin = minPairDistance(positions[i].element, positions[j].element) * pressureDistScale;
       if (dist < dMin - 1e-3) {
         return {
@@ -5960,14 +5973,14 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       positions = relaxed;
       console.log(`[QE-Worker] Using xTB pre-relaxed geometry for ${formula}`);
 
-      const postXtbGeom = softValidateGeometry(positions, latticeA, true, workerPressure, fpCoverA, fpGamma);
+      const postXtbGeom = softValidateGeometry(positions, latticeA, true, workerPressure, fpCoverA, fpGamma, estimateBOverA(elements, counts));
       if (!postXtbGeom.valid) {
         const xtbRepair = repairStructureGeometry(positions, latticeA, workerPressure, estimateCOverA(elements, counts), estimateBOverA(elements, counts));
         if (xtbRepair.repaired) {
           positions = xtbRepair.positions;
           latticeA = xtbRepair.latticeA;
           console.log(`[QE-Worker] Repaired post-xTB geometry for ${formula} (lattice=${latticeA.toFixed(3)} A)`);
-          const recheck = softValidateGeometry(positions, latticeA, true, workerPressure, fpCoverA, fpGamma);
+          const recheck = softValidateGeometry(positions, latticeA, true, workerPressure, fpCoverA, fpGamma, estimateBOverA(elements, counts));
           if (!recheck.valid) {
             result.error = `Geometry rejected (post-xTB repair failed): ${recheck.reason}`;
             result.failureStage = "geometry";
@@ -7066,8 +7079,44 @@ ${cellBlockEos}
                   prevPressReductionPerStep = pressImproveAbs / ionicSteps;
                 }
               }
+              // Capture this pass's per-pass reduction BEFORE reassigning,
+              // for the futility check below.
+              const forceReductionThisPass = currentForce - refForce;
+              const pressReductionThisPass = (currentPressure != null && refPressure != null)
+                ? Math.abs(currentPressure - pressTarget) - Math.abs(refPressure - pressTarget)
+                : 0;
               currentForce = refForce;
               currentPressure = refPressure;
+
+              // --- Futility early-abort ---
+              // The only other early-stop is "zero improvement"; a refinement
+              // that improves a hair every pass (CaFe2As2: ~0.015 Ry/bohr/pass,
+              // never approaching the 0.001 target) burns all MAX_REFINE_PASSES
+              // — 6 h of wall for a 39% reduction. Such systems are hard-SCF
+              // magnetic/+U cells where each pass fits only a handful of ionic
+              // steps. Using the MEASURED per-pass rates: if neither force nor
+              // pressure can reach its target within 3× the remaining pass
+              // budget (3× = generous margin against single-pass rate noise),
+              // the refinement is stuck — abort and proceed with the best result.
+              const remainingPasses = MAX_REFINE_PASSES - refinePass;
+              const forceNeedsWork = currentForce > PUB_FORCE_THR;
+              const pressNeedsWork = currentPressure != null
+                && Math.abs(currentPressure - pressTarget) > PRESSURE_THR;
+              if (remainingPasses > 0 && (forceNeedsWork || pressNeedsWork)) {
+                const forceLeft = currentForce - PUB_FORCE_THR;
+                const pressLeft = currentPressure != null
+                  ? Math.abs(currentPressure - pressTarget) - PRESSURE_THR : 0;
+                const forceCanConverge = !forceNeedsWork
+                  || (forceReductionThisPass > 0
+                      && Math.ceil(forceLeft / forceReductionThisPass) <= remainingPasses * 3);
+                const pressCanConverge = !pressNeedsWork
+                  || (pressReductionThisPass > 0
+                      && Math.ceil(pressLeft / pressReductionThisPass) <= remainingPasses * 3);
+                if (!forceCanConverge && !pressCanConverge) {
+                  console.log(`[QE-Worker] Refinement futile for ${formula}: after pass ${refinePass}, neither force (${currentForce.toFixed(4)} Ry/bohr, Δ=${forceReductionThisPass.toExponential(2)}/pass) nor P_residual (${currentPressure != null ? Math.abs(currentPressure - pressTarget).toFixed(0) : "N/A"} kbar, Δ=${pressReductionThisPass.toFixed(1)}/pass) can reach target within 3× the ${remainingPasses} remaining passes — aborting refinement, proceeding with best result (bad starting cell — see CSP volume/shape)`);
+                  break;
+                }
+              }
             } else {
               console.log(`[QE-Worker] Refinement pass ${refinePass} no improvement for ${formula}: force ${currentForce.toFixed(6)} → ${refForce.toFixed(6)} (${forceImproved ? "improved" : "worse"}), P_residual=${prevPressResidual.toFixed(1)} → ${refPressResidual.toFixed(1)} kbar (${pressureImproved ? "improved" : "no improvement"}) (wall=${refWall.toFixed(0)}s, steps=${ionicSteps}) — stopping refinement`);
               totalRefineWallSec += refWall;
@@ -8175,8 +8224,18 @@ ${r2Cell}
       // then 16. Hard cap at 16× to stay within memory on c2-standard workers.
       try {
         const pgTargetQGrid = autoPhononQGrid(elements, positions.length, result.scf?.totalForce ?? undefined);
+        // The phonon-prep k-grid must use the SAME c/a and b/a that
+        // generateSCFInputWithParams (cOverA2/bOverA2) builds the cell with —
+        // i.e. the known-structure ratios when a literature entry exists, the
+        // estimate otherwise. Passing the bare estimate mis-sized the k-grid
+        // anisotropy vs the actual phonon-prep cell for every known compound.
+        const pgKnownStruct = lookupKnownStructure(formula);
+        const pgKgridCoverA = pgKnownStruct?.latticeC
+          ? pgKnownStruct.latticeC / pgKnownStruct.latticeA : cOverA;
+        const pgKgridBoverA = pgKnownStruct?.latticeB
+          ? pgKnownStruct.latticeB / pgKnownStruct.latticeA : bOverAFull;
         const pgKCard = kPointsCardForPhononPrep(
-          latticeA, cOverA, bOverAFull,
+          latticeA, pgKgridCoverA, pgKgridBoverA,
           vegardResult?.isMetallic ?? undefined,
           positions.length,
           pgTargetQGrid,
@@ -8322,6 +8381,7 @@ ${r2Cell}
           jobDir,
           callbacks: qeCallbacks,
           ecutwfc,
+          isMetallic: result.scf?.isMetallic,
         });
 
         if (!gammaResult.passed) {
@@ -8512,6 +8572,7 @@ ${r2Cell}
           maxSeconds: phMaxSeconds,
           recover: isRetry && !prevCrashed,
           residualForce: result.scf?.totalForce ?? undefined,
+          isMetallic: result.scf?.isMetallic,
           ...(prevCrashed ? { tr2Ph: "1.0d-10", alphaMix: 0.1 } : {}),
         });
         const phInputFile = path.join(jobDir, "ph.in");
@@ -8906,6 +8967,7 @@ ${r2Cell}
               );
               const phInput = generatePhononInput(formula, elements, phPos.length, {
                 maxSeconds: 3600, tr2Ph: "1.0d-10", alphaMix: 0.5,
+                isMetallic: result.scf?.isMetallic,
               });
               const phFile = path.join(jobDir, `${phPrefix}_ph.in`);
               fs.writeFileSync(phFile, phInput);
@@ -9092,8 +9154,6 @@ ${r2Cell}
     const publicationForce = residualForce != null && residualForce < 0.001;
     if (scfUsable && dfptGatePass && publicationForce && phononPhysicallyStable && !opts?.skipEph) {
       try {
-        const phForceEPW = result.scf?.totalForce ?? 999;
-        const [epwQGrid] = autoPhononQGrid(elements, positions.length, phForceEPW);
         const epwCOverA = estimateCOverA(elements, counts);
         const epwBOverA = estimateBOverA(elements, counts);
         // Honor known-structure angles so monoclinic candidates use the
@@ -9109,7 +9169,14 @@ ${r2Cell}
             fermiEnergy: result.scf!.fermiEnergy!,
             ecutwfc: computeEcutwfc(elements, 0, 80, 45),
             ecutrho: computeEcutwfc(elements, 0, 80, 45) * ecutrhoMultiplier(elements),
-            phononQGrid: [epwQGrid, epwQGrid, epwQGrid] as [number, number, number],
+            // EPW's coarse q-grid MUST equal the q-grid of the DFPT run that
+            // wrote the .dyn/.dvscf files EPW reads. runDFPTEPC (the only step
+            // that writes .dvscf) always uses its hardcoded 2x2x2 grid
+            // (result.dfpt.nqGrid). Passing autoPhononQGrid (3-6 for
+            // publication-force structures) told EPW to expect 27-216 coarse
+            // q-points when only 8 exist on disk -> EPW reads the wrong coarse
+            // mesh and produces garbage interpolated lambda.
+            phononQGrid: ((result.dfpt as any)?.nqGrid as [number, number, number]) ?? [2, 2, 2],
             cellParameters: generateCellParameters(latticeA, epwCOverA, 0, epwBOverA, elements, counts, epwKS?.alpha ?? 90, epwKS?.beta ?? 90, epwKS?.gamma ?? 90),
           },
           {

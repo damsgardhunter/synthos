@@ -1152,8 +1152,7 @@ export interface Stage4Opts {
   jobDir: string;
   callbacks: QERunnerCallbacks;
   ecutwfc: number;
-  /** SCF metallicity — gates the ph.x `epsil` flag (ph.x aborts on
-   *  `epsil=.true.` for metals). Undefined = treated as metal (epsil omitted). */
+  /** SCF metallicity (informational — from parseSCFOutput's gap detection). */
   isMetallic?: boolean;
 }
 
@@ -1237,14 +1236,15 @@ export async function runStage4GammaPhonon(opts: Stage4Opts): Promise<StageResul
 
   console.log(`[Staged-Relax] ${formula} Stage 4 cost model: ${nReps} reps, ${phElectrons} e-, ${phNkpts} kpts, nspin=${phNspin} → cost/rep=${costPerRep.toFixed(0)}, est=${estimatedPhSeconds.toFixed(0)}s, timeout=${phTimeoutS.toFixed(0)}s (${(phTimeoutS/60).toFixed(0)} min)`);
 
-  // Born effective charges + macroscopic dielectric (epsil) require the
-  // electric-field response. ph.x ABORTS on `epsil=.true.` for metals —
-  // "Error in routine phq_readin (1): no elec. field with metals" — it does
-  // NOT auto-skip. So epsil is emitted ONLY for confirmed insulators
-  // (isMetallic === false); metals and unknown metallicity omit it. ph.x
-  // computes phonons fine without it (LO-TO splitting matters only for polar
-  // insulators). trans=.true. is the phonon response itself — always required.
-  const epsilFlags = (opts.isMetallic === false ? "  epsil = .true.,\n" : "") + "  trans = .true.,\n";
+  // No `epsil` — only `trans=.true.` (the phonon response itself). ph.x's
+  // phq_readin ABORTS with "no elec. field with metals" whenever epsil/zeu/zue
+  // is requested AND the SCF used smearing occupations (lgauss=.true.). Every
+  // QAE SCF runs `occupations='smearing'`, so lgauss is always true and epsil
+  // can never be used. The old `isMetallic===false` gate keyed on gap
+  // detection, unrelated to ph.x's occupation-based check, so epsil leaked
+  // through and crashed metallic runs. Born charges / LO-TO splitting only
+  // matter for polar insulators, which are not superconductors.
+  const epsilFlags = "  trans = .true.,\n";
 
   // 2-attempt retry matching production phonon pipeline (qe-worker.ts lines 4580-4644):
   //   Attempt 1: tr2_ph=1e-12, alpha_mix=0.5 (production defaults)
