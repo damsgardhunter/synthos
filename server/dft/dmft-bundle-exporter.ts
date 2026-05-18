@@ -226,10 +226,16 @@ function buildCorrelatedSubspace(
     const jValue = site.hunds > 0 ? site.hunds : (HUNDS_J[el] ?? 0);
     let U = site.uEffective + jValue;  // reconstruct U_bare = U_eff + J
     let J = jValue;
-    // ACBN0 hp.x gives a first-principles U_bare; use it directly when
-    // available (J stays the cRPA table value — ACBN0Result exposes no J).
+    // ACBN0 / hp.x linear-response gives a first-principles Hubbard U — but
+    // that quantity is the DUDAREV EFFECTIVE U (U_eff = U_bare - J), the
+    // parameter used in the simplified DFT+U functional, NOT the Slater
+    // F0-derived U_bare the DMFT interaction tensor is built from. Add J
+    // back to recover U_bare. Using it directly as U made the solver's
+    // U' = U - 2J collapse to U_bare - 3J, so the inter-orbital repulsion
+    // came out ~J too low (exchange double-counted). J stays the cRPA
+    // table value — ACBN0Result exposes no J.
     if (acbn0?.converged && acbn0.hubbardU[el] != null) {
-      U = acbn0.hubbardU[el];
+      U = acbn0.hubbardU[el] + jValue;
     }
 
     shells.push({
@@ -336,7 +342,7 @@ export async function exportDMFTBundle(
   // bundles with Pm/Ho/Er/Tm/Yb/Lu/Ag/Au/Cd/Hg/Tc or actinides Pa/Np/Pu/Am/Cm.
   const VALENCE_D_ELECTRONS: Record<string, number> = {
     // 3d (oxide valences: Cu²⁺ d⁹, Ni²⁺ d⁸, Co²⁺ d⁷, etc.)
-    Sc: 1, Ti: 2, V: 3, Cr: 5, Mn: 5, Fe: 6, Co: 7, Ni: 8, Cu: 9, Zn: 10,
+    Sc: 1, Ti: 2, V: 3, Cr: 4, Mn: 5, Fe: 6, Co: 7, Ni: 8, Cu: 9, Zn: 10,
     // 4d (Ag/Cd added — full d-shell)
     Y: 1, Zr: 2, Nb: 4, Mo: 5, Tc: 5, Ru: 7, Rh: 8, Pd: 10, Ag: 10, Cd: 10,
     // 5d (Au/Hg added)
