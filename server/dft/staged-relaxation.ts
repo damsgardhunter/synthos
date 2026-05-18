@@ -382,7 +382,11 @@ function computeStage1Params(elements: string[], totalAtoms: number, counts?: Re
   // getting 71958s = 20h via stageAtomScale=6.65. If a structure genuinely
   // needs more, that's a sign it should be downgraded to a cheaper tier or
   // dropped entirely, not blocked for a day.
-  const STAGE1_HARD_CEILING_S = 14400; // 4h
+  // 6h ceiling: a Z=3 clathrate-hydride cell (~36 atoms) the atom cap now
+  // admits costs ~5h by the model — a 4h ceiling would guarantee it times
+  // out. Larger cells than that should be downgraded to a cheaper tier or
+  // dropped, not blocked for a day.
+  const STAGE1_HARD_CEILING_S = 21600; // 6h
   const maxTimeoutS = Math.min(rawMaxTimeoutS, STAGE1_HARD_CEILING_S);
   // FLOOR by system type — the cost model underestimates for magnetic systems
   // because spin-polarized SCF on Fe/Mn/Cr is intrinsically much harder than
@@ -450,14 +454,23 @@ export async function runStagedRelaxation(opts: StagedRelaxationOpts): Promise<S
       publication: 60,
     };
     const tierCap = maxAtomsForS1[tier] ?? 30;
-    // Also cap relative to the formula unit. The absolute tier cap alone let
-    // a Z=4 PyXtal candidate for ScYH10 through (48 atoms < 50 deep cap) —
-    // cost-model est 31387s vs the 14400s timeout, guaranteed to time out
-    // with no result. A Z=1/2 cell screens the same chemistry far cheaper,
-    // so allow at most ~2 formula units; floor at 12 atoms so tiny formulas
-    // still get supercell headroom. Genuine supercell ground states are
-    // found later (Stage 2 vc-relax), not in Stage 1 screening.
-    const atomCap = Math.min(tierCap, Math.max(12, totalAtoms * 2));
+    // Also cap relative to the formula unit. A Z=4 cell screens the same
+    // chemistry as Z=1 at 4x the cost, so cap the number of formula units.
+    // BUT clathrate hydrides — the materials this pipeline targets — very
+    // often have a Z>=2 ground-state cell, and a candidate skipped here
+    // never reaches Stage 2 either (Stage 2 only refines Stage-1 survivors).
+    // So for hydride compositions at the deep/publication tiers, allow up to
+    // 3 formula units (a Z=3 clathrate cell, ~36 atoms, fits the 6h Stage-1
+    // ceiling); non-hydrides and lighter tiers keep the 2-f.u. cap. Z=4
+    // (~48 atoms, ~9h) is still excluded — too expensive, and Z=4 cells are
+    // usually reducible. Floor at 12 atoms so tiny formulas keep headroom.
+    const hFrac = candidates.length > 0
+      ? candidates[0].positions.filter(p => p.element === "H").length /
+        Math.max(1, candidates[0].positions.length)
+      : 0;
+    const isHydrideClathrate = hFrac >= 0.5;
+    const fuMultiplier = (isHydrideClathrate && (tier === "deep" || tier === "publication")) ? 3 : 2;
+    const atomCap = Math.min(tierCap, Math.max(12, totalAtoms * fuMultiplier));
 
     // First pass: take the top maxS1 candidates that fit under the atom cap.
     // If an oversized candidate is skipped, backfill from the remaining pool
