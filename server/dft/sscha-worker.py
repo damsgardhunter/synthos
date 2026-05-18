@@ -883,90 +883,95 @@ def run_sscha_fallback(args) -> dict:
             "method": "SSCHA-fallback",
         }
 
-    # Fit effective force constants from displacement-force data
-    # F = -Phi * u  =>  Phi = -(F^T * u) / (u^T * u) in least-squares sense
-    U_mat = np.array([d.flatten() for d in used_displacements])  # (nconf, 3N) — paired with successful configs only
+    # Fit effective force constants from displacement-force data.
+    # F = -Phi · u  =>  Phi = -(UᵀU)⁻¹ Uᵀ F  in the least-squares sense.
+    U_mat = np.array([d.flatten() for d in used_displacements])  # (nconf, 3N)
     F_mat = np.array([f.flatten() for f in forces_list])  # (nconf, 3N)
-
-    # Convert forces from Ry/Bohr to eV/Angstrom for consistent units
+    # Convert forces from Ry/Bohr to eV/Angstrom for consistent units.
     F_mat_eV_A = F_mat * (RY_TO_EV / BOHR_TO_ANG)
 
-    # Least-squares fit: Phi = -(U^T U)^{-1} U^T F
-    try:
-        # Use pseudo-inverse for numerical stability
-        Phi = -np.linalg.lstsq(U_mat, F_mat_eV_A, rcond=None)[0].T  # (3N, 3N)
+    # Per-atom masses (amu), expanded to 3N. Mass-weighting is essential —
+    # without it heavy elements get omega too high by sqrt(m_amu).
+    masses_per_atom = np.array(
+        [ATOMIC_MASSES_AMU.get(base_element(el), 50.0) for el in atom_labels],
+        dtype=float,
+    )
+    masses_3N = np.repeat(masses_per_atom, 3)
+    sqrt_m = np.sqrt(masses_3N)
 
-        # Symmetrize force constant matrix
-        Phi = 0.5 * (Phi + Phi.T)
+    def fit_freqs(u_mat, f_mat):
+        """Least-squares fit Phi from (displacement, force) rows, enforce the
+        acoustic sum rule, mass-weight, and return sorted frequencies (cm^-1).
+        Returns None on numerical failure."""
+        try:
+            phi = -np.linalg.lstsq(u_mat, f_mat, rcond=None)[0].T  # (3N, 3N)
+            phi = 0.5 * (phi + phi.T)                              # symmetrize
+            # Acoustic sum rule: a rigid translation costs zero energy, so
+            # sum_j Phi[3i+a, 3j+b] = 0. Stochastic-fit noise violates it,
+            # giving spurious imaginary acoustic modes (and shifting the
+            # optical modes) — enforce on the self-blocks, re-symmetrize,
+            # iterate until both constraints hold to numerical noise.
+            nat_fit = phi.shape[0] // 3
+            for _ in range(5):
+                for i in range(nat_fit):
+                    si = slice(3 * i, 3 * i + 3)
+                    off = np.zeros((3, 3))
+                    for j in range(nat_fit):
+                        if j != i:
+                            off += phi[si, 3 * j:3 * j + 3]
+                    phi[si, si] = -off
+                phi = 0.5 * (phi + phi.T)
+            # Mass-weighted dynamical matrix D_ij = Phi_ij / sqrt(m_i·m_j).
+            d_mat = phi / np.outer(sqrt_m, sqrt_m)
+            evals, _ = np.linalg.eigh(d_mat)
+            out = []
+            for ev in evals:
+                # D in eV/(Å²·amu): sqrt(D)·15.633 → THz, ·33.356 → cm⁻¹.
+                f_cm = np.sqrt(abs(ev)) * 15.633 * 33.356
+                out.append(f_cm if ev > 0 else -f_cm)  # imaginary → negative
+            return np.array(sorted(out))
+        except Exception:
+            return None
 
-        # Acoustic sum rule: a rigid translation of the whole crystal must
-        # cost zero energy, i.e. sum_j Phi[3i+a, 3j+b] = 0 for every atom i.
-        # A least-squares fit from noisy stochastic displacements violates
-        # this, so the three Gamma acoustic branches come out at spurious
-        # nonzero (often imaginary) frequencies — and ASR violation also
-        # shifts the optical modes. Enforce it on the self-blocks and
-        # re-symmetrize; iterate so both constraints hold to numerical noise.
-        nat_fit = Phi.shape[0] // 3
-        for _ in range(5):
-            for i in range(nat_fit):
-                si = slice(3 * i, 3 * i + 3)
-                off_diag_sum = np.zeros((3, 3))
-                for j in range(nat_fit):
-                    if j != i:
-                        off_diag_sum += Phi[si, 3 * j:3 * j + 3]
-                Phi[si, si] = -off_diag_sum
-            Phi = 0.5 * (Phi + Phi.T)
-
-        # Mass-weight the dynamical matrix: D_ij = Phi_ij / sqrt(m_i · m_j).
-        # Without this, the diagonalization assumes m=1 amu for every atom —
-        # heavy elements end up with ω too high by sqrt(m_amu): Li by 2.6×,
-        # Fe by 7.5×, U by 15.4×. Critical for any non-H-only system.
-        masses_per_atom = np.array(
-            [ATOMIC_MASSES_AMU.get(base_element(el), 50.0) for el in atom_labels],
-            dtype=float,
-        )
-        # Expand to 3N components (each atom has x, y, z)
-        masses_3N = np.repeat(masses_per_atom, 3)
-        sqrt_m = np.sqrt(masses_3N)
-        # D = Phi / (sqrt_m_i * sqrt_m_j) via outer-product division
-        D = Phi / np.outer(sqrt_m, sqrt_m)
-
-        eigenvalues, eigvecs = np.linalg.eigh(D)
-
-        # Convert eigenvalues to frequencies (cm^-1):
-        #   D has units eV/(Å²·amu) ⇒ sqrt(D) is angular frequency in units
-        #   where the conversion factor 15.633 maps to THz when m is in amu
-        #   and K in eV/Å². Then 33.356 cm⁻¹/THz to reach the standard unit.
-        # See: https://en.wikipedia.org/wiki/Reciprocal_centimetre#Spectroscopy
-        anh_freqs_cm = []
-        for ev in eigenvalues:
-            if ev > 0:
-                freq_THz = np.sqrt(ev) * 15.633   # eV/(Å²·amu) → THz
-                freq_cm = freq_THz * 33.356        # THz → cm⁻¹
-                anh_freqs_cm.append(freq_cm)
-            else:
-                # Imaginary mode — record as negative frequency by convention
-                freq_THz = np.sqrt(abs(ev)) * 15.633
-                freq_cm = -freq_THz * 33.356
-                anh_freqs_cm.append(freq_cm)
-
-        anh_freqs_cm = np.array(sorted(anh_freqs_cm))
-
-        # Compute anharmonic omega_log — Allen-Dynes 1/omega-weighted log
-        # average (DOS-only approximation), NOT an unweighted geometric mean.
+    anh_freqs_fit = fit_freqs(U_mat, F_mat_eV_A)
+    omega_log_std_meV = None
+    n_imag_range = None
+    if anh_freqs_fit is not None:
+        anh_freqs_cm = anh_freqs_fit
         positive_mask = anh_freqs_cm > 5.0
-        if np.any(positive_mask):
-            pos_freqs = anh_freqs_cm[positive_mask]
-            omega_log_cm = omega_log_inv_weighted(pos_freqs)
-            omega_log_meV = omega_log_cm * 0.12398
-        else:
-            omega_log_meV = 0.0
-
+        omega_log_meV = (omega_log_inv_weighted(anh_freqs_cm[positive_mask]) * 0.12398
+                         if np.any(positive_mask) else 0.0)
         n_imag_anh = int(np.sum(anh_freqs_cm < IMAGINARY_MODE_THRESHOLD_CM))
         fit_converged = True
 
-    except Exception as e:
-        log(f"  Force constant fitting failed: {e}")
+        # Bootstrap the stochastic uncertainty. The ensemble is finite and
+        # drawn from a single fixed RNG seed, so the fitted Phi carries
+        # sampling noise that a single-point result hides. Resampling the
+        # (displacement, force) rows with replacement and refitting gives an
+        # honest spread on omega_log and the imaginary-mode count — and costs
+        # nothing extra (no new DFT calls, just least-squares refits).
+        nconf = U_mat.shape[0]
+        if nconf >= 8:
+            rng_boot = np.random.default_rng(12345)
+            boot_omega, boot_nimag = [], []
+            for _ in range(24):
+                idx = rng_boot.integers(0, nconf, size=nconf)
+                fb = fit_freqs(U_mat[idx], F_mat_eV_A[idx])
+                if fb is None:
+                    continue
+                pos = fb[fb > 5.0]
+                if pos.size > 0:
+                    boot_omega.append(omega_log_inv_weighted(pos) * 0.12398)
+                boot_nimag.append(int(np.sum(fb < IMAGINARY_MODE_THRESHOLD_CM)))
+            if len(boot_omega) >= 4:
+                omega_log_std_meV = float(np.std(boot_omega))
+            if boot_nimag:
+                n_imag_range = [int(min(boot_nimag)), int(max(boot_nimag))]
+            log(f"  Bootstrap ({len(boot_omega)} samples): omega_log = "
+                f"{omega_log_meV:.2f} +/- {omega_log_std_meV or 0.0:.2f} meV, "
+                f"n_imag range = {n_imag_range}")
+    else:
+        log("  Force constant fitting failed")
         omega_log_meV = 0.0
         anh_freqs_cm = np.array(harmonic_freqs_cm)
         n_imag_anh = n_imag_harm
@@ -1010,6 +1015,12 @@ def run_sscha_fallback(args) -> dict:
         "nImaginaryModes": n_imag_anh,
         "harmonicImaginaryCount": n_imag_harm,
         "anharmonicFreqsCm": [float(x) for x in anh_freqs_cm.tolist()],
+        # Bootstrap stochastic-uncertainty estimates (None when too few
+        # configs to resample): 1σ on omega_log, and the min/max imaginary-
+        # mode count across resamples. Consumers should treat the fallback
+        # SSCHA result as an estimate carrying this much sampling noise.
+        "omegaLogAnharmonicStdMeV": omega_log_std_meV,
+        "nImaginaryModesRange": n_imag_range,
         "elapsedSeconds": round(elapsed_total, 1),
         "method": "SSCHA-fallback",
     }
