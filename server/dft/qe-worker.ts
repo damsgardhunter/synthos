@@ -4812,7 +4812,6 @@ function generateVCRelaxInput(
 
   // vc-relax wall-time cap — scaled by system complexity and atom count.
   const hasHVcr = elements.includes("H");
-  const hasMagVcr = elements.some(el => el in MAGNETIC_ELEMENTS);
   const isHighPHydride = hasHVcr && pressureGPa >= 50 && totalAtoms >= 7;
   // Cuprates (Cu-O layered oxides): SCF is slow — dense Cu-3d bands plus
   // long-wavelength charge sloshing across the CuO2 planes. With 'plain'
@@ -4821,11 +4820,18 @@ function generateVCRelaxInput(
   // local-TF mixing (damps the layered sloshing) + the magnetic-tier 60 min
   // wall budget so the cell/ion relaxation has room to converge.
   const isCuprateVcr = elements.includes("Cu") && elements.includes("O") && (counts["O"] ?? 0) >= 2;
+  // The 60-min tier must key on what actually makes the run slow: nspin=2
+  // (broadMagnetic — the same flag that sets nspin above) and DFT+U (the
+  // Hubbard new_ns/vhpsi routines). Keying on hasMagVcr (MAGNETIC_ELEMENTS
+  // only) under-budgeted nspin=2 systems whose magnetic element isn't in that
+  // narrow set — Sr2RuO4 ran nspin=2 + DFT+U on the 30-min tier, finished
+  // ZERO ionic steps, and produced no geometry.
+  const hasHubbardVcr = !!(opts?.hubbardCard && opts.hubbardCard.trim().length > 0);
   // Atom-count scaling: larger cells need proportionally more time.
   // Base budgets calibrated for 7-atom cells; scale by (nAtoms/7)^1.2 for larger.
   const atomScale = totalAtoms > 7 ? Math.pow(totalAtoms / 7, 1.2) : 1.0;
   const vcRelaxMaxSeconds = isHighPHydride ? Math.round(10800 * atomScale) // 3h base for high-P hydrides, scaled
-    : (hasMagVcr || isCuprateVcr) ? Math.round(3600 * atomScale)            // 60 min base for magnetic/cuprate, scaled
+    : (broadMagnetic || isCuprateVcr || hasHubbardVcr) ? Math.round(3600 * atomScale) // 60 min base: nspin=2 / cuprate / DFT+U
     : Math.round(Math.max(600, Math.min(QE_MAX_SECONDS, 1800)) * atomScale); // 30 min base, scaled
   const VC_RELAX_MAX_SECONDS = vcRelaxMaxSeconds;
   // UNIFIED vc-relax: damped dynamics with TIGHT SCF convergence.
@@ -4842,8 +4848,8 @@ function generateVCRelaxInput(
   //   cell_dynamics='damp-w' — cell adjusts gradually with positions
   //   conv_thr=1e-7 — production-quality forces at every ionic step
   //   400 nstep — enough for convergence (slower per step, but accurate)
-  const vcMixingMode = isHighPHydride ? "local-TF" : (hasMagVcr || isCuprateVcr) ? "local-TF" : "plain";
-  const vcMixingBeta = isHighPHydride ? 0.2 : (hasMagVcr || isCuprateVcr) ? 0.2 : 0.3;
+  const vcMixingMode = isHighPHydride ? "local-TF" : (broadMagnetic || isCuprateVcr || hasHubbardVcr) ? "local-TF" : "plain";
+  const vcMixingBeta = isHighPHydride ? 0.2 : (broadMagnetic || isCuprateVcr || hasHubbardVcr) ? 0.2 : 0.3;
 
   return `&CONTROL
   calculation = 'vc-relax',
@@ -6821,17 +6827,18 @@ ${cellBlockEos}
       // Phase 2: BFGS tightens from the damped result (fast convergence)
       const hasHVcRelax = elements.includes("H");
       const isHighPHVcRelax = hasHVcRelax && workerPressure >= 50 && positions.length >= 7;
-      const hasMagVcRelax = elements.some(el => el in MAGNETIC_ELEMENTS);
       const isCuprateVcRelax = elements.includes("Cu") && elements.includes("O") && (counts["O"] ?? 0) >= 2;
       // Mirror generateVCRelaxInput's internal VC_RELAX_MAX_SECONDS exactly
-      // (same base × atom-scale): QE's max_seconds is then passed as an
-      // explicit override so it equals the Node kill timeout. Previously the
-      // kill timeout used an unscaled base (1800/3600) while the input file
-      // baked in the atom-scaled value — for >7-atom cells Node SIGKILLed QE
-      // before it printed its clock summary (wall parsed as 0s).
+      // (same base × atom-scale): QE's max_seconds is passed as an explicit
+      // override so it equals the Node kill timeout. The 60-min tier keys on
+      // broadMagnetic (the flag that sets nspin=2) and DFT+U — keying on
+      // MAGNETIC_ELEMENTS alone under-budgeted Sr2RuO4 (nspin=2 + DFT+U ran on
+      // the 30-min tier and produced zero ionic steps).
+      const broadMagVcRelax = mayHaveMagneticMoment(elements);
+      const hasHubbardVcRelax = !!(hubbardResult?.applyToVCRelax && hubbardResult.qeHubbardCard);
       const vcRelaxAtomScale = positions.length > 7 ? Math.pow(positions.length / 7, 1.2) : 1.0;
       const vcRelaxMaxSec = Math.round(
-        (isHighPHVcRelax ? 10800 : (hasMagVcRelax || isCuprateVcRelax) ? 3600 : 1800) * vcRelaxAtomScale,
+        (isHighPHVcRelax ? 10800 : (broadMagVcRelax || isCuprateVcRelax || hasHubbardVcRelax) ? 3600 : 1800) * vcRelaxAtomScale,
       );
       const vcRelaxKillMs = vcRelaxMaxSec * 1000 + 60_000;
 
