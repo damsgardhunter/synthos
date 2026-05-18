@@ -490,25 +490,18 @@ export async function runCandidateFunnel(
         Math.max(600000, Math.round(maxEval * perStructureMs * 1.5) + 120000) // 50% safety margin + 120s overhead
       ));
 
-      // CHGNet relaxes at AMBIENT pressure (no scalar_pressure term). For a
-      // high-pressure material that decompresses every candidate ~2×, the
-      // drift gate then rejects most of them, and — worse — the volume-bias
-      // hint reads the ambient/high-P volume ratio as "CSP volumes too
-      // compressed" and persists a bogus ~×2 correction that would blow up
-      // the next CSP batch. For P ≥ 50 GPa, rank by single-point energy at
-      // the (correct) high-P CSP geometry instead of relaxing.
-      const relaxInChgnet = pressureGPa < 50;
+      // CHGNet relaxation is constant-pressure aware (pressureGPa is passed
+      // through to the relax backend, which minimizes H = E + P*V at the
+      // target pressure via an ASE cell filter). High-P candidates relax to
+      // their correct high-P volume — no ambient-decompression artifact.
       const chgnetResult = await runChgnetEvaluation(
         f6Candidates,
         path.join(process.cwd(), "server", "csp", "chgnet_work_" + formula.replace(/[^a-zA-Z0-9]/g, "")),
-        relaxInChgnet,
+        true,
         maxEval,
         timeoutMs,
         pressureGPa,
       );
-      if (!relaxInChgnet) {
-        console.log(`[CSP-Funnel] F6 CHGNet for ${formula}: single-point only (P=${pressureGPa} GPa ≥ 50 — CHGNet relaxes at ambient, would decompress high-P structures)`);
-      }
       if (chgnetResult.stats.evaluated > 0) {
         f6Candidates = chgnetResult.rankedCandidates;
         console.log(`[CSP-Funnel] F6 CHGNet: ${chgnetResult.stats.evaluated} evaluated, ${chgnetResult.stats.relaxed} relaxed, best=${chgnetResult.stats.bestEnergy?.toFixed(4) ?? "?"} eV/atom, time=${chgnetResult.stats.totalRelaxTimeS.toFixed(0)}s (timeout=${Math.round(timeoutMs / 1000)}s)`);

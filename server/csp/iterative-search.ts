@@ -175,21 +175,15 @@ export async function screenRound2(
     // of pure compute and was ETIMEDOUT'ing (then silently falling back to
     // the Round 1 structure). 90 s/candidate gives generous headroom.
     const r2Count = Math.min(unique.length, 50);
-    // CHGNet relaxes at AMBIENT pressure (no scalar_pressure term). For a
-    // high-pressure material that decompresses the structure ~2× — the drift
-    // gate then rejects most candidates and the ranking mixes ambient-relaxed
-    // with single-point energies. For P ≥ 50 GPa, skip relaxation entirely
-    // and rank by single-point energy at the (correct) high-P CSP geometry.
-    const relaxInChgnet = pressureGPa < 50;
+    // CHGNet relaxation is constant-pressure aware — pressureGPa is passed
+    // through to the relax backend, which minimizes H = E + P*V at the target
+    // pressure, so high-P candidates relax to their correct high-P volume.
     const chgnetResult = await runChgnetEvaluation(
-      unique, workDir, relaxInChgnet,
+      unique, workDir, true,
       r2Count,
       Math.max(900_000, r2Count * 90_000),
       pressureGPa,
     );
-    if (!relaxInChgnet) {
-      console.log(`[Iterative] Round 2 CHGNet for ${formula}: single-point only (P=${pressureGPa} GPa ≥ 50 — CHGNet relaxes at ambient, would decompress the structure)`);
-    }
 
     if (chgnetResult.stats.evaluated > 0) {
       console.log(`[Iterative] Round 2 CHGNet: ${chgnetResult.stats.evaluated} evaluated, best=${chgnetResult.stats.bestEnergy?.toFixed(4)} eV/atom`);

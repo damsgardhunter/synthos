@@ -58,9 +58,10 @@ function generateChgnetScript(
   outputPath: string,
   doRelax: boolean,
   maxStructures: number,
+  pressureGPa: number,
 ): string {
   return `#!/usr/bin/env python3
-"""CHGNet MLIP energy evaluation with full relaxation."""
+"""CHGNet MLIP energy evaluation with constant-pressure cell relaxation."""
 import os, sys, json, warnings, traceback, time
 warnings.filterwarnings("ignore")
 
@@ -71,22 +72,79 @@ os.environ["OPENBLAS_NUM_THREADS"] = "2"
 
 try:
     from chgnet.model import CHGNet
-    from chgnet.model.dynamics import StructOptimizer
     from pymatgen.core import Structure
     import numpy as np
 except ImportError as e:
     print(json.dumps({"error": f"Import failed: {e}"}))
     sys.exit(1)
 
+# --- Constant-pressure relaxation backend ---------------------------------
+# CHGNet's StructOptimizer.relax() minimizes the energy at AMBIENT pressure
+# only — it has no external-pressure term. Relaxing a high-pressure structure
+# that way decompresses it to its ambient volume (~2x larger), which made the
+# drift gate reject most high-P candidates and corrupted the volume-bias
+# cache. Instead we drive an ASE cell filter that minimizes the ENTHALPY
+# H = E + P*V at the target pressure. FrechetCellFilter is ASE >= 3.23;
+# ExpCellFilter is the older equivalent. If neither (or the CHGNet ASE
+# calculator) is importable, fall back to StructOptimizer (ambient) with a
+# warning so the degraded behaviour is visible in the logs.
+_CellFilter = None
+_FIRE = None
+_AseAdaptor = None
+_CHGNetCalculator = None
+try:
+    from ase.optimize import FIRE as _FIRE
+    from pymatgen.io.ase import AseAtomsAdaptor as _AseAdaptor
+    from chgnet.model.dynamics import CHGNetCalculator as _CHGNetCalculator
+    try:
+        from ase.filters import FrechetCellFilter as _CellFilter
+    except ImportError:
+        from ase.constraints import ExpCellFilter as _CellFilter
+except Exception:
+    _CellFilter = None
+
+# ASE cell filters take scalar_pressure in eV/Angstrom^3. 1 eV/A^3 = 160.21766208 GPa.
+GPA_TO_EV_A3 = 1.0 / 160.21766208
+
 try:
     # Load pre-trained model (inference only, no training)
     model = CHGNet.load()
-    optimizer = StructOptimizer()
 
     poscar_dir = ${JSON.stringify(poscarDir.replace(/\\/g, "/"))}
     output_path = ${JSON.stringify(outputPath.replace(/\\/g, "/"))}
     do_relax = ${doRelax ? "True" : "False"}
     max_structures = ${maxStructures}
+    pressure_gpa = ${Number.isFinite(pressureGPa) ? pressureGPa : 0}
+    scalar_pressure = pressure_gpa * GPA_TO_EV_A3
+
+    # Pick the relaxation backend: constant-pressure ASE path if available,
+    # else ambient StructOptimizer fallback.
+    ase_calc = None
+    struct_optimizer = None
+    if _CellFilter is not None and _CHGNetCalculator is not None and _FIRE is not None and _AseAdaptor is not None:
+        try:
+            ase_calc = _CHGNetCalculator(model=model)
+        except Exception:
+            ase_calc = None
+    if ase_calc is None:
+        from chgnet.model.dynamics import StructOptimizer
+        struct_optimizer = StructOptimizer()
+        if pressure_gpa > 0:
+            print("CHGNET_WARN constant-pressure relaxation unavailable (ASE cell filter/calculator missing) - relaxing at ambient P; high-P volumes will be wrong", flush=True)
+    print(f"CHGNET_INFO relax_mode={'const-P' if ase_calc is not None else 'ambient-fallback'} pressure_gpa={pressure_gpa}", flush=True)
+
+    def relax_structure(struct, fmax, steps):
+        """Relax cell + positions. ASE path minimizes H = E + P*V at the
+        target pressure; the fallback minimizes E at ambient pressure."""
+        if ase_calc is not None:
+            atoms = _AseAdaptor.get_atoms(struct)
+            atoms.calc = ase_calc
+            ucf = _CellFilter(atoms, scalar_pressure=scalar_pressure) if scalar_pressure > 0 else _CellFilter(atoms)
+            opt = _FIRE(ucf, logfile=None)
+            opt.run(fmax=fmax, steps=steps)
+            return _AseAdaptor.get_structure(atoms)
+        rr = struct_optimizer.relax(struct, fmax=fmax, steps=steps, verbose=False)
+        return rr["final_structure"]
 
     results = []
     files = sorted([f for f in os.listdir(poscar_dir) if f.endswith(".vasp") or f.startswith("POSCAR")])[:max_structures]
@@ -113,57 +171,52 @@ try:
                 "relaxed": False,
             }
 
-            # Full relaxation for ALL candidates
-            # Scale steps with atom count: more atoms need more steps to converge
-            # Small cells (< 10 atoms): 100 steps, large cells (50+ atoms): 500 steps
-            max_steps = min(500, max(100, n_atoms * 10))
-            fmax_target = 0.02  # tighter than before (was 0.05)
+            if do_relax:
+                # Scale steps with atom count: more atoms need more steps to
+                # converge. Small cells (< 10 atoms): 100 steps, large cells
+                # (50+ atoms): 500 steps.
+                max_steps = min(500, max(100, n_atoms * 10))
+                fmax_target = 0.02
 
-            try:
-                relax_result = optimizer.relax(
-                    struct,
-                    fmax=fmax_target,
-                    steps=max_steps,
-                    verbose=False,
-                )
-                relaxed_struct = relax_result["final_structure"]
-                relaxed_pred = model.predict_structure(relaxed_struct)
+                try:
+                    relaxed_struct = relax_structure(struct, fmax_target, max_steps)
+                    relaxed_pred = model.predict_structure(relaxed_struct)
 
-                relaxed_e = float(relaxed_pred["e"])
-                relaxed_forces = relaxed_pred["f"]
-                relaxed_max_force = float(max(abs(f).max() for f in relaxed_forces)) if relaxed_forces is not None else None
+                    relaxed_e = float(relaxed_pred["e"])
+                    relaxed_forces = relaxed_pred["f"]
+                    relaxed_max_force = float(max(abs(f).max() for f in relaxed_forces)) if relaxed_forces is not None else None
 
-                # Track volume change during relaxation
-                orig_vol = struct.volume
-                relaxed_vol = relaxed_struct.volume
-                vol_change_pct = (relaxed_vol - orig_vol) / orig_vol * 100
+                    # Track volume change during relaxation
+                    orig_vol = struct.volume
+                    relaxed_vol = relaxed_struct.volume
+                    vol_change_pct = (relaxed_vol - orig_vol) / orig_vol * 100
 
-                result["relaxed"] = True
-                result["relaxed_energy_per_atom_ev"] = relaxed_e
-                result["relaxed_total_energy_ev"] = relaxed_e * len(relaxed_struct)
-                result["relaxed_max_force"] = relaxed_max_force
-                result["relaxed_volume"] = relaxed_vol
-                result["volume_change_pct"] = round(vol_change_pct, 2)
-                result["relax_steps"] = max_steps
-                result["relax_time_s"] = round(time.time() - t0, 2)
+                    result["relaxed"] = True
+                    result["relaxed_energy_per_atom_ev"] = relaxed_e
+                    result["relaxed_total_energy_ev"] = relaxed_e * len(relaxed_struct)
+                    result["relaxed_max_force"] = relaxed_max_force
+                    result["relaxed_volume"] = relaxed_vol
+                    result["volume_change_pct"] = round(vol_change_pct, 2)
+                    result["relax_steps"] = max_steps
+                    result["relax_time_s"] = round(time.time() - t0, 2)
 
-                # Extract relaxed lattice parameters
-                latt = relaxed_struct.lattice
-                result["relaxed_lattice_a"] = round(latt.a, 4)
-                result["relaxed_lattice_b"] = round(latt.b, 4)
-                result["relaxed_lattice_c"] = round(latt.c, 4)
-                result["relaxed_alpha"] = round(latt.alpha, 2)
-                result["relaxed_beta"] = round(latt.beta, 2)
-                result["relaxed_gamma"] = round(latt.gamma, 2)
+                    # Extract relaxed lattice parameters
+                    latt = relaxed_struct.lattice
+                    result["relaxed_lattice_a"] = round(latt.a, 4)
+                    result["relaxed_lattice_b"] = round(latt.b, 4)
+                    result["relaxed_lattice_c"] = round(latt.c, 4)
+                    result["relaxed_alpha"] = round(latt.alpha, 2)
+                    result["relaxed_beta"] = round(latt.beta, 2)
+                    result["relaxed_gamma"] = round(latt.gamma, 2)
 
-                # Write relaxed structure as POSCAR for DFT follow-up
-                relaxed_path = os.path.join(poscar_dir, f"relaxed_{fname}")
-                relaxed_struct.to(fmt="poscar", filename=relaxed_path)
-                result["relaxed_file"] = f"relaxed_{fname}"
+                    # Write relaxed structure as POSCAR for DFT follow-up
+                    relaxed_path = os.path.join(poscar_dir, f"relaxed_{fname}")
+                    relaxed_struct.to(fmt="poscar", filename=relaxed_path)
+                    result["relaxed_file"] = f"relaxed_{fname}"
 
-            except Exception as relax_err:
-                result["relax_error"] = str(relax_err)[:100]
-                result["relax_time_s"] = round(time.time() - t0, 2)
+                except Exception as relax_err:
+                    result["relax_error"] = str(relax_err)[:100]
+                    result["relax_time_s"] = round(time.time() - t0, 2)
 
             results.append(result)
 
@@ -288,7 +341,7 @@ export async function runChgnetEvaluation(
   // Generate and run CHGNet script
   const outputPath = path.join(workDir, "chgnet_results.json");
   const scriptPath = path.join(workDir, "chgnet_eval.py");
-  const script = generateChgnetScript(poscarDir, outputPath, doRelax, maxStructures);
+  const script = generateChgnetScript(poscarDir, outputPath, doRelax, maxStructures, pressureGPa);
   fs.writeFileSync(scriptPath, script);
 
   console.log(`[CHGNet] Evaluating ${candidateMap.size} candidates (relax=${doRelax}, timeout=${Math.round(timeoutMs / 1000)}s)`);
