@@ -246,7 +246,7 @@ const Z_VALENCE: Record<string, number> = {
  *   LaH12   (13 atoms, 23 electrons, ~2 kpts): 3319s
  *   Bi2GeSb (4 atoms, 58 electrons, ~4 kpts):  1293s
  */
-function computeStage1Params(elements: string[], totalAtoms: number, counts?: Record<string, number>): {
+function computeStage1Params(elements: string[], totalAtoms: number, baseEcutwfc: number, counts?: Record<string, number>): {
   timeoutMs: number;
   ecutwfcScale: number;
   kspacingOverride: number;
@@ -255,6 +255,12 @@ function computeStage1Params(elements: string[], totalAtoms: number, counts?: Re
 } {
   const heavyCount = elements.filter(e => HEAVY_ELEMENTS.has(e)).length;
   const hasMagnetic = elements.some(e => MAGNETIC_ELS.has(e));
+  // Open-d 3d transition metals — Fe/Mn/Cr/Co/Ni/V — have intrinsically slow
+  // magnetic SCF (the spin density takes many iterations to settle, and they
+  // need high ecutwfc, ~90 Ry, which makes each iteration expensive). FeSe's
+  // Stage 1 finished ZERO ionic steps in the 6000 s magnetic floor.
+  const HARD_3D_MAGNETS = new Set(["V", "Cr", "Mn", "Fe", "Co", "Ni"]);
+  const hasHard3dMagnet = elements.some(e => HARD_3D_MAGNETS.has(e));
 
   // Open-d-shell TMs (3d V→Cu and 4d Ru/Rh/Pd) have valence d-electrons whose
   // SCF forces require ecutwfc ≥ 60–80 Ry to converge. The default heavy-atom
@@ -342,7 +348,17 @@ function computeStage1Params(elements: string[], totalAtoms: number, counts?: Re
   // But SCF cost doesn't scale linearly with all factors — it's more like
   // N_atoms^1.5 * sqrt(N_electrons) * N_kpoints^0.7 in practice.
   // Use a simpler empirical formula calibrated to the three data points:
-  const costFactor = Math.pow(totalAtoms, 1.8) * Math.sqrt(cellElectrons) * Math.pow(nKpoints, 0.6) * nspinFactor;
+  //
+  // ecutMultiplier: the plane-wave count (and FFT grid) scales ~ecutwfc^1.5,
+  // so a high-cutoff system costs proportionally more PER SCF iteration. The
+  // base model ignored this — FeSe runs at 90 Ry (Fe needs it) but was
+  // estimated as if it were a ~50 Ry system, a ~2x underestimate. One-sided
+  // (>= 1.0): typical 45-70 Ry systems are unchanged; only high-cutoff 3d-TM
+  // / hydride systems are scaled up. effEcut = baseEcutwfc * ecutwfcScale is
+  // the cutoff Stage 1 will actually use.
+  const effEcut = baseEcutwfc * ecutwfcScale;
+  const ecutMultiplier = Math.max(1.0, Math.pow(effEcut / 70, 1.4));
+  const costFactor = Math.pow(totalAtoms, 1.8) * Math.sqrt(cellElectrons) * Math.pow(nKpoints, 0.6) * nspinFactor * ecutMultiplier;
 
   // Calibration constant: fit to observed data
   // MoSiTl2: costFactor = 4^1.8 * sqrt(60) * 64^0.6 * 1 = 12.1 * 7.75 * 14.9 = 1397 → 844s → rate = 0.60 s/unit
@@ -373,7 +389,7 @@ function computeStage1Params(elements: string[], totalAtoms: number, counts?: Re
   // hit the default 90-min cap before atomic relax converged in the May-2026 run.
   const isHeavyElectronRich = cellElectrons >= 70 || heavyCount >= 2;
   const rawMaxTimeoutS = Math.round((hasMagnetic
-    ? (heavyCount >= 1 ? 10800 : 9000)
+    ? ((heavyCount >= 1 || hasHard3dMagnet) ? 10800 : 9000)
     : isHighPressureHydride ? 9000
     : isHeavyElectronRich ? 9000
     : 5400) * stageAtomScale);
@@ -390,9 +406,14 @@ function computeStage1Params(elements: string[], totalAtoms: number, counts?: Re
   const maxTimeoutS = Math.min(rawMaxTimeoutS, STAGE1_HARD_CEILING_S);
   // FLOOR by system type — the cost model underestimates for magnetic systems
   // because spin-polarized SCF on Fe/Mn/Cr is intrinsically much harder than
-  // the atom-count-based model predicts. FeSe (4 atoms) and LiFeAs (3 atoms)
-  // were getting 35-51 min but need 90+ min for spin to converge.
-  const minTimeoutS = hasMagnetic ? 6000      // 100 min minimum for ANY magnetic system
+  // the atom-count-based model predicts. Open-d 3d magnets (Fe/Mn/Cr/Co/Ni/V)
+  // are the worst: FeSe finished ZERO ionic steps in the old 6000 s floor —
+  // one ionic step alone is several thousand seconds. They get a 3 h floor so
+  // the relax clears at least one ionic step and produces a geometry. (QE
+  // stops at forc_conv_thr if it converges sooner, so the longer floor costs
+  // nothing for systems that are actually fast.)
+  const minTimeoutS = (hasMagnetic && hasHard3dMagnet) ? 10800 // 3 h for open-d 3d magnets
+    : hasMagnetic ? 6000                       // 100 min minimum for ANY magnetic system
     : isHighPressureHydride ? 6000             // 100 min minimum for high-P hydrides
     : 900;                                     // 15 min minimum default
   const clampedTimeoutS = Math.max(minTimeoutS, Math.min(timeoutSeconds, maxTimeoutS));
@@ -416,7 +437,7 @@ export async function runStagedRelaxation(opts: StagedRelaxationOpts): Promise<S
   // Each candidate gets its own timeout from the cost model. Total budget
   // is capped at 90 min for Stage 1 across all candidates combined.
   const totalAtoms = Object.values(counts).reduce((s, n) => s + n, 0);
-  const s1Params = computeStage1Params(elements, totalAtoms, counts);
+  const s1Params = computeStage1Params(elements, totalAtoms, callbacks.resolveEcutwfc(elements), counts);
   const STAGE1_TOTAL_BUDGET_MS = 5_400_000; // 90 min total for all candidates
   const perCandidateMs = s1Params.timeoutMs;
   const budgetBasedMax = Math.max(1, Math.floor(STAGE1_TOTAL_BUDGET_MS / perCandidateMs));
@@ -732,9 +753,9 @@ async function runStage1AtomicRelax(
   const nTypes = elements.length;
 
   // Scale timeout, ecutwfc, and k-grid based on element complexity
-  const s1Params = computeStage1Params(elements, totalAtoms, counts);
-
   const baseEcutwfc = cb.resolveEcutwfc(elements);
+  const s1Params = computeStage1Params(elements, totalAtoms, baseEcutwfc, counts);
+
   const ecutwfc = Math.round(baseEcutwfc * s1Params.ecutwfcScale);
   const ecutrho = cb.resolveEcutrho(elements, ecutwfc);
   const kpoints = cb.autoKPoints(latticeA, cOverA, s1Params.kspacingOverride);
