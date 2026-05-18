@@ -4367,7 +4367,7 @@ function validateXTBRelaxation(
   effectiveLattice: number,
   maxFracDisp: number = 0.35,
   absMinDist: number = 0.5,
-): { valid: boolean; maxDisp: number; maxDispAtom: number; minDist: number; minPair: string } {
+): { valid: boolean; maxDisp: number; maxDispAtom: number; minDist: number; minPair: string; minHHDist: number } {
   let maxDisp = 0;
   let maxDispAtom = -1;
   for (let i = 0; i < relaxed.length; i++) {
@@ -4383,6 +4383,11 @@ function validateXTBRelaxation(
 
   let minDist = Infinity;
   let minPair = "";
+  // Track the shortest H-H contact separately: a molecular optimizer (xTB
+  // GFN-FF) drives hydrogen toward H₂ (~0.74 Å bond), the opposite of the
+  // metallic/atomic-H physics of a high-pressure hydride. The global minDist
+  // can be a metal pair while an H₂ has still formed elsewhere.
+  let minHHDist = Infinity;
   for (let i = 0; i < relaxed.length; i++) {
     for (let j = i + 1; j < relaxed.length; j++) {
       let fdx = relaxed[i].x - relaxed[j].x;
@@ -4393,12 +4398,15 @@ function validateXTBRelaxation(
       fdz -= Math.round(fdz);
       const dist = Math.sqrt((fdx * effectiveLattice) ** 2 + (fdy * effectiveLattice) ** 2 + (fdz * effectiveLattice) ** 2);
       if (dist < minDist) { minDist = dist; minPair = `${relaxed[i].element}-${relaxed[j].element}`; }
+      if (relaxed[i].element === "H" && relaxed[j].element === "H" && dist < minHHDist) {
+        minHHDist = dist;
+      }
     }
   }
 
   return {
     valid: maxDisp <= maxFracDisp && minDist >= absMinDist,
-    maxDisp, maxDispAtom, minDist, minPair,
+    maxDisp, maxDispAtom, minDist, minPair, minHHDist,
   };
 }
 
@@ -4538,9 +4546,20 @@ function tryXTBPreRelaxation(
       console.log(`[QE-Worker] xTB pre-relax rejected: ${v.minPair} distance ${v.minDist.toFixed(3)} A < ${ABS_MIN_DIST} A absolute minimum — molecular optimizer collapsed atoms`);
       return null;
     }
+    // H₂ guard: xTB's GFN-FF force field drives hydrogen toward molecular H₂
+    // (~0.74 Å bond), but a high-pressure hydride should have atomic/metallic
+    // H with cage H-H ≳ 1.0 Å. An H-H contact below 0.90 Å means the
+    // pre-relaxation formed H₂ — reject it and fall back to the raw CSP
+    // geometry, which QE then relaxes with the correct (DFT) physics.
+    const H2_BOND_THRESHOLD_ANG = 0.90;
+    if (v.minHHDist < H2_BOND_THRESHOLD_ANG) {
+      console.log(`[QE-Worker] xTB pre-relax rejected: H-H contact ${v.minHHDist.toFixed(3)} A < ${H2_BOND_THRESHOLD_ANG} A — molecular optimizer formed H₂; keeping raw CSP geometry for DFT`);
+      return null;
+    }
 
     const mode = isHighPressureHydride ? "constrained" : "unconstrained";
-    console.log(`[QE-Worker] xTB pre-relaxation succeeded for ${nAtoms} atoms (${mode}, scale=${scale.toFixed(3)}, effLattice=${effectiveLattice.toFixed(3)} A, maxDisp=${v.maxDisp.toFixed(3)} frac, minDist=${v.minDist.toFixed(3)} A [${v.minPair}])`);
+    const hhTag = Number.isFinite(v.minHHDist) ? `, minH-H=${v.minHHDist.toFixed(3)} A` : "";
+    console.log(`[QE-Worker] xTB pre-relaxation succeeded for ${nAtoms} atoms (${mode}, scale=${scale.toFixed(3)}, effLattice=${effectiveLattice.toFixed(3)} A, maxDisp=${v.maxDisp.toFixed(3)} frac, minDist=${v.minDist.toFixed(3)} A [${v.minPair}]${hhTag})`);
     return relaxed;
   } catch (err: any) {
     console.log(`[QE-Worker] xTB pre-relaxation failed for ${positions.length} atoms: ${err.message?.slice(0, 150)}`);
