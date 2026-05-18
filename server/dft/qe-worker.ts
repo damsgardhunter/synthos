@@ -6307,6 +6307,29 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
         } else {
           console.log(`[QE-Worker] Staged relaxation did not improve geometry for ${formula}, using pre-staged positions`);
         }
+
+        // Abort when staged relaxation found the structure PHYSICALLY BROKEN
+        // (a Stage with catastrophic forces — overlapping atoms / wrong
+        // topology / garbage SCF forces). Pushing it through the unified
+        // vc-relax + magnetic search is hours of wasted DFT on a structure
+        // that can never converge, and no result is recoverable. (Observed:
+        // broken AIRSS cuprate cells with F = Infinity Ry/bohr proceeding to
+        // a ~2 h vc-relax.) Only the explicit catastrophic-force signal
+        // triggers this — benign "all candidates crashed" stages (no maxForce)
+        // still fall through to the existing best-effort flow.
+        const brokenStage = stagedResult.stages.find(
+          s => !s.passed && s.maxForce != null && s.maxForce > 10.0,
+        );
+        if (brokenStage && !stagedResult.stages.some(s => s.passed)) {
+          const reason = `staged relaxation found the structure physically broken ` +
+            `(Stage ${brokenStage.stage} max force ${brokenStage.maxForce!.toExponential(2)} Ry/bohr)`;
+          result.error = `Rejected: ${reason}`;
+          result.rejectionReason = reason;
+          result.failureStage = "staged_relaxation_broken";
+          result.wallTimeTotal = (Date.now() - startTime) / 1000;
+          console.log(`[QE-Worker] ${formula}: ${reason} — aborting (skipping vc-relax + magnetic search)`);
+          return result;
+        }
       } catch (stagedErr: any) {
         console.log(`[QE-Worker] Staged relaxation failed for ${formula}: ${stagedErr.message?.slice(0, 200)}, continuing with existing flow`);
       }
