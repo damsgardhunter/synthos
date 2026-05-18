@@ -6769,9 +6769,19 @@ ${cellBlockEos}
         const magAtomsPre = positions.length;
         const magElecPre = positions.reduce((s, p) => s + (getZValence(p.element) ?? 10), 0);
         const magNspinPre = magConfigs.some(c => c.nspin === 2) ? 2 : 1;
-        const magBasePre = 600;
-        const magScaledPre = Math.round(magBasePre * Math.pow(magAtomsPre / 4, 1.3) * Math.sqrt(magElecPre / 20) * magNspinPre);
-        const magTimeoutPre = Math.max(600, Math.min(3600, magScaledPre));
+        // Magnetic SCF for open-d transition metals (V/Cr/Mn/Fe/Co/Ni/Cu) —
+        // especially with DFT+U — converges slowly. FeSe's NM trial was still
+        // at 4.9e-3 Ry accuracy when the 600 s floor cut it off, so the search
+        // selected a ground state from two timed-out trials. Open-d magnets
+        // get a 2× base, and the (atoms/4)^1.3 term is floored at 1.0 so a
+        // small atom count can't shrink the budget below the base (a 2-atom
+        // Fe magnet+U SCF is not cheap).
+        const HARD_MAGNETIC_TM = new Set(["V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu"]);
+        const hasHardMag = elements.some(el => HARD_MAGNETIC_TM.has(el));
+        const magBasePre = hasHardMag ? 1200 : 600;
+        const magAtomFactor = Math.max(1.0, Math.pow(magAtomsPre / 4, 1.3));
+        const magScaledPre = Math.round(magBasePre * magAtomFactor * Math.sqrt(magElecPre / 20) * magNspinPre);
+        const magTimeoutPre = Math.max(magBasePre, Math.min(5400, magScaledPre));
         console.log(`[QE-Worker] Running magnetic ground-state search for ${formula}: ${magConfigs.length} orderings (${magConfigs.map(c => c.ordering).join(", ")}), ${magAtomsPre} atoms, ${magElecPre} e-, timeout=${magTimeoutPre}s/trial`);
         const magTrials: MagneticTrialResult[] = [];
 
