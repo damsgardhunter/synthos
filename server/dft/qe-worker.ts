@@ -5601,7 +5601,30 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     // - Likely space group for PyXtal biasing
     // - Element coordination roles for cage seeder
     // - Lattice estimate cross-check for Vegard
-    const structureAdvice = await getStructureAdvice(formula, workerPressure, elements).catch(() => null);
+    // Shared bounded-wait helper. External lookups (the LLM advisor, the
+    // AFLOW/MP endpoints) can stall indefinitely, so each is raced against a
+    // wall-clock timeout. NOTE: this is a setTimeout race — it only fires
+    // when the Node event loop is responsive. If a duration logged below is
+    // far past its timeout, the loop was blocked by synchronous work and the
+    // timeout could not fire (the cause is elsewhere, not here).
+    const fetchTimeoutSentinel = Symbol("fetch-timeout");
+    const withTimeout = <T>(p: Promise<T>, ms: number): Promise<T | typeof fetchTimeoutSentinel> =>
+      Promise.race([
+        p,
+        new Promise<typeof fetchTimeoutSentinel>(res => setTimeout(() => res(fetchTimeoutSentinel), ms)),
+      ]);
+
+    // LLM structure advisor — bounded (was an unbounded await: a hung
+    // OpenAI request could block the whole pipeline indefinitely).
+    const ADVICE_TIMEOUT_MS = 60_000;
+    const adviceRaced = await withTimeout(
+      getStructureAdvice(formula, workerPressure, elements).catch(() => null),
+      ADVICE_TIMEOUT_MS,
+    );
+    const structureAdvice = adviceRaced === fetchTimeoutSentinel ? null : adviceRaced;
+    if (adviceRaced === fetchTimeoutSentinel) {
+      console.log(`[QE-Worker] Structure advice for ${formula} timed out after ${ADVICE_TIMEOUT_MS / 1000}s — proceeding without`);
+    }
 
     // Try Vegard interpolation from AFLOW/MP binary endpoints for a better
     // starting lattice. Falls back to the existing volume-sum estimate if
@@ -5616,28 +5639,31 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       // that we fall back to the volume-sum estimator rather than block the
       // pipeline.
       const VEGARD_TIMEOUT_MS = 90_000;
-      const timeoutSentinel = Symbol("vegard-timeout");
-      const timed = <T>(p: Promise<T>): Promise<T | typeof timeoutSentinel> => Promise.race([
-        p,
-        new Promise<typeof timeoutSentinel>(res => setTimeout(() => res(timeoutSentinel), VEGARD_TIMEOUT_MS)),
-      ]);
       const [veg, cand] = await Promise.all([
-        timed(vegardEstimate(elements, counts, workerPressure).catch(() => null)),
-        timed(generateStructureCandidates(formula, elements, counts, workerPressure, 5).catch(() => [])),
+        withTimeout(vegardEstimate(elements, counts, workerPressure).catch(() => null), VEGARD_TIMEOUT_MS),
+        withTimeout(generateStructureCandidates(formula, elements, counts, workerPressure, 5).catch(() => []), VEGARD_TIMEOUT_MS),
       ]);
-      if (veg === timeoutSentinel) {
+      if (veg === fetchTimeoutSentinel) {
         console.log(`[QE-Worker] Vegard estimate for ${formula} timed out after ${(VEGARD_TIMEOUT_MS / 1000).toFixed(0)}s — proceeding without (will use volume-sum fallback)`);
         vegardResult = null;
       } else {
         vegardResult = veg as VegardEstimate | null;
       }
-      if (cand === timeoutSentinel) {
+      if (cand === fetchTimeoutSentinel) {
         console.log(`[QE-Worker] Structure-candidate fetch for ${formula} timed out after ${(VEGARD_TIMEOUT_MS / 1000).toFixed(0)}s — proceeding without`);
         structureCandidates = [];
       } else {
         structureCandidates = cand as StructureCandidate[];
       }
       const vegardMs = Date.now() - vegardT0;
+      // This span is raced against a 90s timeout, so it should never be much
+      // larger. If it is, the setTimeout could not fire — the Node event
+      // loop was blocked by synchronous work — and vegardMs is a wall-clock
+      // span, not a meaningful "Vegard took X". Flag it rather than logging
+      // a bare, confusing number (e.g. the observed 17525984ms ≈ 4.9h).
+      if (vegardMs > VEGARD_TIMEOUT_MS * 2) {
+        console.warn(`[QE-Worker] Vegard/candidate fetch for ${formula} ran ${(vegardMs / 1000).toFixed(0)}s — far past the ${VEGARD_TIMEOUT_MS / 1000}s timeout. The event loop was blocked (timeout could not fire); investigate synchronous work elsewhere in the worker.`);
+      }
       if (vegardResult && vegardResult.confidence > 0.2) {
         console.log(`[QE-Worker] Vegard estimate for ${formula}: a=${vegardResult.latticeA.toFixed(3)} A (conf=${vegardResult.confidence.toFixed(2)}, method=${vegardResult.method}, ${vegardResult.endpointsUsed.length} endpoints, ${vegardMs}ms)`);
       }
