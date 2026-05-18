@@ -1417,7 +1417,17 @@ if (!KNOWN_STRUCTURES_ENABLED) {
 export function lookupKnownStructure(formula: string): KnownStructure | null {
   if (!KNOWN_STRUCTURES_ENABLED) return null;
   const norm = normalizeFormula(formula);
-  return KNOWN_STRUCTURES[norm] ?? null;
+  const rec = KNOWN_STRUCTURES[norm];
+  if (!rec) return null;
+  // Hexagonal lattices have γ = 120°, not the 90° default. A record that
+  // omits `gamma` would otherwise be built as a tetragonal-shaped a×a×c
+  // cell — e.g. MgB2 (P6/mmm, AlB2-type, c/a ≈ 1.14) was relaxed in a
+  // ~cubic cell, destroying the honeycomb and the phonon spectrum. Fill γ
+  // in from the lattice type so consumers never see a wrong cell shape.
+  if (rec.latticeType === "hexagonal" && rec.gamma === undefined) {
+    return { ...rec, gamma: 120 };
+  }
+  return rec;
 }
 
 /**
