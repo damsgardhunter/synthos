@@ -208,6 +208,28 @@ export function selectForDFT(
     }
   };
 
+  // 0. Force-admit the literature known-structure candidate, if present.
+  // It is the experimental ground-state geometry (injected with conf 0.97);
+  // letting it lose the competitive funnel scoring to random AIRSS/PyXtal
+  // structures defeats the point of injecting it. For complex layered cells
+  // (cuprates) the random alternatives are often physically broken and
+  // crash the DFT SCF ("too many bands not converged" / Infinity force),
+  // so without this the material can have NO converging DFT candidate.
+  // The known-structure candidate may be a non-representative member of its
+  // cluster, so scan members and emit that candidate itself.
+  for (const s of scored) {
+    if (selected.length >= nSelect) break;
+    if (used.has(s.cluster.clusterId)) continue;
+    const ksMember = s.cluster.members.find(m => m.prototype === "known-structure");
+    if (!ksMember) continue;
+    used.add(s.cluster.clusterId);
+    s.score.selectionCategory = "exploitation";
+    selected.push(ksMember);
+    scores.set(ksMember, s.score);
+    breakdown.exploitation++;
+    console.log(`[DFT-Admission] force-admitted literature known-structure (cluster ${s.cluster.clusterId})`);
+  }
+
   // 1. Exploitation: best overall score
   const byScore = [...scored].sort((a, b) => b.score.total - a.score.total);
   pick(byScore, "exploitation", nExploitation);
