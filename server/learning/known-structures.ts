@@ -1431,6 +1431,28 @@ export function lookupKnownStructure(formula: string): KnownStructure | null {
 }
 
 /**
+ * Cell volume per atom (Å³/atom) of a known structure's primitive cell.
+ *
+ * Used to anchor CSP volume targeting: for a formula with a known
+ * structure, this is the EXACT per-atom volume — far better than the
+ * elemental-volume sum, which overestimates compound volumes by ~30-60%
+ * and drift-gates ~40% of CSP candidates. Pass a record from
+ * lookupKnownStructure (which fills in the hexagonal γ).
+ */
+export function knownStructureVolumePerAtom(ks: KnownStructure): number {
+  const a = ks.latticeA;
+  const b = ks.latticeB ?? ks.latticeA;
+  const c = ks.latticeC ?? ks.latticeA;
+  const toR = (d: number) => (d * Math.PI) / 180;
+  const ca = Math.cos(toR(ks.alpha ?? 90));
+  const cb = Math.cos(toR(ks.beta ?? 90));
+  const cg = Math.cos(toR(ks.gamma ?? 90));
+  const vol = a * b * c * Math.sqrt(Math.max(0, 1 + 2 * ca * cb * cg - ca * ca - cb * cb - cg * cg));
+  const nAtoms = ks.atoms.length;
+  return nAtoms > 0 ? vol / nAtoms : NaN;
+}
+
+/**
  * Check if a formula has a known structure in the database.
  * Always false when the database is disabled (the default).
  */

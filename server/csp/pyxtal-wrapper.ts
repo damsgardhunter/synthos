@@ -16,6 +16,7 @@ import { SCREENING_TIERS, pressureVolumeEnsemble } from "./csp-types";
 import { parsePOSCAR } from "./poscar-io";
 import { estimateVolumePerAtom } from "./airss-wrapper";
 import { estimateBulkModulusFromElements } from "../dft/vegard-lattice";
+import { lookupKnownStructure, knownStructureVolumePerAtom } from "../learning/known-structures";
 
 const PYTHON_BIN = process.env.PYTHON_BIN ?? "python3";
 
@@ -359,18 +360,30 @@ export const pyxtalEngine: CSPEngine = {
       }
     }
 
-    // EOS-compressed target volume per atom — the SAME Murnaghan EOS and
-    // element-based bulk modulus the Vegard lattice and AIRSS paths use.
-    // Each generated cell is rescaled to this volume so the PyXtal starting
-    // structures are pressure-correct (was: pyxtal's radius-based estimate
-    // with a `factor` clamped to >=0.9, which left high-P cells far too
-    // large and CHGNet drift-rejected them).
-    const fractions: Record<string, number> = {};
-    for (const el of elements) fractions[el] = Math.round(counts[el] ?? 0);
-    const b0 = estimateBulkModulusFromElements(elements, fractions);
-    const ambientVpa = estimateVolumePerAtom(elements, counts);
-    const eosEns = pressureVolumeEnsemble(ambientVpa, config.pressureGPa, [1.0], b0);
-    const targetVpa = eosEns[eosEns.length - 1] || ambientVpa;
+    // Target volume per atom — each generated cell is rescaled to this.
+    // Priority: a known structure's exact cell volume (when one exists at a
+    // comparable pressure), otherwise the ambient elemental-sum volume
+    // compressed by the Murnaghan EOS. Same logic as the AIRSS path.
+    let targetVpa: number;
+    let volSource: string;
+    const ksFormula = elements
+      .map(el => { const n = Math.round(counts[el] ?? 0); return el + (n > 1 ? n : ""); })
+      .join("");
+    const knownStruct = lookupKnownStructure(ksFormula);
+    const knownVpa = knownStruct ? knownStructureVolumePerAtom(knownStruct) : NaN;
+    if (knownStruct && Number.isFinite(knownVpa) && knownVpa > 0
+        && Math.abs((knownStruct.pressureGPa ?? 0) - config.pressureGPa) < 30) {
+      targetVpa = knownVpa;
+      volSource = `known-structure ${knownVpa.toFixed(1)} A^3/atom`;
+    } else {
+      const fractions: Record<string, number> = {};
+      for (const el of elements) fractions[el] = Math.round(counts[el] ?? 0);
+      const b0 = estimateBulkModulusFromElements(elements, fractions);
+      const ambientVpa = estimateVolumePerAtom(elements, counts);
+      const eosEns = pressureVolumeEnsemble(ambientVpa, config.pressureGPa, [1.0], b0);
+      targetVpa = eosEns[eosEns.length - 1] || ambientVpa;
+      volSource = `EOS ambient ${ambientVpa.toFixed(1)} A^3/atom, B0=${b0.toFixed(0)} GPa`;
+    }
 
     const script = generatePyXtalScript(
       elements, baseComp, validZ, config.maxStructures,
@@ -378,7 +391,7 @@ export const pyxtalEngine: CSPEngine = {
     );
     fs.writeFileSync(scriptPath, script);
 
-    console.log(`[PyXtal] Generating ${config.maxStructures} structures for ${elements.join("")} at ${config.pressureGPa} GPa (Z=[${validZ.join(",")}], maxAtoms=${tierConfig.maxAtoms}, ${tierConfig.tier} tier, EOS target ${targetVpa.toFixed(1)} A^3/atom, B0=${b0.toFixed(0)} GPa)`);
+    console.log(`[PyXtal] Generating ${config.maxStructures} structures for ${elements.join("")} at ${config.pressureGPa} GPa (Z=[${validZ.join(",")}], maxAtoms=${tierConfig.maxAtoms}, ${tierConfig.tier} tier, target ${targetVpa.toFixed(1)} A^3/atom — ${volSource})`);
 
     try {
       const result = execSync(

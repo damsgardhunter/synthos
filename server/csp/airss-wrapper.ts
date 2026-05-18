@@ -23,6 +23,7 @@ import {
 } from "./csp-types";
 import { loadVolumeBias } from "./volume-bias-cache";
 import { estimateBulkModulusFromElements } from "../dft/vegard-lattice";
+import { lookupKnownStructure, knownStructureVolumePerAtom } from "../learning/known-structures";
 
 const BUILDCELL_BIN = process.env.AIRSS_BIN
   ?? process.env.BUILDCELL_BIN
@@ -349,26 +350,34 @@ export const airssEngine: CSPEngine = {
       .join("");
     const volumeBias = loadVolumeBias(biasFormula, config.pressureGPa);
 
-    // Volume targeting from the equation of state. The cell VOLUME is set by
-    // physics — the ambient per-atom volume compressed by the Murnaghan EOS
-    // with the SAME element-based bulk modulus the Vegard lattice path uses.
-    //
-    // The previous code trusted the LLM structureAdvice.estimatedLattice for
-    // the volume MAGNITUDE. An LLM cannot quantitatively predict a
-    // high-pressure cell volume — it returned ~40 Å³/atom for YBeH8 at
-    // 180 GPa (~10× too large), so CHGNet's drift gate then rejected ~40% of
-    // candidates and they were ranked on meaningless single-point energies.
-    // The LLM lattice is still used for cell SHAPE (a:b:c anisotropy — passed
-    // to generateCellInput); only the magnitude now comes from the EOS.
-    const fractions: Record<string, number> = {};
-    for (const el of elements) fractions[el] = Math.round(counts[el] ?? 0);
-    const b0 = estimateBulkModulusFromElements(elements, fractions);
-    const ambientVPA = estimateVolumePerAtom(elements, counts);
-    const volPerAtom = ambientVPA * volumeBias;
-    const volumeTargets = pressureVolumeEnsemble(
-      volPerAtom, config.pressureGPa, tierConfig.volumeEnsemble, b0,
-    );
-    const volSource = `EOS ambient ${ambientVPA.toFixed(1)} A^3/atom, B0=${b0.toFixed(0)} GPa -> ${volumeTargets.length ? (volumeTargets[volumeTargets.length - 1]).toFixed(2) : "?"} A^3/atom`;
+    // Volume targeting. Priority:
+    //  1. Known structure at a comparable pressure → its EXACT cell volume.
+    //     The elemental-volume sum overestimates compound volumes ~30-60%
+    //     and the LLM lattice cannot predict a high-pressure volume at all
+    //     (it returned ~40 Å³/atom for YBeH8 @ 180 GPa, ~10× too large) —
+    //     either way CHGNet's drift gate then rejected ~40% of candidates.
+    //  2. Otherwise: ambient elemental sum compressed by the Murnaghan EOS
+    //     with the same element-based bulk modulus the Vegard path uses.
+    // The LLM lattice is still used only for cell SHAPE in generateCellInput.
+    let volPerAtom: number;
+    let volumeTargets: number[];
+    let volSource: string;
+    const knownStruct = lookupKnownStructure(biasFormula);
+    const knownVpa = knownStruct ? knownStructureVolumePerAtom(knownStruct) : NaN;
+    if (knownStruct && Number.isFinite(knownVpa) && knownVpa > 0
+        && Math.abs((knownStruct.pressureGPa ?? 0) - config.pressureGPa) < 30) {
+      volPerAtom = knownVpa * volumeBias;
+      volumeTargets = tierConfig.volumeEnsemble.map(f => volPerAtom * f);
+      volSource = `known-structure ${knownVpa.toFixed(1)} A^3/atom`;
+    } else {
+      const fractions: Record<string, number> = {};
+      for (const el of elements) fractions[el] = Math.round(counts[el] ?? 0);
+      const b0 = estimateBulkModulusFromElements(elements, fractions);
+      const ambientVPA = estimateVolumePerAtom(elements, counts);
+      volPerAtom = ambientVPA * volumeBias;
+      volumeTargets = pressureVolumeEnsemble(volPerAtom, config.pressureGPa, tierConfig.volumeEnsemble, b0);
+      volSource = `EOS ambient ${ambientVPA.toFixed(1)} A^3/atom, B0=${b0.toFixed(0)} GPa`;
+    }
     console.log(`[AIRSS] Volume target for ${biasFormula} @ ${config.pressureGPa} GPa: ${volSource}` +
       `${Math.abs(volumeBias - 1) > 0.05 ? ` (volume-bias x${volumeBias.toFixed(2)})` : ""}, ${volumeTargets.length} ensemble points`);
 
