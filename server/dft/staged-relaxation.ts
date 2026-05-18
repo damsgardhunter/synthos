@@ -864,6 +864,82 @@ ${cellBlock}
 
   const stageDir = path.join(jobDir, `stage1_${candidateIdx}`);
   fs.mkdirSync(stageDir, { recursive: true });
+
+  // --- Pre-relax SCF feasibility probe ---
+  // A physically broken CSP candidate (overlapping atoms, unphysical
+  // geometry) makes QE abort — but only AFTER the full multi-hour Stage 1
+  // relax has burned its entire wall-time budget producing no geometry
+  // (logged downstream as "catastrophic force Infinity — physically
+  // broken"). A short, coarse nspin=1 SCF probe catches a genuinely broken
+  // structure in minutes: if QE aborts with an error, skip the candidate
+  // instead of wasting the full relax budget. A merely-slow (not broken)
+  // candidate produces an energy or cleanly hits the probe's max_seconds —
+  // neither is flagged, so expensive-but-valid structures still proceed.
+  const probeMaxSec = Math.min(900, Math.max(180, Math.round(s1Params.maxSeconds * 0.12)));
+  const probeInput = `&CONTROL
+  calculation = 'scf',
+  restart_mode = 'from_scratch',
+  prefix = '${prefix}_s1probe_${candidateIdx}',
+  outdir = './tmp',
+  disk_io = 'low',
+  pseudo_dir = '${cb.getPseudoDirInput()}',
+  tprnfor = .true.,
+  max_seconds = ${probeMaxSec},
+/
+&SYSTEM
+  ibrav = 0,
+  nat = ${totalAtoms},
+  ntyp = ${nTypes},
+  ecutwfc = ${ecutwfc},
+  ecutrho = ${ecutrho},
+  input_dft = 'PBE',
+  occupations = 'smearing',
+  smearing = 'mv',
+  degauss = 0.02,
+  nspin = 1,
+/
+&ELECTRONS
+  electron_maxstep = 60,
+  conv_thr = 1.0d-3,
+  mixing_beta = 0.3,
+  mixing_mode = 'local-TF',
+  diagonalization = 'david',
+  scf_must_converge = .false.,
+/
+ATOMIC_SPECIES
+${atomicSpecies}
+ATOMIC_POSITIONS {crystal}
+${atomicPositions}
+K_POINTS {automatic}
+${kpoints}
+
+${cellBlock}
+`;
+  const probeFile = path.join(stageDir, "scf_probe.in");
+  fs.writeFileSync(probeFile, probeInput);
+  verifyQEInputWritten(probeFile, probeInput, formula, "Stage 1 SCF probe");
+  const probeResult = await cb.runPwx(probeFile, stageDir, (probeMaxSec + 120) * 1000);
+  fs.writeFileSync(path.join(stageDir, "scf_probe.out"), probeResult.stdout);
+  cb.cleanTmpDir(path.join(stageDir, "tmp"));
+  // A QE error abort (non-zero exit + an "Error in routine" block) means the
+  // geometry is unphysical for DFT. A clean max_seconds stop exits 0, so a
+  // slow-but-valid structure is NOT flagged and proceeds to the full relax.
+  if (probeResult.exitCode !== 0 && /Error in routine/.test(probeResult.stdout)) {
+    const probeTail = probeResult.stdout.slice(-220).replace(/\s+/g, " ").trim();
+    console.log(`[Staged-Relax] ${formula} Stage 1 candidate ${candidateIdx + 1}: SCF feasibility probe FAILED — QE aborted on this geometry (${probeMaxSec}s probe), skipping the full relax. Tail: ${probeTail}`);
+    return {
+      stage: 1,
+      passed: false,
+      failReason: "SCF feasibility probe failed — QE aborted on an unphysical geometry",
+      positions,
+      latticeA,
+      totalEnergy: 0,
+      maxForce: undefined,
+      wallTimeSeconds: (Date.now() - t0) / 1000,
+      scfConverged: false,
+    };
+  }
+
   const inputFile = path.join(stageDir, "relax.in");
   fs.writeFileSync(inputFile, input);
   verifyQEInputWritten(inputFile, input, formula, "Stage 1 relax");
