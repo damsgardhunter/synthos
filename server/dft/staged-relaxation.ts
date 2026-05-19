@@ -973,10 +973,23 @@ ${cellBlock}
     try {
       const MAG_EL = "Cu";
       const CU_SEED = 0.5; // Cu(2+) d9, S=1/2 — moderate AFM seed; QE relaxes it
+      // Collinear AFM needs >= 2 Cu atoms so each spin sublattice is non-empty.
+      // A single-Cu primitive cell (Hg-1201 HgBa2CuO4 at Z=1, La-214 at Z=1,
+      // etc.) cannot host intra-cell AFM order — splitting Cu -> Cu1/Cu2 there
+      // leaves Cu2 with zero atoms, and QE rejects that as a malformed input
+      // (a species declared in ATOMIC_SPECIES with no atoms). Below 2 Cu we
+      // fall back to a single spin-polarised Cu species, which still captures
+      // the on-site Cu moment energy for the enthalpy ranking.
+      const cuCount = parsed.positions.filter(p => p.element === MAG_EL).length;
+      const splitAFM = cuCount >= 2;
       const speciesList: string[] = [];
       for (const el of elements) {
-        if (el === MAG_EL) speciesList.push("Cu1", "Cu2");
-        else speciesList.push(el);
+        if (el === MAG_EL) {
+          if (splitAFM) speciesList.push("Cu1", "Cu2");
+          else speciesList.push("Cu");
+        } else {
+          speciesList.push(el);
+        }
       }
       let afmSpecies = "";
       for (const sp of speciesList) {
@@ -987,15 +1000,21 @@ ${cellBlock}
       let afmPositions = "";
       for (const pos of parsed.positions) {
         const label = pos.element === MAG_EL
-          ? (cuCounter++ % 2 === 0 ? "Cu1" : "Cu2")
+          ? (splitAFM ? (cuCounter++ % 2 === 0 ? "Cu1" : "Cu2") : "Cu")
           : pos.element;
         afmPositions += `  ${label}  ${pos.x.toFixed(6)}  ${pos.y.toFixed(6)}  ${pos.z.toFixed(6)}\n`;
       }
-      const iCu1 = speciesList.indexOf("Cu1") + 1;
-      const iCu2 = speciesList.indexOf("Cu2") + 1;
-      const afmMag =
-        `  starting_magnetization(${iCu1}) = ${CU_SEED.toFixed(1)},\n` +
-        `  starting_magnetization(${iCu2}) = ${(-CU_SEED).toFixed(1)},\n`;
+      let afmMag: string;
+      if (splitAFM) {
+        const iCu1 = speciesList.indexOf("Cu1") + 1;
+        const iCu2 = speciesList.indexOf("Cu2") + 1;
+        afmMag =
+          `  starting_magnetization(${iCu1}) = ${CU_SEED.toFixed(1)},\n` +
+          `  starting_magnetization(${iCu2}) = ${(-CU_SEED).toFixed(1)},\n`;
+      } else {
+        const iCu = speciesList.indexOf("Cu") + 1;
+        afmMag = `  starting_magnetization(${iCu}) = ${CU_SEED.toFixed(1)},\n`;
+      }
       const afmTimeoutMs = Math.round(s1Params.timeoutMs * 0.35);
       const afmMaxSeconds = Math.max(300, Math.round(afmTimeoutMs / 1000) - 60);
       const afmInput = `&CONTROL
@@ -1039,7 +1058,7 @@ ${cellBlock}
       const afmFile = path.join(stageDir, "scf_afm.in");
       fs.writeFileSync(afmFile, afmInput);
       verifyQEInputWritten(afmFile, afmInput, formula, "Stage 1 AFM SCF");
-      console.log(`[Staged-Relax] ${formula} S1 cuprate AFM SCF: Cu split into Cu1/Cu2 (${cuCounter} Cu atoms), nspin=2, seed=±${CU_SEED}`);
+      console.log(`[Staged-Relax] ${formula} S1 cuprate magnetic SCF: ${splitAFM ? `Cu split into Cu1/Cu2 AFM (${cuCount} Cu atoms, seed=±${CU_SEED})` : `single-Cu cell — one spin-polarised Cu species (seed=+${CU_SEED}), intra-cell AFM not possible`}, nspin=2`);
       const afmResult = await cb.runPwx(afmFile, stageDir, afmTimeoutMs);
       fs.writeFileSync(path.join(stageDir, "scf_afm.out"), afmResult.stdout);
       const afmParsed = parseRelaxOutput(afmResult.stdout);
