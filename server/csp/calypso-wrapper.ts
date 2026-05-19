@@ -13,7 +13,10 @@
 
 import * as fs from "fs";
 import * as path from "path";
-import { execSync } from "child_process";
+import { execSync, exec } from "child_process";
+import { promisify } from "util";
+
+const execAsync = promisify(exec);
 import type { CSPCandidate, CSPEngine, CSPEngineConfig } from "./csp-types";
 import { parseMultiplePOSCARS, writePOSCAR } from "./poscar-io";
 
@@ -120,8 +123,11 @@ export const calypsoEngine: CSPEngine = {
 
     console.log(`[CALYPSO] Starting PSO: pop=${popSize}, gen=${nGenerations}, P=${config.pressureGPa} GPa, seed=${baseSeed}`);
 
+    // MUST be async: this subprocess runs for many minutes. execSync would
+    // block the Node event loop the whole time, stalling every other job's
+    // timers. Structures are harvested from results/ below.
     try {
-      execSync(
+      await execAsync(
         `cd ${workDir} && ${CALYPSO_BIN} 2>&1 || true`,
         { cwd: workDir, timeout: config.timeoutMs, maxBuffer: 10 * 1024 * 1024 }
       );

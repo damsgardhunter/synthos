@@ -10,8 +10,11 @@
 
 import * as fs from "fs";
 import * as path from "path";
-import { execSync } from "child_process";
+import { execSync, exec } from "child_process";
+import { promisify } from "util";
 import type { CSPCandidate, CSPEngine, CSPEngineConfig, ScreeningTierConfig } from "./csp-types";
+
+const execAsync = promisify(exec);
 import { SCREENING_TIERS, pressureVolumeEnsemble } from "./csp-types";
 import { parsePOSCAR } from "./poscar-io";
 import { estimateVolumePerAtom } from "./airss-wrapper";
@@ -393,12 +396,16 @@ export const pyxtalEngine: CSPEngine = {
 
     console.log(`[PyXtal] Generating ${config.maxStructures} structures for ${elements.join("")} at ${config.pressureGPa} GPa (Z=[${validZ.join(",")}], maxAtoms=${tierConfig.maxAtoms}, ${tierConfig.tier} tier, target ${targetVpa.toFixed(1)} A^3/atom — ${volSource})`);
 
+    // MUST be async: this subprocess runs for many minutes. execSync would
+    // block the Node event loop the whole time, stalling every other job's
+    // timers. The script writes POSCARs incrementally, so a timeout still
+    // leaves harvestable files in outputDir below.
     try {
-      const result = execSync(
+      const result = await execAsync(
         `${PYTHON_BIN} ${scriptPath} 2>&1`,
         { cwd: workDir, timeout: config.timeoutMs, maxBuffer: 5 * 1024 * 1024 }
       );
-      const output = result.toString();
+      const output = result.stdout.toString();
       const debugLines = output.split("\n").filter(l => l.startsWith("PYXTAL_DEBUG"));
       if (debugLines.length > 0) {
         console.log(`[PyXtal] Debug: ${debugLines.slice(0, 5).join(" | ")}`);

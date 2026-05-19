@@ -12,8 +12,11 @@
 
 import * as fs from "fs";
 import * as path from "path";
-import { execSync } from "child_process";
+import { execSync, exec } from "child_process";
+import { promisify } from "util";
 import type { CSPCandidate, CSPEngine, CSPEngineConfig, ScreeningTierConfig } from "./csp-types";
+
+const execAsync = promisify(exec);
 import {
   cellVolumeFromVectors,
   COVALENT_RADII,
@@ -419,12 +422,16 @@ export const airssEngine: CSPEngine = {
             const inputPath = path.join(workDir, `airss_${seed}.cell`);
             fs.writeFileSync(inputPath, cellInput);
 
-            const result = execSync(
+            // MUST be async: this loop runs up to 10000 buildcell calls.
+            // execSync would block the Node event loop for the whole sweep
+            // (~19 min observed), stalling every other job's timers. Awaiting
+            // each call yields to the loop between invocations.
+            const result = await execAsync(
               `${BUILDCELL_BIN} < ${inputPath} 2>&1`,
               { cwd: workDir, timeout: 10000, maxBuffer: 1024 * 1024 }
             );
 
-            const output = result.toString("utf-8");
+            const output = result.stdout.toString();
             const candidate = parseCellOutput(output, elements, seed, config.pressureGPa, 1, z);
             if (candidate) {
               candidates.push(candidate);
