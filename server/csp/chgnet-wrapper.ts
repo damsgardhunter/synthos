@@ -22,8 +22,11 @@
 
 import * as fs from "fs";
 import * as path from "path";
-import { execSync } from "child_process";
+import { execSync, exec } from "child_process";
+import { promisify } from "util";
 import type { CSPCandidate } from "./csp-types";
+
+const execAsync = promisify(exec);
 import { writePOSCAR } from "./poscar-io";
 
 const PYTHON_BIN = process.env.PYTHON_BIN ?? "python3";
@@ -149,6 +152,32 @@ try:
     results = []
     files = sorted([f for f in os.listdir(poscar_dir) if f.endswith(".vasp") or f.startswith("POSCAR")])[:max_structures]
 
+    def write_output():
+        """Serialize current results to disk atomically. Called periodically so
+        a timeout kill still leaves a usable partial file rather than nothing."""
+        valid = [r for r in results if "energy_per_atom_ev" in r]
+        valid.sort(key=lambda r: r.get("relaxed_energy_per_atom_ev", r["energy_per_atom_ev"]))
+        rlx = [r["relaxed_energy_per_atom_ev"] for r in valid if r.get("relaxed")]
+        unrlx = [r["energy_per_atom_ev"] for r in valid]
+        trt = sum(r.get("relax_time_s", 0) for r in valid)
+        be = rlx[0] if rlx else (unrlx[0] if unrlx else None)
+        we = rlx[-1] if rlx else (unrlx[-1] if unrlx else None)
+        out = {
+            "total": len(files),
+            "evaluated": len(valid),
+            "relaxed": len(rlx),
+            "failed": len(results) - len(valid),
+            "results": valid,
+            "best_energy": be,
+            "worst_energy": we,
+            "total_relax_time_s": round(trt, 1),
+        }
+        tmp = output_path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(out, f, indent=2)
+        os.replace(tmp, output_path)
+        return out, be, we, trt
+
     for i, fname in enumerate(files):
         fpath = os.path.join(poscar_dir, fname)
         try:
@@ -220,6 +249,8 @@ try:
 
             results.append(result)
 
+            if (i + 1) % 8 == 0:
+                write_output()
             if (i + 1) % 25 == 0:
                 elapsed = time.time() - t0
                 print(f"CHGNET_PROGRESS {i+1}/{len(files)} last_relax={elapsed:.1f}s", flush=True)
@@ -230,33 +261,13 @@ try:
                 "error": str(struct_err)[:100],
             })
 
-    # Sort by relaxed energy (lowest first), fall back to single-point
-    valid_results = [r for r in results if "energy_per_atom_ev" in r]
-    valid_results.sort(key=lambda r: r.get("relaxed_energy_per_atom_ev", r["energy_per_atom_ev"]))
+    # Final write (also captures the trailing structures since the last checkpoint)
+    output, best_e, worst_e, total_relax_time = write_output()
 
-    # Compute stats
-    relaxed_energies = [r["relaxed_energy_per_atom_ev"] for r in valid_results if r.get("relaxed")]
-    unrelaxed_energies = [r["energy_per_atom_ev"] for r in valid_results]
-    total_relax_time = sum(r.get("relax_time_s", 0) for r in valid_results)
-
-    best_e = relaxed_energies[0] if relaxed_energies else (unrelaxed_energies[0] if unrelaxed_energies else None)
-    worst_e = relaxed_energies[-1] if relaxed_energies else (unrelaxed_energies[-1] if unrelaxed_energies else None)
-
-    output = {
-        "total": len(files),
-        "evaluated": len(valid_results),
-        "relaxed": len(relaxed_energies),
-        "failed": len(results) - len(valid_results),
-        "results": valid_results,
-        "best_energy": best_e,
-        "worst_energy": worst_e,
-        "total_relax_time_s": round(total_relax_time, 1),
-    }
-
-    with open(output_path, "w") as f:
-        json.dump(output, f, indent=2)
-
-    print(f"CHGNET_DONE evaluated={len(valid_results)} relaxed={len(relaxed_energies)} failed={len(results) - len(valid_results)} best={best_e:.4f} worst={worst_e:.4f} time={total_relax_time:.0f}s")
+    if best_e is not None and worst_e is not None:
+        print(f"CHGNET_DONE evaluated={output['evaluated']} relaxed={output['relaxed']} failed={output['failed']} best={best_e:.4f} worst={worst_e:.4f} time={total_relax_time:.0f}s")
+    else:
+        print(f"CHGNET_DONE evaluated=0 relaxed=0 failed={output['failed']} best=0.0 worst=0.0 time=0s")
 
 except Exception as fatal:
     print(f"CHGNET_FATAL {traceback.format_exc()}")
@@ -346,12 +357,18 @@ export async function runChgnetEvaluation(
 
   console.log(`[CHGNet] Evaluating ${candidateMap.size} candidates (relax=${doRelax}, timeout=${Math.round(timeoutMs / 1000)}s)`);
 
+  // IMPORTANT: this MUST be an async spawn. execSync froze the Node event loop
+  // for the entire batch (relax=true batches run multiple hours), which stalled
+  // every other timer in the worker — the 90 s Vegard/candidate-fetch timeout
+  // could not even fire. The Python script checkpoints results to disk every
+  // few structures, so a timeout here still leaves a usable partial file: log
+  // and fall through to the parse step rather than discarding everything.
   try {
-    const result = execSync(
+    const result = await execAsync(
       `${PYTHON_BIN} ${scriptPath} 2>&1`,
       { cwd: workDir, timeout: Math.round(timeoutMs), maxBuffer: 10 * 1024 * 1024 }
     );
-    const output = result.toString();
+    const output = result.stdout.toString();
 
     // Log progress
     const doneMatch = output.match(/CHGNET_DONE evaluated=(\d+) relaxed=(\d+) failed=(\d+) best=([-\d.]+) worst=([-\d.]+) time=(\d+)s/);
@@ -363,8 +380,9 @@ export async function runChgnetEvaluation(
       return { rankedCandidates: candidates, results: [], stats: { evaluated: 0, relaxed: 0, failed: 0, bestEnergy: null, totalRelaxTimeS: 0 }, volumeBiasFactor: 1.0 };
     }
   } catch (err: any) {
-    console.log(`[CHGNet] Evaluation failed: ${err.message?.slice(0, 100)}`);
-    return { rankedCandidates: candidates, results: [], stats: { evaluated: 0, relaxed: 0, failed: 0, bestEnergy: null, totalRelaxTimeS: 0 }, volumeBiasFactor: 1.0 };
+    // Timeout or non-zero exit. The script checkpoints to disk, so partial
+    // results may still be on disk — fall through to the parse step.
+    console.log(`[CHGNet] Evaluation did not complete cleanly (${err.message?.slice(0, 80)}) — attempting to salvage checkpointed results`);
   }
 
   // Parse results
