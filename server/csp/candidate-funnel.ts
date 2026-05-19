@@ -485,9 +485,16 @@ export async function runCandidateFunnel(
       // the spawn doesn't get killed mid-batch. Per-material budget still
       // protected by the size-scaled `perStructureMs` × maxEval calculation.
       const hardCapMs = hasH ? 28800000 : 10800000; // hydrides: 480 min, others: 180 min
+      // Only the top RELAX_TOP_N candidates (by preScore) get the expensive
+      // cell relaxation; the rest get a cheap single-point energy. A full
+      // 122-195-candidate relax batch ran 4-6 h and ETIMEDOUTed; relaxing the
+      // top 40 keeps it well inside budget while still relaxing every
+      // candidate that has a realistic shot at the DFT stage.
+      const RELAX_TOP_N = 40;
+      const relaxCount = Math.min(maxEval, RELAX_TOP_N);
       const timeoutMs = Math.round(Math.min(
         hardCapMs,
-        Math.max(600000, Math.round(maxEval * perStructureMs * 1.5) + 120000) // 50% safety margin + 120s overhead
+        Math.max(600000, Math.round(relaxCount * perStructureMs * 1.5) + 120000) // 50% safety margin + 120s overhead
       ));
 
       // CHGNet relaxation is constant-pressure aware (pressureGPa is passed
@@ -501,6 +508,7 @@ export async function runCandidateFunnel(
         maxEval,
         timeoutMs,
         pressureGPa,
+        RELAX_TOP_N,
       );
       if (chgnetResult.stats.evaluated > 0) {
         f6Candidates = chgnetResult.rankedCandidates;

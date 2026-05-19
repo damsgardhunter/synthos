@@ -175,14 +175,19 @@ export async function screenRound2(
     // of pure compute and was ETIMEDOUT'ing (then silently falling back to
     // the Round 1 structure). 90 s/candidate gives generous headroom.
     const r2Count = Math.min(unique.length, 50);
+    // Only the top 40 (by preScore) get the expensive cell relaxation; the
+    // rest get a cheap single-point energy — keeps the batch inside budget.
+    const r2RelaxTopN = 40;
+    const r2RelaxCount = Math.min(r2Count, r2RelaxTopN);
     // CHGNet relaxation is constant-pressure aware — pressureGPa is passed
     // through to the relax backend, which minimizes H = E + P*V at the target
     // pressure, so high-P candidates relax to their correct high-P volume.
     const chgnetResult = await runChgnetEvaluation(
       unique, workDir, true,
       r2Count,
-      Math.max(900_000, r2Count * 90_000),
+      Math.max(900_000, r2RelaxCount * 90_000),
       pressureGPa,
+      r2RelaxTopN,
     );
 
     if (chgnetResult.stats.evaluated > 0) {

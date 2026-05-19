@@ -62,6 +62,7 @@ function generateChgnetScript(
   doRelax: boolean,
   maxStructures: number,
   pressureGPa: number,
+  relaxTopN: number,
 ): string {
   return `#!/usr/bin/env python3
 """CHGNet MLIP energy evaluation with constant-pressure cell relaxation."""
@@ -117,6 +118,10 @@ try:
     output_path = ${JSON.stringify(outputPath.replace(/\\/g, "/"))}
     do_relax = ${doRelax ? "True" : "False"}
     max_structures = ${maxStructures}
+    # Only the top relax_top_n candidates (by preScore — input order) get the
+    # expensive cell relaxation; the rest get a cheap single-point energy. This
+    # keeps the batch inside its wall-time budget instead of timing out.
+    relax_top_n = ${Number.isFinite(relaxTopN) ? Math.max(0, Math.round(relaxTopN)) : 1_000_000}
     pressure_gpa = ${Number.isFinite(pressureGPa) ? pressureGPa : 0}
     scalar_pressure = pressure_gpa * GPA_TO_EV_A3
 
@@ -200,7 +205,7 @@ try:
                 "relaxed": False,
             }
 
-            if do_relax:
+            if do_relax and i < relax_top_n:
                 # Scale steps with atom count: more atoms need more steps to
                 # converge. Small cells (< 10 atoms): 100 steps, large cells
                 # (50+ atoms): 500 steps.
@@ -314,6 +319,7 @@ export async function runChgnetEvaluation(
   maxStructures: number = 300,
   timeoutMs: number = 300000, // 5 min default
   pressureGPa: number = 0,
+  relaxTopN: number = 1_000_000, // relax all by default; callers cap this
 ): Promise<{
   rankedCandidates: CSPCandidate[];
   results: ChgnetResult[];
@@ -352,10 +358,11 @@ export async function runChgnetEvaluation(
   // Generate and run CHGNet script
   const outputPath = path.join(workDir, "chgnet_results.json");
   const scriptPath = path.join(workDir, "chgnet_eval.py");
-  const script = generateChgnetScript(poscarDir, outputPath, doRelax, maxStructures, pressureGPa);
+  const script = generateChgnetScript(poscarDir, outputPath, doRelax, maxStructures, pressureGPa, relaxTopN);
   fs.writeFileSync(scriptPath, script);
 
-  console.log(`[CHGNet] Evaluating ${candidateMap.size} candidates (relax=${doRelax}, timeout=${Math.round(timeoutMs / 1000)}s)`);
+  const relaxCount = doRelax ? Math.min(candidateMap.size, relaxTopN) : 0;
+  console.log(`[CHGNet] Evaluating ${candidateMap.size} candidates (relax top ${relaxCount}, single-point ${candidateMap.size - relaxCount}, timeout=${Math.round(timeoutMs / 1000)}s)`);
 
   // IMPORTANT: this MUST be an async spawn. execSync froze the Node event loop
   // for the entire batch (relax=true batches run multiple hours), which stalled
