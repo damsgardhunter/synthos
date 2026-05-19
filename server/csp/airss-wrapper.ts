@@ -402,6 +402,15 @@ export const airssEngine: CSPEngine = {
 
         const batchBudget = Math.min(budgetPerCombo, tierConfig.airssTotalCap - totalGenerated);
         let batchGenerated = 0;
+        // Abandon a (Z, volume) combo once it has failed this many times in
+        // a row with nothing generated. A (volume, MINSEP) pair can be
+        // geometrically infeasible — buildcell cannot place the atoms and
+        // each call burns its full 10 s timeout. Without an early exit an
+        // impossible combo runs all ~200 seeds ≈ 33 min of pure timeout
+        // (observed: LaH12 spent ~1h50m in AIRSS generation this way).
+        const INFEASIBLE_FAIL_STREAK = 10;
+        let consecutiveFails = 0;
+        let batchTimeouts = 0;
 
         for (let i = 0; i < batchBudget; i++) {
           const seed = baseSeed + seedCounter++;
@@ -421,13 +430,24 @@ export const airssEngine: CSPEngine = {
               candidates.push(candidate);
               batchGenerated++;
               totalGenerated++;
+              consecutiveFails = 0;
+            } else {
+              consecutiveFails++;
             }
 
             try { fs.unlinkSync(inputPath); } catch {}
           } catch (err: any) {
+            consecutiveFails++;
+            if (/ETIMEDOUT|timed out/i.test(err?.message ?? "")) batchTimeouts++;
             if (batchGenerated === 0 && i === 0) {
               console.log(`[AIRSS] Z=${z} vol=${targetVol.toFixed(1)} first fail: ${err.message?.slice(0, 100)}`);
             }
+          }
+          // Bail on an infeasible combo: a streak of failures with nothing
+          // generated means buildcell cannot satisfy this (volume, MINSEP).
+          if (batchGenerated === 0 && consecutiveFails >= INFEASIBLE_FAIL_STREAK) {
+            console.log(`[AIRSS] Z=${z} vol=${targetVol.toFixed(1)}: abandoned after ${consecutiveFails} consecutive failures (${batchTimeouts} timeouts) — (volume, MINSEP) geometrically infeasible`);
+            break;
           }
         }
       }
