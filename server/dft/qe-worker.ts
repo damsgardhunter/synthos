@@ -5109,7 +5109,20 @@ function runQECommand(binary: string, inputFile: string, workDir: string, timeou
     // On Windows, wsl.exe does not reliably forward Node.js piped stdin to the inner
     // process. Use bash -c file-redirection instead so I/O stays within WSL.
     const wslInputFile = IS_WINDOWS ? toWslPath(inputFile) : undefined;
-    const proc = spawnQE(binary, { cwd: workDir, stdio: ["pipe", "pipe", "pipe"], wslInputFile });
+    // On Linux, deliver pw.x / ph.x input via QE's `-inp` flag instead of a
+    // piped stdin. These run for hours; a stdin pipe cannot be pumped while
+    // the event loop is blocked by a concurrent spawnSync (AIRSS/CHGNet),
+    // which starved QE of its input and made it abort with "could not find
+    // namelist &control". With `-inp`, QE opens the file itself — input
+    // delivery no longer depends on the Node event loop. Fast PP tools
+    // (q2r.x, matdyn.x, …) keep the stdin path.
+    const useInputFlag = !IS_WINDOWS && (binary.endsWith("pw.x") || binary.endsWith("ph.x"));
+    const proc = spawnQE(binary, {
+      cwd: workDir,
+      stdio: [useInputFlag ? "ignore" : "pipe", "pipe", "pipe"],
+      wslInputFile,
+      inputFile: useInputFlag ? inputFile : undefined,
+    });
     let stdout = "";
     let stderr = "";
     let resolved = false;
@@ -5128,7 +5141,7 @@ function runQECommand(binary: string, inputFile: string, workDir: string, timeou
     }
 
     let inputStream: ReturnType<typeof fs.createReadStream> | null = null;
-    if (!IS_WINDOWS) {
+    if (!IS_WINDOWS && !useInputFlag) {
       inputStream = fs.createReadStream(inputFile);
       inputStream.on("error", (err: Error) => {
         stderr += `\nInput file error: ${err.message}`;

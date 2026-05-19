@@ -118,10 +118,16 @@ const QE_SPAWN_ENV: NodeJS.ProcessEnv = {
 
 export function spawnQE(
   binary: string,
-  options: { cwd: string; stdio: ("pipe" | "inherit" | "ignore")[]; wslInputFile?: string },
+  options: { cwd: string; stdio: ("pipe" | "inherit" | "ignore")[]; wslInputFile?: string; inputFile?: string },
 ): ChildProcess {
   const mpi = getMpiWrapper();
   const env: NodeJS.ProcessEnv = { ...process.env, ...QE_SPAWN_ENV };
+  // On Linux, when inputFile is given, hand it to QE via its `-inp` flag so
+  // QE opens the file itself. This avoids piping the input through Node's
+  // stdin — a pipe that cannot be pumped while the event loop is blocked by
+  // a concurrent spawnSync (AIRSS buildcell / CHGNet). A starved stdin made
+  // QE abort at startup with "could not find namelist &control".
+  const inpArgs = (!IS_WINDOWS && options.inputFile) ? ["-inp", options.inputFile] : [];
   if (IS_WINDOWS) {
     if (options.wslInputFile) {
       // Use bash -c with file redirection to bypass WSL stdin-pipe unreliability
@@ -144,8 +150,8 @@ export function spawnQE(
   }
   if (mpi) {
     // mpirun args go before binary, QE args (-nk, -npool) go after
-    // Result: mpirun -np 10 --allow-run-as-root pw.x -nk 5
-    return nodeSpawn(mpi.cmd, [...mpi.args, binary, ...mpi.qeArgs], { cwd: options.cwd, stdio: options.stdio as any, env });
+    // Result: mpirun -np 10 --allow-run-as-root pw.x -nk 5 -inp scf.in
+    return nodeSpawn(mpi.cmd, [...mpi.args, binary, ...mpi.qeArgs, ...inpArgs], { cwd: options.cwd, stdio: options.stdio as any, env });
   }
-  return nodeSpawn(binary, { cwd: options.cwd, stdio: options.stdio as any, env });
+  return nodeSpawn(binary, inpArgs, { cwd: options.cwd, stdio: options.stdio as any, env });
 }

@@ -921,10 +921,18 @@ ${cellBlock}
   const probeResult = await cb.runPwx(probeFile, stageDir, (probeMaxSec + 120) * 1000);
   fs.writeFileSync(path.join(stageDir, "scf_probe.out"), probeResult.stdout);
   cb.cleanTmpDir(path.join(stageDir, "tmp"));
+  // "could not find namelist &control" is an INPUT-DELIVERY failure (QE
+  // never received its input), not a verdict on the geometry — the input
+  // file itself was verified intact above. Never reject a candidate for it:
+  // let the full relax proceed (and surface the infrastructure problem).
+  const probeInputNotDelivered = /could not find namelist/i.test(probeResult.stdout);
+  if (probeInputNotDelivered) {
+    console.log(`[Staged-Relax] ${formula} Stage 1 candidate ${candidateIdx + 1}: SCF probe INCONCLUSIVE — QE reported "could not find namelist &control" (input not delivered, not a geometry fault); proceeding to the full relax.`);
+  }
   // A QE error abort (non-zero exit + an "Error in routine" block) means the
   // geometry is unphysical for DFT. A clean max_seconds stop exits 0, so a
   // slow-but-valid structure is NOT flagged and proceeds to the full relax.
-  if (probeResult.exitCode !== 0 && /Error in routine/.test(probeResult.stdout)) {
+  if (probeResult.exitCode !== 0 && /Error in routine/.test(probeResult.stdout) && !probeInputNotDelivered) {
     const probeTail = probeResult.stdout.slice(-220).replace(/\s+/g, " ").trim();
     console.log(`[Staged-Relax] ${formula} Stage 1 candidate ${candidateIdx + 1}: SCF feasibility probe FAILED — QE aborted on this geometry (${probeMaxSec}s probe), skipping the full relax. Tail: ${probeTail}`);
     return {
