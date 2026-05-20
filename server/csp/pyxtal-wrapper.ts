@@ -421,7 +421,29 @@ export const pyxtalEngine: CSPEngine = {
         return [];
       }
     } catch (err: any) {
+      // The Node-level err.message is just "Command failed: python3 ..." — useless.
+      // The script's `2>&1` merges stderr into stdout, which child_process.exec
+      // surfaces on err.stdout for non-zero exits. Pull the actual Python traceback
+      // (PYXTAL_FATAL line + tail) so the operator can see *why* the script died,
+      // not just that it did. Falls back to err.stderr for the bare-error case.
+      const childStdout: string = (err.stdout ?? "").toString();
+      const childStderr: string = (err.stderr ?? "").toString();
+      const combined = childStdout + (childStderr && !childStdout.includes(childStderr) ? "\n" + childStderr : "");
       console.log(`[PyXtal] Generation failed: ${err.message?.slice(0, 100)}`);
+      // Surface the PYXTAL_FATAL traceback if present, otherwise the last 600 chars.
+      const fatalIdx = combined.indexOf("PYXTAL_FATAL");
+      if (fatalIdx >= 0) {
+        console.log(`[PyXtal] Python traceback: ${combined.slice(fatalIdx, fatalIdx + 800).replace(/\n/g, " | ")}`);
+      } else if (combined.trim().length > 0) {
+        const tail = combined.slice(-600).trim().replace(/\n/g, " | ");
+        console.log(`[PyXtal] Python output tail: ${tail}`);
+      }
+      // Surface the per-attempt PYXTAL_DEBUG hints too — they explain WHY individual
+      // SG attempts are failing (factor too small, write_error, etc.).
+      const debugLines = combined.split("\n").filter(l => l.startsWith("PYXTAL_DEBUG")).slice(0, 8);
+      if (debugLines.length > 0) {
+        console.log(`[PyXtal] Per-attempt diagnostics: ${debugLines.join(" | ")}`);
+      }
     }
 
     // Harvest POSCAR files

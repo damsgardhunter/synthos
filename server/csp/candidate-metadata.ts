@@ -142,10 +142,25 @@ export function analyzeHydrideChemistry(candidate: CSPCandidate): HydrideAnalysi
   }
   const mhCoord = metalAtoms.length > 0 ? totalMHCoord / metalAtoms.length : 0;
 
+  // For ternary cage hydrides (e.g. YH9Na2, Li2LaH12) the total-H/total-metal
+  // ratio collapses because guest metals (Na, Li) inflate the denominator —
+  // YH9Na2 gives 9/3 = 3.0, below the 4.0 clathrate threshold, even though
+  // the H/Y ratio (9) is unambiguously cage-forming. Compute the max-per-element
+  // H ratio alongside the total ratio so the classifier sees the framework
+  // metal's perspective, not just the diluted overall ratio.
+  let maxHPerMetal = 0;
+  const metalCounts: Record<string, number> = {};
+  for (const m of metalAtoms) metalCounts[m.element] = (metalCounts[m.element] ?? 0) + 1;
+  for (const n of Object.values(metalCounts)) {
+    const r = n > 0 ? hAtoms.length / n : 0;
+    if (r > maxHPerMetal) maxHPerMetal = r;
+  }
+
   // Classify hydrogen network type
   const networkType = classifyHydrogenNetwork(
     hAtoms.length, metalAtoms.length, hhMeanDist, hhMinDist,
     mhCoord, volumePerH, candidate.spaceGroup ?? "",
+    maxHPerMetal,
   );
 
   const isMetallicHydride = mhCoord >= 4 && hhMeanDist < 2.0;
@@ -175,8 +190,15 @@ function classifyHydrogenNetwork(
   hhMeanDist: number, hhMinDist: number,
   mhCoord: number, volumePerH: number,
   spaceGroup: string,
+  maxHPerMetal: number = 0,
 ): HydrogenNetworkType {
   const hRatio = metalCount > 0 ? hCount / metalCount : Infinity;
+  // cageRatio: the framework metal's H ratio (max across metal species).
+  // For binary MHₙ this equals hRatio; for ternary AₓMHₙ (with A a guest
+  // alkali/alkaline-earth and M the cage former) this stays at n while the
+  // total hRatio collapses. Use it to gate the cage classification so guest
+  // metals don't push true clathrates into the chain/sheet buckets.
+  const cageRatio = Math.max(hRatio, maxHPerMetal);
 
   // H2-like molecular units
   if (hhMinDist > 0 && hhMinDist < 0.95) return "H2-molecular";
@@ -185,12 +207,12 @@ function classifyHydrogenNetwork(
   if (hhMeanDist > 2.5 || hCount <= 1) return "isolated-H";
 
   // Cage structures (high H ratio + moderate H-H distances)
-  if (hRatio >= 6 && hhMeanDist < 2.0 && mhCoord >= 8) {
+  if (cageRatio >= 6 && hhMeanDist < 2.0 && mhCoord >= 8) {
     if (spaceGroup.includes("Im-3m") || spaceGroup.includes("229")) return "sodalite-cage";
     return "clathrate-cage";
   }
 
-  if (hRatio >= 4 && hhMeanDist < 2.0) return "clathrate-cage";
+  if (cageRatio >= 4 && hhMeanDist < 2.0) return "clathrate-cage";
 
   // Interstitial H in metal lattice
   if (hRatio <= 1 && mhCoord >= 4) return "interstitial";

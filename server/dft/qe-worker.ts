@@ -5905,6 +5905,65 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       console.log(`[QE-Worker] Injected literature known-structure for ${formula}: ${ksCandidate.spaceGroup}, a=${ksCandidate.latticeA.toFixed(2)} Å${ksCandidate.latticeC ? `, c=${ksCandidate.latticeC.toFixed(2)} Å (c/a=${ksCOverA.toFixed(2)})` : ""}, ${ksCandidate.atoms.length} atoms (total now: ${structureCandidates.length})`);
     }
 
+    // --- Inject prototype-derived candidate (anisotropic c/a) ---
+    // For materials whose composition matches a curated prototype template
+    // (YBCO-123, K2NiF4, MgB2-AlB2, etc.) but where neither DFT-cache nor
+    // known-structure DB has a record, the AIRSS/PyXtal cubic candidates
+    // dominate the pool and the funnel picks one of those — even though the
+    // prototype template carries the correct anisotropic c/a and layered
+    // Wyckoff positions. Observed on YBa2Cu3O7 (May 20): YBCO-123 template
+    // matched, Vegard gave a=6.36 Å cubic, but Stage 1 ran on an AIRSS Z=1
+    // cube with a=7.08 Å — wrong c/a, wrong layering, ~20× compute wasted.
+    //
+    // Build a fractional-position candidate at the prototype's c/a, using
+    // the Vegard cubic-equivalent volume to set `a` (V = c/a · a³ → a =
+    // (V_cubic / cOverA)^(1/3)). Skip if no prototype matches, if c/a ≈ 1
+    // (cubic — Vegard's a is already right), or if the known-structure DB
+    // already injected this formula (the literature cell is strictly better).
+    if (!ksCandidate || ksCandidate.atoms.length === 0) {
+      try {
+        const proto = selectPrototype(formula);
+        if (proto && proto.template.cOverA > 1.1 && proto.template.sites.length > 0) {
+          // Source for the cubic-equivalent volume: Vegard if confident,
+          // otherwise the volume-sum estimate.
+          const cubicEqA = vegardResult && vegardResult.confidence > 0.3
+            ? vegardResult.latticeA
+            : estimateLatticeConstant(elements, counts, workerPressure);
+          const cubicVolume = cubicEqA * cubicEqA * cubicEqA;
+          const protoA = Math.pow(cubicVolume / proto.template.cOverA, 1 / 3);
+          if (Number.isFinite(protoA) && protoA > 1.5) {
+            const protoC = protoA * proto.template.cOverA;
+            const protoPositions: Array<{ element: string; x: number; y: number; z: number }> = [];
+            for (const site of proto.template.sites) {
+              const el = proto.siteMap[site.label];
+              if (el) protoPositions.push({ element: el, x: site.x, y: site.y, z: site.z });
+            }
+            if (protoPositions.length > 0) {
+              structureCandidates.push({
+                latticeA: protoA,
+                latticeB: protoA,
+                latticeC: protoC,
+                cOverA: proto.template.cOverA,
+                positions: protoPositions,
+                prototype: "prototype-derived",
+                crystalSystem: proto.template.latticeType ?? "tetragonal",
+                spaceGroup: proto.template.spaceGroup ?? "",
+                source: `Prototype ${proto.template.name} (a=${protoA.toFixed(2)} Å, c/a=${proto.template.cOverA.toFixed(2)}, ${protoPositions.length} atoms)`,
+                // Below known-structure (0.97) and DFT-cached (0.99) so those
+                // still win when available, but above AIRSS (0.40) so the
+                // prototype dominates random-CSP for matched compositions.
+                confidence: 0.85,
+                isMetallic: null,
+              });
+              console.log(`[QE-Worker] Injected prototype-derived candidate for ${formula}: ${proto.template.name} (${proto.template.spaceGroup}), a=${protoA.toFixed(2)} Å, c=${protoC.toFixed(2)} Å (c/a=${proto.template.cOverA.toFixed(2)}), ${protoPositions.length} atoms (total now: ${structureCandidates.length})`);
+            }
+          }
+        }
+      } catch (protoInjErr: any) {
+        console.log(`[QE-Worker] Prototype-derived injection failed for ${formula}: ${protoInjErr.message?.slice(0, 100)}`);
+      }
+    }
+
     // --- Candidate stats logging ---
     try {
       logCandidateStats(structureCandidates as any, formula);
