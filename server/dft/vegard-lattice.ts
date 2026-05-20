@@ -841,8 +841,18 @@ export async function interpolateFromTemplateReferences(
   if (!protoResult) return null;
   const { siteMap } = protoResult;
 
-  // Weighted average positions
+  // Weighted average positions. Each element-mapped site MUST have at least
+  // one matching reference contribution — otherwise we'd fall back to the
+  // bare template position (site.x, site.y, site.z), which is just one
+  // Wyckoff-orbit representative. Multiple sites can share the same
+  // representative position in a template; falling back to it for >1 site
+  // produces atoms at IDENTICAL coordinates (K2NiF4-214 with Mn2O4Zr1 refs
+  // mapped onto La2CuO4 May 20: La and Cu both fell back to (0,0,0) and
+  // overlapped at 0.000 Å, killing the VCA output). If any element-mapped
+  // site lacks a reference contribution, the reference structures are too
+  // dissimilar from the template — reject rather than emit a corrupt result.
   const positions: Array<{ element: string; x: number; y: number; z: number }> = [];
+  const missingSites: string[] = [];
   for (let si = 0; si < template.sites.length; si++) {
     const site = template.sites[si];
     const element = siteMap[site.label];
@@ -853,8 +863,12 @@ export async function interpolateFromTemplateReferences(
       for (const a of acc) { wx += a.x * a.weight; wy += a.y * a.weight; wz += a.z * a.weight; wt += a.weight; }
       positions.push({ element, x: wx / wt, y: wy / wt, z: wz / wt });
     } else {
-      positions.push({ element, x: site.x, y: site.y, z: site.z });
+      missingSites.push(`${site.label}@(${site.x.toFixed(2)},${site.y.toFixed(2)},${site.z.toFixed(2)})`);
     }
+  }
+  if (missingSites.length > 0) {
+    console.log(`[VCA-Template] Rejected: ${missingSites.length}/${template.sites.length} sites had no matching reference position (${template.name}, refs: ${referencesUsed.join(", ")}, missing: ${missingSites.slice(0, 4).join(", ")}${missingSites.length > 4 ? "..." : ""}) — references too dissimilar from template, falling back to template defaults would overlap atoms.`);
+    return null;
   }
 
   // Average geometry from references

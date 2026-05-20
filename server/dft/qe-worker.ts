@@ -5948,14 +5948,38 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       }
     }
 
-    // Use Vegard lattice if confident, otherwise fall back to volume-sum
+    // Use Vegard lattice if confident, otherwise prefer a prototype-derived
+    // lattice (anisotropy-aware) over the cubic-equivalent volume-sum. Vegard
+    // can time out for ternary cuprates (60-100 endpoint fetches > 90 s),
+    // and the cubic volume-sum then gave wildly wrong starting lattices:
+    // La2CuO4 May 20 got a=5.76 Å cubic when the prototype-aware estimate
+    // (K2NiF4, c/a=3.3) gives a=3.97 Å — closer to the real 3.78. The bad
+    // starting cell then made the Stage 1 SCF unable to converge.
     let latticeA: number;
     if (vegardResult && vegardResult.confidence > 0.3) {
       latticeA = vegardResult.latticeA;
       console.log(`[QE-Worker] Using Vegard lattice for ${formula}: ${latticeA.toFixed(3)} A (conf=${vegardResult.confidence.toFixed(2)})`);
     } else {
-      latticeA = estimateLatticeConstant(elements, counts, workerPressure);
-      console.log(`[QE-Worker] Using volume-sum lattice for ${formula}: ${latticeA.toFixed(3)} A (Vegard conf=${vegardResult?.confidence?.toFixed(2) ?? "N/A"})`);
+      const cubicA = estimateLatticeConstant(elements, counts, workerPressure);
+      let usedPrototypeLattice = false;
+      try {
+        const proto = selectPrototype(formula);
+        if (proto && proto.template.cOverA > 1.1) {
+          // V_cell unchanged; for a tetragonal/hexagonal a×a×(cOverA·a) cell
+          // V = cOverA · a^3 → a = (V_cubic^3 / cOverA)^(1/3).
+          const cubicVolume = cubicA * cubicA * cubicA;
+          const tetA = Math.pow(cubicVolume / proto.template.cOverA, 1 / 3);
+          if (Number.isFinite(tetA) && tetA > 1.5) {
+            latticeA = tetA;
+            usedPrototypeLattice = true;
+            console.log(`[QE-Worker] Using prototype-derived lattice for ${formula}: ${latticeA.toFixed(3)} A (${proto.template.name}, ${proto.template.latticeType} c/a=${proto.template.cOverA.toFixed(2)}) — Vegard conf=${vegardResult?.confidence?.toFixed(2) ?? "N/A"}, cubic volume-sum would give ${cubicA.toFixed(3)} A`);
+          }
+        }
+      } catch { /* fall through to cubic volume-sum */ }
+      if (!usedPrototypeLattice) {
+        latticeA = cubicA;
+        console.log(`[QE-Worker] Using volume-sum lattice for ${formula}: ${latticeA.toFixed(3)} A (Vegard conf=${vegardResult?.confidence?.toFixed(2) ?? "N/A"})`);
+      }
     }
     // For known structures with explicit lattice parameters, override the Vegard estimate.
     // Vegard produces a cubic-equivalent lattice (e.g., 13.885 Å for Bi2212) but the
@@ -6132,7 +6156,7 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       if (postXtbGeom.valid && postXtbGeom.warnings.length > 0) {
         console.log(`[QE-Worker] ${formula} geometry warnings (proceeding): ${postXtbGeom.warnings.join("; ")}`);
       }
-    } else {
+    } else if (!skipXtb) {
       console.log(`[QE-Worker] ${formula} xTB pre-relax failed — proceeding with raw positions to vc-relax`);
     }
 
