@@ -6983,13 +6983,55 @@ ${cellBlockEos}
 
       // Use vc-relax result
       if (vcParsed.finalPositions && vcParsed.finalPositions.length > 0) {
-        positions = vcParsed.finalPositions;
-        result.vcRelaxed = true;
-        if (vcParsed.finalLatticeAng && vcParsed.finalLatticeAng > 0.5) {
-          latticeA = vcParsed.finalLatticeAng;
-          result.relaxedLatticeA = latticeA;
+        // --- Collapsed-cell sanity gate ---
+        // BFGS + damp-w can settle into a "minimum" at extreme compression
+        // (V/atom < 2 Å³ — atoms inside each other) when the starting cell is
+        // far from the physical basin. LaH12 May 19: a 4.021 → 2.856 Å run
+        // ended at V/atom = 1.79 Å³ with forces and pressure looking small,
+        // but the structure is unphysical and the subsequent Γ phonon then
+        // produced 7 large imaginary modes. Downstream refinement, polish,
+        // and phonon stages on such cells are guaranteed garbage, so reject
+        // the vc-relax result here and leave the pre-vc-relax geometry in
+        // place. Refinement / polish / cache / SCF-reuse all gate on
+        // result.vcRelaxed, so this single flip skips the wreckage.
+        const _nAtoms = vcParsed.finalPositions.length;
+        const _v = vcParsed.finalCellVectors;
+        let _finalVol = 0;
+        if (_v && _v.length === 3) {
+          _finalVol = Math.abs(
+            _v[0][0] * (_v[1][1] * _v[2][2] - _v[1][2] * _v[2][1]) -
+            _v[0][1] * (_v[1][0] * _v[2][2] - _v[1][2] * _v[2][0]) +
+            _v[0][2] * (_v[1][0] * _v[2][1] - _v[1][1] * _v[2][0]),
+          );
+        } else if (vcParsed.finalLatticeAng) {
+          _finalVol = Math.pow(vcParsed.finalLatticeAng, 3);
         }
-        console.log(`[QE-Worker] vc-relax ${vcParsed.converged ? "CONVERGED" : "partial"} for ${formula}: a=${latticeA.toFixed(3)} A, ${positions.length} atoms`);
+        const _finalVpa = _nAtoms > 0 ? _finalVol / _nAtoms : 0;
+        // Cubic-equivalent reference from the pre-vc-relax lattice — adequate
+        // for a ratio sanity check even when the cell isn't strictly cubic.
+        const _startingVpa = (preVcLatticeA ** 3) / Math.max(1, _nAtoms);
+        // Physical floor: metallic H at 500 GPa is V/atom > 1.3 Å³; LaH-class
+        // at < 300 GPa is 3-5 Å³. Below 1.8 Å³ atoms overlap. Pair with a
+        // > 55 % contraction ratio so "very compressed but physical" still
+        // passes while "BFGS escaped into a numerical artifact" gets rejected.
+        const _collapsedAbsolute = _finalVpa > 0 && _finalVpa < 1.8;
+        const _collapsedRelative = _startingVpa > 0 && _finalVpa / _startingVpa < 0.45;
+        if (_collapsedAbsolute || _collapsedRelative) {
+          console.error(
+            `[QE-Worker] vc-relax COLLAPSED CELL for ${formula}: final V/atom=${_finalVpa.toFixed(2)} Å³ (was ${_startingVpa.toFixed(2)} Å³ pre-vc-relax, ratio=${_startingVpa > 0 ? (_finalVpa / _startingVpa).toFixed(2) : "?"}). ` +
+            `Aborting downstream stages — the cell is not physical. ` +
+            `Probable cause: CSP starting cell too far from the high-P basin so BFGS+damp-w found a non-physical "minimum". Fix at the CSP volume prior for this composition+pressure, not here.`,
+          );
+          // Keep pre-vc-relax positions and lattice; do NOT set vcRelaxed=true.
+        } else {
+          positions = vcParsed.finalPositions;
+          result.vcRelaxed = true;
+          if (vcParsed.finalLatticeAng && vcParsed.finalLatticeAng > 0.5) {
+            latticeA = vcParsed.finalLatticeAng;
+            result.relaxedLatticeA = latticeA;
+          }
+          console.log(`[QE-Worker] vc-relax ${vcParsed.converged ? "CONVERGED" : "partial"} for ${formula}: a=${latticeA.toFixed(3)} A, ${positions.length} atoms`);
+        }
       } else if (vcResult.exitCode !== 0) {
         console.log(`[QE-Worker] vc-relax failed for ${formula} — proceeding with original geometry`);
       } else {
@@ -7519,29 +7561,42 @@ ${cellBlockEos}
     // smearing to spec, and their .save/ density is what ph.x sees on disk.
     // Parsing the initial-only file led to result.scf.pressure being wrong
     // by orders of magnitude in pre-phonon validation.
+    // Pick the vc-relax / refine / polish output with the LOWEST final
+    // total force, not just the latest. LaH12 May 19 showed why: refinement
+    // pass 1 made the force worse (0.003279 → 0.003738) and the "no
+    // improvement → stop" gate correctly held onto the pre-refinement
+    // geometry — but the file-selection logic was picking vc_relax_refine1.out
+    // anyway (latest by filename), so the downstream SCF reused the *worse*
+    // result, propagating bad forces into pre-phonon and the Tc tier.
+    // Selecting by lowest final force naturally tracks whatever refinement /
+    // polish accept-vs-reject decided.
     const vcRelaxOutPath = path.join(jobDir, "vc_relax.out");
     let bestVcOutPath = vcRelaxOutPath;
+    let bestVcOutForce = Infinity;
     try {
-      const polishOuts = fs.readdirSync(jobDir)
-        .filter(f => /^vc_relax_smearing_polish_\d+\.out$/.test(f))
-        .map(f => path.join(jobDir, f))
-        .filter(p => fs.existsSync(p))
-        .sort();
-      if (polishOuts.length > 0) {
-        bestVcOutPath = polishOuts[polishOuts.length - 1];
-      } else {
-        const refineOuts = fs.readdirSync(jobDir)
-          .filter(f => /^vc_relax_refine\d+\.out$/.test(f))
-          .map(f => path.join(jobDir, f))
-          .filter(p => fs.existsSync(p))
-          .sort();
-        if (refineOuts.length > 0) {
-          bestVcOutPath = refineOuts[refineOuts.length - 1];
+      const candidatePaths: string[] = [];
+      for (const f of fs.readdirSync(jobDir)) {
+        if (/^vc_relax(_refine\d+|_smearing_polish_\d+)?\.out$/.test(f)) {
+          const p = path.join(jobDir, f);
+          if (fs.existsSync(p)) candidatePaths.push(p);
+        }
+      }
+      for (const p of candidatePaths) {
+        const txt = fs.readFileSync(p, "utf-8");
+        const forces = [...txt.matchAll(/Total force\s*=\s*([\d.]+)/g)];
+        if (forces.length === 0) continue;
+        const finalForce = parseFloat(forces[forces.length - 1][1]);
+        if (!Number.isFinite(finalForce)) continue;
+        if (finalForce < bestVcOutForce) {
+          bestVcOutForce = finalForce;
+          bestVcOutPath = p;
         }
       }
     } catch { /* fall back to initial vc_relax.out */ }
     if (bestVcOutPath !== vcRelaxOutPath) {
-      console.log(`[QE-Worker] Reusing SCF from ${path.basename(bestVcOutPath)} (latest refinement/polish output) instead of vc_relax.out for ${formula}`);
+      console.log(`[QE-Worker] Reusing SCF from ${path.basename(bestVcOutPath)} (lowest final force ${bestVcOutForce.toExponential(3)} Ry/bohr across all vc-relax / refine / polish passes) for ${formula}`);
+    } else if (Number.isFinite(bestVcOutForce)) {
+      console.log(`[QE-Worker] Reusing SCF from vc_relax.out for ${formula} (force ${bestVcOutForce.toExponential(3)} Ry/bohr beat all refine / polish passes)`);
     }
     const vcRelaxStdout = fs.existsSync(bestVcOutPath) ? fs.readFileSync(bestVcOutPath, "utf-8") : null;
     if (result.vcRelaxed && vcRelaxStdout) {
