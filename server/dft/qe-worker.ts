@@ -7485,6 +7485,89 @@ ${cellBlockEos}
           console.log(`[QE-Worker] Refinement stopped for ${formula}: force=${currentForce.toFixed(6)} (started at ${startingForce.toFixed(6)}) after ${refinePass} pass${refinePass > 1 ? "es" : ""}, total wall=${totalRefineWallSec.toFixed(0)}s (${(totalRefineWallSec / 60).toFixed(1)} min), force reduced ${forceReduction}%`);
         }
       }
+
+      // --- Refinement-futile retry from a prototype-aware alternative ---
+      // When refinement could not bring force to publication quality, the
+      // Stage-1 winner was probably a poor starting basin and no amount of
+      // BFGS work can recover it. LiNbO3 May 20: a 5-atom AIRSS cube ended
+      // at force=0.063 because the compound is rhombohedral, not cubic; the
+      // funnel's LiNbO3-R3c alternative would have given a much better
+      // basin. Try the highest-confidence prototype-aware structureCandidate
+      // whose lattice differs meaningfully from the current one. Cap at 1
+      // retry; keep whichever ended up with the lower final force.
+      const REFINE_RETRY_FORCE_THR = 0.05; // Ry/bohr — below this, no retry needed
+      if (currentForce > REFINE_RETRY_FORCE_THR && structureCandidates.length > 1) {
+        const PROTOTYPE_TAGS = [
+          "Vegard+", "TemplateVCA-", "K2NiF4", "LiNbO3", "ThCr2Si2",
+          "Perovskite", "FeSe-", "MgB2", "Hex-Clathrate", "Sodalite",
+          "Clathrate", "Hg1212", "Hg1223", "YBCO", "Bcc-MH3", "Corundum",
+        ];
+        const isPrototypeAware = (c: typeof structureCandidates[number]) =>
+          PROTOTYPE_TAGS.some(t => (c.prototype ?? "").includes(t) || (c.source ?? "").includes(t));
+        const distinctCandidates = [...structureCandidates]
+          .filter(c => c.positions && c.positions.length > 0 && c.latticeA > 1.5)
+          .filter(c => Math.abs(c.latticeA - latticeA) > 0.2)
+          .sort((a, b) => (b.confidence ?? 0) - (a.confidence ?? 0));
+        const retryCand = distinctCandidates.find(isPrototypeAware) ?? distinctCandidates[0];
+
+        if (retryCand) {
+          console.log(`[QE-Worker] Refinement-futile retry for ${formula}: post-refinement force=${currentForce.toFixed(4)} Ry/bohr > ${REFINE_RETRY_FORCE_THR} — re-running vc-relax from ${retryCand.prototype ?? retryCand.source ?? "alternative"} (a=${retryCand.latticeA.toFixed(3)} A, ${retryCand.positions.length} atoms, conf=${(retryCand.confidence ?? 0).toFixed(2)}) to see whether a different starting basin gives lower force`);
+
+          const retryAtomScale = retryCand.positions.length > 7 ? Math.pow(retryCand.positions.length / 7, 1.2) : 1.0;
+          const retryMaxSec = Math.round(Math.min(
+            (elements.includes("H") && workerPressure >= 50 ? 7200 : 3600) * retryAtomScale,
+            14400, // 4 h ceiling — retry is bounded, not a full second-pass pipeline
+          ));
+
+          try {
+            cleanQETmpScratch(path.join(jobDir, "tmp"));
+            const retryInput = generateVCRelaxInput(
+              formula, elements, counts, retryCand.latticeA, retryCand.positions, workerPressure,
+              undefined,
+              {
+                socFlags: socAnalysis?.enableFullSOC ? socAnalysis.qeSystemFlags : undefined,
+                forceNspin: result.magneticGroundState?.winningNspin,
+                forceMagBlock: result.magneticGroundState?.winningMagBlock || undefined,
+                siteLabels: result.magneticGroundState?.winningSiteLabels,
+                hubbardCard: hubbardResult?.applyToVCRelax ? hubbardResult.qeHubbardCard : undefined,
+                maxSecondsOverride: retryMaxSec,
+              },
+            );
+            const retryFile = path.join(jobDir, "vc_relax_refine_retry.in");
+            fs.writeFileSync(retryFile, retryInput);
+            const retryResult = await runQECommand(
+              path.posix.join(getQEBinDir(), "pw.x"), retryFile, jobDir,
+              retryMaxSec * 1000 + 60_000,
+            );
+            fs.writeFileSync(path.join(jobDir, "vc_relax_refine_retry.out"), retryResult.stdout);
+            const retryParsed = parseVCRelaxOutput(retryResult.stdout);
+
+            if (retryParsed.finalPositions && retryParsed.finalPositions.length > 0) {
+              const retryForceMatches = [...retryResult.stdout.matchAll(/Total force\s*=\s*([\d.]+)/g)];
+              const retryForce = retryForceMatches.length > 0
+                ? parseFloat(retryForceMatches[retryForceMatches.length - 1][1])
+                : 999;
+              if (Number.isFinite(retryForce) && retryForce < currentForce) {
+                const beforeForce = currentForce;
+                positions = retryParsed.finalPositions;
+                if (retryParsed.finalLatticeAng && retryParsed.finalLatticeAng > 0.5) {
+                  latticeA = retryParsed.finalLatticeAng;
+                  result.relaxedLatticeA = latticeA;
+                }
+                currentForce = retryForce;
+                console.log(`[QE-Worker] Refinement-futile retry IMPROVED for ${formula}: force ${beforeForce.toFixed(4)} → ${retryForce.toFixed(4)} Ry/bohr (${(100 * (1 - retryForce / beforeForce)).toFixed(0)}% reduction). Swapping in retry geometry.`);
+              } else {
+                console.log(`[QE-Worker] Refinement-futile retry did not improve for ${formula}: force ${currentForce.toFixed(4)} → ${retryForce.toFixed(4)} (worse or no change). Keeping original.`);
+              }
+            } else {
+              console.log(`[QE-Worker] Refinement-futile retry produced no positions for ${formula} — keeping original.`);
+            }
+          } catch (retryErr: any) {
+            console.log(`[QE-Worker] Refinement-futile retry error for ${formula}: ${retryErr.message?.slice(0, 100)} — keeping original.`);
+          }
+        }
+      }
+
       postRefinementForce = currentForce;
     }
 
@@ -8359,9 +8442,13 @@ ${cellBlockEos}
             };
             console.log(`[QE-Worker] Hull stability for ${formula}: ${label} (Miedema ΔHf=${miedemaH.toFixed(3)} eV/atom = ${formationMeV.toFixed(0)} meV/atom, E_DFT/atom=${ePerAtom.toFixed(4)} eV)`);
           } else {
-            // Miedema hit floor/ceiling — unreliable for this composition (e.g. hydrides)
+            // Miedema saturated at the model floor (-8 eV/atom) or ceiling
+            // (+3 eV/atom). The clamped value is not a real estimate; report
+            // N/A rather than the saturated number so downstream code and
+            // logs don't mistake "-8.00 eV/atom" for a hull placement.
+            const direction = miedemaH < 0 ? "floor (very negative)" : "ceiling (very positive)";
             result.hullStability = { hullDistanceMeVAtom: 0, label: "unknown_hull", computedFromDFT: false };
-            console.log(`[QE-Worker] Hull stability for ${formula}: unknown_hull (Miedema=${miedemaH.toFixed(2)} eV/atom — hit model limits, unreliable for this composition)`);
+            console.log(`[QE-Worker] Hull stability for ${formula}: unknown_hull (Miedema saturated at model ${direction} — N/A for this composition; common for hydrides and other compounds the semi-empirical model is not calibrated for)`);
           }
         } else {
           result.hullStability = { hullDistanceMeVAtom: 0, label: "unknown_hull", computedFromDFT: false };
