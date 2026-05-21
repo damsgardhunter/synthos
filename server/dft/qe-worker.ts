@@ -6048,7 +6048,10 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     // La2CuO4 May 20 got a=5.76 Å cubic when the prototype-aware estimate
     // (K2NiF4, c/a=3.3) gives a=3.97 Å — closer to the real 3.78. The bad
     // starting cell then made the Stage 1 SCF unable to converge.
-    let latticeA: number;
+    // Initialised to 0; assigned in every branch below. The explicit 0 is so
+    // TS's flow analysis (which doesn't reason through the try/catch in the
+    // else branch) doesn't flag latticeA as possibly-unassigned downstream.
+    let latticeA: number = 0;
     if (vegardResult && vegardResult.confidence > 0.3) {
       latticeA = vegardResult.latticeA;
       console.log(`[QE-Worker] Using Vegard lattice for ${formula}: ${latticeA.toFixed(3)} A (conf=${vegardResult.confidence.toFixed(2)})`);
@@ -7516,10 +7519,18 @@ ${cellBlockEos}
       const hasMagPolish = elements.some(el => el in MAGNETIC_ELEMENTS);
       const isHighPHPolish = hasHPolish && workerPressure >= 50 && positions.length >= 7;
       const polishAtomScale = positions.length > 7 ? Math.pow(positions.length / 7, 1.2) : 1.0;
-      // Base 30/60/180 min × 1.5 for tight smearing × atom-scale
-      const polishMaxSec = Math.round(
-        (isHighPHPolish ? 16200 : hasMagPolish ? 3600 : 1800) * polishAtomScale,
-      );
+      // Polish is a smearing-correction step — it retightens degauss and
+      // re-relaxes a handful of ionic steps. It should NOT take longer than
+      // the vc-relax that produced the geometry it's polishing. The earlier
+      // 16200 s × atom-scale base for high-P hydrides gave Li2LaH12 May 19 a
+      // 40430 s / 11 h budget per pass — longer than its 26954 s vc-relax,
+      // and 2.5× the 16980 s actual wall. Drop the high-P base to 90 min and
+      // ceiling the whole computation at 4 h per pass so polish stays a
+      // fraction of vc-relax rather than parity.
+      const polishMaxSec = Math.round(Math.min(
+        (isHighPHPolish ? 5400 : hasMagPolish ? 3600 : 1800) * polishAtomScale,
+        14400, // 4 h absolute ceiling per pass
+      ));
 
       // Reference energy: parse from latest vc-relax / refinement output
       // (so we can compute ΔE/atom across the first polish pass too).
@@ -7622,6 +7633,20 @@ ${cellBlockEos}
           if (Number.isFinite(dEMevPerAtom) && dEMevPerAtom < 0.5) {
             polishConverged = true;
             console.log(`[QE-Worker] Smearing convergence MET for ${formula} at degauss=${degauss}: ΔE/atom=${dEMevPerAtom.toFixed(3)} meV < 0.5 meV — stopping polish loop after pass ${pi + 1}`);
+            break;
+          }
+          // Early bail: if the FIRST pass barely moved the structure and the
+          // force is already screening-quality, the next (tighter-degauss)
+          // pass will burn hours for a sub-meV correction. Skip it. Threshold
+          // 3 meV/atom is well above the 0.5 meV "fully converged" gate but
+          // well below typical smearing-correction sizes (~5-25 meV/atom for
+          // real corrections), so this only fires when polish is essentially
+          // a no-op.
+          if (pi === 0
+              && Number.isFinite(dEMevPerAtom) && dEMevPerAtom < 3.0
+              && polishForce != null && polishForce < 0.005) {
+            polishConverged = true;
+            console.log(`[QE-Worker] Smearing-polish pass 1 for ${formula} barely moved the structure (ΔE/atom=${dEMevPerAtom.toFixed(2)} meV, force=${polishForce.toFixed(6)} Ry/bohr) — pass 2 (tighter degauss) won't materially improve. Stopping polish loop after pass 1.`);
             break;
           }
         } catch (polishErr: any) {

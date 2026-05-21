@@ -402,7 +402,14 @@ function computeStage1Params(elements: string[], totalAtoms: number, baseEcutwfc
   // admits costs ~5h by the model — a 4h ceiling would guarantee it times
   // out. Larger cells than that should be downgraded to a cheaper tier or
   // dropped, not blocked for a day.
-  const STAGE1_HARD_CEILING_S = 21600; // 6h
+  // Cuprate exception: HgBa2Ca2Cu3O8 (Hg-1223, 32 atoms) was estimated at
+  // 128263s = 36 h and clipped to the 6 h cap, so Stage 1 was *guaranteed*
+  // to timeout before convergence. Multi-CuO2-layer cuprates (Hg-1212,
+  // Hg-1223, Tl-1223, Bi-2212/2223) — heavy-electron-rich AND >= 24 atoms —
+  // get a 16 h ceiling. The cell-count gate ensures the small Hg-1201
+  // (8 atoms) keeps its 6 h cap; only the genuinely expensive multi-layer
+  // cuprates get the bigger budget.
+  const STAGE1_HARD_CEILING_S = (isHeavyElectronRich && totalAtoms >= 24) ? 57600 : 21600;
   const maxTimeoutS = Math.min(rawMaxTimeoutS, STAGE1_HARD_CEILING_S);
   // FLOOR by system type — the cost model underestimates for magnetic systems
   // because spin-polarized SCF on Fe/Mn/Cr is intrinsically much harder than
@@ -815,6 +822,13 @@ async function runStage1AtomicRelax(
   const degauss = relaxMagnetic ? 0.005 : 0.015;                 // narrower smearing for metallic magnets
   const electronMaxstep = relaxMagnetic ? 300 : 200;             // give magnetic SCF more room
   const scfMustConvergeLine = relaxMagnetic ? "" : "  scf_must_converge = .false.,\n"; // require convergence for magnetic
+  // Davidson subspace dimension. The QE default (2) is too tight for the dense,
+  // tightly-spaced band manifold of cuprates with heavy semicore states
+  // (HgBa2CaCu2O6 May 20 aborted both Stage 1 candidates at SCF iteration 1
+  // with "too many bands are not converged" — c_bands failure inside the
+  // david diagonalizer). Bumping to 4 gives Davidson enough subspace to
+  // resolve the lowest eigenvalues at the cost of a bit more memory.
+  const cuprateDavidNdimLine = isCuprate ? "  diago_david_ndim = 4,\n" : "";
 
   const input = `&CONTROL
   calculation = 'relax',
@@ -848,7 +862,7 @@ ${magLines}/
   mixing_beta = ${mixingBeta},
   mixing_mode = 'local-TF',
   diagonalization = 'david',
-${scfMustConvergeLine}/
+${cuprateDavidNdimLine}${scfMustConvergeLine}/
 &IONS
   ion_dynamics = 'bfgs',
 /
@@ -904,7 +918,7 @@ ${cellBlock}
   mixing_beta = 0.3,
   mixing_mode = 'local-TF',
   diagonalization = 'david',
-  scf_must_converge = .false.,
+${cuprateDavidNdimLine}  scf_must_converge = .false.,
 /
 ATOMIC_SPECIES
 ${atomicSpecies}
@@ -1045,6 +1059,7 @@ ${afmMag}/
   mixing_beta = 0.2,
   mixing_mode = 'local-TF',
   diagonalization = 'david',
+  diago_david_ndim = 4,
 /
 ATOMIC_SPECIES
 ${afmSpecies}
