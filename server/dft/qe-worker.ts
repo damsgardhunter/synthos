@@ -5939,57 +5939,79 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
       console.log(`[QE-Worker] Injected literature known-structure for ${formula}: ${ksCandidate.spaceGroup}, a=${ksCandidate.latticeA.toFixed(2)} Å${ksCandidate.latticeC ? `, c=${ksCandidate.latticeC.toFixed(2)} Å (c/a=${ksCOverA.toFixed(2)})` : ""}, ${ksCandidate.atoms.length} atoms (total now: ${structureCandidates.length})`);
     }
 
-    // --- Inject prototype-derived candidate (anisotropic c/a) ---
+    // --- Inject prototype-derived candidate (anisotropic c/a + Z factor) ---
     // For materials whose composition matches a curated prototype template
-    // (YBCO-123, K2NiF4, MgB2-AlB2, etc.) but where neither DFT-cache nor
-    // known-structure DB has a record, the AIRSS/PyXtal cubic candidates
+    // (A15, YBCO-123, K2NiF4, MgB2-AlB2, etc.) but where neither DFT-cache
+    // nor known-structure DB has a record, the AIRSS/PyXtal cubic candidates
     // dominate the pool and the funnel picks one of those — even though the
     // prototype template carries the correct anisotropic c/a and layered
-    // Wyckoff positions. Observed on YBa2Cu3O7 (May 20): YBCO-123 template
-    // matched, Vegard gave a=6.36 Å cubic, but Stage 1 ran on an AIRSS Z=1
-    // cube with a=7.08 Å — wrong c/a, wrong layering, ~20× compute wasted.
+    // Wyckoff positions.
     //
-    // Build a fractional-position candidate at the prototype's c/a, using
-    // the Vegard cubic-equivalent volume to set `a` (V = c/a · a³ → a =
-    // (V_cubic / cOverA)^(1/3)). Skip if no prototype matches, if c/a ≈ 1
-    // (cubic — Vegard's a is already right), or if the known-structure DB
-    // already injected this formula (the literature cell is strictly better).
+    // Two transformations must happen against Vegard's `latticeA`:
+    //
+    //  (a) Z factor. Vegard returns `latticeA = cbrt(volPerAtom × formula
+    //      _atoms)` — a Z=1 lattice for the formula unit. When a prototype
+    //      has more sites than the formula has atoms (e.g. A15 Pm-3n with
+    //      8 sites for the 4-atom Nb3Sn formula = Z=2), Vegard's a is too
+    //      small by Z^(1/3). Nb3Sn May 21: Vegard a=4.445 → real A15 needs
+    //      a ≈ 5.6 Å; xTB pre-relax on the Z=1 lattice put Nb-Nb at 2.22 Å
+    //      and the post-xTB validator hard-rejected the whole job.
+    //
+    //  (b) c/a anisotropy. For tetragonal/hex prototypes the cubic-equivalent
+    //      a needs to be reshaped into a = (V_cell / cOverA)^(1/3), c = a *
+    //      cOverA. YBa2Cu3O7 May 20: YBCO-123 matched (cOverA=3.06), Vegard
+    //      gave a=6.36 cubic, Stage 1 ran on an AIRSS Z=1 cube — wrong c/a.
+    //
+    // Compute the prototype-corrected cell once and use it for both the
+    // injection here and the local `latticeA` choice further down.
     if (!ksCandidate || ksCandidate.atoms.length === 0) {
       try {
         const proto = selectPrototype(formula);
-        if (proto && proto.template.cOverA > 1.1 && proto.template.sites.length > 0) {
-          // Source for the cubic-equivalent volume: Vegard if confident,
-          // otherwise the volume-sum estimate.
-          const cubicEqA = vegardResult && vegardResult.confidence > 0.3
-            ? vegardResult.latticeA
-            : estimateLatticeConstant(elements, counts, workerPressure);
-          const cubicVolume = cubicEqA * cubicEqA * cubicEqA;
-          const protoA = Math.pow(cubicVolume / proto.template.cOverA, 1 / 3);
-          if (Number.isFinite(protoA) && protoA > 1.5) {
-            const protoC = protoA * proto.template.cOverA;
-            const protoPositions: Array<{ element: string; x: number; y: number; z: number }> = [];
-            for (const site of proto.template.sites) {
-              const el = proto.siteMap[site.label];
-              if (el) protoPositions.push({ element: el, x: site.x, y: site.y, z: site.z });
-            }
-            if (protoPositions.length > 0) {
-              structureCandidates.push({
-                latticeA: protoA,
-                latticeB: protoA,
-                latticeC: protoC,
-                cOverA: proto.template.cOverA,
-                positions: protoPositions,
-                prototype: "prototype-derived",
-                crystalSystem: proto.template.latticeType ?? "tetragonal",
-                spaceGroup: proto.template.spaceGroup ?? "",
-                source: `Prototype ${proto.template.name} (a=${protoA.toFixed(2)} Å, c/a=${proto.template.cOverA.toFixed(2)}, ${protoPositions.length} atoms)`,
-                // Below known-structure (0.97) and DFT-cached (0.99) so those
-                // still win when available, but above AIRSS (0.40) so the
-                // prototype dominates random-CSP for matched compositions.
-                confidence: 0.85,
-                isMetallic: null,
-              });
-              console.log(`[QE-Worker] Injected prototype-derived candidate for ${formula}: ${proto.template.name} (${proto.template.spaceGroup}), a=${protoA.toFixed(2)} Å, c=${protoC.toFixed(2)} Å (c/a=${proto.template.cOverA.toFixed(2)}), ${protoPositions.length} atoms (total now: ${structureCandidates.length})`);
+        if (proto && proto.template.sites.length > 0) {
+          const formulaAtoms = Object.values(counts).reduce((s, n) => s + Math.round(n), 0);
+          const nProtoAtoms = proto.template.sites.length;
+          const cOverA = proto.template.cOverA;
+          const zFactor = nProtoAtoms / Math.max(1, formulaAtoms);
+          // Only fire when the transformation changes something: either
+          // multi-formula-unit (Z != 1) or anisotropic (cOverA != 1).
+          const needsTransform = Math.abs(zFactor - 1) > 0.05 || cOverA > 1.1;
+          if (needsTransform) {
+            // Cubic-equivalent volume per atom (pressure-corrected by Vegard
+            // already). Fall back to elemental volume-sum when Vegard timed
+            // out or had low confidence.
+            const cubicEqA = vegardResult && vegardResult.confidence > 0.3
+              ? vegardResult.latticeA
+              : estimateLatticeConstant(elements, counts, workerPressure);
+            const volPerAtom = vegardResult?.volumePerAtom
+              ?? (cubicEqA ** 3) / Math.max(1, formulaAtoms);
+            const cellVol = volPerAtom * nProtoAtoms;
+            const protoA = Math.pow(cellVol / Math.max(1.0, cOverA), 1 / 3);
+            if (Number.isFinite(protoA) && protoA > 1.5) {
+              const protoC = protoA * cOverA;
+              const protoPositions: Array<{ element: string; x: number; y: number; z: number }> = [];
+              for (const site of proto.template.sites) {
+                const el = proto.siteMap[site.label];
+                if (el) protoPositions.push({ element: el, x: site.x, y: site.y, z: site.z });
+              }
+              if (protoPositions.length > 0) {
+                structureCandidates.push({
+                  latticeA: protoA,
+                  latticeB: protoA,
+                  latticeC: protoC,
+                  cOverA,
+                  positions: protoPositions,
+                  prototype: "prototype-derived",
+                  crystalSystem: proto.template.latticeType ?? "tetragonal",
+                  spaceGroup: proto.template.spaceGroup ?? "",
+                  source: `Prototype ${proto.template.name} (a=${protoA.toFixed(2)} Å, c/a=${cOverA.toFixed(2)}, Z=${zFactor.toFixed(1)}, ${protoPositions.length} atoms)`,
+                  // Below known-structure (0.97) and DFT-cached (0.99) so those
+                  // still win when available, but above AIRSS (0.40) so the
+                  // prototype dominates random-CSP for matched compositions.
+                  confidence: 0.85,
+                  isMetallic: null,
+                });
+                console.log(`[QE-Worker] Injected prototype-derived candidate for ${formula}: ${proto.template.name} (${proto.template.spaceGroup}), a=${protoA.toFixed(2)} Å, c=${protoC.toFixed(2)} Å (c/a=${cOverA.toFixed(2)}, Z=${zFactor.toFixed(1)} vs Vegard cubic-equiv ${cubicEqA.toFixed(2)}), ${protoPositions.length} atoms (total now: ${structureCandidates.length})`);
+              }
             }
           }
         }
@@ -6052,28 +6074,48 @@ export async function runFullDFT(formula: string, opts?: { startAttempt?: number
     // TS's flow analysis (which doesn't reason through the try/catch in the
     // else branch) doesn't flag latticeA as possibly-unassigned downstream.
     let latticeA: number = 0;
-    if (vegardResult && vegardResult.confidence > 0.3) {
-      latticeA = vegardResult.latticeA;
-      console.log(`[QE-Worker] Using Vegard lattice for ${formula}: ${latticeA.toFixed(3)} A (conf=${vegardResult.confidence.toFixed(2)})`);
-    } else {
-      const cubicA = estimateLatticeConstant(elements, counts, workerPressure);
-      let usedPrototypeLattice = false;
-      try {
-        const proto = selectPrototype(formula);
-        if (proto && proto.template.cOverA > 1.1) {
-          // V_cell unchanged; for a tetragonal/hexagonal a×a×(cOverA·a) cell
-          // V = cOverA · a^3 → a = (V_cubic^3 / cOverA)^(1/3).
-          const cubicVolume = cubicA * cubicA * cubicA;
-          const tetA = Math.pow(cubicVolume / proto.template.cOverA, 1 / 3);
-          if (Number.isFinite(tetA) && tetA > 1.5) {
-            latticeA = tetA;
-            usedPrototypeLattice = true;
-            console.log(`[QE-Worker] Using prototype-derived lattice for ${formula}: ${latticeA.toFixed(3)} A (${proto.template.name}, ${proto.template.latticeType} c/a=${proto.template.cOverA.toFixed(2)}) — Vegard conf=${vegardResult?.confidence?.toFixed(2) ?? "N/A"}, cubic volume-sum would give ${cubicA.toFixed(3)} A`);
+    // Try to apply the same prototype-aware transformation (Z factor + c/a)
+    // we used for the injected candidate. Vegard's `latticeA` is a Z=1
+    // cubic-equivalent for the formula unit: it is wrong for any prototype
+    // whose conventional cell has more sites than the formula (e.g. A15 with
+    // 8 sites for the 4-atom Nb3Sn formula → Vegard a=4.445 vs real ~5.6)
+    // OR is non-cubic (e.g. PuCoGa5-115 c/a=1.6 → Vegard a=5.356 vs real
+    // a=4.62). Skip the override only when there's no matching prototype OR
+    // the transformation is a no-op (Z=1 AND cOverA=1).
+    let usedProtoLattice = false;
+    try {
+      const proto = selectPrototype(formula);
+      if (proto && proto.template.sites.length > 0) {
+        const formulaAtoms = Object.values(counts).reduce((s, n) => s + Math.round(n), 0);
+        const nProtoAtoms = proto.template.sites.length;
+        const cOverA = proto.template.cOverA;
+        const zFactor = nProtoAtoms / Math.max(1, formulaAtoms);
+        const needsTransform = Math.abs(zFactor - 1) > 0.05 || cOverA > 1.1;
+        if (needsTransform) {
+          const cubicEqA = vegardResult && vegardResult.confidence > 0.3
+            ? vegardResult.latticeA
+            : estimateLatticeConstant(elements, counts, workerPressure);
+          const volPerAtom = vegardResult?.volumePerAtom
+            ?? (cubicEqA ** 3) / Math.max(1, formulaAtoms);
+          const cellVol = volPerAtom * nProtoAtoms;
+          const protoA = Math.pow(cellVol / Math.max(1.0, cOverA), 1 / 3);
+          if (Number.isFinite(protoA) && protoA > 1.5) {
+            latticeA = protoA;
+            usedProtoLattice = true;
+            const srcTag = vegardResult && vegardResult.confidence > 0.3
+              ? `Vegard volPerAtom=${volPerAtom.toFixed(2)} Å³/atom, conf=${vegardResult.confidence.toFixed(2)}`
+              : `volume-sum`;
+            console.log(`[QE-Worker] Using prototype-corrected lattice for ${formula}: a=${protoA.toFixed(3)} A (${proto.template.name}, ${proto.template.latticeType} c/a=${cOverA.toFixed(2)}, Z=${zFactor.toFixed(1)}) — cubic-equiv would give ${cubicEqA.toFixed(3)} A from ${srcTag}`);
           }
         }
-      } catch { /* fall through to cubic volume-sum */ }
-      if (!usedPrototypeLattice) {
-        latticeA = cubicA;
+      }
+    } catch { /* fall through */ }
+    if (!usedProtoLattice) {
+      if (vegardResult && vegardResult.confidence > 0.3) {
+        latticeA = vegardResult.latticeA;
+        console.log(`[QE-Worker] Using Vegard lattice for ${formula}: ${latticeA.toFixed(3)} A (conf=${vegardResult.confidence.toFixed(2)})`);
+      } else {
+        latticeA = estimateLatticeConstant(elements, counts, workerPressure);
         console.log(`[QE-Worker] Using volume-sum lattice for ${formula}: ${latticeA.toFixed(3)} A (Vegard conf=${vegardResult?.confidence?.toFixed(2) ?? "N/A"})`);
       }
     }
