@@ -151,6 +151,23 @@ function f1_geometry(
   // showed F=177 Ry/bohr at Stage 1, wasting ~50 min before failure.
   const ABS_MIN_DIST_ANG = 0.6;
 
+  // Pressure-scale the multiplier when no LLM override is given. getPairMinsep
+  // already does a coarse pressure scaling (×0.82 at 150-200 GPa, ×0.75 at
+  // 200+), but the May 21 LaH11Li2 logs showed f1_atom_overlap=5150/9399 raw
+  // at 173 GPa — over half the AIRSS output rejected even though buildcell
+  // produced it within its own MINSEP. At high P, AIRSS structures live below
+  // 0.65 × covalent_sum because that's the physically correct packing — the
+  // covalent radii sum is a *low-P* reference. The ABS_MIN_DIST_ANG floor
+  // still protects against catastrophic overlap regardless of the multiplier.
+  // Default-only adjustment: if the caller passed a non-default value (LLM
+  // structure-advisor), honour it as-is.
+  let effectiveMultiplier = minsepMultiplier;
+  if (Math.abs(minsepMultiplier - 0.65) < 1e-6) {
+    if (pressureGPa >= 150) effectiveMultiplier = 0.50;
+    else if (pressureGPa >= 50) effectiveMultiplier = 0.55;
+    // < 50 GPa keeps the original 0.65
+  }
+
   for (const c of candidates) {
     const a = c.latticeA;
     const cOverA = c.cOverA ?? 1.0;
@@ -180,7 +197,7 @@ function f1_geometry(
         const dist = Math.sqrt((dx * a) ** 2 + (dy * a * bOverA_dist) ** 2 + (dz * a * cOverA) ** 2);
         const minsep = getPairMinsep(c.positions[i].element, c.positions[j].element, pressureGPa);
 
-        if (dist < ABS_MIN_DIST_ANG || dist < minsep * minsepMultiplier) {
+        if (dist < ABS_MIN_DIST_ANG || dist < minsep * effectiveMultiplier) {
           // Hard reject: catastrophic atomic overlap (absolute floor) OR
           // below multiplier × per-pair minsep (LLM-advised or default)
           rejected = true;
@@ -429,7 +446,15 @@ export async function runCandidateFunnel(
   // upstream — tight MINSEP + loose multiplier and loose MINSEP + tight
   // multiplier produce the same effective floor.
   const f1MinsepMult = opts.prefilterMinsepMultiplier ?? 0.65;
-  console.log(`[CSP-Funnel] F1 pre-filter using minsep multiplier ${f1MinsepMult.toFixed(2)} for ${formula}${opts.prefilterMinsepMultiplier != null ? " (LLM-advised)" : " (default)"}`);
+  // Predict the effective multiplier (f1_geometry pressure-scales the default
+  // when no LLM override is given) so the log reflects what F1 actually uses.
+  const effectiveF1Mult = opts.prefilterMinsepMultiplier != null
+    ? f1MinsepMult
+    : (pressureGPa >= 150 ? 0.50 : pressureGPa >= 50 ? 0.55 : 0.65);
+  const sourceTag = opts.prefilterMinsepMultiplier != null
+    ? "LLM-advised"
+    : (effectiveF1Mult !== f1MinsepMult ? `pressure-scaled @ ${pressureGPa} GPa` : "default");
+  console.log(`[CSP-Funnel] F1 pre-filter using minsep multiplier ${effectiveF1Mult.toFixed(2)} for ${formula} (${sourceTag})`);
   const f1 = f1_geometry(f0, pressureGPa, stats, f1MinsepMult);
 
   // F2: Chemistry sanity

@@ -890,16 +890,29 @@ export async function interpolateFromTemplateReferences(
   // Mixing reference positions with template fallback positions can create
   // overlaps when the reference structure has a different atom arrangement
   // (e.g., C4Sc6Zr2 mapped onto YH9Na2 template produces atoms #4/#7 overlap).
-  const estLattice = geometry?.a ?? 5.0;
+  //
+  // Use the averaged anisotropic cell geometry — using a single `estLattice`
+  // for all three axes was wrong for tetragonal/hexagonal templates where
+  // c/a >> 1. Hg-1223 (c/a=3.95, a≈3.85 Å, c≈15.2 Å) and other Hg/Tl
+  // cuprates triggered false-positive overlap rejections in the May 21 logs
+  // (reported 0.014 Å overlaps between Hg-layer / apical-O / Ca-spacer atoms
+  // that share (0,0,z) but differ by ≥0.1 in z — true distance is 0.1×15.2
+  // = 1.5 Å, but the cubic-style check computed 0.1×3.85 = 0.38 Å, then
+  // ANOTHER averaging step pulled it below 0.3 Å). Use template.cOverA when
+  // geometry.c is unavailable so layered templates still get the right axis
+  // scaling on first iteration.
+  const cellA = geometry?.a ?? 5.0;
+  const cellB = geometry?.b ?? cellA;
+  const cellC = geometry?.c ?? (cellA * (template.cOverA ?? 1.0));
   for (let i = 0; i < positions.length; i++) {
     for (let j = i + 1; j < positions.length; j++) {
       let dx = positions[i].x - positions[j].x;
       let dy = positions[i].y - positions[j].y;
       let dz = positions[i].z - positions[j].z;
       dx -= Math.round(dx); dy -= Math.round(dy); dz -= Math.round(dz);
-      const dist = Math.sqrt((dx * estLattice) ** 2 + (dy * estLattice) ** 2 + (dz * estLattice) ** 2);
+      const dist = Math.sqrt((dx * cellA) ** 2 + (dy * cellB) ** 2 + (dz * cellC) ** 2);
       if (dist < 0.3) {
-        console.log(`[VCA-Template] Rejected: atoms ${i} (${positions[i].element}) and ${j} (${positions[j].element}) overlap at ${dist.toFixed(3)} Å (${template.name}, refs: ${referencesUsed.join(", ")})`);
+        console.log(`[VCA-Template] Rejected: atoms ${i} (${positions[i].element}) and ${j} (${positions[j].element}) overlap at ${dist.toFixed(3)} Å (${template.name}, cell=${cellA.toFixed(2)}×${cellB.toFixed(2)}×${cellC.toFixed(2)} Å, refs: ${referencesUsed.join(", ")})`);
         return null;
       }
     }
