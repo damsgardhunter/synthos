@@ -1339,6 +1339,18 @@ function saveDFTStructureCache(
   energy: number,
 ): void {
   try {
+    // Refuse to save a cell smaller than the known-structures DB's record.
+    // The load-side gate rejects mismatched caches, but if save accepts a
+    // wrong-Z relaxation we just re-poison the cache for the next run.
+    // Block at write time so the bad geometry never leaves the worker.
+    try {
+      const ks = lookupKnownStructure(formula);
+      if (ks && ks.atoms.length > 0 && positions.length < ks.atoms.length) {
+        console.log(`[DFT-Cache] REFUSED to save ${formula}: ${positions.length} atoms < known-structure ${ks.atoms.length} atoms (${ks.spaceGroup}). This run produced a wrong-Z geometry that cannot represent the literature topology — not caching.`);
+        return;
+      }
+    } catch {}
+
     if (!fs.existsSync(DFT_STRUCTURE_CACHE_DIR)) {
       fs.mkdirSync(DFT_STRUCTURE_CACHE_DIR, { recursive: true });
     }
@@ -1374,6 +1386,28 @@ function loadDFTStructureCache(formula: string): CachedStructure | null {
     const cached: CachedStructure = JSON.parse(fs.readFileSync(cacheFile, "utf-8"));
     // Validate basic structure
     if (!cached.positions || cached.positions.length === 0 || !cached.latticeA || cached.latticeA <= 0) return null;
+
+    // Cross-check atom count against the known-structures DB. The cache is
+    // injected at conf=0.99, above known-structure (0.97) and prototype-derived
+    // (0.85), so a stale/wrong-Z cache always wins the funnel. If the KS
+    // record exists and the cache has fewer atoms, the cache predates the
+    // topology fix that brought KS up to the minimal symmetry cell (e.g.
+    // LiNbO3 R3c needs ≥10 atoms in the hex primitive; a 5-atom cached
+    // cubic Pm-3m perovskite cell physically cannot reach R3c, so vc-relax
+    // strains it into a fake-cubic minimum and Stage 4 phonons are garbage).
+    // Rename the bad cache aside instead of deleting so a human can inspect
+    // what was poisoned, and return null so the run falls through to the
+    // KS injection path.
+    try {
+      const ks = lookupKnownStructure(formula);
+      if (ks && ks.atoms.length > 0 && cached.positions.length < ks.atoms.length) {
+        const stalePath = cacheFile + `.stale-${Date.now()}`;
+        try { fs.renameSync(cacheFile, stalePath); } catch {}
+        console.log(`[DFT-Cache] REJECTED ${formula}: cached ${cached.positions.length} atoms < known-structure ${ks.atoms.length} atoms (${ks.spaceGroup}). Cache predates the KS topology (likely a wrong-Z relaxation that vc-relax cannot escape from). Renamed to ${path.basename(stalePath)} — falling through to KS injection.`);
+        return null;
+      }
+    } catch {}
+
     console.log(`[DFT-Cache] Loaded ${formula}: a=${cached.latticeA.toFixed(3)} Å, ${cached.positions.length} atoms, force=${cached.force.toFixed(6)}, age=${((Date.now() - cached.timestamp) / 3600_000).toFixed(1)}h`);
     return cached;
   } catch {
