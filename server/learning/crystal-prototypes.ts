@@ -453,10 +453,18 @@ export const PROTOTYPE_TEMPLATES: PrototypeTemplate[] = [
     coordination: [6, 12, 2],
     chemistryRules: (elements) => {
       if (elements.length !== 3) return false;
-      const hasAnion = elements.some(e => ["C", "N", "B", "O"].includes(e));
-      // Expanded to include alkali metals: Li3OCl, Na3OBr are key solid electrolytes
+      const hasInterstitialAnion = elements.some(e => ["C", "N", "B", "O"].includes(e));
+      // Anti-perovskite (Li3OCl class) has TWO anion sublattices: the body-
+      // centre interstitial (O / N / C) AND the corner halide / chalcogenide.
+      // Without the second anion this template is being applied to plain ABO3
+      // distorted perovskites (LiNbO3 May 20 — Li + Nb + O matched anti-pero
+      // by stoichiometry, won over LiNbO3-R3c by atom count, and put Nb at
+      // the body centre with c/a=1, producing a cubic 5-atom starting cell
+      // and a vc-relax that never recovered). Require a halide or sulfide
+      // partner so this template only fires for real anti-perovskites.
+      const hasHalideOrSecondAnion = elements.some(e => ["F", "Cl", "Br", "I", "S"].includes(e));
       const hasMetal = elements.some(e => isTransitionMetal(e) || CATIONS_LARGE.has(e) || ["Li", "Na", "K", "Mg"].includes(e));
-      return hasAnion && hasMetal;
+      return hasInterstitialAnion && hasHalideOrSecondAnion && hasMetal;
     },
   },
   // ── High-pressure hydride prototypes ──────────────────────────────────

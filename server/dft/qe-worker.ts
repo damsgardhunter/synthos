@@ -7279,9 +7279,18 @@ ${cellBlockEos}
           // with local-TF mixing in generateVCRelaxInput) lets more ionic
           // steps land per pass so the cell/ion geometry actually converges.
           const isCuprateRefine = elements.includes("Cu") && elements.includes("O") && (counts["O"] ?? 0) >= 2;
+          // Refractory TMs (heavy d/f pseudopotentials) make each SCF iteration
+          // expensive: LiNbO3 May 20 ran only 1 ionic step inside its 1200 s
+          // refinement budget — Nb's 4d/5s pseudo burned the whole window on
+          // electronic convergence and BFGS never moved. Treat these like
+          // cuprates (3600 s base) so a refinement pass can actually take
+          // several ionic steps.
+          const hasRefractoryTMRefine = elements.some(el =>
+            ["Nb", "Ta", "Mo", "W", "Re", "Hf", "V", "Cr", "Ru", "Os", "Rh", "Ir", "Tc"].includes(el)
+          );
           const refineAtomScale = positions.length > 7 ? Math.pow(positions.length / 7, 1.2) : 1.0;
           const refineMaxSec = Math.round(
-            (isHighPHRefine ? 9000 : (hasMagRefine || isCuprateRefine) ? 3600 : 1200) * refineAtomScale,
+            (isHighPHRefine ? 9000 : (hasMagRefine || isCuprateRefine || hasRefractoryTMRefine) ? 3600 : 1200) * refineAtomScale,
           );
           const refineKillMs = refineMaxSec * 1000 + 60_000;
 
