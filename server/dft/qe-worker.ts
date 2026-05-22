@@ -26,7 +26,7 @@ import {
   computePhononSpectrum,
   type ElectronPhononCoupling,
 } from "../learning/physics-engine";
-import { generateStructureCandidates, vegardEstimate, type StructureCandidate, type VegardEstimate } from "./vegard-lattice";
+import { generateStructureCandidates, vegardEstimate, estimateBulkModulusFromElements, type StructureCandidate, type VegardEstimate } from "./vegard-lattice";
 import { runEPWPipeline, type EPWResult } from "./epw-pipeline";
 import { checkSSCHAEligibility, runSSCHAPipeline, type SSCHAResult } from "./sscha-pipeline";
 import { runACBN0Pipeline, type ACBN0Result } from "./acbn0-pipeline";
@@ -46,7 +46,7 @@ import {
   type MagneticGroundStateResult,
   type MagneticTrialResult,
 } from "./magnetic-ground-state";
-import { lookupKnownStructure, getKnownStructureFormulas } from "../learning/known-structures";
+import { lookupKnownStructure, getKnownStructureFormulas, type KnownStructure } from "../learning/known-structures";
 import { airssEngine } from "../csp/airss-wrapper";
 import { pyxtalEngine } from "../csp/pyxtal-wrapper";
 import { mutateTopCandidates } from "../csp/structure-mutator";
@@ -1330,6 +1330,69 @@ interface CachedStructure {
   source: string;
 }
 
+/**
+ * Conservative lower bound on cell V/atom assuming a CUBIC interpretation of
+ * the given latticeA. For real hex/tet/ortho cells with c/a > 1 the true
+ * volume is larger; this bound is always ≤ the true V/atom, so a small value
+ * here is unambiguously wrong, while a large value could still be wrong (we
+ * don't catch that case — true cell vectors would be needed).
+ *
+ * Compares against the KS literature V/atom Murnaghan-compressed from the KS
+ * reference pressure to the cached pressure. Returns the ratio; values
+ * dramatically below 1 (CeH9 May 21 collapse: 0.17) indicate a vc-relax
+ * basin escape that should not be cached.
+ */
+function cacheVolumeSanityRatio(
+  formula: string,
+  latticeA: number,
+  nAtoms: number,
+  pressure: number | null,
+): { ratio: number; expected: number; cubicBound: number; ks: KnownStructure } | null {
+  try {
+    const ks = lookupKnownStructure(formula);
+    if (!ks || !ks.atoms.length || !ks.latticeA) return null;
+    const ksA = ks.latticeA;
+    const ksB = ks.latticeB ?? ksA;
+    const ksC = ks.latticeC ?? ksA;
+    const ksAlphaR = (ks.alpha ?? 90) * Math.PI / 180;
+    const ksBetaR = (ks.beta ?? 90) * Math.PI / 180;
+    const ksGammaR = (ks.gamma ?? (ks.latticeType === "hexagonal" ? 120 : 90)) * Math.PI / 180;
+    const cosA = Math.cos(ksAlphaR), cosB = Math.cos(ksBetaR), cosG = Math.cos(ksGammaR);
+    const detTerm = 1 - cosA * cosA - cosB * cosB - cosG * cosG + 2 * cosA * cosB * cosG;
+    const ksSin = detTerm > 0 ? Math.sqrt(detTerm) : 1.0;
+    const ksVperAtom = (ksA * ksB * ksC * ksSin) / ks.atoms.length;
+    // Murnaghan-compress from KS pressure to the cached pressure so we
+    // compare apples to apples. Bulk modulus from elemental sum.
+    const counts: Record<string, number> = {};
+    for (const a of ks.atoms) counts[a.element] = (counts[a.element] ?? 0) + 1;
+    const elements = Object.keys(counts);
+    const fractions: Record<string, number> = {};
+    const total = Object.values(counts).reduce((s, n) => s + n, 0);
+    for (const el of elements) fractions[el] = counts[el] / total;
+    const b0 = estimateBulkModulusFromElements(elements, fractions);
+    const ksP = ks.pressureGPa ?? 0;
+    const cP = pressure ?? 0;
+    const B0p = 4.0;
+    const ratioAt = (p: number) => Math.pow(1 + B0p * Math.max(0, p) / Math.max(1, b0), -1 / B0p);
+    const expected = ksVperAtom * (ratioAt(cP) / Math.max(1e-6, ratioAt(ksP)));
+    // Cubic interpretation of the cached latticeA — always ≤ real V/atom for
+    // non-degenerate cells, so a small ratio is a hard "broken" signal.
+    const cubicBound = (latticeA * latticeA * latticeA) / Math.max(1, nAtoms);
+    const ratio = cubicBound / Math.max(1e-6, expected);
+    return { ratio, expected, cubicBound, ks };
+  } catch {
+    return null;
+  }
+}
+
+// Threshold: cached V/atom must be at least 40 % of the KS-derived expectation
+// at the cached pressure. Real high-P compression rarely drops below ~60 %;
+// 40 % is generous (lets through any plausible cell) but catches the May 21
+// CeH9 collapse (ratio = 0.17 — basin escape during vc-relax). Cells with
+// c/a > 1 have true V even larger than the cubic bound, so the gate is
+// conservative against false-positives.
+const CACHE_V_RATIO_FLOOR = 0.40;
+
 function saveDFTStructureCache(
   formula: string,
   latticeA: number,
@@ -1350,6 +1413,15 @@ function saveDFTStructureCache(
         return;
       }
     } catch {}
+
+    // V/atom sanity vs KS expectation (May 21 CeH9: cached at a=2.893,
+    // cubic V/atom ≈ 2.42 Å³ vs KS-Murnaghan expectation ≈ 14.6 → ratio
+    // 0.17, well below the 0.40 floor — basin escape, refuse to cache).
+    const vSanity = cacheVolumeSanityRatio(formula, latticeA, positions.length, pressure);
+    if (vSanity && vSanity.ratio < CACHE_V_RATIO_FLOOR) {
+      console.log(`[DFT-Cache] REFUSED to save ${formula}: cubic-bound V/atom=${vSanity.cubicBound.toFixed(2)} Å³ vs KS-Murnaghan expected ${vSanity.expected.toFixed(2)} Å³ at P=${pressure ?? 0} GPa (ratio ${vSanity.ratio.toFixed(2)} < ${CACHE_V_RATIO_FLOOR}). Cell collapsed below physical floor — not caching.`);
+      return;
+    }
 
     if (!fs.existsSync(DFT_STRUCTURE_CACHE_DIR)) {
       fs.mkdirSync(DFT_STRUCTURE_CACHE_DIR, { recursive: true });
@@ -1407,6 +1479,23 @@ function loadDFTStructureCache(formula: string): CachedStructure | null {
         return null;
       }
     } catch {}
+
+    // Same V/atom sanity check as the save side. Catches caches that were
+    // written by an older worker (before the save-side gate existed) whose
+    // vc-relax collapsed into a sub-physical basin. The Stage-1 force was
+    // tiny and pressure matched, so the publication-ready gate let it
+    // through — but the cubic-bound V/atom is far below the KS-Murnaghan
+    // expectation. Quarantine the file so future runs fall through to KS
+    // injection instead of starting from the collapsed cell.
+    const vSanityLoad = cacheVolumeSanityRatio(
+      formula, cached.latticeA, cached.positions.length, cached.pressure,
+    );
+    if (vSanityLoad && vSanityLoad.ratio < CACHE_V_RATIO_FLOOR) {
+      const stalePath = cacheFile + `.stale-vol-${Date.now()}`;
+      try { fs.renameSync(cacheFile, stalePath); } catch {}
+      console.log(`[DFT-Cache] REJECTED ${formula}: cubic-bound V/atom=${vSanityLoad.cubicBound.toFixed(2)} Å³ vs KS-Murnaghan expected ${vSanityLoad.expected.toFixed(2)} Å³ at P=${cached.pressure ?? 0} GPa (ratio ${vSanityLoad.ratio.toFixed(2)} < ${CACHE_V_RATIO_FLOOR}). Cached cell collapsed below physical floor — renamed to ${path.basename(stalePath)}, falling through to KS injection.`);
+      return null;
+    }
 
     console.log(`[DFT-Cache] Loaded ${formula}: a=${cached.latticeA.toFixed(3)} Å, ${cached.positions.length} atoms, force=${cached.force.toFixed(6)}, age=${((Date.now() - cached.timestamp) / 3600_000).toFixed(1)}h`);
     return cached;
