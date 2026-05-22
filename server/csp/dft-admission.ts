@@ -208,7 +208,7 @@ export function selectForDFT(
     }
   };
 
-  // 0. Force-admit the literature known-structure candidate, if present.
+  // 0a. Force-admit the literature known-structure candidate, if present.
   // It is the experimental ground-state geometry (injected with conf 0.97);
   // letting it lose the competitive funnel scoring to random AIRSS/PyXtal
   // structures defeats the point of injecting it. For complex layered cells
@@ -228,6 +228,36 @@ export function selectForDFT(
     scores.set(ksMember, s.score);
     breakdown.exploitation++;
     console.log(`[DFT-Admission] force-admitted literature known-structure (cluster ${s.cluster.clusterId})`);
+  }
+
+  // 0b. Force-admit the prototype-derived candidate, if present.
+  // Same reasoning as the KS path: when a prototype template matches the
+  // formula (A15, YBCO-123, Hex-Clathrate-MH9, etc.) we inject a candidate
+  // at the prototype's anisotropic c/a + Z-corrected lattice with proper
+  // Wyckoff fractional coordinates. AIRSS/PyXtal candidates at the same
+  // composition routinely beat it in the funnel score (better diversity,
+  // similar enthalpy at the funnel's CHGNet stage) — but they carry RANDOM
+  // atomic positions, not Wyckoff sites. Stage 1 + vc-relax then have to
+  // find the cage/layer/chain motif from a scrambled start; BFGS frequently
+  // wanders into a P1 collapsed minimum instead (CeH9 May 21: started from
+  // AIRSS Z=1 a=3.65, vc-relax landed at a=2.85 with Ce at (0.52, 0.13,
+  // 0.08) — well off any P63/mmc Wyckoff site, V/atom=3.1 Å³ which is
+  // denser than diamond, marked publication-ready, ~6h of phonon compute
+  // wasted on the wrong basin). Force-admitting the prototype-derived
+  // member guarantees Stage 1 sees the layered/clathrate geometry — vc-relax
+  // can still wander, but at least one of the Stage 1 candidates carries the
+  // right symmetry seed.
+  for (const s of scored) {
+    if (selected.length >= nSelect) break;
+    if (used.has(s.cluster.clusterId)) continue;
+    const protoMember = s.cluster.members.find(m => m.prototype === "prototype-derived");
+    if (!protoMember) continue;
+    used.add(s.cluster.clusterId);
+    s.score.selectionCategory = "exploitation";
+    selected.push(protoMember);
+    scores.set(protoMember, s.score);
+    breakdown.exploitation++;
+    console.log(`[DFT-Admission] force-admitted prototype-derived candidate (cluster ${s.cluster.clusterId}, source: ${protoMember.source ?? "?"})`);
   }
 
   // 1. Exploitation: best overall score

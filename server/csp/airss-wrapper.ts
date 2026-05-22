@@ -367,11 +367,32 @@ export const airssEngine: CSPEngine = {
     let volSource: string;
     const knownStruct = lookupKnownStructure(biasFormula);
     const knownVpa = knownStruct ? knownStructureVolumePerAtom(knownStruct) : NaN;
-    if (knownStruct && Number.isFinite(knownVpa) && knownVpa > 0
-        && Math.abs((knownStruct.pressureGPa ?? 0) - config.pressureGPa) < 30) {
-      volPerAtom = knownVpa * volumeBias;
+    if (knownStruct && Number.isFinite(knownVpa) && knownVpa > 0) {
+      // KS volume is the literature ground state — orders of magnitude better
+      // than the elemental-sum estimate for compound geometries. Use it
+      // ALWAYS when available, Murnaghan-compress from the KS reference
+      // pressure to the worker's target pressure when they differ. The old
+      // ±30 GPa gate excluded CeH9 (KS@150 GPa) at 185 GPa (gap=35), forcing
+      // AIRSS back to the elemental-sum volume (6.6 Å³/atom vs literature
+      // ≈14 Å³/atom at 150 GPa), generating wrong-shape candidates that
+      // collapsed in vc-relax (May 21: ended at V/atom=3.1, P1 symmetry,
+      // wrong basin). Murnaghan from any reference pressure within ±200 GPa
+      // is more accurate than the elemental sum from scratch.
+      const ksPressure = knownStruct.pressureGPa ?? 0;
+      const fractions: Record<string, number> = {};
+      for (const el of elements) fractions[el] = Math.round(counts[el] ?? 0);
+      const b0 = estimateBulkModulusFromElements(elements, fractions);
+      // Murnaghan ratio at target / ratio at KS = V(target)/V(ks)
+      const B0p = 4.0;
+      const ratioAt = (p: number) => Math.pow(1 + B0p * p / b0, -1 / B0p);
+      const ksToTargetScale = ratioAt(Math.max(0, config.pressureGPa)) / Math.max(1e-6, ratioAt(Math.max(0, ksPressure)));
+      const compressedKnownVpa = knownVpa * ksToTargetScale;
+      volPerAtom = compressedKnownVpa * volumeBias;
       volumeTargets = tierConfig.volumeEnsemble.map(f => volPerAtom * f);
-      volSource = `known-structure ${knownVpa.toFixed(1)} A^3/atom`;
+      const ksTag = Math.abs(ksPressure - config.pressureGPa) < 5
+        ? `known-structure ${knownVpa.toFixed(1)} A^3/atom @ ${ksPressure} GPa`
+        : `known-structure ${knownVpa.toFixed(1)} A^3/atom @ ${ksPressure} GPa → ${compressedKnownVpa.toFixed(1)} A^3/atom @ ${config.pressureGPa} GPa via Murnaghan (B0=${b0.toFixed(0)})`;
+      volSource = ksTag;
     } else {
       const fractions: Record<string, number> = {};
       for (const el of elements) fractions[el] = Math.round(counts[el] ?? 0);

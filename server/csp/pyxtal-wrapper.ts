@@ -374,10 +374,23 @@ export const pyxtalEngine: CSPEngine = {
       .join("");
     const knownStruct = lookupKnownStructure(ksFormula);
     const knownVpa = knownStruct ? knownStructureVolumePerAtom(knownStruct) : NaN;
-    if (knownStruct && Number.isFinite(knownVpa) && knownVpa > 0
-        && Math.abs((knownStruct.pressureGPa ?? 0) - config.pressureGPa) < 30) {
-      targetVpa = knownVpa;
-      volSource = `known-structure ${knownVpa.toFixed(1)} A^3/atom`;
+    if (knownStruct && Number.isFinite(knownVpa) && knownVpa > 0) {
+      // Always use the literature volume when KS exists; Murnaghan-compress
+      // for any pressure gap rather than dropping back to the elemental-sum
+      // estimate. The previous ±30 GPa gate missed CeH9 (KS @ 150 GPa) at
+      // 185 GPa worker target — generated structures came out 2× too dense
+      // and vc-relax collapsed to V/atom=3.1 Å³ at the wrong basin.
+      const ksPressure = knownStruct.pressureGPa ?? 0;
+      const fractions: Record<string, number> = {};
+      for (const el of elements) fractions[el] = Math.round(counts[el] ?? 0);
+      const b0 = estimateBulkModulusFromElements(elements, fractions);
+      const B0p = 4.0;
+      const ratioAt = (p: number) => Math.pow(1 + B0p * p / b0, -1 / B0p);
+      const ksToTargetScale = ratioAt(Math.max(0, config.pressureGPa)) / Math.max(1e-6, ratioAt(Math.max(0, ksPressure)));
+      targetVpa = knownVpa * ksToTargetScale;
+      volSource = Math.abs(ksPressure - config.pressureGPa) < 5
+        ? `known-structure ${knownVpa.toFixed(1)} A^3/atom @ ${ksPressure} GPa`
+        : `known-structure ${knownVpa.toFixed(1)} A^3/atom @ ${ksPressure} GPa → ${targetVpa.toFixed(1)} A^3/atom @ ${config.pressureGPa} GPa via Murnaghan (B0=${b0.toFixed(0)})`;
     } else {
       const fractions: Record<string, number> = {};
       for (const el of elements) fractions[el] = Math.round(counts[el] ?? 0);
