@@ -1505,10 +1505,48 @@ function loadDFTStructureCache(formula: string): CachedStructure | null {
 }
 
 // Remove jobDirs left behind by previous crashed server runs. Called once at startup.
-function cleanStaleQEJobDirs(): void {
-  if (!fs.existsSync(QE_WORK_DIR)) return;
-  const staleAgeMs = 2 * 60 * 60 * 1000; // 2 hours
+/**
+ * Recursive maximum mtime across a directory tree. The top-level dir's own
+ * mtime only updates when files are added/removed at the immediate level —
+ * QE writes deeply into jobDir/tmp/<prefix>.save/ so the top mtime can be
+ * stale for hours while the job is actively writing. Walking the tree gives
+ * an accurate "last touched" for cleanup-safety decisions.
+ *
+ * Bounded by maxFiles (~5000) so a runaway tree doesn't block on stat calls.
+ */
+function recursiveMaxMtime(dir: string, maxFiles = 5000): number {
+  let max = 0;
+  let count = 0;
+  function walk(d: string) {
+    if (count >= maxFiles) return;
+    try {
+      const entries = fs.readdirSync(d, { withFileTypes: true });
+      for (const e of entries) {
+        if (count >= maxFiles) return;
+        count++;
+        const full = path.join(d, e.name);
+        try {
+          const st = fs.statSync(full);
+          if (st.mtimeMs > max) max = st.mtimeMs;
+          if (e.isDirectory()) walk(full);
+        } catch {}
+      }
+    } catch {}
+  }
+  walk(dir);
+  return max;
+}
+
+/**
+ * Remove job dirs whose most-recent file mtime (walked recursively) is older
+ * than `maxAgeMs`. Safe to call during worker lifetime because the recursive
+ * mtime check correctly identifies in-progress jobs (they touch deep files
+ * even when the top dir mtime is stale).
+ */
+function cleanStaleQEJobDirs(maxAgeMs: number = 2 * 60 * 60 * 1000): number {
+  if (!fs.existsSync(QE_WORK_DIR)) return 0;
   const now = Date.now();
+  let cleaned = 0;
   try {
     const entries = fs.readdirSync(QE_WORK_DIR);
     for (const entry of entries) {
@@ -1516,13 +1554,82 @@ function cleanStaleQEJobDirs(): void {
       const fullPath = path.join(QE_WORK_DIR, entry);
       try {
         const stat = fs.statSync(fullPath);
-        if (stat.isDirectory() && now - stat.mtimeMs > staleAgeMs) {
+        if (!stat.isDirectory()) continue;
+        const deepMtime = recursiveMaxMtime(fullPath);
+        const effectiveMtime = Math.max(stat.mtimeMs, deepMtime);
+        if (now - effectiveMtime > maxAgeMs) {
           fs.rmSync(fullPath, { recursive: true, force: true });
-          console.log(`[QE-Worker] Cleaned stale job dir: ${entry}`);
+          cleaned++;
+          console.log(`[QE-Worker] Cleaned stale job dir: ${entry} (idle ${((now - effectiveMtime) / 60000).toFixed(0)} min)`);
         }
       } catch {}
     }
   } catch {}
+  return cleaned;
+}
+
+/**
+ * Free bytes on the filesystem that holds QE_WORK_DIR. Returns null if the
+ * statfs is unavailable (older Node, fs failure). Used to flag disk-full
+ * conditions before they manifest as davcio write errors deep in pw.x.
+ */
+function getFreeDiskBytes(): number | null {
+  try {
+    // Node 18.15+: fs.statfsSync exists. Older fallback: just return null.
+    const st: any = (fs as any).statfsSync?.(QE_WORK_DIR);
+    if (st && typeof st.bavail === "number" && typeof st.bsize === "number") {
+      return st.bavail * st.bsize;
+    }
+  } catch {}
+  return null;
+}
+
+/**
+ * Periodic cleanup — runs every 15 min during worker lifetime with a 30-min
+ * stale threshold (vs the 2 h startup threshold). Tighter cycle keeps disk
+ * usage bounded on long-running workers that previously accumulated GB of
+ * old job tmp/ across multi-hour sessions and eventually hit davcio (error
+ * 10): "error writing file ./tmp/LiFePO4.wfc1" when /tmp filled up.
+ *
+ * Safe with the recursive mtime check above — in-progress jobs touch deep
+ * .save/ files within minutes, so a 30-min idle threshold only sweeps
+ * jobs that genuinely finished or died.
+ */
+const PERIODIC_CLEANUP_INTERVAL_MS = 15 * 60 * 1000;
+const PERIODIC_CLEANUP_STALE_MS = 30 * 60 * 1000;
+const DISK_LOW_BYTES = 5 * 1024 * 1024 * 1024; // 5 GB
+const DISK_CRITICAL_BYTES = 1 * 1024 * 1024 * 1024; // 1 GB
+function startPeriodicQECleanup(): void {
+  setInterval(() => {
+    try {
+      const before = getFreeDiskBytes();
+      const cleaned = cleanStaleQEJobDirs(PERIODIC_CLEANUP_STALE_MS);
+      const after = getFreeDiskBytes();
+      if (cleaned > 0 || (after != null && after < DISK_LOW_BYTES)) {
+        const beforeGB = before != null ? (before / 1024 / 1024 / 1024).toFixed(1) : "?";
+        const afterGB = after != null ? (after / 1024 / 1024 / 1024).toFixed(1) : "?";
+        console.log(`[QE-Worker] Periodic cleanup: removed ${cleaned} stale job dir(s), free disk ${beforeGB} GB → ${afterGB} GB`);
+      }
+    } catch {}
+  }, PERIODIC_CLEANUP_INTERVAL_MS).unref();
+}
+
+/**
+ * Emergency cleanup — drop the age threshold and remove every job dir
+ * idle > 5 min. Called when davcio fires or when pre-SCF disk check shows
+ * critical low space. Will NOT touch the calling job's own dir because
+ * its deep mtime is fresh (just-attempted SCF wrote .wfc files).
+ */
+function emergencyCleanupForDisk(): { cleaned: number; freedBytes: number } {
+  const before = getFreeDiskBytes();
+  const cleaned = cleanStaleQEJobDirs(5 * 60 * 1000); // 5-min threshold
+  const after = getFreeDiskBytes();
+  const freedBytes = (after != null && before != null) ? Math.max(0, after - before) : 0;
+  if (cleaned > 0) {
+    const freedGB = (freedBytes / 1024 / 1024 / 1024).toFixed(1);
+    console.log(`[QE-Worker] Emergency disk cleanup: removed ${cleaned} job dir(s), freed ${freedGB} GB`);
+  }
+  return { cleaned, freedBytes };
 }
 
 function cleanupPseudoDir(): void {
@@ -1545,6 +1652,7 @@ function cleanupPseudoDir(): void {
 
 cleanupPseudoDir();
 cleanStaleQEJobDirs();
+startPeriodicQECleanup();
 
 // GitHub pslibrary is the primary source — the QE website is often unreliable/down.
 // Pseudo-DOJO NC PPs as secondary — validated for DFPT, covers lanthanides/actinides.
@@ -8197,6 +8305,26 @@ ${cellBlockEos}
       console.log(`[QE-Worker] ${formula}: tier-adjusted max_seconds = ${effectiveMaxSeconds}s (${(effectiveMaxSeconds / 60).toFixed(0)} min) — heavy-TM or high-P hydride class`);
     }
 
+    // Pre-SCF disk check: if /tmp is running low, sweep stale job dirs now
+    // rather than letting davcio fire mid-SCF. The periodic cleanup runs
+    // every 15 min but SCF can fill multi-GB faster than that on dense
+    // metallic systems with many k-points.
+    const preScfFree = getFreeDiskBytes();
+    if (preScfFree != null && preScfFree < DISK_LOW_BYTES) {
+      const freeGB = (preScfFree / 1024 / 1024 / 1024).toFixed(2);
+      console.log(`[QE-Worker] Pre-SCF disk check for ${formula}: ${freeGB} GB free < ${(DISK_LOW_BYTES / 1024 / 1024 / 1024).toFixed(0)} GB threshold — running emergency cleanup`);
+      emergencyCleanupForDisk();
+      const after = getFreeDiskBytes();
+      if (after != null && after < DISK_CRITICAL_BYTES) {
+        const afterGB = (after / 1024 / 1024 / 1024).toFixed(2);
+        result.scf = parseSCFOutput("", 0.005);
+        result.scf.error = `Disk critically low: ${afterGB} GB free after cleanup. Refusing to start SCF for ${formula} — would fail with davcio.`;
+        result.error = result.scf.error;
+        console.log(`[QE-Worker] ABORTING ${formula}: disk critically low after cleanup (${afterGB} GB)`);
+        return result;
+      }
+    }
+
     for (let attempt = firstAttempt; attempt < retryConfigs.length && !scfConverged; attempt++) {
       const params: RetryConfig = { ...retryConfigs[attempt], ...handlerOverride };
       // Recovery strategy on retry: disk_io='medium' writes charge-density
@@ -8330,6 +8458,30 @@ ${cellBlockEos}
           else if (combined.includes("SIGSEGV") || combined.includes("Segmentation fault")) classifier = " [SEGFAULT]";
           else if (combined.includes("ENOENT") || combined.includes("command not found") || combined.includes("No such file")) classifier = " [BINARY_MISSING]";
           else classifier = " [PROCESS_DIED]";
+        } else if (combined.includes("Error in routine davcio") || combined.includes("error writing file")) {
+          // davcio is QE's direct-access file I/O. Error 10 ("error writing
+          // file ./tmp/<prefix>.wfc1") almost always means /tmp is out of
+          // space — usually because a prior timed-out SCF left GB of
+          // partial wavefunctions that the periodic cleanup hasn't swept
+          // yet, or because too many concurrent jobs share the disk.
+          // Standard SCF-retry handlers (bump mixing, switch diag) won't
+          // help — the disk needs freeing first. Run emergency cleanup so
+          // the next retry has somewhere to write.
+          classifier = " [DISK_FULL]";
+          const free = getFreeDiskBytes();
+          const freeGB = free != null ? (free / 1024 / 1024 / 1024).toFixed(2) : "?";
+          console.log(`[QE-Worker] davcio write failure for ${formula} — free disk ${freeGB} GB. Running emergency cleanup before retry.`);
+          emergencyCleanupForDisk();
+          const freeAfter = getFreeDiskBytes();
+          const freeAfterGB = freeAfter != null ? (freeAfter / 1024 / 1024 / 1024).toFixed(2) : "?";
+          console.log(`[QE-Worker] Post-cleanup free disk for ${formula}: ${freeAfterGB} GB`);
+          // If still below critical even after cleanup, abort retry loop
+          // (next attempts will fail identically) and surface a clear error.
+          if (freeAfter != null && freeAfter < DISK_CRITICAL_BYTES) {
+            result.scf.error = `Disk full (${freeAfterGB} GB free after cleanup): davcio write failed and emergency cleanup couldn't free enough space`;
+            console.log(`[QE-Worker] DISK_CRITICAL after cleanup for ${formula}, aborting SCF retries`);
+            break;
+          }
         } else if (scfResult.exitCode === 2) {
           // WALL_TIME_EXHAUSTED must be checked FIRST. QE exits cleanly
           // (JOB DONE, exit=2) when max_seconds is hit, and the stdout
